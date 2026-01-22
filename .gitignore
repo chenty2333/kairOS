@@ -1,0 +1,26 @@
+# Build outputs
+build/
+*.o
+*.d
+*.elf
+*.bin
+*.iso
+*.img
+
+# Third-party dependencies (fetched via script)
+third_party/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Debug files
+*.log
+*.dump
+
+# OS-specific
+.DS_Store
+Thumbs.db
