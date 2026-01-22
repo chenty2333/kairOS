@@ -7,6 +7,7 @@
 
 #include <kairos/types.h>
 #include <kairos/config.h>
+#include <kairos/list.h>
 #include <kairos/spinlock.h>
 
 /*
@@ -31,7 +32,19 @@ struct page {
 /* Initialize physical memory manager */
 void pmm_init(paddr_t start, paddr_t end);
 
-/* Allocate 2^order contiguous pages */
+/*
+ * Phase 0: Simple bitmap allocator
+ * These will be replaced by buddy allocator in Phase 1.
+ */
+paddr_t pmm_alloc_page(void);
+paddr_t pmm_alloc_pages(size_t count);
+void pmm_free_page(paddr_t pa);
+void pmm_free_pages(paddr_t pa, size_t count);
+size_t pmm_get_free_pages(void);
+size_t pmm_get_total_pages(void);
+void pmm_reserve_range(paddr_t start, paddr_t end);
+
+/* Allocate 2^order contiguous pages (Phase 1+) */
 struct page *alloc_pages(unsigned int order);
 
 /* Free pages allocated with alloc_pages */
@@ -52,9 +65,9 @@ static inline void free_page(struct page *page)
 paddr_t page_to_phys(struct page *page);
 struct page *phys_to_page(paddr_t addr);
 
-/* Get total/free memory */
+/* Get total/free memory (Phase 1+ API) */
 size_t pmm_total_pages(void);
-size_t pmm_free_pages(void);
+size_t pmm_num_free_pages(void);
 
 /*
  * Kernel Heap (kmalloc)

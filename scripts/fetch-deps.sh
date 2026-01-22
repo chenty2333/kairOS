@@ -21,7 +21,7 @@ fetch_limine() {
         return
     fi
     git clone https://github.com/limine-bootloader/limine.git \
-        --branch=v8.x-binary --depth=1 "$DEPS_DIR/limine"
+        --branch=v10.x-binary --depth=1 "$DEPS_DIR/limine"
     echo "Limine downloaded to $DEPS_DIR/limine"
 }
 
@@ -32,7 +32,7 @@ fetch_lwip() {
         return
     fi
     git clone https://git.savannah.nongnu.org/git/lwip.git \
-        --branch=STABLE-2_2_0_RELEASE --depth=1 "$DEPS_DIR/lwip"
+        --branch=STABLE-2_2_1_RELEASE --depth=1 "$DEPS_DIR/lwip"
     echo "lwIP downloaded to $DEPS_DIR/lwip"
     echo "License: BSD-3-Clause"
 }
@@ -44,7 +44,7 @@ fetch_tinyusb() {
         return
     fi
     git clone https://github.com/hathach/tinyusb.git \
-        --branch=0.16.0 --depth=1 "$DEPS_DIR/tinyusb"
+        --branch=0.20.0 --depth=1 "$DEPS_DIR/tinyusb"
     echo "TinyUSB downloaded to $DEPS_DIR/tinyusb"
     echo "License: MIT"
 }
@@ -57,7 +57,7 @@ fetch_fatfs() {
     fi
     mkdir -p "$DEPS_DIR/fatfs"
     # FatFs is distributed as a zip, we'll use curl
-    curl -L "http://elm-chan.org/fsw/ff/arc/ff15.zip" -o "/tmp/fatfs.zip"
+    curl -L "http://elm-chan.org/fsw/ff/arc/ff16.zip" -o "/tmp/fatfs.zip"
     unzip -q "/tmp/fatfs.zip" -d "$DEPS_DIR/fatfs"
     rm "/tmp/fatfs.zip"
     echo "FatFs downloaded to $DEPS_DIR/fatfs"
@@ -79,7 +79,7 @@ fetch_musl() {
 fetch_limine_header() {
     echo "=== Fetching Limine protocol header ==="
     mkdir -p "kernel/include/boot"
-    curl -L "https://raw.githubusercontent.com/limine-bootloader/limine/v8.x-binary/limine.h" \
+    curl -L "https://codeberg.org/Limine/limine-protocol/raw/branch/trunk/include/limine.h" \
         -o "kernel/include/boot/limine.h"
     echo "Limine header downloaded to kernel/include/boot/limine.h"
 }

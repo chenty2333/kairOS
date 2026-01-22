@@ -8,29 +8,29 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 ## Phase 0: Foundation (Week 1-2)
 
 ### 0.1 Build System & Boot
-- [ ] Set up Makefile with multi-arch support
-- [ ] Create linker script for RISC-V
-- [ ] Implement `_start` (boot.S) - set up stack, call kernel_main
-- [ ] Get "Hello, World!" printing via SBI ecall (RISC-V)
-- [ ] Set up Limine bootloader configuration
+- [x] Set up Makefile with multi-arch support
+- [x] Create linker script for RISC-V
+- [x] Implement `_start` (boot.S) - set up stack, call kernel_main
+- [x] Get "Hello, World!" printing via SBI ecall (RISC-V)
+- [ ] Set up Limine bootloader configuration (x86_64 only, Phase 10)
 
-**Test**: Kernel prints to serial console and halts.
+**Test**: Kernel prints to serial console and halts. ✓
 
 ### 0.2 Early Console
-- [ ] Implement `arch_early_putchar()` using SBI
-- [ ] Implement basic `printk()` (no format strings yet)
-- [ ] Implement `vsprintf()` with %d, %x, %s, %p
-- [ ] Full `printk()` with format strings
+- [x] Implement `arch_early_putchar()` using SBI
+- [x] Implement basic `printk()` (no format strings yet)
+- [x] Implement `vsprintf()` with %d, %x, %s, %p
+- [x] Full `printk()` with format strings
 
-**Test**: `printk("Value: %d, Hex: 0x%x\n", 42, 0xDEAD);`
+**Test**: `printk("Value: %d, Hex: 0x%x\n", 42, 0xDEAD);` ✓
 
 ### 0.3 Basic Memory Setup
-- [ ] Parse memory map from bootloader
-- [ ] Define physical memory layout
-- [ ] Implement simple page allocator (bitmap for now)
-- [ ] Test: allocate and free pages
+- [x] Parse memory map from bootloader (FDT/DTB)
+- [x] Define physical memory layout
+- [x] Implement simple page allocator (bitmap for now)
+- [x] Test: allocate and free pages
 
-**Test**: Allocate 100 pages, free them, allocate again - should succeed.
+**Test**: Allocate 100 pages, free them, allocate again - should succeed. ✓
 
 ---
 
@@ -343,18 +343,18 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 
 ## Milestone Checklist
 
-| Milestone | Description | Target |
-|-----------|-------------|--------|
-| M1 | Boot and print | Week 2 |
-| M2 | Memory management working | Week 4 |
-| M3 | First user process | Week 8 |
-| M4 | Shell running | Week 16 |
-| M5 | Network working | Week 20 |
-| M6 | BusyBox complete | Week 24 |
-| M7 | TCC working | Week 24 |
-| M8 | x86_64 port | Week 32 |
-| M9 | Real hardware boot | Week 34 |
-| M10 | DOOM running | Week 36 |
+| Milestone | Description | Target | Status |
+|-----------|-------------|--------|--------|
+| M1 | Boot and print | Week 2 | ✓ Done |
+| M2 | Memory management working | Week 4 | Partial (bitmap) |
+| M3 | First user process | Week 8 | |
+| M4 | Shell running | Week 16 | |
+| M5 | Network working | Week 20 | |
+| M6 | BusyBox complete | Week 24 | |
+| M7 | TCC working | Week 24 | |
+| M8 | x86_64 port | Week 32 | |
+| M9 | Real hardware boot | Week 34 | |
+| M10 | DOOM running | Week 36 | |
 
 ---
 

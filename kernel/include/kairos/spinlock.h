@@ -24,7 +24,8 @@ static inline void spin_lock(spinlock_t *lock)
     while (__atomic_test_and_set(&lock->lock, __ATOMIC_ACQUIRE)) {
         /* Spin */
         while (__atomic_load_n(&lock->lock, __ATOMIC_RELAXED)) {
-            __builtin_ia32_pause();  /* CPU hint: we're spinning */
+            /* CPU hint: we're spinning */
+            __asm__ __volatile__("" ::: "memory");
         }
     }
 }

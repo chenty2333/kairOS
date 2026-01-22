@@ -37,19 +37,25 @@ endif
 #                    Toolchain Setup
 # ============================================================
 
+# Use clang for cross-compilation (set USE_GCC=1 to use GCC)
+USE_GCC ?= 0
+
 ifeq ($(ARCH),riscv64)
   CROSS_COMPILE ?= riscv64-unknown-elf-
+  CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
   QEMU_CPU := rv64
   KERNEL_LOAD := 0x80200000
 else ifeq ($(ARCH),x86_64)
   CROSS_COMPILE ?=
+  CLANG_TARGET := x86_64-unknown-elf
   QEMU := qemu-system-x86_64
   QEMU_MACHINE := q35
   KERNEL_LOAD := 0xffffffff80000000
 else ifeq ($(ARCH),aarch64)
   CROSS_COMPILE ?= aarch64-none-elf-
+  CLANG_TARGET := aarch64-unknown-elf
   QEMU := qemu-system-aarch64
   QEMU_MACHINE := virt
   QEMU_CPU := cortex-a72
@@ -58,11 +64,17 @@ else
   $(error Unsupported architecture: $(ARCH))
 endif
 
-CC := $(CROSS_COMPILE)gcc
-LD := $(CROSS_COMPILE)ld
-AS := $(CROSS_COMPILE)as
-OBJCOPY := $(CROSS_COMPILE)objcopy
-OBJDUMP := $(CROSS_COMPILE)objdump
+ifeq ($(USE_GCC),1)
+  CC := $(CROSS_COMPILE)gcc
+  LD := $(CROSS_COMPILE)ld
+  AS := $(CROSS_COMPILE)as
+else
+  CC := clang --target=$(CLANG_TARGET)
+  LD := ld.lld
+  AS := clang --target=$(CLANG_TARGET)
+endif
+OBJCOPY := llvm-objcopy
+OBJDUMP := llvm-objdump
 
 # ============================================================
 #                    Compiler Flags
@@ -77,15 +89,19 @@ CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 
 # Architecture-specific flags
 ifeq ($(ARCH),riscv64)
-  CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
-  LDFLAGS := -melf64lriscv
+  ifeq ($(USE_GCC),1)
+    CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
+  else
+    CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
+  endif
+  LDFLAGS :=
 else ifeq ($(ARCH),x86_64)
   CFLAGS += -m64 -mno-red-zone -mno-sse -mno-sse2
   CFLAGS += -mcmodel=kernel
-  LDFLAGS := -m elf_x86_64
+  LDFLAGS :=
 else ifeq ($(ARCH),aarch64)
   CFLAGS += -mgeneral-regs-only
-  LDFLAGS := -m aarch64elf
+  LDFLAGS :=
 endif
 
 LDFLAGS += -nostdlib -static
@@ -97,67 +113,33 @@ LDSCRIPT := kernel/arch/$(ARCH)/linker.ld
 #                    Source Files
 # ============================================================
 
+# Phase 0: Minimal boot sources
+# Additional sources will be added as phases are implemented
+
 # Core kernel sources (architecture-independent)
 CORE_SRCS := \
     kernel/core/main.c \
-    kernel/core/sched/sched.c \
-    kernel/core/sched/cfs.c \
     kernel/core/mm/pmm.c \
-    kernel/core/mm/vmm.c \
-    kernel/core/mm/kmalloc.c \
-    kernel/core/proc/process.c \
-    kernel/core/proc/fork.c \
-    kernel/core/proc/exec.c \
-    kernel/core/trap/trap.c \
-    kernel/core/time/time.c \
-    kernel/ipc/pipe.c \
-    kernel/ipc/signal.c \
     kernel/lib/printk.c \
-    kernel/lib/string.c \
-    kernel/lib/rbtree.c \
-    kernel/lib/vsprintf.c
+    kernel/lib/vsprintf.c \
+    kernel/lib/fdt.c
 
-# File system sources
-FS_SRCS := \
-    kernel/fs/vfs/vfs.c \
-    kernel/fs/vfs/path.c \
-    kernel/fs/ext2/ext2.c \
-    kernel/fs/ext2/inode.c \
-    kernel/fs/ext2/dir.c \
-    kernel/fs/fat32/fat32.c \
-    kernel/fs/devfs/devfs.c
-
-# Driver sources
-DRIVER_SRCS := \
-    kernel/drivers/block/virtio_blk.c \
-    kernel/drivers/block/nvme.c \
-    kernel/drivers/net/virtio_net.c \
-    kernel/drivers/net/e1000.c \
-    kernel/drivers/fb/fb.c \
-    kernel/drivers/pci/pci.c
-
-# Architecture-specific sources
+# Architecture-specific sources (minimal for Phase 0)
 ARCH_SRCS := \
     kernel/arch/$(ARCH)/boot.S \
-    kernel/arch/$(ARCH)/entry.c \
-    kernel/arch/$(ARCH)/trap.S \
-    kernel/arch/$(ARCH)/trap.c \
-    kernel/arch/$(ARCH)/mmu.c \
-    kernel/arch/$(ARCH)/context.S \
-    kernel/arch/$(ARCH)/timer.c \
-    kernel/arch/$(ARCH)/irq.c
+    kernel/arch/$(ARCH)/entry.c
 
-# Syscall sources
-SYSCALL_SRCS := \
-    kernel/syscall/syscall.c \
-    kernel/syscall/proc.c \
-    kernel/syscall/file.c \
-    kernel/syscall/mem.c \
-    kernel/syscall/signal.c \
-    kernel/syscall/time.c
+# Future phases will add:
+# - kernel/core/sched/sched.c, cfs.c
+# - kernel/core/mm/pmm.c, vmm.c, kmalloc.c
+# - kernel/core/proc/process.c, fork.c, exec.c
+# - kernel/core/trap/trap.c, kernel/arch/$(ARCH)/trap.S, trap.c
+# - kernel/core/time/time.c, kernel/arch/$(ARCH)/timer.c
+# - kernel/ipc/pipe.c, signal.c
+# - kernel/fs/*, kernel/drivers/*, kernel/syscall/*
 
 # All sources
-SRCS := $(CORE_SRCS) $(FS_SRCS) $(DRIVER_SRCS) $(ARCH_SRCS) $(SYSCALL_SRCS)
+SRCS := $(CORE_SRCS) $(ARCH_SRCS)
 
 # Object files
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(filter %.c,$(SRCS)))
