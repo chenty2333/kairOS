@@ -7,6 +7,13 @@
 
 #include <kairos/types.h>
 
+/* Forward declarations for types used in syscall prototypes */
+struct stat;
+struct sigaction;
+struct timespec;
+struct pollfd;
+typedef uint64_t sigset_t;
+
 /*
  * System Call Numbers
  *
@@ -164,6 +171,15 @@ int sys_nanosleep(const struct timespec *req, struct timespec *rem);
 
 /* I/O Multiplexing */
 int sys_poll(struct pollfd *fds, size_t nfds, int timeout);
+
+/* utsname structure */
+struct utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+};
 
 /* Misc */
 int sys_uname(struct utsname *buf);

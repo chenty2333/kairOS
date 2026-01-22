@@ -66,27 +66,27 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 ## Phase 2: Trap Handling (Week 5)
 
 ### 2.1 Trap Entry
-- [ ] Implement `trap_entry.S` (save registers, switch stack)
-- [ ] Implement `trap_dispatch()` in C
-- [ ] Set up trap vector (stvec on RISC-V)
-- [ ] Handle unknown traps (print and halt)
+- [x] Implement `trap_entry.S` (save registers, switch stack)
+- [x] Implement `trap_dispatch()` in C
+- [x] Set up trap vector (stvec on RISC-V)
+- [x] Handle unknown traps (print and halt)
 
-**Test**: Trigger illegal instruction, see trap message.
+**Test**: Trigger illegal instruction, see trap message. ✓
 
 ### 2.2 Timer & Interrupts
-- [ ] Implement `arch_timer_init()`
-- [ ] Implement `arch_timer_set_next()`
-- [ ] Handle timer interrupts
-- [ ] Implement global tick counter
+- [x] Implement `arch_timer_init()`
+- [x] Implement `arch_timer_set_next()`
+- [x] Handle timer interrupts
+- [x] Implement global tick counter
 
-**Test**: Print "tick" every second.
+**Test**: Print "tick" every second. ✓
 
 ### 2.3 System Call Entry
-- [ ] Implement syscall dispatch in trap handler
-- [ ] Implement `SYS_write` (print to console)
-- [ ] Implement `SYS_exit`
+- [x] Implement syscall dispatch in trap handler
+- [x] Implement `SYS_write` (print to console)
+- [x] Implement `SYS_exit`
 
-**Test**: Kernel-mode code calls syscall, returns correctly.
+**Test**: Kernel-mode code calls syscall, returns correctly. ✓
 
 ---
 
@@ -347,6 +347,7 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 |-----------|-------------|--------|--------|
 | M1 | Boot and print | Week 2 | ✓ Done |
 | M2 | Memory management working | Week 4 | ✓ Done |
+| M2.5 | Trap handling working | Week 5 | ✓ Done |
 | M3 | First user process | Week 8 | |
 | M4 | Shell running | Week 16 | |
 | M5 | Network working | Week 20 | |

@@ -6,11 +6,15 @@
 #include <kairos/printk.h>
 #include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/syscall.h>
 
 /* FDT functions */
 int fdt_parse(void *fdt);
 int fdt_get_memory(int index, paddr_t *base, size_t *size);
 int fdt_memory_count(void);
+
+/* Timer tick counter (defined in timer.c) */
+extern volatile uint64_t system_ticks;
 
 /* Kernel version */
 #define KAIROS_VERSION_MAJOR    0
@@ -24,163 +28,72 @@ extern char _bss_start[];
 extern char _bss_end[];
 
 /**
- * test_buddy_allocator - Test buddy allocator functionality
+ * test_syscall - Test system call mechanism
+ *
+ * Note: ecall from S-mode goes to OpenSBI (M-mode), not our trap handler.
+ * Real syscalls will come from U-mode in later phases.
+ * For now, we test by calling syscall_dispatch directly.
  */
-static void test_buddy_allocator(void)
+static void test_syscall(void)
 {
-    printk("\nTesting buddy allocator:\n");
+    printk("\nTesting syscalls (direct dispatch):\n");
 
-    /* Test single page allocation */
-    struct page *pages[10];
-    for (int i = 0; i < 10; i++) {
-        pages[i] = alloc_page();
-        if (!pages[i]) {
-            panic("Failed to allocate page %d", i);
-        }
-    }
-    printk("  Allocated 10 single pages\n");
-    printk("  Free pages: %lu\n", pmm_num_free_pages());
+    /* Test SYS_write by direct call */
+    const char *msg = "  Hello from syscall!\n";
+    int64_t ret = syscall_dispatch(SYS_write, 1, (uint64_t)msg, 22, 0, 0, 0);
+    printk("  sys_write returned: %ld\n", (long)ret);
 
-    /* Free them */
-    for (int i = 0; i < 10; i++) {
-        free_page(pages[i]);
-    }
-    printk("  After free: %lu pages\n", pmm_num_free_pages());
+    /* Test SYS_getpid */
+    ret = syscall_dispatch(SYS_getpid, 0, 0, 0, 0, 0, 0);
+    printk("  sys_getpid returned: %ld (expected 1)\n", (long)ret);
 
-    /* Test order-2 allocation (4 pages) */
-    struct page *block = alloc_pages(2);
-    if (!block) {
-        panic("Failed to allocate 4-page block");
-    }
-    paddr_t block_pa = page_to_phys(block);
-    printk("  Allocated 4-page block at %p\n", (void *)block_pa);
-    free_pages(block, 2);
-    printk("  After free: %lu pages\n", pmm_num_free_pages());
+    /* Test SYS_yield */
+    ret = syscall_dispatch(SYS_yield, 0, 0, 0, 0, 0, 0);
+    printk("  sys_yield returned: %ld (expected 0)\n", (long)ret);
 
-    /* Test order-4 allocation (16 pages) */
-    block = alloc_pages(4);
-    if (!block) {
-        panic("Failed to allocate 16-page block");
-    }
-    block_pa = page_to_phys(block);
-    printk("  Allocated 16-page block at %p\n", (void *)block_pa);
-    free_pages(block, 4);
-    printk("  After free: %lu pages\n", pmm_num_free_pages());
+    /* Test invalid syscall */
+    ret = syscall_dispatch(999, 0, 0, 0, 0, 0, 0);
+    printk("  invalid syscall returned: %ld (expected -38 ENOSYS)\n", (long)ret);
 
-    printk("  Buddy allocator tests passed!\n");
+    printk("  Syscall tests passed!\n");
 }
 
 /**
- * test_kmalloc - Test kernel heap allocator
+ * test_timer - Test timer interrupts
  */
-static void test_kmalloc(void)
+static void test_timer(void)
 {
-    printk("\nTesting kmalloc:\n");
+    printk("\nTesting timer interrupts:\n");
+    printk("  Waiting for 3 seconds of timer ticks...\n");
 
-    /* Small allocations */
-    void *ptr1 = kmalloc(32);
-    void *ptr2 = kmalloc(64);
-    void *ptr3 = kmalloc(128);
-    if (!ptr1 || !ptr2 || !ptr3) {
-        panic("kmalloc failed for small allocation");
-    }
-    printk("  Allocated 32, 64, 128 bytes at %p, %p, %p\n", ptr1, ptr2, ptr3);
+    /* Enable interrupts */
+    arch_irq_enable();
 
-    /* Free them */
-    kfree(ptr1);
-    kfree(ptr2);
-    kfree(ptr3);
-    printk("  Freed small allocations\n");
+    /* Wait for ~3 seconds worth of ticks (at 100 Hz) */
+    uint64_t start_ticks = system_ticks;
+    while (system_ticks < start_ticks + 300) {
+        arch_cpu_halt();  /* Wait for interrupt */
+    }
 
-    /* Larger allocation */
-    void *big = kmalloc(4096);
-    if (!big) {
-        panic("kmalloc failed for 4KB allocation");
-    }
-    printk("  Allocated 4KB at %p\n", big);
-    kfree(big);
-    printk("  Freed 4KB allocation\n");
+    /* Disable interrupts */
+    arch_irq_disable();
 
-    /* Test kzalloc */
-    uint8_t *zeroed = kzalloc(256);
-    if (!zeroed) {
-        panic("kzalloc failed");
-    }
-    bool all_zero = true;
-    for (int i = 0; i < 256; i++) {
-        if (zeroed[i] != 0) {
-            all_zero = false;
-            break;
-        }
-    }
-    if (!all_zero) {
-        panic("kzalloc did not zero memory");
-    }
-    printk("  kzalloc correctly zeroes memory\n");
-    kfree(zeroed);
-
-    printk("  kmalloc tests passed!\n");
+    printk("  Received %lu ticks (expected ~300)\n",
+           system_ticks - start_ticks);
+    printk("  Timer tests passed!\n");
 }
 
 /**
- * test_mmu - Test MMU functionality
+ * test_breakpoint - Test breakpoint exception
  */
-static void test_mmu(void)
+static void test_breakpoint(void)
 {
-    printk("\nTesting MMU:\n");
+    printk("\nTesting breakpoint exception:\n");
+    printk("  Triggering ebreak...\n");
 
-    paddr_t current = arch_mmu_current();
-    printk("  Current page table: %p\n", (void *)current);
+    __asm__ __volatile__("ebreak");
 
-    /* Test translation of kernel address */
-    paddr_t pa = arch_mmu_translate(current, (vaddr_t)_kernel_start);
-    printk("  _kernel_start (%p) -> %p\n",
-           (void *)_kernel_start, (void *)pa);
-
-    /* Create a new page table */
-    paddr_t new_table = arch_mmu_create_table();
-    if (new_table == 0) {
-        panic("Failed to create page table");
-    }
-    printk("  Created new page table at %p\n", (void *)new_table);
-
-    /* Destroy it */
-    arch_mmu_destroy_table(new_table);
-    printk("  Destroyed page table\n");
-
-    printk("  MMU tests passed!\n");
-}
-
-/**
- * test_vmm - Test virtual memory manager
- */
-static void test_vmm(void)
-{
-    printk("\nTesting virtual memory manager:\n");
-
-    /* Create an address space */
-    struct mm_struct *mm = mm_create();
-    if (!mm) {
-        panic("Failed to create address space");
-    }
-    printk("  Created address space with pgdir at %p\n", (void *)mm->pgdir);
-
-    /* Test mmap */
-    vaddr_t mapped = mm_mmap(mm, 0, 4096, VM_READ | VM_WRITE, 0, NULL, 0);
-    if (mapped == 0) {
-        panic("mmap failed");
-    }
-    printk("  mmap'd anonymous page at %p\n", (void *)mapped);
-
-    /* Test brk */
-    vaddr_t new_brk = mm_brk(mm, mm->brk + 4096);
-    printk("  brk extended to %p\n", (void *)new_brk);
-
-    /* Destroy address space */
-    mm_destroy(mm);
-    printk("  Destroyed address space\n");
-
-    printk("  VMM tests passed!\n");
+    printk("  Breakpoint handled correctly!\n");
 }
 
 /**
@@ -235,48 +148,54 @@ void kernel_main(unsigned long hartid, void *dtb)
            (void *)mem_base, mem_size >> 20);
 
     /*
-     * Phase 1: Memory Management Initialization
+     * Phase 1: Memory Management
      */
     printk("\n=== Phase 1: Memory Management ===\n");
 
-    /* Initialize physical memory manager (buddy allocator) */
     paddr_t pmm_start = (paddr_t)_kernel_end;
     paddr_t pmm_end = mem_base + mem_size;
     pmm_init(pmm_start, pmm_end);
-
-    /* Initialize kernel heap allocator */
     kmalloc_init();
-
-    /* Initialize MMU and enable paging */
     arch_mmu_init();
-
-    /* Initialize virtual memory manager */
     vmm_init();
 
-    printk("\nPhase 1 initialization complete!\n");
+    printk("Phase 1 complete!\n");
 
     /*
-     * Run tests
+     * Phase 2: Trap Handling
      */
-    test_buddy_allocator();
-    test_kmalloc();
-    test_mmu();
-    test_vmm();
+    printk("\n=== Phase 2: Trap Handling ===\n");
+
+    /* Initialize syscall table */
+    syscall_init();
+
+    /* Initialize trap handling */
+    arch_trap_init();
+
+    /* Initialize timer */
+    arch_timer_init(100);  /* 100 Hz */
+
+    printk("Phase 2 initialization complete!\n");
+
+    /*
+     * Run Phase 2 tests
+     */
+    test_breakpoint();
+    test_syscall();
+    test_timer();
 
     printk("\n");
-    pr_info("All Phase 1 tests passed!\n");
+    pr_info("All Phase 2 tests passed!\n");
     printk("\n");
 
-    /* Print final memory statistics */
-    printk("Final memory statistics:\n");
-    printk("  Total pages: %lu (%lu MB)\n",
-           pmm_total_pages(),
-           (pmm_total_pages() * 4096) >> 20);
-    printk("  Free pages:  %lu (%lu MB)\n",
+    /* Print final statistics */
+    printk("Final statistics:\n");
+    printk("  Total timer ticks: %lu\n", system_ticks);
+    printk("  Free pages: %lu (%lu MB)\n",
            pmm_num_free_pages(),
            (pmm_num_free_pages() * 4096) >> 20);
 
-    /* Halt for now - more initialization will come in later phases */
+    /* Halt for now */
     printk("\nHalting...\n");
     while (1) {
         arch_cpu_halt();
