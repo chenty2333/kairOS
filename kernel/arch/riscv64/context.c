@@ -1,0 +1,229 @@
+/**
+ * context.c - RISC-V 64 Context Management
+ *
+ * Implements architecture context allocation and initialization.
+ */
+
+#include <kairos/types.h>
+#include <kairos/arch.h>
+#include <kairos/mm.h>
+#include <kairos/printk.h>
+#include <kairos/config.h>
+
+/**
+ * Architecture context structure
+ *
+ * Contains saved registers and stack information.
+ * Must match the layout expected by context.S
+ */
+struct arch_context {
+    /* Callee-saved registers */
+    uint64_t ra;        /* 0x00: Return address */
+    uint64_t sp;        /* 0x08: Stack pointer */
+    uint64_t s0;        /* 0x10: Frame pointer */
+    uint64_t s1;        /* 0x18 */
+    uint64_t s2;        /* 0x20 */
+    uint64_t s3;        /* 0x28 */
+    uint64_t s4;        /* 0x30 */
+    uint64_t s5;        /* 0x38 */
+    uint64_t s6;        /* 0x40 */
+    uint64_t s7;        /* 0x48 */
+    uint64_t s8;        /* 0x50 */
+    uint64_t s9;        /* 0x58 */
+    uint64_t s10;       /* 0x60 */
+    uint64_t s11;       /* 0x68 */
+
+    /* Stack and page table info */
+    uint64_t kernel_stack;  /* 0x70: Kernel stack base */
+    uint64_t user_stack;    /* 0x78: User stack pointer */
+    uint64_t satp;          /* 0x80: Page table (satp register value) */
+
+    /* For kernel threads: function and argument */
+    uint64_t kthread_fn;    /* Function pointer */
+    uint64_t kthread_arg;   /* Function argument */
+};
+
+/* External entry point for new kernel threads */
+extern void kthread_entry(void);
+
+/**
+ * arch_context_alloc - Allocate architecture context
+ *
+ * Allocates a context structure and kernel stack.
+ */
+struct arch_context *arch_context_alloc(void)
+{
+    /* Allocate context structure */
+    struct arch_context *ctx = kmalloc(sizeof(*ctx));
+    if (!ctx) {
+        return NULL;
+    }
+
+    /* Allocate kernel stack (2 pages = 8KB) */
+    struct page *stack_page = alloc_pages(1);  /* 2^1 = 2 pages */
+    if (!stack_page) {
+        kfree(ctx);
+        return NULL;
+    }
+
+    /* Initialize context */
+    ctx->ra = 0;
+    ctx->sp = 0;
+    ctx->s0 = 0;
+    ctx->s1 = 0;
+    ctx->s2 = 0;
+    ctx->s3 = 0;
+    ctx->s4 = 0;
+    ctx->s5 = 0;
+    ctx->s6 = 0;
+    ctx->s7 = 0;
+    ctx->s8 = 0;
+    ctx->s9 = 0;
+    ctx->s10 = 0;
+    ctx->s11 = 0;
+
+    /* Kernel stack grows down, so base is at top of allocated region */
+    paddr_t stack_base = page_to_phys(stack_page);
+    ctx->kernel_stack = stack_base + (2 * CONFIG_PAGE_SIZE);
+    ctx->sp = ctx->kernel_stack;  /* Initial SP at top of stack */
+
+    ctx->user_stack = 0;
+    ctx->satp = 0;
+    ctx->kthread_fn = 0;
+    ctx->kthread_arg = 0;
+
+    return ctx;
+}
+
+/**
+ * arch_context_free - Free architecture context
+ */
+void arch_context_free(struct arch_context *ctx)
+{
+    if (!ctx) {
+        return;
+    }
+
+    /* Free kernel stack */
+    if (ctx->kernel_stack) {
+        paddr_t stack_base = ctx->kernel_stack - (2 * CONFIG_PAGE_SIZE);
+        struct page *stack_page = phys_to_page(stack_base);
+        if (stack_page) {
+            free_pages(stack_page, 1);
+        }
+    }
+
+    kfree(ctx);
+}
+
+/**
+ * arch_context_init - Initialize context for a new process/thread
+ *
+ * @ctx: Context to initialize
+ * @entry: Entry point (function address)
+ * @stack: Stack pointer (user stack for user mode, ignored for kernel)
+ * @kernel: True for kernel thread, false for user process
+ */
+void arch_context_init(struct arch_context *ctx,
+                       vaddr_t entry,
+                       vaddr_t stack,
+                       bool kernel)
+{
+    if (kernel) {
+        /* Kernel thread setup */
+        ctx->ra = (uint64_t)kthread_entry;
+        ctx->sp = ctx->kernel_stack;
+        ctx->s0 = entry;    /* Function to call */
+        ctx->s1 = stack;    /* Argument (repurposed) */
+        ctx->kthread_fn = entry;
+        ctx->kthread_arg = stack;
+    } else {
+        /* User process setup */
+        ctx->ra = entry;            /* Entry point stored in ra for arch_enter_user */
+        ctx->sp = ctx->kernel_stack;
+        ctx->user_stack = stack;
+        ctx->s0 = 0;
+        ctx->s1 = 0;
+    }
+}
+
+/**
+ * arch_context_clone - Clone context (for fork)
+ */
+void arch_context_clone(struct arch_context *dst, struct arch_context *src)
+{
+    /* Copy register state */
+    dst->ra = src->ra;
+    /* Don't copy sp - it points to different stack */
+    dst->s0 = src->s0;
+    dst->s1 = src->s1;
+    dst->s2 = src->s2;
+    dst->s3 = src->s3;
+    dst->s4 = src->s4;
+    dst->s5 = src->s5;
+    dst->s6 = src->s6;
+    dst->s7 = src->s7;
+    dst->s8 = src->s8;
+    dst->s9 = src->s9;
+    dst->s10 = src->s10;
+    dst->s11 = src->s11;
+
+    dst->user_stack = src->user_stack;
+    /* satp will be set separately when page table is cloned */
+}
+
+/**
+ * arch_context_set_retval - Set return value in context
+ *
+ * Used for syscall return and fork child return value.
+ */
+void arch_context_set_retval(struct arch_context *ctx, uint64_t val)
+{
+    /* Return value goes in a0, but we're using callee-saved context.
+     * For syscall return, the trap handler sets this.
+     * For fork, we need to handle this differently.
+     * For now, store it where the trap frame will pick it up.
+     */
+    (void)ctx;
+    (void)val;
+    /* TODO: Implement properly when we have user mode */
+}
+
+/**
+ * arch_context_set_args - Set argument registers
+ *
+ * Used for signal delivery.
+ */
+void arch_context_set_args(struct arch_context *ctx,
+                           uint64_t arg0, uint64_t arg1, uint64_t arg2)
+{
+    (void)ctx;
+    (void)arg0;
+    (void)arg1;
+    (void)arg2;
+    /* TODO: Implement for signal delivery */
+}
+
+/**
+ * arch_context_get_sp - Get stack pointer from context
+ */
+uint64_t arch_context_get_sp(struct arch_context *ctx)
+{
+    return ctx->sp;
+}
+
+/**
+ * arch_context_set_sp - Set stack pointer in context
+ */
+void arch_context_set_sp(struct arch_context *ctx, uint64_t sp)
+{
+    ctx->sp = sp;
+}
+
+/**
+ * arch_context_get_kernel_stack - Get kernel stack base
+ */
+uint64_t arch_context_get_kernel_stack(struct arch_context *ctx)
+{
+    return ctx->kernel_stack;
+}

@@ -9,6 +9,7 @@
 #include <kairos/config.h>
 #include <kairos/spinlock.h>
 #include <kairos/rbtree.h>
+#include <kairos/list.h>
 
 struct process;
 
@@ -102,10 +103,10 @@ struct cfs_rq *sched_rq(int cpu);
 struct percpu_data {
     int cpu_id;
     struct cfs_rq runqueue;
-    struct process *current;
-    struct process *idle;
+    struct process *curr_proc;          /* Currently running process */
+    struct process *idle_proc;          /* Idle process for this CPU */
     uint64_t ticks;                     /* Timer ticks on this CPU */
-    bool need_resched;                  /* Reschedule needed */
+    bool resched_needed;                /* Reschedule needed */
 };
 
 /* Defined in arch code */
@@ -113,6 +114,6 @@ extern struct percpu_data *arch_get_percpu(void);
 
 #define this_cpu        (arch_get_percpu()->cpu_id)
 #define this_rq         (&arch_get_percpu()->runqueue)
-#define need_resched    (arch_get_percpu()->need_resched)
+#define need_resched    (arch_get_percpu()->resched_needed)
 
 #endif /* _KAIROS_SCHED_H */

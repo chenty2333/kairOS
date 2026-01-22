@@ -8,6 +8,7 @@
 #include <kairos/types.h>
 #include <kairos/config.h>
 #include <kairos/list.h>
+#include <kairos/rbtree.h>
 #include <kairos/mm.h>
 #include <kairos/spinlock.h>
 
@@ -49,7 +50,8 @@ struct process {
     uint64_t vruntime;                  /* Virtual runtime */
     int nice;                           /* Priority: -20 (high) to +19 (low) */
     uint64_t last_run_time;             /* Last time this process ran */
-    struct rb_node sched_node;          /* Red-black tree node */
+    struct rb_node sched_node;          /* Red-black tree node (CFS, Phase 4) */
+    struct list_head sched_list;        /* Run queue linkage (round-robin) */
     bool on_rq;                         /* On run queue? */
     int cpu;                            /* CPU affinity (-1 = any) */
 
@@ -115,6 +117,15 @@ struct process *proc_find(pid_t pid);
 
 /* Get current process */
 struct process *proc_current(void);
+
+/* Set current process (called by scheduler) */
+void proc_set_current(struct process *p);
+
+/* Get idle process */
+struct process *proc_idle(void);
+
+/* Initialize idle process */
+struct process *proc_idle_init(void);
 
 /* Yield CPU */
 void proc_yield(void);

@@ -122,6 +122,8 @@ CORE_SRCS := \
     kernel/core/mm/buddy.c \
     kernel/core/mm/kmalloc.c \
     kernel/core/mm/vmm.c \
+    kernel/core/proc/process.c \
+    kernel/core/sched/sched.c \
     kernel/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
@@ -134,7 +136,9 @@ ARCH_SRCS := \
     kernel/arch/$(ARCH)/mmu.c \
     kernel/arch/$(ARCH)/trapasm.S \
     kernel/arch/$(ARCH)/trap.c \
-    kernel/arch/$(ARCH)/timer.c
+    kernel/arch/$(ARCH)/timer.c \
+    kernel/arch/$(ARCH)/switch.S \
+    kernel/arch/$(ARCH)/context.c
 
 # Future phases will add:
 # - kernel/core/sched/sched.c, cfs.c

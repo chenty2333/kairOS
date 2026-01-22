@@ -93,21 +93,21 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 ## Phase 3: Process Management (Week 6-8)
 
 ### 3.1 Process Structure
-- [ ] Define `struct process`
-- [ ] Implement process table
-- [ ] Implement `proc_alloc()` - allocate PCB
-- [ ] Implement `arch_context_alloc()` - kernel stack
-- [ ] Implement idle process (PID 0)
+- [x] Define `struct process`
+- [x] Implement process table
+- [x] Implement `proc_alloc()` - allocate PCB
+- [x] Implement `arch_context_alloc()` - kernel stack
+- [x] Implement idle process (PID 0)
 
-**Test**: Create idle process, it runs.
+**Test**: Create idle process, it runs. ✓
 
 ### 3.2 Context Switching
-- [ ] Implement `arch_context_switch()`
+- [x] Implement `arch_context_switch()`
 - [ ] Implement `arch_enter_user()`
-- [ ] Implement basic scheduler (round-robin for now)
-- [ ] Create two kernel threads, switch between them
+- [x] Implement basic scheduler (round-robin for now)
+- [x] Create two kernel threads, switch between them
 
-**Test**: Two threads print alternating messages.
+**Test**: Two threads print alternating messages. ✓
 
 ### 3.3 User Mode
 - [ ] Set up user address space

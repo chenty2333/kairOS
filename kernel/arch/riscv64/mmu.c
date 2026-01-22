@@ -244,9 +244,9 @@ void arch_mmu_init(void)
         }
     }
 
-    /* Map physical memory for kernel use (first 128MB for now) */
+    /* Map physical memory for kernel use (256MB to match QEMU default) */
     paddr_t phys_start = 0x80000000UL;
-    paddr_t phys_end = phys_start + (128UL << 20);  /* 128 MB */
+    paddr_t phys_end = phys_start + (256UL << 20);  /* 256 MB */
 
     pr_info("MMU: Mapping physical memory %p - %p\n",
             (void *)phys_start, (void *)phys_end);

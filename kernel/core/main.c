@@ -7,6 +7,8 @@
 #include <kairos/arch.h>
 #include <kairos/mm.h>
 #include <kairos/syscall.h>
+#include <kairos/process.h>
+#include <kairos/sched.h>
 
 /* FDT functions */
 int fdt_parse(void *fdt);
@@ -94,6 +96,84 @@ static void test_breakpoint(void)
     __asm__ __volatile__("ebreak");
 
     printk("  Breakpoint handled correctly!\n");
+}
+
+/**
+ * Test kernel thread A
+ */
+static volatile int thread_a_count = 0;
+static volatile int thread_b_count = 0;
+static volatile bool threads_done = false;
+
+static int test_thread_a(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 5; i++) {
+        printk("  Thread A: iteration %d\n", i);
+        thread_a_count++;
+        proc_yield();
+    }
+    printk("  Thread A: done\n");
+    return 0;
+}
+
+/**
+ * Test kernel thread B
+ */
+static int test_thread_b(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 5; i++) {
+        printk("  Thread B: iteration %d\n", i);
+        thread_b_count++;
+        proc_yield();
+    }
+    printk("  Thread B: done\n");
+    threads_done = true;
+    return 0;
+}
+
+/**
+ * test_kthreads - Test kernel thread creation and scheduling
+ */
+static void test_kthreads(void)
+{
+    printk("\nTesting kernel threads:\n");
+
+    /* Create two kernel threads */
+    struct process *p1 = kthread_create(test_thread_a, NULL, "test_a");
+    struct process *p2 = kthread_create(test_thread_b, NULL, "test_b");
+
+    if (!p1 || !p2) {
+        printk("  ERROR: Failed to create kernel threads\n");
+        return;
+    }
+
+    printk("  Created thread A (pid %d) and thread B (pid %d)\n",
+           p1->pid, p2->pid);
+
+    /* Add threads to run queue */
+    sched_enqueue(p1);
+    sched_enqueue(p2);
+
+    /* Enable interrupts and let threads run */
+    arch_irq_enable();
+
+    /* Wait for threads to complete */
+    while (!threads_done) {
+        schedule();
+    }
+
+    arch_irq_disable();
+
+    printk("  Thread A ran %d times, Thread B ran %d times\n",
+           thread_a_count, thread_b_count);
+
+    if (thread_a_count == 5 && thread_b_count == 5) {
+        printk("  Kernel thread tests passed!\n");
+    } else {
+        printk("  ERROR: Thread counts incorrect!\n");
+    }
 }
 
 /**
@@ -186,6 +266,30 @@ void kernel_main(unsigned long hartid, void *dtb)
 
     printk("\n");
     pr_info("All Phase 2 tests passed!\n");
+
+    /*
+     * Phase 3: Process Management
+     */
+    printk("\n=== Phase 3: Process Management ===\n");
+
+    /* Initialize scheduler */
+    sched_init();
+
+    /* Initialize process subsystem */
+    proc_init();
+
+    /* Create idle process (pid 0) */
+    proc_idle_init();
+
+    printk("Phase 3 initialization complete!\n");
+
+    /*
+     * Run Phase 3 tests
+     */
+    test_kthreads();
+
+    printk("\n");
+    pr_info("All Phase 3 tests passed!\n");
     printk("\n");
 
     /* Print final statistics */
