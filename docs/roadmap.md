@@ -37,29 +37,29 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 ## Phase 1: Memory Management (Week 3-4)
 
 ### 1.1 Buddy Allocator
-- [ ] Implement buddy allocator data structures
-- [ ] Implement `alloc_pages(order)`
-- [ ] Implement `free_pages(page, order)`
-- [ ] Stress test: random alloc/free patterns
+- [x] Implement buddy allocator data structures
+- [x] Implement `alloc_pages(order)`
+- [x] Implement `free_pages(page, order)`
+- [x] Stress test: random alloc/free patterns
 
-**Test**: Allocate various sizes, check for fragmentation.
+**Test**: Allocate various sizes, check for fragmentation. ✓
 
 ### 1.2 Virtual Memory
-- [ ] Implement page table creation (`arch_mmu_create_table`)
-- [ ] Implement page mapping (`arch_mmu_map`)
-- [ ] Implement `arch_mmu_switch`
-- [ ] Set up kernel virtual address space
-- [ ] Map kernel code/data
-- [ ] Map physical memory to direct mapping region
+- [x] Implement page table creation (`arch_mmu_create_table`)
+- [x] Implement page mapping (`arch_mmu_map`)
+- [x] Implement `arch_mmu_switch`
+- [x] Set up kernel virtual address space (identity mapping)
+- [x] Map kernel code/data
+- [x] Map physical memory to direct mapping region
 
-**Test**: Access memory through virtual addresses.
+**Test**: Access memory through virtual addresses. ✓
 
 ### 1.3 Kernel Heap
-- [ ] Implement power-of-2 allocator
-- [ ] Implement `kmalloc()` and `kfree()`
-- [ ] Implement `kzalloc()`
+- [x] Implement power-of-2 allocator
+- [x] Implement `kmalloc()` and `kfree()`
+- [x] Implement `kzalloc()`
 
-**Test**: `struct foo *p = kmalloc(sizeof(*p)); kfree(p);`
+**Test**: `struct foo *p = kmalloc(sizeof(*p)); kfree(p);` ✓
 
 ---
 
@@ -346,7 +346,7 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 | Milestone | Description | Target | Status |
 |-----------|-------------|--------|--------|
 | M1 | Boot and print | Week 2 | ✓ Done |
-| M2 | Memory management working | Week 4 | Partial (bitmap) |
+| M2 | Memory management working | Week 4 | ✓ Done |
 | M3 | First user process | Week 8 | |
 | M4 | Shell running | Week 16 | |
 | M5 | Network working | Week 20 | |

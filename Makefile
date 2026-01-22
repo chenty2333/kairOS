@@ -119,15 +119,18 @@ LDSCRIPT := kernel/arch/$(ARCH)/linker.ld
 # Core kernel sources (architecture-independent)
 CORE_SRCS := \
     kernel/core/main.c \
-    kernel/core/mm/pmm.c \
+    kernel/core/mm/buddy.c \
+    kernel/core/mm/kmalloc.c \
+    kernel/core/mm/vmm.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
     kernel/lib/fdt.c
 
-# Architecture-specific sources (minimal for Phase 0)
+# Architecture-specific sources
 ARCH_SRCS := \
     kernel/arch/$(ARCH)/boot.S \
-    kernel/arch/$(ARCH)/entry.c
+    kernel/arch/$(ARCH)/entry.c \
+    kernel/arch/$(ARCH)/mmu.c
 
 # Future phases will add:
 # - kernel/core/sched/sched.c, cfs.c

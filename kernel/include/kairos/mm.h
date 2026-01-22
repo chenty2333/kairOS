@@ -70,6 +70,26 @@ size_t pmm_total_pages(void);
 size_t pmm_num_free_pages(void);
 
 /*
+ * Kernel Heap Initialization
+ */
+
+/* Initialize kernel heap allocator */
+void kmalloc_init(void);
+
+/* Print allocator statistics */
+void kmalloc_stats(void);
+
+/* Free aligned memory */
+void kfree_aligned(void *ptr);
+
+/*
+ * Virtual Memory Manager Initialization
+ */
+
+/* Initialize virtual memory manager */
+void vmm_init(void);
+
+/*
  * Kernel Heap (kmalloc)
  */
 
