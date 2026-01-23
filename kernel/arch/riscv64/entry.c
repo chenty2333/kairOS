@@ -4,6 +4,7 @@
 
 #include <kairos/types.h>
 #include <kairos/arch.h>
+#include <kairos/sched.h>
 
 /*
  * SBI (Supervisor Binary Interface) call
@@ -209,7 +210,11 @@ void arch_breakpoint(void)
  */
 void arch_send_ipi(int cpu, int type)
 {
-    (void)type;  /* All IPIs trigger software interrupt for now */
+    /* Set pending bit in target CPU's mask */
+    struct percpu_data *data = sched_cpu_data(cpu);
+    if (data) {
+        __sync_fetch_and_or(&data->ipi_pending_mask, (1 << type));
+    }
 
     /* Create hart mask with single bit set for target CPU */
     unsigned long hart_mask = 1UL << cpu;

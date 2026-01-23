@@ -12,6 +12,7 @@
 #include <kairos/arch.h>
 #include <kairos/printk.h>
 #include <kairos/syscall.h>
+#include <kairos/sched.h>
 
 /* RISC-V scause values */
 #define SCAUSE_INTERRUPT        (1UL << 63)
@@ -206,9 +207,31 @@ static void handle_interrupt(struct trap_frame *tf)
         break;
 
     case IRQ_S_SOFT:
-        /* Software interrupt (IPI) - clear it */
-        /* Will be used for SMP in later phases */
-        pr_debug("Software interrupt\n");
+        /* Software interrupt (IPI) */
+        /* Clear SSIP (Supervisor Software Interrupt Pending) bit */
+        __asm__ __volatile__("csrc sip, %0" :: "r"(1UL << 1));
+        
+        /* Handle IPIs based on pending mask */
+        struct percpu_data *cpu = arch_get_percpu();
+        if (cpu) {
+            /* Atomically read and clear pending mask */
+            int pending = __sync_fetch_and_and(&cpu->ipi_pending_mask, 0);
+
+            if (pending & (1 << IPI_RESCHEDULE)) {
+                cpu->resched_needed = true;
+            }
+
+            if (pending & (1 << IPI_CALL)) {
+                /* TODO: Execute function call */
+            }
+
+            if (pending & (1 << IPI_STOP)) {
+                pr_info("CPU %d stopping...\n", arch_cpu_id());
+                while (1) {
+                    arch_cpu_halt();
+                }
+            }
+        }
         break;
 
     case IRQ_S_EXT:

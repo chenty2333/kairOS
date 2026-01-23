@@ -118,7 +118,7 @@ int64_t syscall_dispatch(uint64_t num,
 void syscall_init(void);
 
 /*
- * Individual syscall implementations (defined in syscall/*.c)
+ * Individual syscall implementations (defined in syscall/syscall.c)
  */
 
 /* Process */

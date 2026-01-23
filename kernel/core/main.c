@@ -371,7 +371,6 @@ static void test_cfs_priority(void)
 
 /* Track secondary CPUs online status */
 static volatile int secondary_cpus_online = 0;
-static volatile bool smp_test_done = false;
 
 /* Secondary CPU entry point (arch-specific) */
 int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque);

@@ -384,7 +384,9 @@ struct process *proc_fork(void)
     child->mm = mm_clone(parent->mm);
     if (!child->mm) {
         pr_err("proc_fork: failed to clone address space\n");
+        spin_lock(&proc_table_lock);
         list_del(&child->sibling);
+        spin_unlock(&proc_table_lock);
         proc_free_internal(child);
         return NULL;
     }
@@ -520,6 +522,7 @@ void proc_wakeup_all(void *channel)
 pid_t proc_wait(pid_t pid, int *status, int options)
 {
     struct process *p = current_proc;
+    struct process *child, *tmp;
     (void)options;
 
     while (1) {
@@ -528,13 +531,7 @@ pid_t proc_wait(pid_t pid, int *status, int options)
 
         spin_lock(&proc_table_lock);
 
-        for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-            struct process *child = &proc_table[i];
-
-            if (child->parent != p) {
-                continue;
-            }
-
+        list_for_each_entry_safe(child, tmp, &p->children, sibling) {
             found_child = true;
 
             if (pid > 0 && child->pid != pid) {

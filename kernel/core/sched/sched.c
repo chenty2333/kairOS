@@ -240,6 +240,17 @@ static bool check_preempt_tick(struct cfs_rq *rq)
 }
 
 /**
+ * sched_cpu_data - Get per-CPU data for a specific CPU
+ */
+struct percpu_data *sched_cpu_data(int cpu)
+{
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) {
+        return NULL;
+    }
+    return &cpu_data[cpu];
+}
+
+/**
  * sched_init_cpu - Initialize scheduler for a specific CPU
  */
 void sched_init_cpu(int cpu)
@@ -319,6 +330,11 @@ void sched_enqueue(struct process *p)
 
     update_min_vruntime(rq);
 
+    /* If enqueued on a different CPU, send an IPI to trigger rescheduling */
+    if (cpu != arch_cpu_id()) {
+        arch_send_ipi(cpu, IPI_RESCHEDULE);
+    }
+
     spin_unlock(&sched_lock);
     arch_irq_restore(irq_state);
 }
@@ -385,6 +401,13 @@ static void put_prev_task(struct process *p)
             __enqueue_entity(rq, p);
             p->on_rq = true;
             rq->nr_running++;
+        }
+    } else if (p->state == PROC_SLEEPING || p->state == PROC_ZOMBIE) {
+        /* Process is sleeping or exiting - must be removed from runqueue */
+        if (p->on_rq) {
+            __dequeue_entity(rq, p);
+            p->on_rq = false;
+            rq->nr_running--;
         }
     }
 }

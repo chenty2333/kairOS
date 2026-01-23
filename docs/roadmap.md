@@ -152,6 +152,7 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 - [x] Implement `arch_cpu_id()`
 - [x] Boot secondary CPUs
 - [x] Implement IPI (reschedule)
+- [x] Implement IPI Message Passing (bitmask/call)
 - [x] Per-CPU run queues
 
 **Test**: Multiple CPUs run different processes. ✓

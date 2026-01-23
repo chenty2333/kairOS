@@ -90,6 +90,9 @@ int sched_cpu_id(void);
 struct cfs_rq *sched_cpu_rq(void);
 struct cfs_rq *sched_rq(int cpu);
 
+/* Get per-CPU data for specific CPU */
+struct percpu_data *sched_cpu_data(int cpu);
+
 /*
  * Flags for schedule()
  */
@@ -105,8 +108,17 @@ struct percpu_data {
     struct cfs_rq runqueue;
     struct process *curr_proc;          /* Currently running process */
     struct process *idle_proc;          /* Idle process for this CPU */
-    uint64_t ticks;                     /* Timer ticks on this CPU */
-    bool resched_needed;                /* Reschedule needed */
+    /* IPI State */
+    volatile int ipi_pending_mask;      /* Pending IPIs (bitmask) */
+    
+    /* IPI_CALL data */
+    spinlock_t ipi_call_lock;           /* Protects call data */
+    void (*ipi_call_func)(void *);      /* Function to call */
+    void *ipi_call_arg;                 /* Argument */
+
+    /* Stats */
+    uint64_t ticks;
+    bool resched_needed;
 };
 
 /* Defined in arch code */
