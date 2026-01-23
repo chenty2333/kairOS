@@ -289,7 +289,15 @@ void kernel_main(unsigned long hartid, void *dtb)
     test_kthreads();
 
     printk("\n");
-    pr_info("All Phase 3 tests passed!\n");
+    pr_info("Phase 3.1-3.2 (kernel threads) passed!\n");
+
+    /*
+     * Phase 3.3-3.4: User Mode and Fork Test
+     */
+    printk("\n=== Phase 3.3-3.4: User Mode and Fork Test ===\n");
+    run_fork_test();
+
+    /* Should not reach here if fork test succeeds */
     printk("\n");
 
     /* Print final statistics */

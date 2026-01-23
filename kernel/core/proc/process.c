@@ -126,6 +126,38 @@ static struct process *proc_alloc(void)
 }
 
 /**
+ * proc_alloc_internal - Allocate process structure (internal use)
+ *
+ * This is exposed for the ELF loader.
+ */
+struct process *proc_alloc_internal(void)
+{
+    return proc_alloc();
+}
+
+/**
+ * proc_free_internal - Free process structure (internal use)
+ *
+ * This is exposed for the ELF loader.
+ */
+void proc_free_internal(struct process *p)
+{
+    if (!p) {
+        return;
+    }
+
+    /* Free context (kernel stack) */
+    if (p->context) {
+        arch_context_free(p->context);
+        p->context = NULL;
+    }
+
+    /* Mark as unused */
+    p->state = PROC_UNUSED;
+    p->pid = 0;
+}
+
+/**
  * proc_free - Free a process structure
  */
 static void proc_free(struct process *p)
@@ -297,6 +329,86 @@ struct process *proc_idle(void)
 }
 
 /**
+ * proc_fork - Fork current process
+ *
+ * Creates a copy of the current process. The child process is identical
+ * to the parent except:
+ * - It has a new PID
+ * - Its parent is the calling process
+ * - fork() returns 0 in the child
+ * - fork() returns child PID in the parent
+ *
+ * Returns the child process structure (in parent context).
+ * The child will start running from the syscall return point.
+ */
+struct process *proc_fork(void)
+{
+    struct process *parent = current_proc;
+    struct process *child;
+
+    if (!parent || !parent->mm) {
+        pr_err("proc_fork: cannot fork kernel thread\n");
+        return NULL;
+    }
+
+    /* Allocate child process */
+    child = proc_alloc();
+    if (!child) {
+        pr_err("proc_fork: failed to allocate child process\n");
+        return NULL;
+    }
+
+    /* Copy name */
+    for (int i = 0; i < 15; i++) {
+        child->name[i] = parent->name[i];
+    }
+    child->name[15] = '\0';
+
+    /* Copy credentials */
+    child->uid = parent->uid;
+    child->gid = parent->gid;
+
+    /* Set parent-child relationship */
+    child->parent = parent;
+    child->ppid = parent->pid;
+
+    /* Add child to parent's children list */
+    spin_lock(&proc_table_lock);
+    list_add(&child->sibling, &parent->children);
+    spin_unlock(&proc_table_lock);
+
+    /* Clone address space */
+    child->mm = mm_clone(parent->mm);
+    if (!child->mm) {
+        pr_err("proc_fork: failed to clone address space\n");
+        list_del(&child->sibling);
+        proc_free_internal(child);
+        return NULL;
+    }
+
+    /* Set up child to return from fork with return value 0 */
+    struct trap_frame *parent_tf = get_current_trapframe();
+    if (parent_tf) {
+        arch_setup_fork_child(child->context, parent_tf);
+    } else {
+        /* Fallback: clone context (for kernel threads) */
+        arch_context_clone(child->context, parent->context);
+    }
+
+    /* Child inherits scheduling parameters */
+    child->nice = parent->nice;
+    child->vruntime = parent->vruntime;
+
+    /* Child is ready to run */
+    child->state = PROC_RUNNABLE;
+
+    pr_debug("proc_fork: created child pid %d from parent pid %d\n",
+             child->pid, parent->pid);
+
+    return child;
+}
+
+/**
  * proc_exit - Exit current process
  */
 noreturn void proc_exit(int status)
@@ -323,6 +435,16 @@ noreturn void proc_exit(int status)
     /* Wake up parent if waiting */
     if (p->parent) {
         proc_wakeup(p->parent);
+    }
+
+    /* For user processes without a parent (test processes), halt when done */
+    /* This prevents returning to invalid kernel code after user test exits */
+    if (p->mm && !p->parent) {
+        pr_info("Test process exited. System halted.\n");
+        arch_irq_disable();
+        while (1) {
+            arch_cpu_halt();
+        }
     }
 
     /* Schedule another process - this should never return */
@@ -442,34 +564,7 @@ pid_t proc_wait(pid_t pid, int *status, int options)
     }
 }
 
-/**
- * proc_create - Create process from ELF binary
- *
- * This is a placeholder - full implementation in Phase 3.4
- */
-struct process *proc_create(const char *name, const void *elf, size_t size)
-{
-    (void)elf;
-    (void)size;
-
-    pr_warn("proc_create: ELF loading not yet implemented\n");
-
-    struct process *p = proc_alloc();
-    if (!p) {
-        return NULL;
-    }
-
-    /* Set name */
-    int i;
-    for (i = 0; i < 15 && name[i]; i++) {
-        p->name[i] = name[i];
-    }
-    p->name[i] = '\0';
-
-    /* TODO: Parse ELF, set up address space, etc. */
-
-    return p;
-}
+/* proc_create is now implemented in elf.c */
 
 /**
  * Wait queue implementation

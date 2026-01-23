@@ -103,26 +103,26 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 
 ### 3.2 Context Switching
 - [x] Implement `arch_context_switch()`
-- [ ] Implement `arch_enter_user()`
+- [x] Implement `arch_enter_user()`
 - [x] Implement basic scheduler (round-robin for now)
 - [x] Create two kernel threads, switch between them
 
 **Test**: Two threads print alternating messages. ✓
 
 ### 3.3 User Mode
-- [ ] Set up user address space
-- [ ] Implement user stack setup
-- [ ] Transition to user mode
-- [ ] Handle syscalls from user mode
+- [x] Set up user address space
+- [x] Implement user stack setup
+- [x] Transition to user mode
+- [x] Handle syscalls from user mode
 
 **Test**: User program calls write() syscall.
 
 ### 3.4 Process Creation
-- [ ] Implement ELF loader (basic)
-- [ ] Implement `proc_create()` from ELF
-- [ ] Implement `sys_fork()`
-- [ ] Implement `sys_exec()`
-- [ ] Implement `sys_wait()`
+- [x] Implement ELF loader (basic)
+- [x] Implement `proc_create()` from ELF
+- [x] Implement `sys_fork()`
+- [ ] Implement `sys_exec()` (File System, Phase 5)
+- [x] Implement `sys_wait()`
 
 **Test**: Fork a process, child exits, parent continues.
 

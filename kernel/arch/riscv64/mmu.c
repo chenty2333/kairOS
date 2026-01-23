@@ -275,6 +275,10 @@ void arch_mmu_init(void)
  * arch_mmu_create_table - Create a new page table
  *
  * Returns physical address of new page table.
+ *
+ * Copies kernel mappings from the kernel page table to the new table.
+ * Since we use identity mapping (VA == PA) for the kernel at 0x80000000,
+ * we need to copy the relevant L2 entries.
  */
 paddr_t arch_mmu_create_table(void)
 {
@@ -283,13 +287,26 @@ paddr_t arch_mmu_create_table(void)
         return 0;
     }
 
-    /* Copy kernel mappings (upper half of address space) */
     uint64_t *new_table = (uint64_t *)table;
     uint64_t *kern_table = (uint64_t *)kernel_pgdir;
 
-    /* Copy entries for kernel space (upper half) */
-    for (int i = PTES_PER_PAGE / 2; i < PTES_PER_PAGE; i++) {
-        new_table[i] = kern_table[i];
+    /*
+     * Copy all kernel mappings.
+     *
+     * In Sv39, the L2 page table has 512 entries, each covering 1GB.
+     * Entry i covers VA [i*1GB, (i+1)*1GB).
+     *
+     * For identity-mapped kernel at 0x80000000 (2GB mark):
+     * - VPN[2] = 2 covers 2GB - 3GB
+     *
+     * We copy all non-zero entries from the kernel page table that
+     * correspond to kernel-space mappings. For simplicity, we copy
+     * all entries since user space doesn't use these high addresses.
+     */
+    for (int i = 0; i < PTES_PER_PAGE; i++) {
+        if (kern_table[i] & PTE_V) {
+            new_table[i] = kern_table[i];
+        }
     }
 
     return table;

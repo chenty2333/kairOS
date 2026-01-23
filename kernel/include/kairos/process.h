@@ -174,4 +174,23 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name);
 /* Current process macros */
 #define current     proc_current()
 
+/*
+ * Internal functions (for ELF loader)
+ */
+struct process *proc_alloc_internal(void);
+void proc_free_internal(struct process *p);
+
+/*
+ * User Mode Test (Phase 3.3)
+ */
+
+/* Create a test user process */
+struct process *proc_create_user_test(void);
+
+/* Run the user mode test */
+void run_user_test(void);
+
+/* Run the fork test */
+void run_fork_test(void);
+
 #endif /* _KAIROS_PROCESS_H */

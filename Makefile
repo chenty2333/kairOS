@@ -123,6 +123,8 @@ CORE_SRCS := \
     kernel/core/mm/kmalloc.c \
     kernel/core/mm/vmm.c \
     kernel/core/proc/process.c \
+    kernel/core/proc/user_test.c \
+    kernel/core/proc/elf.c \
     kernel/core/sched/sched.c \
     kernel/syscall/syscall.c \
     kernel/lib/printk.c \

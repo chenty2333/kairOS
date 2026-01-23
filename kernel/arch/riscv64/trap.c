@@ -40,6 +40,7 @@
 #define SSTATUS_SPP             (1UL << 8)
 #define SSTATUS_SPIE            (1UL << 5)
 #define SSTATUS_SIE             (1UL << 1)
+#define SSTATUS_SUM             (1UL << 18)  /* Supervisor User Memory access */
 
 /**
  * Trap frame structure (must match trap.S)
@@ -90,6 +91,19 @@ void timer_interrupt_handler(void);
 
 /* Global tick counter */
 volatile uint64_t system_ticks = 0;
+
+/* Current trap frame (for fork) */
+static struct trap_frame *current_tf = NULL;
+
+/**
+ * get_current_trapframe - Get the current trap frame
+ *
+ * Used by fork to copy parent's trap frame to child.
+ */
+struct trap_frame *get_current_trapframe(void)
+{
+    return current_tf;
+}
 
 /**
  * Exception names for debugging
@@ -213,11 +227,23 @@ static void handle_interrupt(struct trap_frame *tf)
  */
 void trap_dispatch(struct trap_frame *tf)
 {
+    /*
+     * Enable SUM (Supervisor User Memory access) so we can access
+     * user memory in syscall handlers. This is cleared on trap entry
+     * for security, so we enable it explicitly here.
+     */
+    __asm__ __volatile__("csrs sstatus, %0" :: "r"(SSTATUS_SUM));
+
+    /* Save trap frame pointer for fork */
+    current_tf = tf;
+
     if (tf->scause & SCAUSE_INTERRUPT) {
         handle_interrupt(tf);
     } else {
         handle_exception(tf);
     }
+
+    current_tf = NULL;
 }
 
 /**

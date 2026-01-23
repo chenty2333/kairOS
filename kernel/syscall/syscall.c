@@ -9,6 +9,8 @@
 #include <kairos/syscall.h>
 #include <kairos/printk.h>
 #include <kairos/arch.h>
+#include <kairos/process.h>
+#include <kairos/sched.h>
 
 /* Syscall table */
 syscall_fn_t syscall_table[SYS_MAX];
@@ -49,42 +51,93 @@ ssize_t sys_write(int fd, const void *buf, size_t count)
 
 /**
  * sys_exit - Exit the current process
- *
- * For now, just prints a message and halts.
- * Real implementation will come in Phase 3.
  */
 noreturn void sys_exit(int status)
 {
-    pr_info("Process exited with status %d\n", status);
-
-    /* TODO: Clean up process resources in Phase 3 */
-
-    /* For now, just halt */
-    while (1) {
-        arch_cpu_halt();
-    }
+    proc_exit(status);
+    /* Never reached */
 }
 
 /**
  * sys_getpid - Get current process ID
- *
- * Returns 1 for now (init process).
  */
 pid_t sys_getpid(void)
 {
-    /* TODO: Return actual PID in Phase 3 */
-    return 1;
+    struct process *p = proc_current();
+    return p ? p->pid : 0;
+}
+
+/**
+ * sys_getppid - Get parent process ID
+ */
+pid_t sys_getppid(void)
+{
+    struct process *p = proc_current();
+    return p ? p->ppid : 0;
 }
 
 /**
  * sys_yield - Yield the CPU
- *
- * For now, just returns. Real implementation in Phase 4.
  */
 int sys_yield(void)
 {
-    /* TODO: Call scheduler in Phase 4 */
+    proc_yield();
     return 0;
+}
+
+/**
+ * sys_fork - Fork the current process
+ *
+ * Returns child PID to parent, 0 to child, -1 on error.
+ */
+pid_t sys_fork(void)
+{
+    struct process *child = proc_fork();
+    if (!child) {
+        return -ENOMEM;
+    }
+
+    /* Add child to scheduler run queue */
+    sched_enqueue(child);
+
+    /* Return child PID to parent */
+    return child->pid;
+}
+
+/**
+ * sys_wait - Wait for child process
+ *
+ * @pid: Child PID to wait for (-1 = any child)
+ * @status: Pointer to store exit status
+ * @options: Wait options (ignored for now)
+ */
+pid_t sys_wait(pid_t pid, int *status, int options)
+{
+    return proc_wait(pid, status, options);
+}
+
+/**
+ * sys_exec - Replace current process image with new program
+ *
+ * Note: Since we don't have a filesystem yet, this is a simplified version
+ * that takes a path but can only execute embedded test programs.
+ *
+ * @path: Path to executable (ignored for now)
+ * @argv: Argument vector (ignored for now)
+ * @envp: Environment vector (ignored for now)
+ *
+ * Returns: -ENOSYS for now (not fully implemented without filesystem)
+ */
+int sys_exec(const char *path, char *const argv[], char *const envp[])
+{
+    (void)path;
+    (void)argv;
+    (void)envp;
+
+    /* Without a filesystem, we can't load executables from path */
+    /* This will be implemented properly when we have VFS */
+    pr_warn("sys_exec: filesystem not available yet\n");
+    return -ENOSYS;
 }
 
 /**
@@ -163,6 +216,34 @@ static int64_t sys_uname_wrapper(uint64_t buf, uint64_t a1, uint64_t a2,
     return sys_uname((struct utsname *)buf);
 }
 
+static int64_t sys_getppid_wrapper(uint64_t a0, uint64_t a1, uint64_t a2,
+                                    uint64_t a3, uint64_t a4, uint64_t a5)
+{
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return sys_getppid();
+}
+
+static int64_t sys_fork_wrapper(uint64_t a0, uint64_t a1, uint64_t a2,
+                                 uint64_t a3, uint64_t a4, uint64_t a5)
+{
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return sys_fork();
+}
+
+static int64_t sys_wait_wrapper(uint64_t pid, uint64_t status, uint64_t options,
+                                 uint64_t a3, uint64_t a4, uint64_t a5)
+{
+    (void)a3; (void)a4; (void)a5;
+    return sys_wait((pid_t)pid, (int *)status, (int)options);
+}
+
+static int64_t sys_exec_wrapper(uint64_t path, uint64_t argv, uint64_t envp,
+                                 uint64_t a3, uint64_t a4, uint64_t a5)
+{
+    (void)a3; (void)a4; (void)a5;
+    return sys_exec((const char *)path, (char *const *)argv, (char *const *)envp);
+}
+
 /**
  * syscall_init - Initialize syscall table
  */
@@ -175,7 +256,11 @@ void syscall_init(void)
 
     /* Register implemented syscalls */
     syscall_table[SYS_exit] = sys_exit_wrapper;
+    syscall_table[SYS_fork] = sys_fork_wrapper;
+    syscall_table[SYS_exec] = sys_exec_wrapper;
+    syscall_table[SYS_wait] = sys_wait_wrapper;
     syscall_table[SYS_getpid] = sys_getpid_wrapper;
+    syscall_table[SYS_getppid] = sys_getppid_wrapper;
     syscall_table[SYS_yield] = sys_yield_wrapper;
     syscall_table[SYS_write] = sys_write_wrapper;
     syscall_table[SYS_uname] = sys_uname_wrapper;

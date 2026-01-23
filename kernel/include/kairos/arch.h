@@ -237,6 +237,21 @@ void trap_handler(struct trap_info *info);
 
 /*
  * ============================================================
+ *                   Fork Support
+ * ============================================================
+ */
+
+/* Trap frame structure (opaque, defined per-architecture) */
+struct trap_frame;
+
+/* Get the current trap frame (for fork) */
+struct trap_frame *get_current_trapframe(void);
+
+/* Copy trap frame to a child's kernel stack and set up context for fork return */
+void arch_setup_fork_child(struct arch_context *child_ctx, struct trap_frame *parent_tf);
+
+/*
+ * ============================================================
  *                   Debug Support
  * ============================================================
  */
