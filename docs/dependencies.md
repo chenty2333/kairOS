@@ -20,10 +20,10 @@ This document lists all third-party libraries used by Kairos, their versions, an
 
 | Library | Version | License | Purpose |
 |---------|---------|---------|---------|
-| **Limine** | v8.x (latest stable) | BSD-2-Clause | Bootloader |
-| **lwIP** | 2.2.0 (STABLE) | BSD-3-Clause | TCP/IP stack |
-| **TinyUSB** | 0.16.0 | MIT | USB host/device stack |
-| **FatFs** | R0.15 | BSD-1-Clause | FAT32 filesystem |
+| **Limine** | v10.x (latest stable) | BSD-2-Clause | Bootloader |
+| **lwIP** | 2.2.1 (STABLE) | BSD-3-Clause | TCP/IP stack |
+| **TinyUSB** | 0.20.0 | MIT | USB host/device stack |
+| **FatFs** | R0.16 | BSD-1-Clause | FAT32 filesystem |
 | **musl** | 1.2.5 | MIT | C library (for user space) |
 
 ## License Compatibility
@@ -41,7 +41,7 @@ All libraries use permissive licenses (MIT, BSD) compatible with Kairos's MIT li
 ### Limine Bootloader
 
 - **URL**: https://github.com/limine-bootloader/limine
-- **Version**: v8.x-binary branch (prebuilt binaries)
+- **Version**: v10.x-binary branch (prebuilt binaries)
 - **Use**: Boot kernel on x86_64, AArch64, RISC-V
 - **Integration**: Provides memory map, framebuffer, kernel modules
 
@@ -53,7 +53,7 @@ Key files:
 ### lwIP (Lightweight IP)
 
 - **URL**: https://savannah.nongnu.org/projects/lwip/
-- **Version**: STABLE-2_2_0_RELEASE
+- **Version**: STABLE-2_2_1_RELEASE
 - **Use**: TCP/IP networking
 - **Integration**: Kernel or user-space network stack
 
@@ -70,7 +70,7 @@ Configuration:
 ### TinyUSB
 
 - **URL**: https://github.com/hathach/tinyusb
-- **Version**: 0.16.0
+- **Version**: 0.20.0
 - **Use**: USB host controller and HID devices
 - **Integration**: Kernel driver
 
@@ -86,7 +86,7 @@ Configuration:
 ### FatFs
 
 - **URL**: http://elm-chan.org/fsw/ff/
-- **Version**: R0.15
+- **Version**: R0.16
 - **Use**: FAT12/16/32 filesystem (boot partition, USB drives)
 - **Integration**: VFS layer
 
@@ -127,10 +127,10 @@ third_party/
 
 ## Version Selection Rationale
 
-- **Limine v8.x**: Latest stable with full RISC-V support
-- **lwIP 2.2.0**: Latest stable release, well-tested
-- **TinyUSB 0.16.0**: Latest stable, good XHCI support
-- **FatFs R0.15**: Latest, minimal changes needed
+- **Limine v10.x**: Latest stable with full RISC-V support
+- **lwIP 2.2.1**: Latest stable release, well-tested
+- **TinyUSB 0.20.0**: Latest stable, good XHCI support
+- **FatFs R0.16**: Latest, minimal changes needed
 - **musl 1.2.5**: Latest stable, cleanest implementation
 
 ## Updating Dependencies
