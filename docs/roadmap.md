@@ -131,21 +131,21 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 ## Phase 4: CFS Scheduler (Week 9-10)
 
 ### 4.1 Red-Black Tree
-- [ ] Implement rb_insert_color()
-- [ ] Implement rb_erase()
-- [ ] Implement rb_first(), rb_next()
-- [ ] Test with integers
+- [x] Implement rb_insert_color()
+- [x] Implement rb_erase()
+- [x] Implement rb_first(), rb_next()
+- [x] Test with integers
 
-**Test**: Insert 1000 numbers, verify order.
+**Test**: Insert 1000 numbers, verify order. ✓
 
 ### 4.2 CFS Implementation
-- [ ] Implement per-CPU run queue
-- [ ] Implement vruntime tracking
-- [ ] Implement `enqueue_task()`, `dequeue_task()`
-- [ ] Implement `pick_next_task()` (leftmost in RB tree)
-- [ ] Implement nice value support
+- [x] Implement per-CPU run queue
+- [x] Implement vruntime tracking
+- [x] Implement `enqueue_task()`, `dequeue_task()`
+- [x] Implement `pick_next_task()` (leftmost in RB tree)
+- [x] Implement nice value support
 
-**Test**: Higher-nice process gets less CPU.
+**Test**: Higher-nice process gets less CPU. ✓
 
 ### 4.3 SMP Support
 - [ ] Implement per-CPU data structure
@@ -348,7 +348,8 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 | M1 | Boot and print | Week 2 | ✓ Done |
 | M2 | Memory management working | Week 4 | ✓ Done |
 | M2.5 | Trap handling working | Week 5 | ✓ Done |
-| M3 | First user process | Week 8 | |
+| M3 | First user process | Week 8 | ✓ Done |
+| M3.5 | CFS Scheduler | Week 10 | ✓ Done |
 | M4 | Shell running | Week 16 | |
 | M5 | Network working | Week 20 | |
 | M6 | BusyBox complete | Week 24 | |

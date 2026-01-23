@@ -9,6 +9,7 @@
 #include <kairos/arch.h>
 #include <kairos/printk.h>
 #include <kairos/config.h>
+#include <kairos/sched.h>
 
 /* SBI timer extension */
 #define SBI_EXT_TIME            0x54494D45  /* "TIME" */
@@ -147,7 +148,13 @@ void timer_interrupt_handler(void)
         pr_debug("tick: %lu seconds\n", system_ticks / CONFIG_HZ);
     }
 
-    /* TODO: Call scheduler for preemption in later phases */
+    /* Call scheduler tick to update vruntime and check preemption */
+    sched_tick();
+
+    /* If preemption is needed, reschedule */
+    if (sched_need_resched()) {
+        schedule();
+    }
 }
 
 /**

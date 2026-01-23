@@ -129,7 +129,8 @@ CORE_SRCS := \
     kernel/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
-    kernel/lib/fdt.c
+    kernel/lib/fdt.c \
+    kernel/lib/rbtree.c
 
 # Architecture-specific sources
 ARCH_SRCS := \

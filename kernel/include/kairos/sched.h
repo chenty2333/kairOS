@@ -116,4 +116,14 @@ extern struct percpu_data *arch_get_percpu(void);
 #define this_rq         (&arch_get_percpu()->runqueue)
 #define need_resched    (arch_get_percpu()->resched_needed)
 
+/*
+ * Additional scheduler functions
+ */
+
+/* Check if rescheduling is needed */
+bool sched_need_resched(void);
+
+/* Set the idle process for this CPU */
+void sched_set_idle(struct process *p);
+
 #endif /* _KAIROS_SCHED_H */
