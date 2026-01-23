@@ -148,13 +148,13 @@ Each phase builds on the previous one. **Test after each step before moving on.*
 **Test**: Higher-nice process gets less CPU. ✓
 
 ### 4.3 SMP Support
-- [ ] Implement per-CPU data structure
-- [ ] Implement `arch_cpu_id()`
-- [ ] Boot secondary CPUs
-- [ ] Implement IPI (reschedule)
-- [ ] Per-CPU run queues
+- [x] Implement per-CPU data structure
+- [x] Implement `arch_cpu_id()`
+- [x] Boot secondary CPUs
+- [x] Implement IPI (reschedule)
+- [x] Per-CPU run queues
 
-**Test**: Multiple CPUs run different processes.
+**Test**: Multiple CPUs run different processes. ✓
 
 ---
 

@@ -315,6 +315,9 @@ struct process *proc_idle_init(void)
     idle_proc = p;
     current_proc = p;
 
+    /* Register with scheduler */
+    sched_set_idle(p);
+
     pr_info("Process: idle process created (pid 0)\n");
 
     return p;

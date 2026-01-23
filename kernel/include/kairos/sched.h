@@ -126,4 +126,14 @@ bool sched_need_resched(void);
 /* Set the idle process for this CPU */
 void sched_set_idle(struct process *p);
 
+/*
+ * SMP Support (Phase 4.3)
+ */
+
+/* Get number of online CPUs */
+int sched_cpu_count(void);
+
+/* Mark a CPU as online */
+void sched_cpu_online(int cpu);
+
 #endif /* _KAIROS_SCHED_H */

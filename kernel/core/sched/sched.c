@@ -4,10 +4,7 @@
  * Phase 4: Implements the Completely Fair Scheduler using a red-black
  * tree to maintain runnable processes sorted by vruntime.
  *
- * Key concepts:
- * - vruntime: Virtual runtime, increases slower for high-priority tasks
- * - min_vruntime: Baseline for new tasks to prevent starvation
- * - RB tree: Processes ordered by vruntime, leftmost = next to run
+ * Phase 4.3: SMP support with per-CPU run queues.
  */
 
 #include <kairos/sched.h>
@@ -29,10 +26,6 @@
 
 /*
  * Nice to weight table (from Linux kernel)
- * Higher weight = more CPU time
- * nice -20 → weight 88761 (highest priority)
- * nice   0 → weight  1024 (default)
- * nice +19 → weight    15 (lowest priority)
  */
 const int sched_nice_to_weight[40] = {
     /* -20 */ 88761, 71755, 56483, 46273, 36291,
@@ -46,14 +39,31 @@ const int sched_nice_to_weight[40] = {
 };
 
 /*
- * Per-CPU data (single CPU for now, will be extended in Phase 4.3)
+ * Per-CPU data array
  */
-static struct percpu_data cpu0_data;
+static struct percpu_data cpu_data[CONFIG_MAX_CPUS];
+static int nr_cpus_online = 1;  /* Number of online CPUs */
 
 /*
- * Global scheduler lock (for single CPU; per-CPU locks in SMP)
+ * Global scheduler lock (protects cross-CPU operations)
  */
 static spinlock_t sched_lock = SPINLOCK_INIT;
+
+/*
+ * Helper: get current CPU's per-CPU data
+ */
+static inline struct percpu_data *this_cpu_data(void)
+{
+    return &cpu_data[arch_cpu_id()];
+}
+
+/*
+ * Helper: get current CPU's run queue
+ */
+static inline struct cfs_rq *this_rq_local(void)
+{
+    return &cpu_data[arch_cpu_id()].runqueue;
+}
 
 /**
  * __sched_weight - Get weight for a nice value
@@ -72,11 +82,6 @@ static inline int __sched_weight(int nice)
 
 /**
  * calc_delta_fair - Calculate weighted vruntime delta
- * @delta: Actual execution time in nanoseconds
- * @weight: Process weight
- *
- * vruntime = delta * NICE_0_WEIGHT / weight
- * Higher weight processes accumulate vruntime slower.
  */
 static uint64_t calc_delta_fair(uint64_t delta, int weight)
 {
@@ -88,13 +93,6 @@ static uint64_t calc_delta_fair(uint64_t delta, int weight)
 
 /**
  * update_min_vruntime - Update the minimum vruntime baseline
- * @rq: The run queue
- *
- * min_vruntime is monotonically increasing and serves as the baseline
- * for new tasks. It's the maximum of:
- * - Current min_vruntime
- * - Current task's vruntime
- * - Leftmost task's vruntime
  */
 static void update_min_vruntime(struct cfs_rq *rq)
 {
@@ -115,7 +113,6 @@ static void update_min_vruntime(struct cfs_rq *rq)
         }
     }
 
-    /* min_vruntime only increases */
     if (vruntime > rq->min_vruntime) {
         rq->min_vruntime = vruntime;
     }
@@ -123,17 +120,13 @@ static void update_min_vruntime(struct cfs_rq *rq)
 
 /**
  * __enqueue_entity - Insert a process into the RB tree
- * @rq: The run queue
- * @p: The process to insert
  */
 static void __enqueue_entity(struct cfs_rq *rq, struct process *p)
 {
     struct rb_node **link = &rq->tasks_timeline.rb_node;
     struct rb_node *parent = NULL;
     struct process *entry;
-    bool leftmost = true;
 
-    /* Find the right place in the tree */
     while (*link) {
         parent = *link;
         entry = rb_entry(parent, struct process, sched_node);
@@ -142,21 +135,15 @@ static void __enqueue_entity(struct cfs_rq *rq, struct process *p)
             link = &parent->rb_left;
         } else {
             link = &parent->rb_right;
-            leftmost = false;
         }
     }
 
-    /* Add new node and rebalance */
     rb_link_node(&p->sched_node, parent, link);
     rb_insert_color(&p->sched_node, &rq->tasks_timeline);
-
-    (void)leftmost;  /* Could cache leftmost for O(1) access */
 }
 
 /**
  * __dequeue_entity - Remove a process from the RB tree
- * @rq: The run queue
- * @p: The process to remove
  */
 static void __dequeue_entity(struct cfs_rq *rq, struct process *p)
 {
@@ -165,9 +152,6 @@ static void __dequeue_entity(struct cfs_rq *rq, struct process *p)
 
 /**
  * __pick_first_entity - Get the leftmost (smallest vruntime) process
- * @rq: The run queue
- *
- * Returns NULL if the tree is empty.
  */
 static struct process *__pick_first_entity(struct cfs_rq *rq)
 {
@@ -180,9 +164,6 @@ static struct process *__pick_first_entity(struct cfs_rq *rq)
 
 /**
  * update_curr - Update the current process's vruntime
- * @rq: The run queue
- *
- * Called on timer tick to account for execution time.
  */
 static void update_curr(struct cfs_rq *rq)
 {
@@ -200,33 +181,24 @@ static void update_curr(struct cfs_rq *rq)
         return;
     }
 
-    /* Update vruntime */
     curr->vruntime += calc_delta_fair(delta_exec, __sched_weight(curr->nice));
     curr->last_run_time = now;
-
-    /* Update statistics */
     curr->stime++;
 
-    /* Update min_vruntime */
     update_min_vruntime(rq);
 }
 
 /**
  * place_entity - Set initial vruntime for a new/woken task
- * @rq: The run queue
- * @p: The process
- * @initial: True if this is a new process
  */
 static void place_entity(struct cfs_rq *rq, struct process *p, bool initial)
 {
     uint64_t vruntime = rq->min_vruntime;
 
     if (initial) {
-        /* New tasks start slightly behind to avoid immediate preemption */
         vruntime += calc_delta_fair(SCHED_LATENCY_NS, __sched_weight(p->nice));
     }
 
-    /* Don't let vruntime go backward */
     if (p->vruntime < vruntime) {
         p->vruntime = vruntime;
     }
@@ -234,9 +206,6 @@ static void place_entity(struct cfs_rq *rq, struct process *p, bool initial)
 
 /**
  * check_preempt_tick - Check if current task should be preempted
- * @rq: The run queue
- *
- * Returns true if preemption is needed.
  */
 static bool check_preempt_tick(struct cfs_rq *rq)
 {
@@ -248,7 +217,6 @@ static bool check_preempt_tick(struct cfs_rq *rq)
         return rq->nr_running > 0;
     }
 
-    /* Calculate ideal runtime based on number of tasks */
     if (rq->nr_running > 0) {
         ideal_runtime = SCHED_LATENCY_NS / rq->nr_running;
         if (ideal_runtime < SCHED_MIN_GRANULARITY) {
@@ -258,13 +226,11 @@ static bool check_preempt_tick(struct cfs_rq *rq)
         ideal_runtime = SCHED_LATENCY_NS;
     }
 
-    /* Check if current has run long enough */
     delta_exec = (arch_timer_ticks() * TICK_NS) - curr->last_run_time;
     if (delta_exec > ideal_runtime) {
         return true;
     }
 
-    /* Check if there's a task with significantly smaller vruntime */
     next = __pick_first_entity(rq);
     if (next && (int64_t)(curr->vruntime - next->vruntime) > (int64_t)SCHED_WAKEUP_GRANULARITY) {
         return true;
@@ -274,26 +240,42 @@ static bool check_preempt_tick(struct cfs_rq *rq)
 }
 
 /**
- * sched_init - Initialize the CFS scheduler
+ * sched_init_cpu - Initialize scheduler for a specific CPU
+ */
+void sched_init_cpu(int cpu)
+{
+    struct percpu_data *data = &cpu_data[cpu];
+
+    data->cpu_id = cpu;
+    data->runqueue.tasks_timeline = RB_ROOT;
+    data->runqueue.min_vruntime = 0;
+    data->runqueue.nr_running = 0;
+    data->runqueue.curr = NULL;
+    data->runqueue.idle = NULL;
+    spin_init(&data->runqueue.lock);
+    data->curr_proc = NULL;
+    data->idle_proc = NULL;
+    data->ticks = 0;
+    data->resched_needed = false;
+
+    pr_info("CPU %d: scheduler initialized\n", cpu);
+}
+
+/**
+ * sched_init - Initialize the CFS scheduler (called on boot CPU)
  */
 void sched_init(void)
 {
+    int boot_cpu = arch_cpu_id();
+
     spin_init(&sched_lock);
 
-    /* Initialize CPU 0 run queue */
-    cpu0_data.cpu_id = 0;
-    cpu0_data.runqueue.tasks_timeline = RB_ROOT;
-    cpu0_data.runqueue.min_vruntime = 0;
-    cpu0_data.runqueue.nr_running = 0;
-    cpu0_data.runqueue.curr = NULL;
-    cpu0_data.runqueue.idle = NULL;
-    spin_init(&cpu0_data.runqueue.lock);
-    cpu0_data.curr_proc = NULL;
-    cpu0_data.idle_proc = NULL;
-    cpu0_data.ticks = 0;
-    cpu0_data.resched_needed = false;
+    /* Initialize boot CPU */
+    sched_init_cpu(boot_cpu);
+    sched_cpu_online(boot_cpu);
 
-    pr_info("Scheduler: initialized (CFS)\n");
+    pr_info("Scheduler: initialized (CFS, boot CPU %d, max %d CPUs)\n",
+            boot_cpu, CONFIG_MAX_CPUS);
 }
 
 /**
@@ -301,17 +283,17 @@ void sched_init(void)
  */
 struct percpu_data *arch_get_percpu(void)
 {
-    return &cpu0_data;
+    return this_cpu_data();
 }
 
 /**
  * sched_enqueue - Add a process to the run queue
- * @p: The process to enqueue
  */
 void sched_enqueue(struct process *p)
 {
     struct cfs_rq *rq;
     bool irq_state;
+    int cpu;
 
     if (!p || p->on_rq) {
         return;
@@ -320,21 +302,21 @@ void sched_enqueue(struct process *p)
     irq_state = arch_irq_save();
     spin_lock(&sched_lock);
 
-    rq = &cpu0_data.runqueue;
+    /* Use process's preferred CPU, or current CPU */
+    cpu = (p->cpu >= 0 && p->cpu < nr_cpus_online) ? p->cpu : arch_cpu_id();
+    rq = &cpu_data[cpu].runqueue;
 
-    /* Set initial vruntime for new tasks */
     if (p->vruntime == 0) {
         place_entity(rq, p, true);
     } else {
         place_entity(rq, p, false);
     }
 
-    /* Insert into RB tree */
     __enqueue_entity(rq, p);
     p->on_rq = true;
+    p->cpu = cpu;
     rq->nr_running++;
 
-    /* Update baseline */
     update_min_vruntime(rq);
 
     spin_unlock(&sched_lock);
@@ -343,7 +325,6 @@ void sched_enqueue(struct process *p)
 
 /**
  * sched_dequeue - Remove a process from the run queue
- * @p: The process to dequeue
  */
 void sched_dequeue(struct process *p)
 {
@@ -357,14 +338,12 @@ void sched_dequeue(struct process *p)
     irq_state = arch_irq_save();
     spin_lock(&sched_lock);
 
-    rq = &cpu0_data.runqueue;
+    rq = &cpu_data[p->cpu].runqueue;
 
-    /* Remove from RB tree */
     __dequeue_entity(rq, p);
     p->on_rq = false;
     rq->nr_running--;
 
-    /* Update baseline */
     update_min_vruntime(rq);
 
     spin_unlock(&sched_lock);
@@ -372,19 +351,16 @@ void sched_dequeue(struct process *p)
 }
 
 /**
- * pick_next_task - Select the next process to run
- *
- * Returns the process with the smallest vruntime (leftmost in RB tree),
- * or the idle process if the queue is empty.
+ * pick_next_task - Select the next process to run on current CPU
  */
 static struct process *pick_next_task(void)
 {
-    struct cfs_rq *rq = &cpu0_data.runqueue;
+    struct cfs_rq *rq = this_rq_local();
     struct process *next;
 
     next = __pick_first_entity(rq);
     if (!next) {
-        return proc_idle();
+        return this_cpu_data()->idle_proc;
     }
 
     return next;
@@ -392,20 +368,17 @@ static struct process *pick_next_task(void)
 
 /**
  * put_prev_task - Called when switching away from a task
- * @p: The previous task
  */
 static void put_prev_task(struct process *p)
 {
-    struct cfs_rq *rq = &cpu0_data.runqueue;
+    struct cfs_rq *rq = this_rq_local();
 
-    if (!p || p == proc_idle()) {
+    if (!p || p == this_cpu_data()->idle_proc) {
         return;
     }
 
-    /* Update vruntime before putting back */
     update_curr(rq);
 
-    /* If still runnable, put back in the tree */
     if (p->state == PROC_RUNNING) {
         p->state = PROC_RUNNABLE;
         if (!p->on_rq) {
@@ -418,35 +391,31 @@ static void put_prev_task(struct process *p)
 
 /**
  * set_next_task - Called when switching to a task
- * @p: The next task
  */
 static void set_next_task(struct process *p)
 {
-    struct cfs_rq *rq = &cpu0_data.runqueue;
+    struct cfs_rq *rq = this_rq_local();
 
-    if (!p || p == proc_idle()) {
+    if (!p || p == this_cpu_data()->idle_proc) {
         return;
     }
 
-    /* Remove from tree while running */
     if (p->on_rq) {
         __dequeue_entity(rq, p);
         p->on_rq = false;
         rq->nr_running--;
     }
 
-    /* Record start time */
     p->last_run_time = arch_timer_ticks() * TICK_NS;
     rq->curr = p;
 }
 
 /**
  * schedule - Main scheduler entry point
- *
- * Called to potentially switch to a different process.
  */
 void schedule(void)
 {
+    struct percpu_data *cpu = this_cpu_data();
     struct process *prev = proc_current();
     struct process *next;
     bool irq_state;
@@ -454,20 +423,22 @@ void schedule(void)
     irq_state = arch_irq_save();
     spin_lock(&sched_lock);
 
-    /* Clear reschedule flag */
-    cpu0_data.resched_needed = false;
+    cpu->resched_needed = false;
 
-    /* Update current task's vruntime and put it back */
     put_prev_task(prev);
-
-    /* Pick next task to run */
     next = pick_next_task();
 
-    /* Switch if different */
+    /* No task to run (no idle process on this CPU) - just return */
+    if (!next) {
+        spin_unlock(&sched_lock);
+        arch_irq_restore(irq_state);
+        return;
+    }
+
     if (next != prev) {
         set_next_task(next);
         next->state = PROC_RUNNING;
-        cpu0_data.curr_proc = next;
+        cpu->curr_proc = next;
         proc_set_current(next);
 
         spin_unlock(&sched_lock);
@@ -476,7 +447,6 @@ void schedule(void)
             arch_context_switch(prev->context, next->context);
         }
 
-        /* After context switch, we're back - re-acquire lock for restore */
         spin_lock(&sched_lock);
     }
 
@@ -486,28 +456,24 @@ void schedule(void)
 
 /**
  * sched_tick - Called on each timer tick
- *
- * Updates current task's vruntime and checks for preemption.
- * Note: Called from timer interrupt handler, interrupts already disabled.
  */
 void sched_tick(void)
 {
-    struct cfs_rq *rq = &cpu0_data.runqueue;
+    struct percpu_data *cpu = this_cpu_data();
+    struct cfs_rq *rq = &cpu->runqueue;
     struct process *curr = proc_current();
 
-    cpu0_data.ticks++;
+    cpu->ticks++;
 
     spin_lock(&sched_lock);
 
-    /* Update current task's runtime */
-    if (curr && curr != proc_idle()) {
+    if (curr && curr != cpu->idle_proc) {
         rq->curr = curr;
         update_curr(rq);
     }
 
-    /* Check if preemption is needed */
     if (check_preempt_tick(rq)) {
-        cpu0_data.resched_needed = true;
+        cpu->resched_needed = true;
     }
 
     spin_unlock(&sched_lock);
@@ -515,8 +481,6 @@ void sched_tick(void)
 
 /**
  * sched_setnice - Set process nice value
- * @p: The process
- * @nice: New nice value (-20 to +19)
  */
 int sched_setnice(struct process *p, int nice)
 {
@@ -538,19 +502,16 @@ int sched_setnice(struct process *p, int nice)
     irq_state = arch_irq_save();
     spin_lock(&sched_lock);
 
-    rq = &cpu0_data.runqueue;
+    rq = &cpu_data[p->cpu >= 0 ? p->cpu : 0].runqueue;
     on_rq = p->on_rq;
 
-    /* If on run queue, dequeue first */
     if (on_rq) {
         __dequeue_entity(rq, p);
         rq->nr_running--;
     }
 
-    /* Update nice value */
     p->nice = nice;
 
-    /* Re-enqueue with updated priority */
     if (on_rq) {
         __enqueue_entity(rq, p);
         rq->nr_running++;
@@ -578,7 +539,7 @@ int sched_getnice(struct process *p)
  */
 int sched_cpu_id(void)
 {
-    return 0;  /* Single CPU for now */
+    return arch_cpu_id();
 }
 
 /**
@@ -586,7 +547,7 @@ int sched_cpu_id(void)
  */
 struct cfs_rq *sched_cpu_rq(void)
 {
-    return &cpu0_data.runqueue;
+    return this_rq_local();
 }
 
 /**
@@ -594,8 +555,10 @@ struct cfs_rq *sched_cpu_rq(void)
  */
 struct cfs_rq *sched_rq(int cpu)
 {
-    (void)cpu;
-    return &cpu0_data.runqueue;
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) {
+        cpu = 0;
+    }
+    return &cpu_data[cpu].runqueue;
 }
 
 /**
@@ -603,15 +566,35 @@ struct cfs_rq *sched_rq(int cpu)
  */
 bool sched_need_resched(void)
 {
-    return cpu0_data.resched_needed;
+    return this_cpu_data()->resched_needed;
 }
 
 /**
- * sched_set_idle - Set the idle process for this CPU
- * @p: The idle process
+ * sched_set_idle - Set the idle process for current CPU
  */
 void sched_set_idle(struct process *p)
 {
-    cpu0_data.idle_proc = p;
-    cpu0_data.runqueue.idle = p;
+    struct percpu_data *cpu = this_cpu_data();
+    cpu->idle_proc = p;
+    cpu->runqueue.idle = p;
+}
+
+/**
+ * sched_cpu_count - Get number of online CPUs
+ */
+int sched_cpu_count(void)
+{
+    return nr_cpus_online;
+}
+
+/**
+ * sched_cpu_online - Mark a CPU as online
+ */
+void sched_cpu_online(int cpu)
+{
+    if (cpu >= 0 && cpu < CONFIG_MAX_CPUS) {
+        if (cpu >= nr_cpus_online) {
+            nr_cpus_online = cpu + 1;
+        }
+    }
 }

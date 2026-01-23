@@ -10,6 +10,7 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/rbtree.h>
+#include <kairos/config.h>
 
 /* FDT functions */
 int fdt_parse(void *fdt);
@@ -364,6 +365,120 @@ static void test_cfs_priority(void)
     }
 }
 
+/*
+ * Phase 4.3: SMP Support
+ */
+
+/* Track secondary CPUs online status */
+static volatile int secondary_cpus_online = 0;
+static volatile bool smp_test_done = false;
+
+/* Secondary CPU entry point (arch-specific) */
+int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque);
+int arch_cpu_count(void);
+extern void _secondary_start(void);
+
+/**
+ * secondary_cpu_main - Entry point for secondary CPUs
+ * @hartid: This CPU's hart ID
+ *
+ * Called from boot.S after stack setup.
+ */
+void secondary_cpu_main(unsigned long hartid)
+{
+    /* Initialize this CPU */
+    arch_cpu_init((int)hartid);
+
+    /* Initialize scheduler for this CPU */
+    sched_init_cpu((int)hartid);
+    sched_cpu_online((int)hartid);
+
+    /* Initialize trap handling for this CPU */
+    arch_trap_init();
+
+    /* Initialize timer for this CPU */
+    arch_timer_init(CONFIG_HZ);
+
+    pr_info("CPU %lu: online and ready\n", hartid);
+
+    /* Signal that we're online */
+    secondary_cpus_online++;
+
+    /* Enable interrupts and enter idle loop */
+    arch_irq_enable();
+
+    /* Idle loop - wait for work */
+    while (1) {
+        if (sched_need_resched()) {
+            schedule();
+        }
+        arch_cpu_halt();
+    }
+}
+
+/* Boot hartid (defined in boot.S) */
+extern int boot_hartid;
+
+/**
+ * test_smp - Test SMP functionality
+ */
+static void test_smp(void)
+{
+    int my_hart = arch_cpu_id();
+
+    printk("\nTesting SMP support:\n");
+    printk("  Boot hart: %d\n", my_hart);
+
+    /* Try to start secondary CPUs (QEMU virt has multiple harts) */
+    int started = 0;
+
+    for (int cpu = 0; cpu < CONFIG_MAX_CPUS && cpu < 4; cpu++) {
+        /* Skip the boot hart - it's already running! */
+        if (cpu == my_hart) {
+            continue;
+        }
+
+        printk("  Attempting to start CPU %d...\n", cpu);
+
+        int ret = arch_start_cpu(cpu,
+                                 (unsigned long)_secondary_start,
+                                 0);
+
+        if (ret == 0) {
+            printk("  CPU %d: start request sent\n", cpu);
+            started++;
+        } else {
+            printk("  CPU %d: failed to start (error %d)\n", cpu, ret);
+        }
+    }
+
+    if (started == 0) {
+        printk("  No secondary CPUs available (single-core system)\n");
+        printk("  SMP test skipped.\n");
+        return;
+    }
+
+    /* Wait for secondary CPUs to come online */
+    printk("  Waiting for %d secondary CPU(s) to come online...\n", started);
+
+    int timeout = 1000;  /* ~10 seconds */
+    while (secondary_cpus_online < started && timeout > 0) {
+        arch_irq_enable();
+        for (volatile int i = 0; i < 100000; i++) { }
+        arch_irq_disable();
+        timeout--;
+    }
+
+    if (secondary_cpus_online >= started) {
+        printk("  %d secondary CPU(s) online!\n", secondary_cpus_online);
+        printk("  Total CPUs: %d\n", sched_cpu_count());
+        printk("  SMP tests passed!\n");
+    } else {
+        printk("  Timeout: only %d/%d secondary CPUs came online\n",
+               secondary_cpus_online, started);
+    }
+}
+
 /**
  * kernel_main - Main kernel entry point
  * @hartid: Hardware thread ID (CPU ID)
@@ -491,7 +606,16 @@ void kernel_main(unsigned long hartid, void *dtb)
     test_cfs_priority();
 
     printk("\n");
-    pr_info("Phase 4 (CFS Scheduler) tests passed!\n");
+    pr_info("Phase 4.1-4.2 (CFS Scheduler) tests passed!\n");
+
+    /*
+     * Phase 4.3: SMP Support
+     */
+    printk("\n=== Phase 4.3: SMP Support ===\n");
+    test_smp();
+
+    printk("\n");
+    pr_info("Phase 4 complete!\n");
 
     /*
      * Phase 3.3-3.4: User Mode and Fork Test

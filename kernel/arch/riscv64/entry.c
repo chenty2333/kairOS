@@ -20,8 +20,17 @@
 /* SBI extension IDs */
 #define SBI_EXT_BASE            0x10
 #define SBI_EXT_TIMER           0x54494D45  /* "TIME" */
+#define SBI_EXT_IPI             0x735049    /* "sPI" */
 #define SBI_EXT_HSM             0x48534D    /* "HSM" */
 #define SBI_EXT_SRST            0x53525354  /* "SRST" */
+
+/* HSM function IDs */
+#define SBI_HSM_HART_START      0
+#define SBI_HSM_HART_STOP       1
+#define SBI_HSM_HART_STATUS     2
+
+/* IPI function IDs */
+#define SBI_IPI_SEND            0
 
 struct sbi_ret {
     long error;
@@ -187,4 +196,106 @@ int arch_cpu_id(void)
 void arch_breakpoint(void)
 {
     __asm__ __volatile__("ebreak");
+}
+
+/*
+ * SMP Support - Inter-Processor Interrupts
+ */
+
+/**
+ * arch_send_ipi - Send IPI to specific CPU
+ * @cpu: Target CPU ID (hart ID)
+ * @type: IPI type (IPI_RESCHEDULE, IPI_CALL, IPI_STOP)
+ */
+void arch_send_ipi(int cpu, int type)
+{
+    (void)type;  /* All IPIs trigger software interrupt for now */
+
+    /* Create hart mask with single bit set for target CPU */
+    unsigned long hart_mask = 1UL << cpu;
+
+    sbi_ecall(SBI_EXT_IPI, SBI_IPI_SEND, hart_mask, 0, 0, 0, 0, 0);
+}
+
+/**
+ * arch_send_ipi_all - Send IPI to all other CPUs
+ * @type: IPI type
+ */
+void arch_send_ipi_all(int type)
+{
+    (void)type;
+
+    /* Send to all harts except self */
+    unsigned long self = arch_cpu_id();
+    unsigned long hart_mask = ~(1UL << self);
+
+    sbi_ecall(SBI_EXT_IPI, SBI_IPI_SEND, hart_mask, 0, 0, 0, 0, 0);
+}
+
+/*
+ * SMP Support - CPU Bring-up
+ */
+
+/* Secondary CPU entry point (defined in boot.S) */
+extern void _secondary_start(void);
+
+/* Number of online CPUs */
+static int num_cpus = 1;
+
+/**
+ * arch_cpu_count - Get number of online CPUs
+ */
+int arch_cpu_count(void)
+{
+    return num_cpus;
+}
+
+/**
+ * arch_start_cpu - Start a secondary CPU
+ * @cpu: CPU ID (hart ID) to start
+ * @start_addr: Entry point address
+ * @opaque: Opaque value passed to the CPU (stored in a1)
+ *
+ * Returns 0 on success, negative on error.
+ */
+int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque)
+{
+    struct sbi_ret ret;
+
+    ret = sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_START,
+                    cpu, start_addr, opaque, 0, 0, 0);
+
+    if (ret.error == 0) {
+        num_cpus++;
+        return 0;
+    }
+
+    return (int)ret.error;
+}
+
+/**
+ * arch_cpu_status - Get CPU status
+ * @cpu: CPU ID to query
+ *
+ * Returns: 0 = STARTED, 1 = STOPPED, 2 = START_PENDING, 3 = STOP_PENDING
+ */
+int arch_cpu_status(int cpu)
+{
+    struct sbi_ret ret;
+
+    ret = sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_STATUS, cpu, 0, 0, 0, 0, 0);
+
+    return (int)ret.value;
+}
+
+/**
+ * arch_cpu_init - Initialize current CPU
+ * @cpu_id: This CPU's ID
+ *
+ * Called early during CPU bring-up.
+ */
+void arch_cpu_init(int cpu_id)
+{
+    /* Store CPU ID in tp register for arch_cpu_id() */
+    __asm__ __volatile__("mv tp, %0" :: "r"(cpu_id));
 }
