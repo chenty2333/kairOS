@@ -10,6 +10,7 @@
 #include <kairos/spinlock.h>
 #include <kairos/rbtree.h>
 #include <kairos/list.h>
+#include <kairos/arch.h>
 
 struct process;
 
@@ -103,11 +104,15 @@ struct percpu_data *sched_cpu_data(int cpu);
 /*
  * Per-CPU data
  */
+struct trap_frame;
+
 struct percpu_data {
     int cpu_id;
     struct cfs_rq runqueue;
     struct process *curr_proc;          /* Currently running process */
     struct process *idle_proc;          /* Idle process for this CPU */
+    struct trap_frame *current_tf;      /* Current trap frame (for fork) */
+
     /* IPI State */
     volatile int ipi_pending_mask;      /* Pending IPIs (bitmask) */
     
@@ -121,8 +126,18 @@ struct percpu_data {
     bool resched_needed;
 };
 
-/* Defined in arch code */
-extern struct percpu_data *arch_get_percpu(void);
+/* Defined in core/sched/sched.c */
+extern struct percpu_data cpu_data[];
+
+/**
+ * arch_get_percpu - Get per-CPU data for current CPU
+ * 
+ * Optimized to be inline and use direct array access (or register read).
+ */
+static inline struct percpu_data *arch_get_percpu(void)
+{
+    return &cpu_data[arch_cpu_id()];
+}
 
 #define this_cpu        (arch_get_percpu()->cpu_id)
 #define this_rq         (&arch_get_percpu()->runqueue)

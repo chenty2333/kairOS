@@ -396,9 +396,7 @@ int sys_chdir(const char *path)
     vnode_put(vn);
 
     /* Update process CWD */
-    char *dest = p->cwd;
-    const char *src = normalized;
-    while ((*dest++ = *src++));
+    strcpy(p->cwd, normalized);
 
     return 0;
 }
@@ -624,20 +622,19 @@ int sys_uname(struct utsname *buf)
     const char *version = "Phase 2";
     const char *machine = "riscv64";
 
-    /* Copy each field (simplified - no bounds checking) */
-    char *dst = (char *)buf;
-    const char *srcs[] = {sysname, nodename, release, version, machine};
+    /* Build struct in kernel memory */
+    struct utsname kbuf;
+    memset(&kbuf, 0, sizeof(kbuf));
+    
+    strncpy(kbuf.sysname, sysname, 65);
+    strncpy(kbuf.nodename, nodename, 65);
+    strncpy(kbuf.release, release, 65);
+    strncpy(kbuf.version, version, 65);
+    strncpy(kbuf.machine, machine, 65);
 
-    for (int i = 0; i < 5; i++) {
-        const char *src = srcs[i];
-        while (*src) {
-            *dst++ = *src++;
-        }
-        *dst++ = '\0';
-        /* Pad to 65 bytes (standard utsname field size) */
-        while ((dst - (char *)buf) % 65 != 0) {
-            *dst++ = '\0';
-        }
+    /* Copy to user space */
+    if (copy_to_user(buf, &kbuf, sizeof(kbuf)) < 0) {
+        return -EFAULT;
     }
 
     return 0;

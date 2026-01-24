@@ -181,15 +181,7 @@ bool arch_irq_enabled(void)
     return (sstatus & 0x2) != 0;
 }
 
-/*
- * CPU identification
- */
-int arch_cpu_id(void)
-{
-    unsigned long tp;
-    __asm__ __volatile__("mv %0, tp" : "=r"(tp));
-    return (int)tp;
-}
+
 
 /*
  * Debug support

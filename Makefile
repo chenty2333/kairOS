@@ -85,6 +85,7 @@ CFLAGS := -ffreestanding -fno-common -nostdlib -fno-stack-protector
 CFLAGS += -Wall -Wextra -Werror=implicit-function-declaration
 CFLAGS += -O2 -g
 CFLAGS += -I kernel/include
+CFLAGS += -I kernel/arch/$(ARCH)/include
 CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 
 # Architecture-specific flags
@@ -148,7 +149,9 @@ ARCH_SRCS := \
     kernel/arch/$(ARCH)/trap.c \
     kernel/arch/$(ARCH)/timer.c \
     kernel/arch/$(ARCH)/switch.S \
-    kernel/arch/$(ARCH)/context.c
+    kernel/arch/$(ARCH)/context.c \
+    kernel/arch/$(ARCH)/extable.c \
+    kernel/arch/$(ARCH)/lib/uaccess.S
 
 # Future phases will add:
 # - kernel/core/sched/sched.c, cfs.c

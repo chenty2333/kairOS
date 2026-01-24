@@ -13,6 +13,9 @@
 #include <kairos/printk.h>
 #include <kairos/syscall.h>
 #include <kairos/sched.h>
+#include <kairos/uaccess.h>
+#include <kairos/process.h>
+#include <kairos/mm.h>
 
 /* RISC-V scause values */
 #define SCAUSE_INTERRUPT        (1UL << 63)
@@ -93,9 +96,6 @@ void timer_interrupt_handler(void);
 /* Global tick counter */
 volatile uint64_t system_ticks = 0;
 
-/* Current trap frame (for fork) */
-static struct trap_frame *current_tf = NULL;
-
 /**
  * get_current_trapframe - Get the current trap frame
  *
@@ -103,7 +103,7 @@ static struct trap_frame *current_tf = NULL;
  */
 struct trap_frame *get_current_trapframe(void)
 {
-    return current_tf;
+    return arch_get_percpu()->current_tf;
 }
 
 /**
@@ -152,7 +152,13 @@ static void handle_exception(struct trap_frame *tf)
         /* Check if it's a compressed instruction (2 bytes) or regular (4 bytes) */
         /* Compressed instructions have bits [1:0] != 0b11 */
         {
-            uint16_t inst = *(uint16_t *)tf->sepc;
+            uint16_t inst;
+            if (copy_from_user(&inst, (void *)tf->sepc, sizeof(inst)) != 0) {
+                pr_err("Failed to read instruction at %p\n", (void *)tf->sepc);
+                /* TODO: Send SIGSEGV */
+                panic("User breakpoint access fault");
+            }
+
             if ((inst & 0x3) == 0x3) {
                 tf->sepc += 4;  /* 32-bit instruction */
             } else {
@@ -164,7 +170,29 @@ static void handle_exception(struct trap_frame *tf)
     case EXC_INST_PAGE_FAULT:
     case EXC_LOAD_PAGE_FAULT:
     case EXC_STORE_PAGE_FAULT:
-        /* Page fault - will be handled by MM in later phases */
+        /* Check for exception table fixup (e.g. safe user access) */
+        if (!from_user) {
+            unsigned long fixup = search_exception_table(tf->sepc);
+            if (fixup) {
+                tf->sepc = fixup;
+                return;
+            }
+        }
+
+        /* Demand Paging: Handle user space page faults */
+        struct process *curr = proc_current();
+        if (curr && curr->mm) {
+            uint32_t flags = 0;
+            if (cause == EXC_STORE_PAGE_FAULT) flags |= PTE_WRITE;
+            if (cause == EXC_INST_PAGE_FAULT) flags |= PTE_EXEC;
+
+            if (mm_handle_fault(curr->mm, tf->stval, flags) == 0) {
+                /* Successfully handled (allocated page) */
+                return;
+            }
+        }
+
+        /* Page fault - unhandled */
         pr_err("Page fault at %p, accessing %p\n",
                (void *)tf->sepc, (void *)tf->stval);
         if (!from_user) {
@@ -251,14 +279,15 @@ static void handle_interrupt(struct trap_frame *tf)
 void trap_dispatch(struct trap_frame *tf)
 {
     /*
-     * Enable SUM (Supervisor User Memory access) so we can access
-     * user memory in syscall handlers. This is cleared on trap entry
-     * for security, so we enable it explicitly here.
+     * Enable SUM (Supervisor User Memory access) is now handled by uaccess primitives.
+     * We no longer enable it globally here, improving security and performance for
+     * simple interrupts (timer/IPI).
      */
-    __asm__ __volatile__("csrs sstatus, %0" :: "r"(SSTATUS_SUM));
 
-    /* Save trap frame pointer for fork */
-    current_tf = tf;
+    /* Save trap frame pointer for fork (per-cpu safe) */
+    struct percpu_data *cpu = arch_get_percpu();
+    struct trap_frame *old_tf = cpu->current_tf;
+    cpu->current_tf = tf;
 
     if (tf->scause & SCAUSE_INTERRUPT) {
         handle_interrupt(tf);
@@ -266,7 +295,7 @@ void trap_dispatch(struct trap_frame *tf)
         handle_exception(tf);
     }
 
-    current_tf = NULL;
+    cpu->current_tf = old_tf;
 }
 
 /**

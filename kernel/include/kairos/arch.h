@@ -29,8 +29,12 @@ void arch_cpu_init(int cpu_id);
 /* Get number of CPUs */
 int arch_cpu_count(void);
 
+#include <asm/arch.h>
+
 /* Get current CPU ID */
+#ifndef ARCH_HAS_CPU_ID
 int arch_cpu_id(void);
+#endif
 
 /* Halt CPU until interrupt (idle loop) */
 void arch_cpu_halt(void);
@@ -179,17 +183,7 @@ void arch_send_ipi(int cpu, int type);
 /* Send IPI to all other CPUs */
 void arch_send_ipi_all(int type);
 
-/*
- * ============================================================
- *                    Per-CPU Data
- * ============================================================
- */
 
-/* Get per-CPU data for current CPU */
-struct percpu_data *arch_get_percpu(void);
-
-/* Set per-CPU data for current CPU */
-void arch_set_percpu(struct percpu_data *data);
 
 /*
  * ============================================================

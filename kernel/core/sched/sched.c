@@ -41,7 +41,7 @@ const int sched_nice_to_weight[40] = {
 /*
  * Per-CPU data array
  */
-static struct percpu_data cpu_data[CONFIG_MAX_CPUS];
+struct percpu_data cpu_data[CONFIG_MAX_CPUS];
 static int nr_cpus_online = 1;  /* Number of online CPUs */
 
 /*
@@ -295,13 +295,7 @@ void sched_init(void)
             boot_cpu, CONFIG_MAX_CPUS);
 }
 
-/**
- * arch_get_percpu - Get per-CPU data for current CPU
- */
-struct percpu_data *arch_get_percpu(void)
-{
-    return this_cpu_data();
-}
+
 
 /**
  * sched_enqueue - Add a process to the run queue

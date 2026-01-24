@@ -68,17 +68,13 @@ trap_entry:
     /* Save sp temporarily to sscratch, swap with kernel sp if from user */
     csrrw   sp, sscratch, sp
 
-    /* If sscratch was 0, we trapped from kernel mode (sp is already kernel stack) */
-    beqz    sp, 1f
+    /* If sp != 0, we came from user mode (sscratch held kstack) */
+    bnez    sp, 1f
 
-    /* From user mode: sp now has kernel stack, sscratch has user sp */
-    j       2f
-
-1:
-    /* From kernel mode: swap back */
+    /* If sp == 0, sscratch was 0 (kernel mode). Swap back to restore sp. */
     csrrw   sp, sscratch, sp
 
-2:
+1:
     /* Allocate trap frame on stack */
     addi    sp, sp, -TF_SIZE
 
@@ -155,12 +151,12 @@ trap_entry:
 trap_return:
     /* Restore CSRs */
     ld      t0, TF_SEPC(sp)
+    ld      t1, TF_SSTATUS(sp)
     csrw    sepc, t0
-    ld      t0, TF_SSTATUS(sp)
-    csrw    sstatus, t0
+    csrw    sstatus, t1
 
     /* Check if returning to user mode (SPP bit in sstatus) */
-    andi    t0, t0, (1 << 8)    /* SSTATUS_SPP */
+    andi    t0, t1, (1 << 8)    /* SSTATUS_SPP */
     bnez    t0, 1f
 
     /* Returning to user: set sscratch to kernel sp for next trap */

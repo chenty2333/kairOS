@@ -30,6 +30,12 @@ SECTIONS
     .rodata : {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
+        
+        /* Exception table */
+        . = ALIGN(8);
+        __ex_table_start = .;
+        KEEP(*(__ex_table))
+        __ex_table_end = .;
     }
 
     . = ALIGN(4096);

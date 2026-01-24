@@ -108,11 +108,14 @@ arch_enter_user:
     ld sp, 0x78(a0)     /* user_stack */
 
     /* Set sstatus for user mode:
-     * - Clear SPP (0 = user mode)
-     * - Set SPIE (enable interrupts after sret)
+     * - Clear SPP (bit 8) for user mode
+     * - Set SPIE (bit 5) to enable interrupts after sret
+     * Use atomic bit manipulation to preserve other bits (like FS)
      */
+    li t0, (1 << 8)     /* SPP bit */
+    csrc sstatus, t0
     li t0, (1 << 5)     /* SPIE bit */
-    csrw sstatus, t0
+    csrs sstatus, t0
 
     /* Set sscratch to kernel stack for trap entry */
     ld t0, 0x70(a0)     /* kernel_stack */
