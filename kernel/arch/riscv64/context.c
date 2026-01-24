@@ -84,7 +84,11 @@ struct arch_context *arch_context_alloc(void)
 
     /* Kernel stack grows down, so base is at top of allocated region */
     paddr_t stack_base = page_to_phys(stack_page);
-    ctx->kernel_stack = stack_base + (2 * CONFIG_PAGE_SIZE);
+    ctx->kernel_stack = (uint64_t)phys_to_virt(stack_base) + (2 * CONFIG_PAGE_SIZE);
+    
+    pr_debug("arch_context_alloc: stack_page=%p, phys=%p, virt=%p, top=%p\n",
+             stack_page, (void *)stack_base, phys_to_virt(stack_base), (void *)ctx->kernel_stack);
+
     ctx->sp = ctx->kernel_stack;  /* Initial SP at top of stack */
 
     ctx->user_stack = 0;
@@ -106,8 +110,11 @@ void arch_context_free(struct arch_context *ctx)
 
     /* Free kernel stack */
     if (ctx->kernel_stack) {
-        paddr_t stack_base = ctx->kernel_stack - (2 * CONFIG_PAGE_SIZE);
-        struct page *stack_page = phys_to_page(stack_base);
+        /* kernel_stack is a virtual address pointing to top of stack */
+        vaddr_t stack_top = ctx->kernel_stack;
+        vaddr_t stack_bottom = stack_top - (2 * CONFIG_PAGE_SIZE);
+        paddr_t stack_phys = virt_to_phys((void *)stack_bottom);
+        struct page *stack_page = phys_to_page(stack_phys);
         if (stack_page) {
             free_pages(stack_page, 1);
         }
@@ -170,38 +177,6 @@ void arch_context_clone(struct arch_context *dst, struct arch_context *src)
 
     dst->user_stack = src->user_stack;
     /* satp will be set separately when page table is cloned */
-}
-
-/**
- * arch_context_set_retval - Set return value in context
- *
- * Used for syscall return and fork child return value.
- */
-void arch_context_set_retval(struct arch_context *ctx, uint64_t val)
-{
-    /* Return value goes in a0, but we're using callee-saved context.
-     * For syscall return, the trap handler sets this.
-     * For fork, we need to handle this differently.
-     * For now, store it where the trap frame will pick it up.
-     */
-    (void)ctx;
-    (void)val;
-    /* TODO: Implement properly when we have user mode */
-}
-
-/**
- * arch_context_set_args - Set argument registers
- *
- * Used for signal delivery.
- */
-void arch_context_set_args(struct arch_context *ctx,
-                           uint64_t arg0, uint64_t arg1, uint64_t arg2)
-{
-    (void)ctx;
-    (void)arg0;
-    (void)arg1;
-    (void)arg2;
-    /* TODO: Implement for signal delivery */
 }
 
 /**
@@ -304,6 +279,9 @@ void arch_setup_fork_child(struct arch_context *child_ctx, struct trap_frame *pa
      * The parent's sepc is advanced in handle_exception AFTER syscall returns,
      * but we copy the trap frame during the syscall, so we need to advance it here. */
     child_tf->sepc += 4;
+    
+    pr_debug("arch_setup_fork_child: parent_sepc=%p, child_sepc=%p\n", 
+             (void *)parent_tf->sepc, (void *)child_tf->sepc);
 
     /* Set up child's context to resume at trap_return */
     child_ctx->ra = (uint64_t)trap_return;
@@ -322,4 +300,33 @@ void arch_setup_fork_child(struct arch_context *child_ctx, struct trap_frame *pa
     child_ctx->s9 = 0;
     child_ctx->s10 = 0;
     child_ctx->s11 = 0;
+}
+
+/**
+ * arch_context_set_retval - Set return value in context
+ *
+ * Sets a0 in the trap frame so it will be restored when returning
+ * to user space. Used for fork child return value and signal returns.
+ *
+ * Note: The trap frame must be at sp (context was set up by arch_setup_fork_child).
+ */
+void arch_context_set_retval(struct arch_context *ctx, uint64_t val)
+{
+    struct trap_frame *tf = (struct trap_frame *)ctx->sp;
+    tf->a0 = val;
+}
+
+/**
+ * arch_context_set_args - Set argument registers
+ *
+ * Sets a0-a2 in the trap frame for signal delivery. The signal handler
+ * will receive these as arguments when it starts executing.
+ */
+void arch_context_set_args(struct arch_context *ctx,
+                           uint64_t arg0, uint64_t arg1, uint64_t arg2)
+{
+    struct trap_frame *tf = (struct trap_frame *)ctx->sp;
+    tf->a0 = arg0;
+    tf->a1 = arg1;
+    tf->a2 = arg2;
 }

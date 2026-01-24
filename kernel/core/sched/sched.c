@@ -126,6 +126,8 @@ static void __enqueue_entity(struct cfs_rq *rq, struct process *p)
     struct rb_node **link = &rq->tasks_timeline.rb_node;
     struct rb_node *parent = NULL;
     struct process *entry;
+    
+    pr_debug("__enqueue_entity: starting for pid %d\n", p->pid);
 
     while (*link) {
         parent = *link;
@@ -137,9 +139,13 @@ static void __enqueue_entity(struct cfs_rq *rq, struct process *p)
             link = &parent->rb_right;
         }
     }
+    
+    pr_debug("__enqueue_entity: linking node\n");
 
     rb_link_node(&p->sched_node, parent, link);
     rb_insert_color(&p->sched_node, &rq->tasks_timeline);
+    
+    pr_debug("__enqueue_entity: done\n");
 }
 
 /**
@@ -312,6 +318,8 @@ void sched_enqueue(struct process *p)
 
     irq_state = arch_irq_save();
     spin_lock(&sched_lock);
+    
+    pr_debug("sched_enqueue: enqueuing pid %d\n", p->pid);
 
     /* Use process's preferred CPU, or current CPU */
     cpu = (p->cpu >= 0 && p->cpu < nr_cpus_online) ? p->cpu : arch_cpu_id();
@@ -463,6 +471,11 @@ void schedule(void)
         next->state = PROC_RUNNING;
         cpu->curr_proc = next;
         proc_set_current(next);
+
+        /* Switch address space if needed */
+        if (next->mm) {
+            arch_mmu_switch(next->mm->pgdir);
+        }
 
         spin_unlock(&sched_lock);
 

@@ -252,8 +252,8 @@ static struct process *create_user_process(const char *name,
             goto fail;
         }
 
-        /* Copy code to page */
-        uint8_t *code_ptr = (uint8_t *)code_page;
+        /* Copy code to page (convert physical to virtual address) */
+        uint8_t *code_ptr = (uint8_t *)phys_to_virt(code_page);
         size_t offset = pg * CONFIG_PAGE_SIZE;
         size_t copy_size = code_size - offset;
         if (copy_size > CONFIG_PAGE_SIZE) {
@@ -287,8 +287,8 @@ static struct process *create_user_process(const char *name,
             goto fail;
         }
 
-        /* Clear stack page */
-        uint8_t *stack_ptr = (uint8_t *)stack_page;
+        /* Clear stack page (convert physical to virtual address) */
+        uint8_t *stack_ptr = (uint8_t *)phys_to_virt(stack_page);
         for (size_t j = 0; j < CONFIG_PAGE_SIZE; j++) {
             stack_ptr[j] = 0;
         }

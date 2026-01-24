@@ -29,6 +29,11 @@ typedef int64_t  time_t;
 typedef uint64_t useconds_t;
 typedef int64_t  suseconds_t;
 
+/* Seek whence values */
+#define SEEK_SET        0   /* Seek from beginning */
+#define SEEK_CUR        1   /* Seek from current position */
+#define SEEK_END        2   /* Seek from end */
+
 /* Memory types */
 typedef uint64_t paddr_t;   /* Physical address */
 typedef uint64_t vaddr_t;   /* Virtual address */
@@ -67,6 +72,9 @@ typedef uint64_t pgoff_t;   /* Page offset */
 #define EPIPE           32  /* Broken pipe */
 #define ENOSYS          38  /* Function not implemented */
 #define ENOTEMPTY       39  /* Directory not empty */
+#define ERANGE          34  /* Math result not representable */
+#define ENAMETOOLONG    36  /* File name too long */
+#define ETIMEDOUT       110 /* Connection timed out */
 
 /* Utility macros */
 #ifndef NULL

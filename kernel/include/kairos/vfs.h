@@ -8,6 +8,7 @@
 #include <kairos/types.h>
 #include <kairos/list.h>
 #include <kairos/spinlock.h>
+#include <kairos/config.h>
 
 /* Forward declarations */
 struct blkdev;
@@ -215,6 +216,7 @@ int vfs_umount(const char *target);
 /* Path resolution */
 struct vnode *vfs_lookup(const char *path);
 struct vnode *vfs_lookup_parent(const char *path, char *name);
+int vfs_normalize_path(const char *cwd, const char *input, char *output);
 
 /* File operations via path */
 int vfs_open(const char *path, int flags, mode_t mode, struct file **fp);

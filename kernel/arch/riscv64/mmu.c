@@ -265,6 +265,21 @@ void arch_mmu_init(void)
         }
     }
 
+    /* Map MMIO device region (RISC-V QEMU virt machine) */
+    paddr_t mmio_start = 0x10000000UL;  /* VirtIO MMIO base */
+    paddr_t mmio_end = 0x10010000UL;    /* 64KB region */
+
+    pr_info("MMU: Mapping MMIO devices %p - %p\n",
+            (void *)mmio_start, (void *)mmio_end);
+
+    for (paddr_t pa = mmio_start; pa < mmio_end; pa += PAGE_SIZE) {
+        int ret = arch_mmu_map(kernel_pgdir, pa, pa,
+                               PTE_READ | PTE_WRITE);
+        if (ret < 0) {
+            panic("arch_mmu_init: failed to map MMIO at %p", (void *)pa);
+        }
+    }
+
     /* Enable paging */
     arch_mmu_switch(kernel_pgdir);
 

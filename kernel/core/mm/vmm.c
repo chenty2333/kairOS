@@ -27,41 +27,24 @@
 #define USER_HEAP_START     0x00000001000000UL      /* 16MB */
 #define USER_STACK_TOP      0x0000003FF0000000ULL   /* Near top of user space */
 
-/* Maximum number of VMAs per process */
-#define MAX_VMAS            128
-
-/* VMA cache for quick allocation */
-static struct vm_area vma_cache[MAX_VMAS * CONFIG_MAX_PROCESSES];
-static struct list_head free_vmas;
-static spinlock_t vma_lock;
-
 /**
- * vma_alloc - Allocate a VMA structure
+ * vma_alloc - Allocate a VMA structure dynamically
  */
 static struct vm_area *vma_alloc(void)
 {
-    spin_lock(&vma_lock);
-
-    if (list_empty(&free_vmas)) {
-        spin_unlock(&vma_lock);
-        return NULL;
+    struct vm_area *vma = kmalloc(sizeof(*vma));
+    if (vma) {
+        INIT_LIST_HEAD(&vma->list);
     }
-
-    struct vm_area *vma = list_first_entry(&free_vmas, struct vm_area, list);
-    list_del(&vma->list);
-
-    spin_unlock(&vma_lock);
     return vma;
 }
 
 /**
- * vma_free - Return a VMA to the cache
+ * vma_free - Free a VMA structure
  */
 static void vma_free(struct vm_area *vma)
 {
-    spin_lock(&vma_lock);
-    list_add(&vma->list, &free_vmas);
-    spin_unlock(&vma_lock);
+    kfree(vma);
 }
 
 /**
@@ -69,15 +52,7 @@ static void vma_free(struct vm_area *vma)
  */
 void vmm_init(void)
 {
-    spin_init(&vma_lock);
-    INIT_LIST_HEAD(&free_vmas);
-
-    /* Initialize VMA cache */
-    for (size_t i = 0; i < ARRAY_SIZE(vma_cache); i++) {
-        list_add(&vma_cache[i].list, &free_vmas);
-    }
-
-    pr_info("VMM: Initialized with %lu VMAs available\n", ARRAY_SIZE(vma_cache));
+    pr_info("VMM: Initialized with dynamic VMA allocation\n");
 }
 
 /**

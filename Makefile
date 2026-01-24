@@ -125,12 +125,19 @@ CORE_SRCS := \
     kernel/core/proc/process.c \
     kernel/core/proc/user_test.c \
     kernel/core/proc/elf.c \
+    kernel/core/proc/fd.c \
     kernel/core/sched/sched.c \
     kernel/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
     kernel/lib/fdt.c \
-    kernel/lib/rbtree.c
+    kernel/lib/rbtree.c \
+    kernel/lib/string.c \
+    kernel/fs/vfs/vfs.c \
+    kernel/fs/devfs/devfs.c \
+    kernel/fs/ext2/ext2.c \
+    kernel/drivers/block/blkdev.c \
+    kernel/drivers/block/virtio_blk.c
 
 # Architecture-specific sources
 ARCH_SRCS := \
@@ -212,7 +219,14 @@ endif
 
 # Add virtio disk
 DISK_IMG := disk.img
-QEMU_FLAGS += -drive file=$(DISK_IMG),if=virtio,format=raw
+ifeq ($(ARCH),riscv64)
+  # For RISC-V, explicitly create virtio-blk-device
+  QEMU_FLAGS += -global virtio-mmio.force-legacy=false
+  QEMU_FLAGS += -drive id=hd,file=$(DISK_IMG),format=raw,if=none
+  QEMU_FLAGS += -device virtio-blk-device,drive=hd
+else
+  QEMU_FLAGS += -drive file=$(DISK_IMG),if=virtio,format=raw
+endif
 
 # Add network (virtio-net for development)
 QEMU_FLAGS += -netdev user,id=net0,hostfwd=tcp::8080-:80

@@ -60,7 +60,7 @@ struct process {
 
     /* === Files === */
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
-    char *cwd;                          /* Current working directory */
+    char cwd[CONFIG_PATH_MAX];          /* Current working directory */
 
     /* === Signals === */
     uint64_t sig_pending;               /* Pending signals bitmap */
@@ -192,5 +192,27 @@ void run_user_test(void);
 
 /* Run the fork test */
 void run_fork_test(void);
+
+/*
+ * File Descriptor Management (Phase 5)
+ */
+
+/* Allocate file descriptor */
+int fd_alloc(struct process *p, struct file *file);
+
+/* Get file from descriptor */
+struct file *fd_get(struct process *p, int fd);
+
+/* Close file descriptor */
+int fd_close(struct process *p, int fd);
+
+/* Duplicate file descriptor */
+int fd_dup(struct process *p, int oldfd);
+
+/* Duplicate to specific fd */
+int fd_dup2(struct process *p, int oldfd, int newfd);
+
+/* Close all file descriptors */
+void fd_close_all(struct process *p);
 
 #endif /* _KAIROS_PROCESS_H */

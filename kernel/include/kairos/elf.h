@@ -110,6 +110,21 @@ typedef struct {
     uint64_t    sh_entsize;             /* Entry size if table */
 } Elf64_Shdr;
 
+/* Forward declarations */
+struct mm_struct;
+
+/**
+ * Load ELF binary into a process address space
+ *
+ * @mm: Memory management structure with page table
+ * @elf: Pointer to ELF binary data
+ * @size: Size of ELF binary
+ * @entry_out: Output parameter for entry point
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+int elf_load(struct mm_struct *mm, const void *elf, size_t size, vaddr_t *entry_out);
+
 /**
  * Validate ELF header
  *

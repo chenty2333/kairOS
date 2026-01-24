@@ -12,6 +12,7 @@
 #include <kairos/arch.h>
 #include <kairos/printk.h>
 #include <kairos/config.h>
+#include <kairos/vfs.h>
 
 /* Process table */
 static struct process proc_table[CONFIG_MAX_PROCESSES];
@@ -91,7 +92,10 @@ static struct process *proc_alloc(void)
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         p->files[i] = NULL;
     }
-    p->cwd = NULL;
+    
+    /* Initialize CWD to root */
+    p->cwd[0] = '/';
+    p->cwd[1] = '\0';
 
     /* Signals */
     p->sig_pending = 0;
@@ -389,6 +393,23 @@ struct process *proc_fork(void)
         spin_unlock(&proc_table_lock);
         proc_free_internal(child);
         return NULL;
+    }
+
+    /* Clone CWD */
+    for (int i = 0; i < CONFIG_PATH_MAX; i++) {
+        child->cwd[i] = parent->cwd[i];
+    }
+
+    /* Clone file descriptors */
+    for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
+        struct file *f = parent->files[i];
+        if (f) {
+            /* Manually duplicate: verify file, inc refcount, assign to child */
+            spin_lock(&f->lock);
+            f->refcount++;
+            spin_unlock(&f->lock);
+            child->files[i] = f;
+        }
     }
 
     /* Set up child to return from fork with return value 0 */

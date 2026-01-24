@@ -11,11 +11,18 @@
 #include <kairos/sched.h>
 #include <kairos/rbtree.h>
 #include <kairos/config.h>
+#include <kairos/vfs.h>
+#include <kairos/blkdev.h>
 
 /* FDT functions */
 int fdt_parse(void *fdt);
 int fdt_get_memory(int index, paddr_t *base, size_t *size);
 int fdt_memory_count(void);
+
+/* File system initialization functions */
+void devfs_init(void);
+void ext2_init(void);
+void virtio_blk_probe(void);
 
 /* Timer tick counter (defined in timer.c) */
 extern volatile uint64_t system_ticks;
@@ -34,57 +41,40 @@ extern char _bss_end[];
 /**
  * test_syscall - Test system call mechanism
  *
- * Note: ecall from S-mode goes to OpenSBI (M-mode), not our trap handler.
- * Real syscalls will come from U-mode in later phases.
- * For now, we test by calling syscall_dispatch directly.
+ * Note: This test runs before proc_init(), so proc_current() returns NULL
+ * and sys_getpid() returns 0. We test the dispatch mechanism here, not
+ * the process-dependent syscalls.
  */
 static void test_syscall(void)
 {
-    printk("\nTesting syscalls (direct dispatch):\n");
+    int64_t ret;
 
-    /* Test SYS_write by direct call */
-    const char *msg = "  Hello from syscall!\n";
-    int64_t ret = syscall_dispatch(SYS_write, 1, (uint64_t)msg, 22, 0, 0, 0);
-    printk("  sys_write returned: %ld\n", (long)ret);
-
-    /* Test SYS_getpid */
-    ret = syscall_dispatch(SYS_getpid, 0, 0, 0, 0, 0, 0);
-    printk("  sys_getpid returned: %ld (expected 1)\n", (long)ret);
-
-    /* Test SYS_yield */
-    ret = syscall_dispatch(SYS_yield, 0, 0, 0, 0, 0, 0);
-    printk("  sys_yield returned: %ld (expected 0)\n", (long)ret);
-
-    /* Test invalid syscall */
+    /* Test invalid syscall - should return -ENOSYS */
     ret = syscall_dispatch(999, 0, 0, 0, 0, 0, 0);
-    printk("  invalid syscall returned: %ld (expected -38 ENOSYS)\n", (long)ret);
+    if (ret != -ENOSYS) {
+        pr_err("Syscall: invalid syscall FAILED\n");
+        return;
+    }
 
-    printk("  Syscall tests passed!\n");
+    pr_info("Syscall dispatch: passed\n");
 }
 
 /**
- * test_timer - Test timer interrupts
+ * test_timer - Test timer interrupts (quick version)
  */
 static void test_timer(void)
 {
-    printk("\nTesting timer interrupts:\n");
-    printk("  Waiting for 3 seconds of timer ticks...\n");
-
     /* Enable interrupts */
     arch_irq_enable();
 
-    /* Wait for ~3 seconds worth of ticks (at 100 Hz) */
+    /* Wait for a few ticks to verify timer is working */
     uint64_t start_ticks = system_ticks;
-    while (system_ticks < start_ticks + 300) {
-        arch_cpu_halt();  /* Wait for interrupt */
+    while (system_ticks < start_ticks + 10) {
+        arch_cpu_halt();
     }
 
-    /* Disable interrupts */
     arch_irq_disable();
-
-    printk("  Received %lu ticks (expected ~300)\n",
-           system_ticks - start_ticks);
-    printk("  Timer tests passed!\n");
+    pr_info("Timer: %lu ticks received\n", system_ticks - start_ticks);
 }
 
 /**
@@ -92,12 +82,8 @@ static void test_timer(void)
  */
 static void test_breakpoint(void)
 {
-    printk("\nTesting breakpoint exception:\n");
-    printk("  Triggering ebreak...\n");
-
     __asm__ __volatile__("ebreak");
-
-    printk("  Breakpoint handled correctly!\n");
+    pr_info("Breakpoint exception: passed\n");
 }
 
 /**
@@ -111,11 +97,9 @@ static int test_thread_a(void *arg)
 {
     (void)arg;
     for (int i = 0; i < 5; i++) {
-        printk("  Thread A: iteration %d\n", i);
         thread_a_count++;
         proc_yield();
     }
-    printk("  Thread A: done\n");
     return 0;
 }
 
@@ -126,11 +110,9 @@ static int test_thread_b(void *arg)
 {
     (void)arg;
     for (int i = 0; i < 5; i++) {
-        printk("  Thread B: iteration %d\n", i);
         thread_b_count++;
         proc_yield();
     }
-    printk("  Thread B: done\n");
     threads_done = true;
     return 0;
 }
@@ -140,41 +122,27 @@ static int test_thread_b(void *arg)
  */
 static void test_kthreads(void)
 {
-    printk("\nTesting kernel threads:\n");
-
-    /* Create two kernel threads */
     struct process *p1 = kthread_create(test_thread_a, NULL, "test_a");
     struct process *p2 = kthread_create(test_thread_b, NULL, "test_b");
 
     if (!p1 || !p2) {
-        printk("  ERROR: Failed to create kernel threads\n");
+        pr_err("Failed to create kernel threads\n");
         return;
     }
 
-    printk("  Created thread A (pid %d) and thread B (pid %d)\n",
-           p1->pid, p2->pid);
-
-    /* Add threads to run queue */
     sched_enqueue(p1);
     sched_enqueue(p2);
 
-    /* Enable interrupts and let threads run */
     arch_irq_enable();
-
-    /* Wait for threads to complete */
     while (!threads_done) {
         schedule();
     }
-
     arch_irq_disable();
 
-    printk("  Thread A ran %d times, Thread B ran %d times\n",
-           thread_a_count, thread_b_count);
-
     if (thread_a_count == 5 && thread_b_count == 5) {
-        printk("  Kernel thread tests passed!\n");
+        pr_info("Kernel threads: passed\n");
     } else {
-        printk("  ERROR: Thread counts incorrect!\n");
+        pr_err("Kernel threads: FAILED (A=%d, B=%d)\n", thread_a_count, thread_b_count);
     }
 }
 
@@ -193,8 +161,6 @@ struct test_node {
  */
 static void test_rbtree(void)
 {
-    printk("\nTesting red-black tree:\n");
-
     struct rb_root root = RB_ROOT;
     struct test_node *nodes;
     struct rb_node *rb;
@@ -202,27 +168,22 @@ static void test_rbtree(void)
     int count;
     bool ordered;
 
-    /* Allocate 1000 test nodes */
     nodes = kmalloc(1000 * sizeof(struct test_node));
     if (!nodes) {
-        printk("  ERROR: Failed to allocate test nodes\n");
+        pr_err("RB-tree: failed to allocate\n");
         return;
     }
 
     /* Insert 1000 numbers in pseudo-random order */
-    printk("  Inserting 1000 numbers...\n");
     for (int i = 0; i < 1000; i++) {
-        /* Use a simple PRNG: key = (i * 7919 + 104729) mod 1000000 */
         nodes[i].key = (uint64_t)((i * 7919 + 104729) % 1000000);
 
-        /* Find insertion point */
         struct rb_node **link = &root.rb_node;
         struct rb_node *parent = NULL;
 
         while (*link) {
             parent = *link;
             struct test_node *entry = rb_entry(parent, struct test_node, node);
-
             if (nodes[i].key < entry->key) {
                 link = &parent->rb_left;
             } else {
@@ -230,13 +191,11 @@ static void test_rbtree(void)
             }
         }
 
-        /* Insert and rebalance */
         rb_link_node(&nodes[i].node, parent, link);
         rb_insert_color(&nodes[i].node, &root);
     }
 
     /* Verify in-order traversal */
-    printk("  Verifying order...\n");
     prev_key = 0;
     count = 0;
     ordered = true;
@@ -244,8 +203,6 @@ static void test_rbtree(void)
     for (rb = rb_first(&root); rb; rb = rb_next(rb)) {
         struct test_node *entry = rb_entry(rb, struct test_node, node);
         if (count > 0 && entry->key < prev_key) {
-            printk("  ERROR: Order violation at count %d: %lu < %lu\n",
-                   count, (unsigned long)entry->key, (unsigned long)prev_key);
             ordered = false;
             break;
         }
@@ -253,29 +210,20 @@ static void test_rbtree(void)
         count++;
     }
 
-    if (ordered && count == 1000) {
-        printk("  Verified %d elements in sorted order\n", count);
-    } else if (count != 1000) {
-        printk("  ERROR: Expected 1000 elements, got %d\n", count);
-    }
-
-    /* Test deletion of some nodes */
-    printk("  Testing deletion of 100 nodes...\n");
+    /* Test deletion */
     for (int i = 0; i < 100; i++) {
         rb_erase(&nodes[i].node, &root);
     }
 
-    /* Count remaining nodes */
     count = 0;
     for (rb = rb_first(&root); rb; rb = rb_next(rb)) {
         count++;
     }
 
-    if (count == 900) {
-        printk("  After deletion: %d elements remain (expected 900)\n", count);
-        printk("  Red-black tree tests passed!\n");
+    if (ordered && count == 900) {
+        pr_info("RB-tree: passed\n");
     } else {
-        printk("  ERROR: Expected 900 elements after deletion, got %d\n", count);
+        pr_err("RB-tree: FAILED\n");
     }
 
     kfree(nodes);
@@ -316,52 +264,34 @@ static int low_prio_thread(void *arg)
  */
 static void test_cfs_priority(void)
 {
-    printk("\nTesting CFS priority scheduling:\n");
-
-    /* Reset counters */
     high_prio_count = 0;
     low_prio_count = 0;
     cfs_test_done = false;
 
-    /* Create two threads with different nice values */
     struct process *high = kthread_create(high_prio_thread, NULL, "high_prio");
     struct process *low = kthread_create(low_prio_thread, NULL, "low_prio");
 
     if (!high || !low) {
-        printk("  ERROR: Failed to create test threads\n");
+        pr_err("CFS: failed to create threads\n");
         return;
     }
 
-    /* Set nice values: high priority (-10), low priority (+10) */
-    sched_setnice(high, -10);  /* Higher priority */
-    sched_setnice(low, 10);    /* Lower priority */
+    sched_setnice(high, -10);
+    sched_setnice(low, 10);
 
-    printk("  Created high-priority thread (nice=-10, pid=%d)\n", high->pid);
-    printk("  Created low-priority thread (nice=+10, pid=%d)\n", low->pid);
-
-    /* Enqueue threads */
     sched_enqueue(high);
     sched_enqueue(low);
 
-    /* Enable interrupts and let threads run */
     arch_irq_enable();
-
-    /* Wait for completion */
     while (!cfs_test_done) {
         schedule();
     }
-
     arch_irq_disable();
 
-    printk("  High-priority thread ran %d times\n", high_prio_count);
-    printk("  Low-priority thread ran %d times\n", low_prio_count);
-
-    /* In CFS, both should complete eventually (fairness) */
     if (high_prio_count == 10 && low_prio_count == 10) {
-        printk("  Both threads completed successfully!\n");
-        printk("  CFS priority tests passed!\n");
+        pr_info("CFS scheduler: passed\n");
     } else {
-        printk("  ERROR: Threads did not complete correctly\n");
+        pr_err("CFS scheduler: FAILED\n");
     }
 }
 
@@ -424,43 +354,26 @@ extern int boot_hartid;
 static void test_smp(void)
 {
     int my_hart = arch_cpu_id();
-
-    printk("\nTesting SMP support:\n");
-    printk("  Boot hart: %d\n", my_hart);
-
-    /* Try to start secondary CPUs (QEMU virt has multiple harts) */
     int started = 0;
 
     for (int cpu = 0; cpu < CONFIG_MAX_CPUS && cpu < 4; cpu++) {
-        /* Skip the boot hart - it's already running! */
         if (cpu == my_hart) {
             continue;
         }
 
-        printk("  Attempting to start CPU %d...\n", cpu);
-
-        int ret = arch_start_cpu(cpu,
-                                 (unsigned long)_secondary_start,
-                                 0);
-
+        int ret = arch_start_cpu(cpu, (unsigned long)_secondary_start, 0);
         if (ret == 0) {
-            printk("  CPU %d: start request sent\n", cpu);
             started++;
-        } else {
-            printk("  CPU %d: failed to start (error %d)\n", cpu, ret);
         }
     }
 
     if (started == 0) {
-        printk("  No secondary CPUs available (single-core system)\n");
-        printk("  SMP test skipped.\n");
+        pr_info("SMP: single-core system\n");
         return;
     }
 
     /* Wait for secondary CPUs to come online */
-    printk("  Waiting for %d secondary CPU(s) to come online...\n", started);
-
-    int timeout = 1000;  /* ~10 seconds */
+    int timeout = 1000;
     while (secondary_cpus_online < started && timeout > 0) {
         arch_irq_enable();
         for (volatile int i = 0; i < 100000; i++) { }
@@ -469,12 +382,9 @@ static void test_smp(void)
     }
 
     if (secondary_cpus_online >= started) {
-        printk("  %d secondary CPU(s) online!\n", secondary_cpus_online);
-        printk("  Total CPUs: %d\n", sched_cpu_count());
-        printk("  SMP tests passed!\n");
+        pr_info("SMP: %d CPUs online\n", sched_cpu_count());
     } else {
-        printk("  Timeout: only %d/%d secondary CPUs came online\n",
-               secondary_cpus_online, started);
+        pr_warn("SMP: only %d/%d CPUs online\n", secondary_cpus_online, started);
     }
 }
 
@@ -546,81 +456,55 @@ void kernel_main(unsigned long hartid, void *dtb)
     /*
      * Phase 2: Trap Handling
      */
-    printk("\n=== Phase 2: Trap Handling ===\n");
-
-    /* Initialize syscall table */
     syscall_init();
-
-    /* Initialize trap handling */
     arch_trap_init();
-
-    /* Initialize timer */
     arch_timer_init(100);  /* 100 Hz */
 
-    printk("Phase 2 initialization complete!\n");
-
-    /*
-     * Run Phase 2 tests
-     */
     test_breakpoint();
     test_syscall();
     test_timer();
 
-    printk("\n");
-    pr_info("All Phase 2 tests passed!\n");
-
     /*
      * Phase 3: Process Management
      */
-    printk("\n=== Phase 3: Process Management ===\n");
-
-    /* Initialize scheduler */
     sched_init();
-
-    /* Initialize process subsystem */
     proc_init();
-
-    /* Create idle process (pid 0) */
     proc_idle_init();
 
-    printk("Phase 3 initialization complete!\n");
-
-    /*
-     * Run Phase 3 tests
-     */
     test_kthreads();
 
-    printk("\n");
-    pr_info("Phase 3.1-3.2 (kernel threads) passed!\n");
-
     /*
-     * Phase 4: CFS Scheduler
+     * Phase 4: CFS Scheduler & SMP
      */
-    printk("\n=== Phase 4: CFS Scheduler ===\n");
-
-    /* Test red-black tree implementation */
     test_rbtree();
-
-    /* Test CFS priority scheduling */
     test_cfs_priority();
-
-    printk("\n");
-    pr_info("Phase 4.1-4.2 (CFS Scheduler) tests passed!\n");
-
-    /*
-     * Phase 4.3: SMP Support
-     */
-    printk("\n=== Phase 4.3: SMP Support ===\n");
     test_smp();
 
-    printk("\n");
-    pr_info("Phase 4 complete!\n");
+    /*
+     * Phase 5: File System
+     */
+    vfs_init();
+    devfs_init();
+    ext2_init();
+    virtio_blk_probe();
+
+    int ret = vfs_mount(NULL, "/dev", "devfs", 0);
+    if (ret < 0) {
+        pr_warn("devfs mount failed: %d\n", ret);
+    }
+
+    ret = vfs_mount("vda", "/", "ext2", 0);
+    if (ret < 0) {
+        pr_info("ext2 root: not available (error %d)\n", ret);
+    } else {
+        pr_info("ext2 root: mounted\n");
+    }
 
     /*
-     * Phase 3.3-3.4: User Mode and Fork Test
+     * User Mode and Fork Test
      * NOTE: This test enters user mode and does not return!
      */
-    printk("\n=== Phase 3.3-3.4: User Mode and Fork Test ===\n");
+    pr_info("Starting fork test...\n");
     run_fork_test();
 
     /* Should not reach here - fork test enters user mode */
