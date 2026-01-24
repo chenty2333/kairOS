@@ -14,6 +14,7 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/config.h>
+#include <kairos/string.h>
 
 #define PAGE_SIZE       CONFIG_PAGE_SIZE
 #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
@@ -75,6 +76,7 @@ struct mm_struct *mm_create(void)
     }
 
     INIT_LIST_HEAD(&mm->vma_list);
+    mm->mm_rb = RB_ROOT;
     spin_init(&mm->lock);
     mm->brk = USER_HEAP_START;
     mm->start_stack = USER_STACK_TOP;
@@ -101,6 +103,7 @@ void mm_destroy(struct mm_struct *mm)
     }
 
     /* Free all VMAs */
+    /* Note: We can iterate list for destruction, it's simpler than tree traversal */
     struct vm_area *vma, *tmp;
     list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
         /* Unmap and free pages in this VMA */
@@ -111,7 +114,10 @@ void mm_destroy(struct mm_struct *mm)
                 pmm_free_page(pa);
             }
         }
-
+        
+        /* Remove from tree (strictly speaking not needed since we free mm, but good practice) */
+        rb_erase(&vma->rb_node, &mm->mm_rb);
+        
         list_del(&vma->list);
         vma_free(vma);
     }
@@ -126,14 +132,21 @@ void mm_destroy(struct mm_struct *mm)
 
 /**
  * find_vma - Find VMA containing given address
+ * Uses Red-Black tree for O(log N) lookup.
  */
 static struct vm_area *find_vma(struct mm_struct *mm, vaddr_t addr)
 {
-    struct vm_area *vma;
+    struct rb_node *node = mm->mm_rb.rb_node;
 
-    list_for_each_entry(vma, &mm->vma_list, list) {
-        if (addr >= vma->start && addr < vma->end) {
-            return vma;
+    while (node) {
+        struct vm_area *vma = rb_entry(node, struct vm_area, rb_node);
+
+        if (addr < vma->start) {
+            node = node->rb_left;
+        } else if (addr >= vma->end) {
+            node = node->rb_right;
+        } else {
+            return vma; /* addr >= vma->start && addr < vma->end */
         }
     }
 
@@ -142,15 +155,22 @@ static struct vm_area *find_vma(struct mm_struct *mm, vaddr_t addr)
 
 /**
  * find_vma_intersection - Find VMA that overlaps with range
+ * Uses Red-Black tree for O(log N) lookup.
  */
 static struct vm_area *find_vma_intersection(struct mm_struct *mm,
                                              vaddr_t start, vaddr_t end)
 {
-    struct vm_area *vma;
+    struct rb_node *node = mm->mm_rb.rb_node;
 
-    list_for_each_entry(vma, &mm->vma_list, list) {
-        if (vma->start < end && vma->end > start) {
-            return vma;
+    while (node) {
+        struct vm_area *vma = rb_entry(node, struct vm_area, rb_node);
+
+        if (end <= vma->start) {
+            node = node->rb_left;
+        } else if (start >= vma->end) {
+            node = node->rb_right;
+        } else {
+            return vma; /* Overlap */
         }
     }
 
@@ -159,19 +179,42 @@ static struct vm_area *find_vma_intersection(struct mm_struct *mm,
 
 /**
  * insert_vma - Insert VMA into address space (sorted by address)
+ * Inserts into both list and rbtree.
  */
 static void insert_vma(struct mm_struct *mm, struct vm_area *new_vma)
 {
+    /* Insert into list (keep sorted) */
     struct vm_area *vma;
+    bool inserted_list = false;
 
     list_for_each_entry(vma, &mm->vma_list, list) {
         if (new_vma->start < vma->start) {
             list_add_tail(&new_vma->list, &vma->list);
-            return;
+            inserted_list = true;
+            break;
+        }
+    }
+    if (!inserted_list) {
+        list_add_tail(&new_vma->list, &mm->vma_list);
+    }
+
+    /* Insert into RB-Tree */
+    struct rb_node **p = &mm->mm_rb.rb_node;
+    struct rb_node *parent = NULL;
+
+    while (*p) {
+        parent = *p;
+        struct vm_area *tmp = rb_entry(parent, struct vm_area, rb_node);
+
+        if (new_vma->start < tmp->start) {
+            p = &(*p)->rb_left;
+        } else {
+            p = &(*p)->rb_right;
         }
     }
 
-    list_add_tail(&new_vma->list, &mm->vma_list);
+    rb_link_node(&new_vma->rb_node, parent, p);
+    rb_insert_color(&new_vma->rb_node, &mm->mm_rb);
 }
 
 /**
@@ -224,9 +267,7 @@ struct mm_struct *mm_clone(struct mm_struct *src)
             /* Copy page contents */
             uint8_t *src_ptr = (uint8_t *)phys_to_virt(src_pa);
             uint8_t *dst_ptr = (uint8_t *)phys_to_virt(dst_pa);
-            for (size_t i = 0; i < PAGE_SIZE; i++) {
-                dst_ptr[i] = src_ptr[i];
-            }
+            memcpy(dst_ptr, src_ptr, PAGE_SIZE);
 
             /* Map in destination */
             uint64_t flags = PTE_READ;
@@ -325,9 +366,7 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags)
 
     /* Zero the page */
     uint8_t *ptr = phys_to_virt(pa);
-    for (size_t i = 0; i < PAGE_SIZE; i++) {
-        ptr[i] = 0;
-    }
+    memset(ptr, 0, PAGE_SIZE);
 
     /* Map the page */
     uint64_t pte_flags = PTE_USER | PTE_READ;
@@ -436,10 +475,12 @@ vaddr_t mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len,
         addr = ALIGN_UP(mm->brk, PAGE_SIZE);
 
         while (addr + len < mm->start_stack) {
-            if (!find_vma_intersection(mm, addr, addr + len)) {
+            struct vm_area *conflict = find_vma_intersection(mm, addr, addr + len);
+            if (!conflict) {
                 break;
             }
-            addr += PAGE_SIZE;
+            /* Optimization: Skip past the conflicting VMA */
+            addr = ALIGN_UP(conflict->end, PAGE_SIZE);
         }
 
         if (addr + len >= mm->start_stack) {
@@ -511,6 +552,7 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len)
                     pmm_free_page(pa);
                 }
             }
+            rb_erase(&vma->rb_node, &mm->mm_rb);
             list_del(&vma->list);
             vma_free(vma);
         } else if (vma->start < addr && vma->end > end) {

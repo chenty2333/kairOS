@@ -336,7 +336,7 @@ int virtio_blk_init(uint64_t mmio_addr)
                  VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
     /* Read and acknowledge features */
-    uint32_t features = mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
+    mmio_read32(base, VIRTIO_MMIO_DEVICE_FEATURES);
     mmio_write32(base, VIRTIO_MMIO_DRIVER_FEATURES, 0);  /* No special features */
 
     /* Set FEATURES_OK */

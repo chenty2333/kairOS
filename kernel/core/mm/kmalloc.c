@@ -13,6 +13,7 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/config.h>
+#include <kairos/string.h>
 
 #define PAGE_SIZE       CONFIG_PAGE_SIZE
 #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
@@ -28,20 +29,27 @@
 /* Number of size classes */
 #define NUM_SIZE_CLASSES    (MAX_SMALL_SHIFT - MIN_ALLOC_SHIFT + 1)
 
-/* Block header for tracking allocations */
-struct block_header {
-    uint32_t size;          /* Allocation size (or size class for cached) */
-    uint32_t flags;
-    struct block_header *next;  /* Free list link for cached blocks */
-};
+/*
+ * We reuse struct page fields for Slab management to avoid memory overhead.
+ *
+ * struct page layout reuse:
+ * - flags: PG_SLAB set
+ * - list.next: (void *) freelist - Head of the free object list in this page
+ * - list.prev: (void *) size_class - Pointer to the size_class this page belongs to
+ *
+ * Note: This assumes list_head pointers are large enough to hold void* (true).
+ */
 
-#define BLOCK_FLAG_LARGE    (1 << 0)    /* Large (page-aligned) allocation */
-#define BLOCK_FLAG_CACHED   (1 << 1)    /* From size class cache */
+#define PAGE_GET_FREELIST(page)     ((void *)((page)->list.next))
+#define PAGE_SET_FREELIST(page, v)  ((page)->list.next = (struct list_head *)(v))
+
+#define PAGE_GET_CLASS(page)        ((struct size_class *)((page)->list.prev))
+#define PAGE_SET_CLASS(page, v)     ((page)->list.prev = (struct list_head *)(v))
 
 /* Size class cache */
 struct size_class {
-    struct block_header *freelist;
-    size_t block_size;              /* Size of each block */
+    void *freelist;                 /* Head of free object list */
+    size_t block_size;              /* Size of each block (power of 2) */
     size_t blocks_per_page;         /* Blocks that fit in one page */
     size_t num_free;                /* Number of free blocks */
     size_t num_allocated;           /* Number of allocated blocks */
@@ -97,20 +105,39 @@ static int grow_cache(struct size_class *sc)
     }
 
     page->flags |= PG_SLAB;
+    
+    /* Store back-pointer to size_class in the page struct */
+    PAGE_SET_CLASS(page, sc);
+    PAGE_SET_FREELIST(page, NULL); /* We don't track per-page freelist separately yet */
+
     paddr_t pa = page_to_phys(page);
+    void *base = (void *)pa;
 
     /* Divide page into blocks */
     size_t block_size = sc->block_size;
     size_t num_blocks = PAGE_SIZE / block_size;
 
+    /* Link blocks together
+     * The first N-1 blocks point to the next block.
+     * The last block points to the current head of the freelist.
+     */
     for (size_t i = 0; i < num_blocks; i++) {
-        struct block_header *block = (struct block_header *)(pa + i * block_size);
-        block->size = block_size;
-        block->flags = BLOCK_FLAG_CACHED;
-        block->next = sc->freelist;
-        sc->freelist = block;
-        sc->num_free++;
+        void *current_block = (uint8_t *)base + i * block_size;
+        void *next_block;
+
+        if (i < num_blocks - 1) {
+             next_block = (uint8_t *)base + (i + 1) * block_size;
+        } else {
+             next_block = sc->freelist;
+        }
+
+        /* Store the next pointer at the beginning of the block */
+        *(void **)current_block = next_block;
     }
+
+    /* Update cache freelist to point to the first block of the new page */
+    sc->freelist = base;
+    sc->num_free += num_blocks;
 
     return 0;
 }
@@ -125,7 +152,7 @@ void kmalloc_init(void)
     for (int i = 0; i < NUM_SIZE_CLASSES; i++) {
         struct size_class *sc = &size_classes[i];
         sc->freelist = NULL;
-        sc->block_size = class_to_size(i) + sizeof(struct block_header);
+        sc->block_size = class_to_size(i); /* Strictly power of 2 */
         sc->blocks_per_page = PAGE_SIZE / sc->block_size;
         sc->num_free = 0;
         sc->num_allocated = 0;
@@ -153,10 +180,9 @@ void *kmalloc(size_t size)
 
     /* Large allocation: directly from buddy allocator */
     if (size > MAX_SMALL_SIZE) {
-        size_t total_size = size + sizeof(struct block_header);
         unsigned int order = 0;
-
-        while ((size_t)(PAGE_SIZE << order) < total_size && order < MAX_ORDER) {
+        /* Calculate order for size */
+        while ((size_t)(PAGE_SIZE << order) < size && order < MAX_ORDER) {
             order++;
         }
 
@@ -174,22 +200,19 @@ void *kmalloc(size_t size)
             return NULL;
         }
 
-        paddr_t pa = page_to_phys(page);
-        struct block_header *hdr = (struct block_header *)pa;
-        hdr->size = (PAGE_SIZE << order);
-        hdr->flags = BLOCK_FLAG_LARGE;
-        hdr->next = NULL;
-
-        total_allocated += hdr->size;
+        /* We don't need to store size/header for large allocations anymore.
+         * The page struct's order field tracks the size. 
+         */
+        total_allocated += (PAGE_SIZE << order);
 
         spin_unlock(&kmalloc_lock);
         arch_irq_restore(irq_state);
 
-        return (void *)(hdr + 1);
+        return (void *)page_to_phys(page);
     }
 
     /* Small allocation: from size class cache */
-    int class_idx = size_to_class(size + sizeof(struct block_header));
+    int class_idx = size_to_class(size);
     struct size_class *sc = &size_classes[class_idx];
 
     bool irq_state = arch_irq_save();
@@ -205,8 +228,10 @@ void *kmalloc(size_t size)
     }
 
     /* Take block from freelist */
-    struct block_header *block = sc->freelist;
-    sc->freelist = block->next;
+    void *block = sc->freelist;
+    /* The first word of the free block contains the pointer to the next free block */
+    sc->freelist = *(void **)block;
+    
     sc->num_free--;
     sc->num_allocated++;
 
@@ -215,7 +240,7 @@ void *kmalloc(size_t size)
     spin_unlock(&sc->lock);
     arch_irq_restore(irq_state);
 
-    return (void *)(block + 1);
+    return block;
 }
 
 /**
@@ -228,31 +253,22 @@ void kfree(void *ptr)
         return;
     }
 
-    struct block_header *hdr = (struct block_header *)ptr - 1;
+    /* Find the page this pointer belongs to */
+    struct page *page = phys_to_page((paddr_t)ptr);
+    if (!page) {
+        pr_warn("kfree: invalid pointer %p (no page found)\n", ptr);
+        return;
+    }
 
-    if (hdr->flags & BLOCK_FLAG_LARGE) {
-        /* Large allocation: return to buddy allocator */
-        bool irq_state = arch_irq_save();
-        spin_lock(&kmalloc_lock);
-
-        total_freed += hdr->size;
-
-        /* Find order from size */
-        unsigned int order = 0;
-        size_t page_count = hdr->size >> PAGE_SHIFT;
-        while ((1UL << order) < page_count) {
-            order++;
-        }
-
-        struct page *page = phys_to_page((paddr_t)hdr);
-        free_pages(page, order);
-
-        spin_unlock(&kmalloc_lock);
-        arch_irq_restore(irq_state);
-    } else if (hdr->flags & BLOCK_FLAG_CACHED) {
+    if (page->flags & PG_SLAB) {
         /* Small allocation: return to size class cache */
-        int class_idx = size_to_class(hdr->size);
-        struct size_class *sc = &size_classes[class_idx];
+        struct size_class *sc = PAGE_GET_CLASS(page);
+        
+        /* Sanity check */
+        if (!sc || sc < size_classes || sc >= &size_classes[NUM_SIZE_CLASSES]) {
+            pr_warn("kfree: corrupt slab page %p (invalid size class)\n", ptr);
+            return;
+        }
 
         bool irq_state = arch_irq_save();
         spin_lock(&sc->lock);
@@ -260,14 +276,32 @@ void kfree(void *ptr)
         total_freed += sc->block_size;
         sc->num_allocated--;
 
-        hdr->next = sc->freelist;
-        sc->freelist = hdr;
+        /* Link back into freelist */
+        *(void **)ptr = sc->freelist;
+        sc->freelist = ptr;
+        
         sc->num_free++;
 
         spin_unlock(&sc->lock);
         arch_irq_restore(irq_state);
     } else {
-        pr_warn("kfree: invalid block at %p (flags=%x)\n", ptr, hdr->flags);
+        /* Large allocation: return to buddy allocator */
+        bool irq_state = arch_irq_save();
+        spin_lock(&kmalloc_lock);
+
+        /* 
+         * Retrieve order from page struct.
+         * alloc_pages() sets page->order correctly.
+         */
+        unsigned int order = page->order;
+        size_t size = PAGE_SIZE << order;
+        
+        total_freed += size;
+
+        free_pages(page, order);
+
+        spin_unlock(&kmalloc_lock);
+        arch_irq_restore(irq_state);
     }
 }
 
@@ -279,11 +313,7 @@ void *kzalloc(size_t size)
 {
     void *ptr = kmalloc(size);
     if (ptr) {
-        /* Zero the memory */
-        uint8_t *p = ptr;
-        for (size_t i = 0; i < size; i++) {
-            p[i] = 0;
-        }
+        memset(ptr, 0, size);
     }
     return ptr;
 }
@@ -295,12 +325,15 @@ void *kzalloc(size_t size)
  */
 void *kmalloc_aligned(size_t size, size_t align)
 {
-    if (align <= sizeof(struct block_header)) {
-        /* Standard allocation is sufficient */
+    if (align <= sizeof(void *)) {
+        /* Standard allocation guarantees at least pointer alignment */
         return kmalloc(size);
     }
 
-    /* Allocate extra space for alignment */
+    /* Allocate extra space for alignment and padding storage
+     * We need enough space to potentially shift by (align - 1)
+     * AND store the original pointer just before the returned address.
+     */
     size_t total = size + align + sizeof(void *);
     void *raw = kmalloc(total);
     if (!raw) {

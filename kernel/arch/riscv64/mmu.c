@@ -25,6 +25,7 @@
 #include <kairos/arch.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
+#include <kairos/string.h>
 
 /* Page size and shifts */
 #define PAGE_SIZE       4096
@@ -122,10 +123,7 @@ static paddr_t alloc_pgtable(void)
     }
 
     /* Zero the page table */
-    uint64_t *table = (uint64_t *)pa;
-    for (int i = 0; i < PTES_PER_PAGE; i++) {
-        table[i] = 0;
-    }
+    memset((void *)pa, 0, PAGE_SIZE);
 
     return pa;
 }
@@ -318,11 +316,7 @@ paddr_t arch_mmu_create_table(void)
      * correspond to kernel-space mappings. For simplicity, we copy
      * all entries since user space doesn't use these high addresses.
      */
-    for (int i = 0; i < PTES_PER_PAGE; i++) {
-        if (kern_table[i] & PTE_V) {
-            new_table[i] = kern_table[i];
-        }
-    }
+    memcpy(new_table, kern_table, PAGE_SIZE);
 
     return table;
 }

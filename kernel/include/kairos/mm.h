@@ -9,6 +9,7 @@
 #include <kairos/config.h>
 #include <kairos/list.h>
 #include <kairos/spinlock.h>
+#include <kairos/rbtree.h>
 
 /*
  * Physical Page Allocator (Buddy System)
@@ -131,7 +132,8 @@ struct vm_area {
     vaddr_t start;
     vaddr_t end;
     uint32_t flags;
-    struct list_head list;
+    struct list_head list;      /* Linear list of VMAs (sorted by address) */
+    struct rb_node rb_node;     /* Red-Black tree node */
 
     /* For file-backed mappings */
     struct vnode *vnode;
@@ -142,6 +144,7 @@ struct vm_area {
 struct mm_struct {
     paddr_t pgdir;                  /* Page directory physical address */
     struct list_head vma_list;      /* List of VMAs */
+    struct rb_root mm_rb;           /* Red-Black tree root of VMAs */
     spinlock_t lock;
 
     vaddr_t brk;                    /* Current brk (heap end) */
