@@ -2,10 +2,12 @@
  * fdt.c - Flattened Device Tree (FDT) parser
  *
  * Minimal DTB parser to extract memory information.
+ * Optimized to use kernel string functions and enforce bounds checking.
  * Reference: https://devicetree-specification.readthedocs.io/
  */
 
 #include <kairos/types.h>
+#include <kairos/string.h>
 
 /* FDT header structure */
 struct fdt_header {
@@ -45,35 +47,14 @@ static inline uint64_t be64_to_cpu(uint64_t val)
            be32_to_cpu(val >> 32);
 }
 
-/* String comparison */
-static int fdt_strcmp(const char *s1, const char *s2)
-{
-    while (*s1 && *s1 == *s2) {
-        s1++;
-        s2++;
-    }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
-
-/* Check if string starts with prefix */
-static int fdt_strstart(const char *str, const char *prefix)
-{
-    while (*prefix) {
-        if (*str++ != *prefix++) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 /* Align to 4 bytes */
-static inline uint32_t fdt_align(uint32_t val)
+static inline uintptr_t fdt_align(uintptr_t val)
 {
     return (val + 3) & ~3;
 }
 
-/* Memory region storage */
-#define MAX_MEM_REGIONS 8
+/* Memory region storage - Increased limit for complex SoCs */
+#define MAX_MEM_REGIONS 64
 
 struct mem_region {
     paddr_t base;
@@ -96,55 +77,68 @@ static int num_reserved_regions;
 int fdt_parse(void *fdt)
 {
     struct fdt_header *hdr = fdt;
-    uint32_t *p;
-    const char *strings;
-    int depth = 0;
-    int in_memory = 0;
-    uint32_t address_cells = 2;
-    uint32_t size_cells = 1;
-
-    /* Verify magic */
-    if (be32_to_cpu(hdr->magic) != FDT_MAGIC) {
+    
+    /* Basic validation */
+    if (!fdt || be32_to_cpu(hdr->magic) != FDT_MAGIC) {
         return -EINVAL;
     }
 
+    uint32_t totalsize = be32_to_cpu(hdr->totalsize);
+    const char *fdt_end = (const char *)fdt + totalsize;
+
     /* Get string table and structure block */
-    strings = (const char *)fdt + be32_to_cpu(hdr->off_dt_strings);
-    p = (uint32_t *)((char *)fdt + be32_to_cpu(hdr->off_dt_struct));
+    uint32_t off_dt_strings = be32_to_cpu(hdr->off_dt_strings);
+    uint32_t off_dt_struct = be32_to_cpu(hdr->off_dt_struct);
+    
+    if (off_dt_strings >= totalsize || off_dt_struct >= totalsize) {
+        return -EINVAL;
+    }
+
+    const char *strings = (const char *)fdt + off_dt_strings;
+    uint32_t *p = (uint32_t *)((char *)fdt + off_dt_struct);
 
     num_mem_regions = 0;
     num_reserved_regions = 0;
 
     /* Parse memory reservation block */
-    uint64_t *memrsv = (uint64_t *)((char *)fdt + be32_to_cpu(hdr->off_mem_rsvmap));
-    while (1) {
-        uint64_t addr = be64_to_cpu(memrsv[0]);
-        uint64_t size = be64_to_cpu(memrsv[1]);
-        if (addr == 0 && size == 0) {
-            break;
+    uint32_t off_mem_rsvmap = be32_to_cpu(hdr->off_mem_rsvmap);
+    if (off_mem_rsvmap < totalsize) {
+        uint64_t *memrsv = (uint64_t *)((char *)fdt + off_mem_rsvmap);
+        
+        while ((char *)memrsv < fdt_end) {
+            uint64_t addr = be64_to_cpu(memrsv[0]);
+            uint64_t size = be64_to_cpu(memrsv[1]);
+            
+            if (addr == 0 && size == 0) {
+                break;
+            }
+            if (num_reserved_regions < MAX_MEM_REGIONS) {
+                reserved_regions[num_reserved_regions].base = addr;
+                reserved_regions[num_reserved_regions].size = size;
+                num_reserved_regions++;
+            }
+            memrsv += 2;
         }
-        if (num_reserved_regions < MAX_MEM_REGIONS) {
-            reserved_regions[num_reserved_regions].base = addr;
-            reserved_regions[num_reserved_regions].size = size;
-            num_reserved_regions++;
-        }
-        memrsv += 2;
     }
 
     /* Parse structure block */
-    while (1) {
+    int depth = 0;
+    int in_memory = 0;
+    uint32_t address_cells = 2; // Default for root
+    uint32_t size_cells = 1;    // Default for root
+
+    while ((char *)p < fdt_end) {
         uint32_t token = be32_to_cpu(*p++);
 
         switch (token) {
         case FDT_BEGIN_NODE: {
             const char *name = (const char *)p;
-            int len = 0;
-            while (name[len]) {
-                len++;
-            }
-            p = (uint32_t *)((char *)p + fdt_align(len + 1));
-
-            if (depth == 1 && fdt_strstart(name, "memory")) {
+            size_t name_len = strlen(name);
+            
+            p = (uint32_t *)((char *)p + fdt_align(name_len + 1));
+            
+            /* Check memory node: "memory" or "memory@..." */
+            if (depth == 1 && (strcmp(name, "memory") == 0 || strncmp(name, "memory@", 7) == 0)) {
                 in_memory = 1;
             }
             depth++;
@@ -156,28 +150,38 @@ int fdt_parse(void *fdt)
             if (depth == 1) {
                 in_memory = 0;
             }
+            if (depth < 0) return -EINVAL;
             break;
 
         case FDT_PROP: {
+            if ((char *)p + 8 > fdt_end) return -EINVAL;
+            
             uint32_t len = be32_to_cpu(*p++);
             uint32_t nameoff = be32_to_cpu(*p++);
+            
+            if ((const char *)strings + nameoff >= fdt_end) return -EINVAL;
             const char *propname = strings + nameoff;
+            
             void *data = p;
             p = (uint32_t *)((char *)p + fdt_align(len));
+            
+            if ((char *)p > fdt_end) return -EINVAL;
 
             /* Root node properties */
             if (depth == 1) {
-                if (fdt_strcmp(propname, "#address-cells") == 0) {
-                    address_cells = be32_to_cpu(*(uint32_t *)data);
-                } else if (fdt_strcmp(propname, "#size-cells") == 0) {
-                    size_cells = be32_to_cpu(*(uint32_t *)data);
+                if (strcmp(propname, "#address-cells") == 0) {
+                    if (len >= 4) address_cells = be32_to_cpu(*(uint32_t *)data);
+                } else if (strcmp(propname, "#size-cells") == 0) {
+                    if (len >= 4) size_cells = be32_to_cpu(*(uint32_t *)data);
                 }
             }
 
             /* Memory node reg property */
-            if (in_memory && fdt_strcmp(propname, "reg") == 0) {
+            if (in_memory && strcmp(propname, "reg") == 0) {
                 uint32_t *reg = data;
                 uint32_t entry_size = (address_cells + size_cells) * 4;
+                if (entry_size == 0) break; 
+                
                 uint32_t num_entries = len / entry_size;
 
                 for (uint32_t i = 0; i < num_entries && num_mem_regions < MAX_MEM_REGIONS; i++) {
@@ -208,9 +212,12 @@ int fdt_parse(void *fdt)
             return 0;
 
         default:
+            /* Unknown token - stop to be safe */
             return -EINVAL;
         }
     }
+    
+    return -EINVAL; /* Should hit FDT_END */
 }
 
 /**

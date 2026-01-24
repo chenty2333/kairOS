@@ -2,138 +2,188 @@
  * vsprintf.c - String formatting functions
  *
  * Implements a minimal printf-style formatting for kernel use.
- * Supported format specifiers:
- *   %d, %i  - signed decimal
- *   %u      - unsigned decimal
- *   %x, %X  - hexadecimal (lowercase/uppercase)
- *   %p      - pointer (like %016lx)
- *   %s      - string
- *   %c      - character
- *   %%      - literal percent
+ * Optimized for performance and standards compliance.
  *
- * Supported flags:
- *   0       - zero-pad
- *   -       - left-align
- *   width   - minimum field width
- *   l, ll   - long, long long modifier
+ * Features:
+ *  - Hex optimization (shifts vs division)
+ *  - Batch string copy (memcpy)
+ *  - Full alignment support ('-', width)
+ *  - Precision support ('%.N') for integers and strings
+ *  - Correct signed integer handling
  */
 
 #include <kairos/types.h>
+#include <kairos/string.h>
 #include <stdarg.h>
 
-/* Output a single character to buffer */
-static int putchar_buf(char *buf, size_t size, size_t pos, char c)
+struct buf_state {
+    char *ptr;
+    size_t size;
+    size_t pos;
+};
+
+static void emit_char(struct buf_state *state, char c)
 {
-    if (pos < size) {
-        buf[pos] = c;
+    if (state->pos < state->size) {
+        state->ptr[state->pos] = c;
     }
-    return 1;
+    state->pos++;
 }
 
-/* Output a string to buffer */
-static int puts_buf(char *buf, size_t size, size_t pos, const char *s)
+static void emit_str_len(struct buf_state *state, const char *s, size_t len)
 {
-    int written = 0;
-    while (*s) {
-        written += putchar_buf(buf, size, pos + written, *s++);
+    if (state->pos < state->size) {
+        size_t copy_len = len;
+        size_t remain = state->size - state->pos;
+        
+        if (copy_len > remain) {
+            copy_len = remain;
+        }
+        
+        memcpy(state->ptr + state->pos, s, copy_len);
     }
-    return written;
+    state->pos += len;
 }
 
-/* Convert unsigned integer to string */
-static int format_uint(char *buf, size_t size, size_t pos,
-                       unsigned long long val, int base, int width,
-                       int zero_pad, int uppercase)
+static void emit_pad(struct buf_state *state, int len, char pad_char)
 {
-    char tmp[24];
-    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    while (len-- > 0) {
+        emit_char(state, pad_char);
+    }
+}
+
+static void format_number(struct buf_state *state, unsigned long long val, 
+                          int base, int width, int precision, int flags)
+{
+    char tmp[66];
+    const char *digits = (flags & 2) ? "0123456789ABCDEF" : "0123456789abcdef";
     int i = 0;
-    int written = 0;
+    int left_align = (flags & 4);
+    
+    /* 
+     * Flag logic according to standard:
+     * - '0' (zero pad) is ignored if '-' (left align) is present.
+     * - '0' (zero pad) is ignored if precision is specified (for integers).
+     */
+    int zero_pad = (flags & 1) && !left_align && (precision == -1);
 
-    /* Generate digits in reverse */
+    /* Convert number */
     if (val == 0) {
-        tmp[i++] = '0';
+        /* "%.0d" of 0 prints nothing */
+        if (precision != 0) {
+            tmp[i++] = '0';
+        }
+    } else if (base == 16) {
+        while (val != 0) {
+            tmp[i++] = digits[val & 0xF];
+            val >>= 4;
+        }
     } else {
-        while (val > 0) {
+        while (val != 0) {
             tmp[i++] = digits[val % base];
             val /= base;
         }
     }
 
-    /* Padding */
-    char pad = zero_pad ? '0' : ' ';
-    while (width > i) {
-        written += putchar_buf(buf, size, pos + written, pad);
-        width--;
-    }
+    int len = i;
+    int zeros = 0;
 
-    /* Output digits in correct order */
-    while (i > 0) {
-        written += putchar_buf(buf, size, pos + written, tmp[--i]);
-    }
-
-    return written;
-}
-
-/* Convert signed integer to string */
-static int format_int(char *buf, size_t size, size_t pos,
-                      long long val, int width, int zero_pad)
-{
-    int written = 0;
-
-    if (val < 0) {
-        written += putchar_buf(buf, size, pos + written, '-');
-        val = -val;
-        if (width > 0) {
-            width--;
+    /* Calculate explicit precision zeros */
+    if (precision > len) {
+        zeros = precision - len;
+    } else if (precision == -1 && zero_pad) {
+        /* If no precision but zero_pad set, treat width as "precision" basically */
+        if (width > len) {
+            zeros = width - len;
         }
     }
+    
+    /* Total characters to output (excluding external padding spaces) */
+    int total_len = len + zeros;
+    
+    /* Calculate padding spaces */
+    int padding = width - total_len;
+    if (padding < 0) padding = 0;
 
-    written += format_uint(buf, size, pos + written,
-                           (unsigned long long)val, 10, width, zero_pad, 0);
-    return written;
+    /* Output: [Spaces] [Zeros] [Digits] [Spaces(if left)] */
+
+    if (!left_align) {
+        emit_pad(state, padding, ' ');
+    }
+
+    emit_pad(state, zeros, '0');
+
+    while (i > 0) {
+        emit_char(state, tmp[--i]);
+    }
+
+    if (left_align) {
+        emit_pad(state, padding, ' ');
+    }
 }
 
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 {
-    size_t pos = 0;
-    int written;
-
+    struct buf_state state = { buf, size, 0 };
+    
     while (*fmt) {
         if (*fmt != '%') {
-            pos += putchar_buf(buf, size, pos, *fmt++);
+            const char *start = fmt;
+            while (*fmt && *fmt != '%') {
+                fmt++;
+            }
+            emit_str_len(&state, start, fmt - start);
             continue;
         }
 
         fmt++; /* Skip '%' */
 
-        /* Handle %% */
         if (*fmt == '%') {
-            pos += putchar_buf(buf, size, pos, '%');
+            emit_char(&state, '%');
             fmt++;
             continue;
         }
 
         /* Parse flags */
-        int zero_pad = 0;
-        int left_align = 0;
-
-        while (*fmt == '0' || *fmt == '-') {
-            if (*fmt == '0') {
-                zero_pad = 1;
-            }
-            if (*fmt == '-') {
-                left_align = 1;
-            }
+        int flags = 0; // 1=zero_pad, 2=upper, 4=left
+        while (1) {
+            if (*fmt == '0') flags |= 1;
+            else if (*fmt == '-') flags |= 4;
+            else break;
             fmt++;
         }
-        (void)left_align; /* TODO: implement left alignment */
-
+        
         /* Parse width */
         int width = 0;
-        while (*fmt >= '0' && *fmt <= '9') {
-            width = width * 10 + (*fmt - '0');
+        if (*fmt == '*') {
+            width = va_arg(ap, int);
+            if (width < 0) {
+                width = -width;
+                flags |= 4;
+            }
             fmt++;
+        } else {
+            while (*fmt >= '0' && *fmt <= '9') {
+                width = width * 10 + (*fmt - '0');
+                fmt++;
+            }
+        }
+
+        /* Parse precision */
+        int precision = -1;
+        if (*fmt == '.') {
+            fmt++;
+            precision = 0;
+            if (*fmt == '*') {
+                precision = va_arg(ap, int);
+                if (precision < 0) precision = -1; // Negative precision = ignore
+                fmt++;
+            } else {
+                while (*fmt >= '0' && *fmt <= '9') {
+                    precision = precision * 10 + (*fmt - '0');
+                    fmt++;
+                }
+            }
         }
 
         /* Parse length modifier */
@@ -143,7 +193,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             fmt++;
         }
         if (*fmt == 'z') {
-            length = 1; /* size_t = unsigned long on 64-bit */
+            length = 1;
             fmt++;
         }
 
@@ -152,88 +202,100 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         case 'd':
         case 'i': {
             long long val;
-            if (length >= 2) {
-                val = va_arg(ap, long long);
-            } else if (length == 1) {
-                val = va_arg(ap, long);
+            if (length >= 2) val = va_arg(ap, long long);
+            else if (length == 1) val = va_arg(ap, long);
+            else val = va_arg(ap, int);
+
+            /* Handle sign manually */
+            if (val < 0) {
+                emit_char(&state, '-');
+                if (width > 0) width--;
+                format_number(&state, (unsigned long long)-(val + 1) + 1, 10, width, precision, flags);
             } else {
-                val = va_arg(ap, int);
+                format_number(&state, (unsigned long long)val, 10, width, precision, flags);
             }
-            written = format_int(buf, size, pos, val, width, zero_pad);
-            pos += written;
             break;
         }
 
         case 'u': {
             unsigned long long val;
-            if (length >= 2) {
-                val = va_arg(ap, unsigned long long);
-            } else if (length == 1) {
-                val = va_arg(ap, unsigned long);
-            } else {
-                val = va_arg(ap, unsigned int);
-            }
-            written = format_uint(buf, size, pos, val, 10, width, zero_pad, 0);
-            pos += written;
+            if (length >= 2) val = va_arg(ap, unsigned long long);
+            else if (length == 1) val = va_arg(ap, unsigned long);
+            else val = va_arg(ap, unsigned int);
+            format_number(&state, val, 10, width, precision, flags);
             break;
         }
 
         case 'x':
         case 'X': {
             unsigned long long val;
-            if (length >= 2) {
-                val = va_arg(ap, unsigned long long);
-            } else if (length == 1) {
-                val = va_arg(ap, unsigned long);
-            } else {
-                val = va_arg(ap, unsigned int);
-            }
-            written = format_uint(buf, size, pos, val, 16, width, zero_pad, *fmt == 'X');
-            pos += written;
+            if (length >= 2) val = va_arg(ap, unsigned long long);
+            else if (length == 1) val = va_arg(ap, unsigned long);
+            else val = va_arg(ap, unsigned int);
+            
+            if (*fmt == 'X') flags |= 2;
+            format_number(&state, val, 16, width, precision, flags);
             break;
         }
 
         case 'p': {
             void *ptr = va_arg(ap, void *);
-            pos += puts_buf(buf, size, pos, "0x");
-            written = format_uint(buf, size, pos, (unsigned long long)(uintptr_t)ptr,
-                                  16, 16, 1, 0);
-            pos += written;
+            emit_str_len(&state, "0x", 2);
+            /* %p implies 16 hex digits (usually), zero padded if we treat width/precision implicitly
+               But strict standard says implementation defined. 
+               We use width=16, precision=-1 (default), zero_pad=1 for nice pointer output. */
+            format_number(&state, (unsigned long long)(uintptr_t)ptr, 16, 16, -1, flags | 1);
             break;
         }
 
         case 's': {
             const char *s = va_arg(ap, const char *);
-            if (s == NULL) {
-                s = "(null)";
+            if (s == NULL) s = "(null)";
+            
+            /* Strlen logic with precision */
+            size_t len = 0;
+            const char *p = s;
+            while (*p && (precision == -1 || len < (size_t)precision)) {
+                len++;
+                p++;
             }
-            written = puts_buf(buf, size, pos, s);
-            pos += written;
+            
+            int padding = width - (int)len;
+            
+            if (!(flags & 4) && padding > 0) emit_pad(&state, padding, ' ');
+            emit_str_len(&state, s, len);
+            if ((flags & 4) && padding > 0) emit_pad(&state, padding, ' ');
+            
             break;
         }
 
         case 'c': {
             char c = (char)va_arg(ap, int);
-            pos += putchar_buf(buf, size, pos, c);
+            int padding = width - 1;
+             if (!(flags & 4) && padding > 0) emit_pad(&state, padding, ' ');
+            emit_char(&state, c);
+             if ((flags & 4) && padding > 0) emit_pad(&state, padding, ' ');
             break;
         }
 
         default:
-            /* Unknown specifier, output as-is */
-            pos += putchar_buf(buf, size, pos, '%');
-            pos += putchar_buf(buf, size, pos, *fmt);
+            emit_char(&state, '%');
+            emit_char(&state, *fmt);
             break;
         }
 
-        fmt++;
+        if (*fmt) fmt++;
     }
 
-    /* Null terminate */
-    if (size > 0) {
-        buf[pos < size ? pos : size - 1] = '\0';
+    if (state.size > 0) {
+        if (state.pos < state.size) {
+            state.ptr[state.pos] = '\0';
+        } else {
+            state.ptr[state.size - 1] = '\0';
+        }
     }
 
-    return (int)pos;
+    return (int)state.pos;
 }
 
 int vsprintf(char *buf, const char *fmt, va_list ap)
