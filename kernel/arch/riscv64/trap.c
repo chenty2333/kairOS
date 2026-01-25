@@ -1,358 +1,135 @@
 /**
- * trap.c - RISC-V 64 Trap Handling
- *
- * Implements the C portion of trap handling:
- * - Trap dispatch based on scause
- * - Exception handling
- * - Interrupt handling
- * - Syscall entry
+ * kernel/arch/riscv64/trap.c - RISC-V 64 Trap Handling
  */
 
-#include <kairos/types.h>
+#include <asm/arch.h>
 #include <kairos/arch.h>
-#include <kairos/printk.h>
-#include <kairos/syscall.h>
-#include <kairos/sched.h>
-#include <kairos/uaccess.h>
-#include <kairos/process.h>
 #include <kairos/mm.h>
+#include <kairos/printk.h>
+#include <kairos/process.h>
+#include <kairos/sched.h>
+#include <kairos/syscall.h>
+#include <kairos/types.h>
+#include <kairos/uaccess.h>
 
-/* RISC-V scause values */
-#define SCAUSE_INTERRUPT        (1UL << 63)
+#define EXC_BREAKPOINT 3
+#define EXC_ECALL_U 8
+#define EXC_ECALL_S 9
+#define EXC_INST_PAGE_FAULT 12
+#define EXC_LOAD_PAGE_FAULT 13
+#define EXC_STORE_PAGE_FAULT 15
+#define EXC_ILLEGAL_INST 2
 
-/* Exception codes (scause without interrupt bit) */
-#define EXC_INST_MISALIGNED     0
-#define EXC_INST_ACCESS         1
-#define EXC_ILLEGAL_INST        2
-#define EXC_BREAKPOINT          3
-#define EXC_LOAD_MISALIGNED     4
-#define EXC_LOAD_ACCESS         5
-#define EXC_STORE_MISALIGNED    6
-#define EXC_STORE_ACCESS        7
-#define EXC_ECALL_U             8
-#define EXC_ECALL_S             9
-#define EXC_INST_PAGE_FAULT     12
-#define EXC_LOAD_PAGE_FAULT     13
-#define EXC_STORE_PAGE_FAULT    15
+#define IRQ_S_SOFT 1
+#define IRQ_S_TIMER 5
+#define IRQ_S_EXT 9
 
-/* Interrupt codes */
-#define IRQ_S_SOFT              1
-#define IRQ_S_TIMER             5
-#define IRQ_S_EXT               9
-
-/* sstatus bits */
-#define SSTATUS_SPP             (1UL << 8)
-#define SSTATUS_SPIE            (1UL << 5)
-#define SSTATUS_SIE             (1UL << 1)
-#define SSTATUS_SUM             (1UL << 18)  /* Supervisor User Memory access */
-
-/**
- * Trap frame structure (must match trap.S)
- */
-struct trap_frame {
-    uint64_t ra;        /* x1 */
-    uint64_t sp;        /* x2 */
-    uint64_t gp;        /* x3 */
-    uint64_t tp;        /* x4 */
-    uint64_t t0;        /* x5 */
-    uint64_t t1;        /* x6 */
-    uint64_t t2;        /* x7 */
-    uint64_t s0;        /* x8 */
-    uint64_t s1;        /* x9 */
-    uint64_t a0;        /* x10 */
-    uint64_t a1;        /* x11 */
-    uint64_t a2;        /* x12 */
-    uint64_t a3;        /* x13 */
-    uint64_t a4;        /* x14 */
-    uint64_t a5;        /* x15 */
-    uint64_t a6;        /* x16 */
-    uint64_t a7;        /* x17 */
-    uint64_t s2;        /* x18 */
-    uint64_t s3;        /* x19 */
-    uint64_t s4;        /* x20 */
-    uint64_t s5;        /* x21 */
-    uint64_t s6;        /* x22 */
-    uint64_t s7;        /* x23 */
-    uint64_t s8;        /* x24 */
-    uint64_t s9;        /* x25 */
-    uint64_t s10;       /* x26 */
-    uint64_t s11;       /* x27 */
-    uint64_t t3;        /* x28 */
-    uint64_t t4;        /* x29 */
-    uint64_t t5;        /* x30 */
-    uint64_t t6;        /* x31 */
-    uint64_t sepc;
-    uint64_t sstatus;
-    uint64_t scause;
-    uint64_t stval;
-};
-
-/* External trap entry point */
 extern void trap_entry(void);
-
-/* Timer handler (implemented in timer.c) */
 void timer_interrupt_handler(void);
-
-/* Global tick counter */
 volatile uint64_t system_ticks = 0;
 
-/**
- * get_current_trapframe - Get the current trap frame
- *
- * Used by fork to copy parent's trap frame to child.
- */
-struct trap_frame *get_current_trapframe(void)
-{
+struct trap_frame *get_current_trapframe(void) {
     return arch_get_percpu()->current_tf;
 }
 
-/**
- * Exception names for debugging
- */
-static const char *exception_names[] = {
-    [EXC_INST_MISALIGNED]   = "Instruction address misaligned",
-    [EXC_INST_ACCESS]       = "Instruction access fault",
-    [EXC_ILLEGAL_INST]      = "Illegal instruction",
-    [EXC_BREAKPOINT]        = "Breakpoint",
-    [EXC_LOAD_MISALIGNED]   = "Load address misaligned",
-    [EXC_LOAD_ACCESS]       = "Load access fault",
-    [EXC_STORE_MISALIGNED]  = "Store/AMO address misaligned",
-    [EXC_STORE_ACCESS]      = "Store/AMO access fault",
-    [EXC_ECALL_U]           = "Environment call from U-mode",
-    [EXC_ECALL_S]           = "Environment call from S-mode",
-    [10]                    = "Reserved",
-    [11]                    = "Reserved",
-    [EXC_INST_PAGE_FAULT]   = "Instruction page fault",
-    [EXC_LOAD_PAGE_FAULT]   = "Load page fault",
-    [14]                    = "Reserved",
-    [EXC_STORE_PAGE_FAULT]  = "Store/AMO page fault",
-};
+static const char *exc_names[] = {
+    [0] = "Misaligned instruction", [1] = "Instruction access fault",
+    [2] = "Illegal instruction",    [3] = "Breakpoint",
+    [8] = "Ecall from U-mode",      [9] = "Ecall from S-mode",
+    [12] = "Inst page fault",       [13] = "Load page fault",
+    [15] = "Store page fault"};
 
-/**
- * handle_exception - Handle synchronous exception
- */
-static void handle_exception(struct trap_frame *tf)
-{
+static void handle_exception(struct trap_frame *tf) {
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
-    bool from_user = (tf->sstatus & SSTATUS_SPP) == 0;
+    bool from_user = !(tf->sstatus & SSTATUS_SPP);
 
-    switch (cause) {
-    case EXC_ECALL_U:
-    case EXC_ECALL_S:
-        /* System call */
-        tf->a0 = syscall_dispatch(tf->a7,
-                                  tf->a0, tf->a1, tf->a2,
-                                  tf->a3, tf->a4, tf->a5);
-        /* Advance PC past ecall instruction */
+    if (cause == EXC_ECALL_U || cause == EXC_ECALL_S) {
+        tf->tf_a0 = syscall_dispatch(tf->tf_a7, tf->tf_a0, tf->tf_a1, tf->tf_a2,
+                                     tf->tf_a3, tf->tf_a4, tf->tf_a5);
         tf->sepc += 4;
-        break;
-
-    case EXC_BREAKPOINT:
-        pr_info("Breakpoint at %p\n", (void *)tf->sepc);
-        /* Check if it's a compressed instruction (2 bytes) or regular (4 bytes) */
-        /* Compressed instructions have bits [1:0] != 0b11 */
-        {
-            uint16_t inst;
-            if (copy_from_user(&inst, (void *)tf->sepc, sizeof(inst)) != 0) {
-                pr_err("Failed to read instruction at %p\n", (void *)tf->sepc);
-                /* TODO: Send SIGSEGV */
-                panic("User breakpoint access fault");
-            }
-
-            if ((inst & 0x3) == 0x3) {
-                tf->sepc += 4;  /* 32-bit instruction */
-            } else {
-                tf->sepc += 2;  /* 16-bit compressed instruction */
-            }
-        }
-        break;
-
-    case EXC_INST_PAGE_FAULT:
-    case EXC_LOAD_PAGE_FAULT:
-    case EXC_STORE_PAGE_FAULT:
-        /* Check for exception table fixup (e.g. safe user access) */
-        if (!from_user) {
-            unsigned long fixup = search_exception_table(tf->sepc);
-            if (fixup) {
-                tf->sepc = fixup;
-                return;
-            }
-        }
-
-        /* Demand Paging: Handle user space page faults */
-        struct process *curr = proc_current();
-        if (curr && curr->mm) {
-            uint32_t flags = 0;
-            if (cause == EXC_STORE_PAGE_FAULT) flags |= PTE_WRITE;
-            if (cause == EXC_INST_PAGE_FAULT) flags |= PTE_EXEC;
-
-            if (mm_handle_fault(curr->mm, tf->stval, flags) == 0) {
-                /* Successfully handled (allocated page) */
-                return;
-            }
-        }
-
-        /* Page fault - unhandled */
-        pr_err("Page fault at %p, accessing %p\n",
-               (void *)tf->sepc, (void *)tf->stval);
-        if (!from_user) {
-            panic("Kernel page fault!");
-        }
-        /* TODO: Send SIGSEGV to user process */
-        panic("User page fault (no signal handling yet)");
-        break;
-
-    case EXC_ILLEGAL_INST:
-        pr_err("Illegal instruction at %p\n", (void *)tf->sepc);
-        if (!from_user) {
-            panic("Illegal instruction in kernel!");
-        }
-        /* TODO: Send SIGILL to user process */
-        panic("User illegal instruction (no signal handling yet)");
-        break;
-
-    default:
-        pr_err("Unhandled exception: %s (cause=%lu)\n",
-               cause < 16 ? exception_names[cause] : "Unknown",
-               cause);
-        pr_err("  sepc:    %p\n", (void *)tf->sepc);
-        pr_err("  stval:   %p\n", (void *)tf->stval);
-        pr_err("  sstatus: 0x%lx\n", tf->sstatus);
-        panic("Unhandled exception");
+        return;
     }
+
+    if (cause == EXC_BREAKPOINT) {
+        uint16_t inst;
+        if (copy_from_user(&inst, (void *)tf->sepc, 2))
+            panic("bp read fail");
+        tf->sepc += ((inst & 0x3) == 0x3) ? 4 : 2;
+        return;
+    }
+
+    if (cause >= EXC_INST_PAGE_FAULT && cause <= EXC_STORE_PAGE_FAULT) {
+        if (!from_user) {
+            unsigned long fix = search_exception_table(tf->sepc);
+            if (fix) {
+                tf->sepc = fix;
+                return;
+            }
+        }
+        struct process *cur = proc_current();
+        if (cur && cur->mm) {
+            uint32_t f = (cause == EXC_STORE_PAGE_FAULT)  ? PTE_WRITE
+                         : (cause == EXC_INST_PAGE_FAULT) ? PTE_EXEC
+                                                          : 0;
+            if (mm_handle_fault(cur->mm, tf->stval, f) == 0)
+                return;
+        }
+    }
+
+    pr_err("Exception: %s (cause=%lu, epc=%p, val=%p)\n",
+           cause < 16 ? exc_names[cause] : "Unknown", cause, (void *)tf->sepc,
+           (void *)tf->stval);
+    panic(from_user ? "User exception" : "Kernel exception");
 }
 
-/**
- * handle_interrupt - Handle asynchronous interrupt
- */
-static void handle_interrupt(struct trap_frame *tf)
-{
+static void handle_interrupt(struct trap_frame *tf) {
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
-
-    switch (cause) {
-    case IRQ_S_TIMER:
+    if (cause == IRQ_S_TIMER)
         timer_interrupt_handler();
-        break;
-
-    case IRQ_S_SOFT:
-        /* Software interrupt (IPI) */
-        /* Clear SSIP (Supervisor Software Interrupt Pending) bit */
-        __asm__ __volatile__("csrc sip, %0" :: "r"(1UL << 1));
-        
-        /* Handle IPIs based on pending mask */
+    else if (cause == IRQ_S_SOFT) {
+        __asm__ __volatile__("csrc sip, %0" ::"r"(1UL << 1));
         struct percpu_data *cpu = arch_get_percpu();
-        if (cpu) {
-            /* Atomically read and clear pending mask */
-            int pending = __sync_fetch_and_and(&cpu->ipi_pending_mask, 0);
-
-            if (pending & (1 << IPI_RESCHEDULE)) {
-                cpu->resched_needed = true;
-            }
-
-            if (pending & (1 << IPI_CALL)) {
-                /* TODO: Execute function call */
-            }
-
-            if (pending & (1 << IPI_STOP)) {
-                pr_info("CPU %d stopping...\n", arch_cpu_id());
-                while (1) {
-                    arch_cpu_halt();
-                }
-            }
+        int pending = __sync_fetch_and_and(&cpu->ipi_pending_mask, 0);
+        if (pending & (1 << IPI_RESCHEDULE))
+            cpu->resched_needed = true;
+        if (pending & (1 << IPI_STOP)) {
+            while (1)
+                arch_cpu_halt();
         }
-        break;
-
-    case IRQ_S_EXT:
-        /* External interrupt - will be handled by device drivers */
-        pr_debug("External interrupt\n");
-        break;
-
-    default:
-        pr_warn("Unknown interrupt: %lu\n", cause);
-        break;
     }
 }
 
-/**
- * trap_dispatch - Main trap dispatcher (called from trap.S)
- */
-void trap_dispatch(struct trap_frame *tf)
-{
-    /*
-     * Enable SUM (Supervisor User Memory access) is now handled by uaccess primitives.
-     * We no longer enable it globally here, improving security and performance for
-     * simple interrupts (timer/IPI).
-     */
-
-    /* Save trap frame pointer for fork (per-cpu safe) */
+void trap_dispatch(struct trap_frame *tf) {
     struct percpu_data *cpu = arch_get_percpu();
-    struct trap_frame *old_tf = cpu->current_tf;
+    struct trap_frame *old = cpu->current_tf;
     cpu->current_tf = tf;
-
-    if (tf->scause & SCAUSE_INTERRUPT) {
+    if (tf->scause & SCAUSE_INTERRUPT)
         handle_interrupt(tf);
-    } else {
+    else
         handle_exception(tf);
-    }
-
-    cpu->current_tf = old_tf;
+    cpu->current_tf = old;
 }
 
-/**
- * arch_trap_init - Initialize trap handling
- */
-void arch_trap_init(void)
-{
-    /* Set trap vector */
+void arch_trap_init(void) {
     __asm__ __volatile__(
-        "csrw stvec, %0"
-        :: "r"(trap_entry)
-    );
-
-    /* Clear sscratch (indicates we're in kernel mode) */
-    __asm__ __volatile__("csrw sscratch, zero");
-
-    /* Enable supervisor interrupts in sie */
-    uint64_t sie = (1UL << IRQ_S_SOFT) |
-                   (1UL << IRQ_S_TIMER) |
-                   (1UL << IRQ_S_EXT);
-    __asm__ __volatile__(
-        "csrw sie, %0"
-        :: "r"(sie)
-    );
-
-    pr_info("Trap: initialized, stvec=%p\n", (void *)trap_entry);
+        "csrw stvec, %0\ncsrw sscratch, zero" ::"r"(trap_entry));
+    uint64_t sie =
+        (1UL << IRQ_S_SOFT) | (1UL << IRQ_S_TIMER) | (1UL << IRQ_S_EXT);
+    __asm__ __volatile__("csrw sie, %0" ::"r"(sie));
+    pr_info("Trap: initialized\n");
 }
 
-/**
- * arch_dump_regs - Dump register state for debugging
- */
-void arch_dump_regs(struct arch_context *ctx)
-{
-    /* TODO: Implement when arch_context is defined */
-    (void)ctx;
-    pr_info("Register dump not yet implemented\n");
-}
-
-/**
- * arch_backtrace - Print stack backtrace
- */
-void arch_backtrace(void)
-{
+void arch_backtrace(void) {
     uint64_t fp;
     __asm__ __volatile__("mv %0, s0" : "=r"(fp));
-
     pr_info("Backtrace:\n");
-
-    for (int i = 0; i < 16 && fp != 0; i++) {
-        uint64_t ra = *(uint64_t *)(fp - 8);
-        uint64_t prev_fp = *(uint64_t *)(fp - 16);
-
+    for (int i = 0; i < 16 && fp; i++) {
+        uint64_t ra = *(uint64_t *)(fp - 8), prev = *(uint64_t *)(fp - 16);
         pr_info("  [%d] %p\n", i, (void *)ra);
-
-        if (prev_fp <= fp) {
-            break;  /* Stack grows down, so prev_fp should be > fp */
-        }
-        fp = prev_fp;
+        if (prev <= fp)
+            break;
+        fp = prev;
     }
 }
+
+void arch_dump_regs(struct arch_context *ctx __attribute__((unused))) {}
