@@ -1,24 +1,5 @@
 /**
  * mmu.c - RISC-V 64 MMU (Sv39) Implementation
- *
- * Sv39 uses a 3-level page table with 39-bit virtual addresses:
- * - VPN[2] (9 bits): Level 2 page table index
- * - VPN[1] (9 bits): Level 1 page table index
- * - VPN[0] (9 bits): Level 0 page table index
- * - Offset (12 bits): Page offset
- *
- * Page Table Entry format:
- * [63:54] Reserved
- * [53:10] PPN (Physical Page Number)
- * [9:8]   RSW (Reserved for Software)
- * [7]     D (Dirty)
- * [6]     A (Accessed)
- * [5]     G (Global)
- * [4]     U (User)
- * [3]     X (Execute)
- * [2]     W (Write)
- * [1]     R (Read)
- * [0]     V (Valid)
  */
 
 #include <kairos/types.h>
@@ -27,499 +8,148 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
-/* Page size and shifts */
 #define PAGE_SIZE       4096
 #define PAGE_SHIFT      12
-#define PAGE_MASK       (~(PAGE_SIZE - 1))
-
-/* Sv39 parameters */
-#define PTES_PER_PAGE   512         /* 4KB / 8 bytes per PTE */
-#define PTE_SHIFT       3           /* log2(8) - PTE size */
+#define PTES_PER_PAGE   512
 #define VPN_BITS        9
-#define VPN_MASK        ((1UL << VPN_BITS) - 1)
+#define VPN_MASK        (PTES_PER_PAGE - 1)
 #define LEVELS          3
 
-/* Virtual address breakdown */
-#define VA_OFFSET_MASK  ((1UL << PAGE_SHIFT) - 1)
-#define VA_VPN0_SHIFT   12
-#define VA_VPN1_SHIFT   21
-#define VA_VPN2_SHIFT   30
+#define PTE_V (1UL<<0)
+#define PTE_R (1UL<<1)
+#define PTE_W (1UL<<2)
+#define PTE_X (1UL<<3)
+#define PTE_U (1UL<<4)
+#define PTE_G (1UL<<5)
+#define PTE_A (1UL<<6)
+#define PTE_D (1UL<<7)
+#define PTE_PPN_SHIFT 10
 
-/* PTE flags */
-#define PTE_V           (1UL << 0)  /* Valid */
-#define PTE_R           (1UL << 1)  /* Readable */
-#define PTE_W           (1UL << 2)  /* Writable */
-#define PTE_X           (1UL << 3)  /* Executable */
-#define PTE_U           (1UL << 4)  /* User accessible */
-#define PTE_G           (1UL << 5)  /* Global */
-#define PTE_A           (1UL << 6)  /* Accessed */
-#define PTE_D           (1UL << 7)  /* Dirty */
-
-/* PPN extraction */
-#define PTE_PPN_SHIFT   10
-#define PTE_PPN_MASK    (0xFFFFFFFFFFFUL << PTE_PPN_SHIFT)
-
-/* SATP register format */
 #define SATP_MODE_SV39  (8UL << 60)
-#define SATP_ASID_SHIFT 44
-#define SATP_PPN_MASK   ((1UL << 44) - 1)
-
-/* Kernel virtual address space */
-#define KERNEL_BASE     0xFFFFFFFF80000000UL
-#define PHYS_BASE       0x80000000UL
-
-/* Forward declarations */
-static uint64_t *pte_to_pa(uint64_t pte);
-static uint64_t pa_to_pte(paddr_t pa);
-
-/* Kernel page table (physical address) */
 static paddr_t kernel_pgdir;
+extern char _kernel_start[], _kernel_end[];
 
-/* External symbols */
-extern char _kernel_start[];
-extern char _kernel_end[];
+/* --- Internal Helpers --- */
 
-/**
- * Extract VPN[level] from virtual address
- */
-static inline size_t va_to_vpn(vaddr_t va, int level)
-{
-    size_t shift = PAGE_SHIFT + (level * VPN_BITS);
-    return (va >> shift) & VPN_MASK;
+static inline size_t va_to_vpn(vaddr_t va, int level) {
+    return (va >> (PAGE_SHIFT + (level * VPN_BITS))) & VPN_MASK;
 }
 
-/**
- * Convert PTE to physical address of next level table or page
- */
-static uint64_t *pte_to_pa(uint64_t pte)
-{
+static inline uint64_t *pte_to_pa(uint64_t pte) {
     return (uint64_t *)((pte >> PTE_PPN_SHIFT) << PAGE_SHIFT);
 }
 
-/**
- * Convert physical address to PTE format
- */
-static uint64_t pa_to_pte(paddr_t pa)
-{
+static inline uint64_t pa_to_pte(paddr_t pa) {
     return ((pa >> PAGE_SHIFT) << PTE_PPN_SHIFT);
 }
 
-/**
- * Check if PTE is a leaf (has R, W, or X permission)
- */
-static inline bool pte_is_leaf(uint64_t pte)
-{
-    return (pte & (PTE_R | PTE_W | PTE_X)) != 0;
-}
-
-/**
- * Allocate a page table page
- */
-static paddr_t alloc_pgtable(void)
-{
+static paddr_t pt_alloc(void) {
     paddr_t pa = pmm_alloc_page();
-    if (pa == 0) {
-        return 0;
-    }
-
-    /* Zero the page table */
-    memset((void *)pa, 0, PAGE_SIZE);
-
+    if (pa) memset((void *)pa, 0, PAGE_SIZE);
     return pa;
 }
 
-/**
- * Free a page table page
- */
-static void free_pgtable(paddr_t pa)
-{
-    pmm_free_page(pa);
+static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
+    uint64_t *pt = (uint64_t *)table;
+    for (int i = LEVELS - 1; i > 0; i--) {
+        size_t idx = va_to_vpn(va, i);
+        if (!(pt[idx] & PTE_V)) {
+            if (!create) return NULL;
+            paddr_t next = pt_alloc();
+            if (!next) return NULL;
+            pt[idx] = pa_to_pte(next) | PTE_V;
+        }
+        pt = pte_to_pa(pt[idx]);
+    }
+    return &pt[va_to_vpn(va, 0)];
 }
 
-/**
- * Walk the page table, optionally creating entries
- *
- * @table: Physical address of root page table
- * @va: Virtual address to look up
- * @create: If true, create missing page table levels
- *
- * Returns pointer to PTE, or NULL if not found/cannot create
- */
-static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create)
-{
-    uint64_t *pgtable = (uint64_t *)table;
-
-    for (int level = LEVELS - 1; level > 0; level--) {
-        size_t idx = va_to_vpn(va, level);
-        uint64_t pte = pgtable[idx];
-
-        if (!(pte & PTE_V)) {
-            if (!create) {
-                return NULL;
-            }
-
-            /* Allocate new page table level */
-            paddr_t new_table = alloc_pgtable();
-            if (new_table == 0) {
-                return NULL;
-            }
-
-            pgtable[idx] = pa_to_pte(new_table) | PTE_V;
-            pgtable = (uint64_t *)new_table;
-        } else if (pte_is_leaf(pte)) {
-            /* Huge page - not supported in this simple implementation */
-            return NULL;
-        } else {
-            pgtable = pte_to_pa(pte);
-        }
-    }
-
-    /* Return pointer to leaf PTE */
-    size_t idx = va_to_vpn(va, 0);
-    return &pgtable[idx];
+static uint64_t flags_to_pte(uint64_t f) {
+    uint64_t p = PTE_V | PTE_A | PTE_D;
+    if (f & PTE_READ)  p |= PTE_R;
+    if (f & PTE_WRITE) p |= PTE_W;
+    if (f & PTE_EXEC)  p |= PTE_X;
+    if (f & PTE_USER)  p |= PTE_U;
+    if (f & PTE_GLOBAL)p |= PTE_G;
+    return p;
 }
 
-/**
- * Convert generic flags to RISC-V PTE flags
- */
-static uint64_t flags_to_pte(uint64_t flags)
-{
-    uint64_t pte_flags = PTE_V | PTE_A | PTE_D;
-
-    if (flags & PTE_READ) {
-        pte_flags |= PTE_R;
+static void pt_free_recursive(paddr_t table, int level) {
+    uint64_t *pt = (uint64_t *)table;
+    for (int i = 0; i < (level > 0 ? PTES_PER_PAGE : 0); i++) {
+        if ((pt[i] & PTE_V) && !(pt[i] & (PTE_R|PTE_W|PTE_X)))
+            pt_free_recursive((paddr_t)pte_to_pa(pt[i]), level - 1);
     }
-    if (flags & PTE_WRITE) {
-        pte_flags |= PTE_W;
-    }
-    if (flags & PTE_EXEC) {
-        pte_flags |= PTE_X;
-    }
-    if (flags & PTE_USER) {
-        pte_flags |= PTE_U;
-    }
-    if (flags & PTE_GLOBAL) {
-        pte_flags |= PTE_G;
-    }
-
-    return pte_flags;
+    pmm_free_page(table);
 }
 
-/*
- * ============================================================
- *                   Public MMU Interface
- * ============================================================
- */
+static int map_region(paddr_t root, vaddr_t va, paddr_t pa, size_t sz, uint64_t f) {
+    for (size_t off = 0; off < sz; off += PAGE_SIZE)
+        if (arch_mmu_map(root, va + off, pa + off, f) < 0) return -1;
+    return 0;
+}
 
-/**
- * arch_mmu_init - Initialize the MMU
- *
- * Creates the kernel page table and enables paging.
- */
-void arch_mmu_init(void)
-{
-    /* Allocate root page table */
-    kernel_pgdir = alloc_pgtable();
-    if (kernel_pgdir == 0) {
-        panic("arch_mmu_init: failed to allocate kernel page table");
-    }
+/* --- Public Interface --- */
 
-    pr_info("MMU: Kernel page table at %p\n", (void *)kernel_pgdir);
+void arch_mmu_init(void) {
+    if (!(kernel_pgdir = pt_alloc())) panic("mmu: init failed");
 
-    /* Identity map kernel memory */
-    paddr_t kernel_start = ALIGN_DOWN((paddr_t)_kernel_start, PAGE_SIZE);
-    paddr_t kernel_end_addr = ALIGN_UP((paddr_t)_kernel_end, PAGE_SIZE);
+    map_region(kernel_pgdir, (vaddr_t)_kernel_start, (paddr_t)_kernel_start,
+               ALIGN_UP((paddr_t)_kernel_end, PAGE_SIZE) - (paddr_t)_kernel_start,
+               PTE_READ | PTE_WRITE | PTE_EXEC);
+    map_region(kernel_pgdir, 0x80000000UL, 0x80000000UL, 256UL << 20, PTE_READ | PTE_WRITE);
+    map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 64 << 10, PTE_READ | PTE_WRITE);
 
-    pr_info("MMU: Mapping kernel %p - %p\n",
-            (void *)kernel_start, (void *)kernel_end_addr);
-
-    for (paddr_t pa = kernel_start; pa < kernel_end_addr; pa += PAGE_SIZE) {
-        /* Identity map for now (VA == PA) */
-        int ret = arch_mmu_map(kernel_pgdir, pa, pa,
-                               PTE_READ | PTE_WRITE | PTE_EXEC);
-        if (ret < 0) {
-            panic("arch_mmu_init: failed to map kernel page %p", (void *)pa);
-        }
-    }
-
-    /* Map physical memory for kernel use (256MB to match QEMU default) */
-    paddr_t phys_start = 0x80000000UL;
-    paddr_t phys_end = phys_start + (256UL << 20);  /* 256 MB */
-
-    pr_info("MMU: Mapping physical memory %p - %p\n",
-            (void *)phys_start, (void *)phys_end);
-
-    for (paddr_t pa = phys_start; pa < phys_end; pa += PAGE_SIZE) {
-        /* Skip if already mapped as kernel */
-        if (pa >= kernel_start && pa < kernel_end_addr) {
-            continue;
-        }
-
-        int ret = arch_mmu_map(kernel_pgdir, pa, pa,
-                               PTE_READ | PTE_WRITE);
-        if (ret < 0) {
-            panic("arch_mmu_init: failed to map physical memory at %p",
-                  (void *)pa);
-        }
-    }
-
-    /* Map MMIO device region (RISC-V QEMU virt machine) */
-    paddr_t mmio_start = 0x10000000UL;  /* VirtIO MMIO base */
-    paddr_t mmio_end = 0x10010000UL;    /* 64KB region */
-
-    pr_info("MMU: Mapping MMIO devices %p - %p\n",
-            (void *)mmio_start, (void *)mmio_end);
-
-    for (paddr_t pa = mmio_start; pa < mmio_end; pa += PAGE_SIZE) {
-        int ret = arch_mmu_map(kernel_pgdir, pa, pa,
-                               PTE_READ | PTE_WRITE);
-        if (ret < 0) {
-            panic("arch_mmu_init: failed to map MMIO at %p", (void *)pa);
-        }
-    }
-
-    /* Enable paging */
     arch_mmu_switch(kernel_pgdir);
-
     pr_info("MMU: Sv39 paging enabled\n");
 }
 
-/**
- * arch_mmu_create_table - Create a new page table
- *
- * Returns physical address of new page table.
- *
- * Copies kernel mappings from the kernel page table to the new table.
- * Since we use identity mapping (VA == PA) for the kernel at 0x80000000,
- * we need to copy the relevant L2 entries.
- */
-paddr_t arch_mmu_create_table(void)
-{
-    paddr_t table = alloc_pgtable();
-    if (table == 0) {
-        return 0;
-    }
-
-    uint64_t *new_table = (uint64_t *)table;
-    uint64_t *kern_table = (uint64_t *)kernel_pgdir;
-
-    /*
-     * Copy all kernel mappings.
-     *
-     * In Sv39, the L2 page table has 512 entries, each covering 1GB.
-     * Entry i covers VA [i*1GB, (i+1)*1GB).
-     *
-     * For identity-mapped kernel at 0x80000000 (2GB mark):
-     * - VPN[2] = 2 covers 2GB - 3GB
-     *
-     * We copy all non-zero entries from the kernel page table that
-     * correspond to kernel-space mappings. For simplicity, we copy
-     * all entries since user space doesn't use these high addresses.
-     */
-    memcpy(new_table, kern_table, PAGE_SIZE);
-
+paddr_t arch_mmu_create_table(void) {
+    paddr_t table = pt_alloc();
+    if (table) memcpy((void *)table, (void *)kernel_pgdir, PAGE_SIZE);
     return table;
 }
 
-/**
- * arch_mmu_destroy_table - Destroy a page table
- * @table: Physical address of page table to destroy
- *
- * Frees all user-space page table pages. Does not free kernel mappings.
- */
-void arch_mmu_destroy_table(paddr_t table)
-{
-    if (table == 0 || table == kernel_pgdir) {
-        return;
-    }
-
-    uint64_t *l2 = (uint64_t *)table;
-
-    /* Only free user space entries (lower half) */
-    for (int i = 0; i < PTES_PER_PAGE / 2; i++) {
-        if (!(l2[i] & PTE_V)) {
-            continue;
-        }
-
-        if (pte_is_leaf(l2[i])) {
-            continue;  /* Huge page, just skip */
-        }
-
-        uint64_t *l1 = pte_to_pa(l2[i]);
-        for (int j = 0; j < PTES_PER_PAGE; j++) {
-            if (!(l1[j] & PTE_V)) {
-                continue;
-            }
-
-            if (pte_is_leaf(l1[j])) {
-                continue;
-            }
-
-            uint64_t *l0 = pte_to_pa(l1[j]);
-            free_pgtable((paddr_t)l0);
-        }
-
-        free_pgtable((paddr_t)l1);
-    }
-
-    free_pgtable(table);
+void arch_mmu_destroy_table(paddr_t table) {
+    if (table && table != kernel_pgdir) pt_free_recursive(table, LEVELS - 1);
 }
 
-/**
- * arch_mmu_map - Map a virtual address to a physical address
- * @table: Physical address of page table
- * @va: Virtual address to map
- * @pa: Physical address to map to
- * @flags: Mapping flags (PTE_READ, PTE_WRITE, etc.)
- *
- * Returns 0 on success, negative error on failure.
- */
-int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags)
-{
+int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
     uint64_t *pte = walk_pgtable(table, va, true);
-    if (!pte) {
-        return -ENOMEM;
-    }
-
-    if (*pte & PTE_V) {
-        /* Already mapped - check if same mapping */
-        if (pte_to_pa(*pte) == (uint64_t *)pa) {
-            /* Same page, just update flags */
-            *pte = pa_to_pte(pa) | flags_to_pte(flags);
-            return 0;
-        }
-        return -EEXIST;
-    }
-
+    if (!pte) return -ENOMEM;
     *pte = pa_to_pte(pa) | flags_to_pte(flags);
     return 0;
 }
 
-/**
- * arch_mmu_unmap - Unmap a virtual address
- * @table: Physical address of page table
- * @va: Virtual address to unmap
- *
- * Returns 0 on success, negative error on failure.
- */
-int arch_mmu_unmap(paddr_t table, vaddr_t va)
-{
+int arch_mmu_unmap(paddr_t table, vaddr_t va) {
     uint64_t *pte = walk_pgtable(table, va, false);
-    if (!pte || !(*pte & PTE_V)) {
-        return -ENOENT;
-    }
-
+    if (!pte || !(*pte & PTE_V)) return -ENOENT;
     *pte = 0;
     arch_mmu_flush_tlb_page(va);
     return 0;
 }
 
-/**
- * arch_mmu_translate - Translate virtual address to physical
- * @table: Physical address of page table
- * @va: Virtual address to translate
- *
- * Returns physical address, or 0 if not mapped.
- */
-paddr_t arch_mmu_translate(paddr_t table, vaddr_t va)
-{
+paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
     uint64_t *pte = walk_pgtable(table, va, false);
-    if (!pte || !(*pte & PTE_V)) {
-        return 0;
-    }
-
-    paddr_t pa = (paddr_t)pte_to_pa(*pte);
-    return pa | (va & VA_OFFSET_MASK);
+    return (pte && (*pte & PTE_V)) ? (paddr_t)pte_to_pa(*pte) | (va & (PAGE_SIZE-1)) : 0;
 }
 
-/**
- * arch_mmu_switch - Switch to a new address space
- * @table: Physical address of page table to switch to
- */
-void arch_mmu_switch(paddr_t table)
-{
+void arch_mmu_switch(paddr_t table) {
     uint64_t satp = SATP_MODE_SV39 | (table >> PAGE_SHIFT);
-    __asm__ __volatile__(
-        "csrw satp, %0\n"
-        "sfence.vma"
-        :: "r"(satp)
-        : "memory"
-    );
+    __asm__ __volatile__("csrw satp, %0\nsfence.vma":: "r"(satp): "memory");
 }
 
-/**
- * arch_mmu_current - Get current page table
- *
- * Returns physical address of current page table.
- */
-paddr_t arch_mmu_current(void)
-{
+paddr_t arch_mmu_current(void) {
     uint64_t satp;
     __asm__ __volatile__("csrr %0, satp" : "=r"(satp));
-    return (satp & SATP_PPN_MASK) << PAGE_SHIFT;
+    return (satp & ((1UL << 44) - 1)) << PAGE_SHIFT;
 }
 
-/**
- * arch_mmu_flush_tlb - Flush entire TLB
- */
-void arch_mmu_flush_tlb(void)
-{
-    __asm__ __volatile__("sfence.vma" ::: "memory");
-}
+void arch_mmu_flush_tlb(void) { __asm__ __volatile__("sfence.vma" ::: "memory"); }
+void arch_mmu_flush_tlb_page(vaddr_t va) { __asm__ __volatile__("sfence.vma %0" :: "r"(va) : "memory"); }
 
-/**
- * arch_mmu_flush_tlb_page - Flush TLB for a single page
- * @va: Virtual address of page to flush
- */
-void arch_mmu_flush_tlb_page(vaddr_t va)
-{
-    __asm__ __volatile__("sfence.vma %0" :: "r"(va) : "memory");
-}
-
-/*
- * ============================================================
- *               Kernel Virtual Memory Helpers
- * ============================================================
- */
-
-/**
- * phys_to_virt - Convert physical address to kernel virtual address
- *
- * For now, we use identity mapping so VA == PA.
- */
-void *phys_to_virt(paddr_t addr)
-{
-    return (void *)addr;
-}
-
-/**
- * virt_to_phys - Convert kernel virtual address to physical
- */
-paddr_t virt_to_phys(void *addr)
-{
-    return (paddr_t)addr;
-}
-
-/**
- * ioremap - Map device memory into kernel virtual space
- * @phys: Physical address of device
- * @size: Size of region to map
- *
- * Returns virtual address of mapped region.
- */
-void *ioremap(paddr_t phys, size_t size)
-{
-    /* For now, with identity mapping, just return the physical address */
-    (void)size;
-    return (void *)phys;
-}
-
-/**
- * iounmap - Unmap device memory
- * @virt: Virtual address to unmap
- */
-void iounmap(void *virt)
-{
-    /* Nothing to do with identity mapping */
-    (void)virt;
-}
+/* --- KVM Helpers --- */
+void *phys_to_virt(paddr_t addr) { return (void *)addr; }
+paddr_t virt_to_phys(void *addr) { return (paddr_t)addr; }
+void *ioremap(paddr_t phys, size_t size) { return (void *)phys; }
+void iounmap(void *virt) {}

@@ -1,13 +1,5 @@
 /**
  * buddy.c - Buddy System Physical Memory Allocator
- *
- * Implements a binary buddy allocator for physical page management.
- * Supports allocation of 2^order contiguous pages (order 0-10).
- *
- * The buddy system works by:
- * 1. Maintaining free lists for each order (0 to MAX_ORDER-1)
- * 2. When allocating, finding the smallest sufficient block and splitting
- * 3. When freeing, coalescing adjacent buddy blocks into larger ones
  */
 
 #include <kairos/types.h>
@@ -15,520 +7,252 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/config.h>
+#include <kairos/arch.h>
 
-/* Page size constants */
 #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
 #define PAGE_SIZE       CONFIG_PAGE_SIZE
-#define PAGE_MASK       (~(PAGE_SIZE - 1))
 
-/* Maximum physical memory we support (1GB) */
 #define MAX_PHYS_MEM    (1UL << 30)
 #define MAX_PAGES       (MAX_PHYS_MEM / PAGE_SIZE)
 
-/* Free lists for each order */
+#define PCP_BATCH       16
+#define PCP_HIGH        64
+
 static struct list_head free_lists[MAX_ORDER];
-
-/* Page array - one struct page per physical page */
 static struct page *page_array;
-static size_t page_array_pages;  /* Number of pages used by page array */
-
-/* Memory range */
-static paddr_t mem_start;
-static paddr_t mem_end;
-static size_t total_pages;
-static size_t num_free_pages;
-
-/* Lock for allocator */
+static paddr_t mem_start, mem_end;
+static size_t total_pages, num_free_pages;
 static spinlock_t buddy_lock;
 
-/* External symbols from linker script */
-extern char _kernel_start[];
-extern char _kernel_end[];
+static struct pcp_area {
+    struct list_head list;
+    int count;
+} pcp_areas[CONFIG_MAX_CPUS];
 
-/**
- * page_to_phys - Convert page struct to physical address
- */
-paddr_t page_to_phys(struct page *page)
-{
-    size_t pfn = page - page_array;
-    return mem_start + (pfn << PAGE_SHIFT);
+extern char _kernel_start[], _kernel_end[];
+
+/* --- Conversions --- */
+
+paddr_t page_to_phys(struct page *page) {
+    return mem_start + ((size_t)(page - page_array) << PAGE_SHIFT);
 }
 
-/**
- * phys_to_page - Convert physical address to page struct
- */
-struct page *phys_to_page(paddr_t addr)
-{
-    if (addr < mem_start || addr >= mem_end) {
-        return NULL;
-    }
-    size_t pfn = (addr - mem_start) >> PAGE_SHIFT;
-    return &page_array[pfn];
+struct page *phys_to_page(paddr_t addr) {
+    if (addr < mem_start || addr >= mem_end) return NULL;
+    return &page_array[(addr - mem_start) >> PAGE_SHIFT];
 }
 
-/**
- * pfn_to_page - Convert page frame number to page struct
- */
-static inline struct page *pfn_to_page(size_t pfn)
-{
-    return &page_array[pfn];
+static inline size_t page_to_pfn(struct page *page) { return page - page_array; }
+static inline struct page *pfn_to_page(size_t pfn) { return &page_array[pfn]; }
+
+static bool pages_are_buddies(struct page *page, struct page *buddy, unsigned int order) {
+    return (buddy >= page_array && buddy < page_array + total_pages &&
+            buddy->order == order && buddy->refcount == 0 &&
+            !(buddy->flags & PG_RESERVED) &&
+            (page_to_pfn(page) ^ (1UL << order)) == page_to_pfn(buddy));
 }
 
-/**
- * page_to_pfn - Convert page struct to page frame number
- */
-static inline size_t page_to_pfn(struct page *page)
-{
-    return page - page_array;
-}
+/* --- Internal Alloc/Free (buddy_lock must be held) --- */
 
-/**
- * get_buddy_pfn - Get the page frame number of the buddy page
- */
-static inline size_t get_buddy_pfn(size_t pfn, unsigned int order)
-{
-    return pfn ^ (1UL << order);
-}
+static struct page *__alloc_pages(unsigned int order) {
+    for (unsigned int o = order; o < MAX_ORDER; o++) {
+        if (list_empty(&free_lists[o])) continue;
 
-/**
- * pages_are_buddies - Check if two pages are buddies at given order
- */
-static bool pages_are_buddies(struct page *page, struct page *buddy,
-                              unsigned int order)
-{
-    size_t pfn = page_to_pfn(page);
-    size_t buddy_pfn = page_to_pfn(buddy);
-
-    /* Check if addresses are aligned for this order */
-    if (buddy_pfn != get_buddy_pfn(pfn, order)) {
-        return false;
-    }
-
-    /* Buddy must be free and same order */
-    if (buddy->flags & PG_RESERVED) {
-        return false;
-    }
-    if (buddy->order != order) {
-        return false;
-    }
-
-    /* Check if buddy is in a free list (refcount == 0 means free) */
-    if (buddy->refcount != 0) {
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * __alloc_pages - Internal allocation (lock must be held)
- */
-static struct page *__alloc_pages(unsigned int order)
-{
-    unsigned int current_order;
-    struct page *page;
-
-    if (order >= MAX_ORDER) {
-        return NULL;
-    }
-
-    /* Find a free block of sufficient size */
-    for (current_order = order; current_order < MAX_ORDER; current_order++) {
-        if (list_empty(&free_lists[current_order])) {
-            continue;
-        }
-
-        /* Found a block, remove from free list */
-        page = list_first_entry(&free_lists[current_order],
-                                struct page, list);
+        struct page *page = list_first_entry(&free_lists[o], struct page, list);
         list_del(&page->list);
-        page->refcount = 1;
-
-        /* Split the block down to requested size */
-        while (current_order > order) {
-            current_order--;
-            size_t pfn = page_to_pfn(page);
-            size_t buddy_pfn = pfn + (1UL << current_order);
-
-            if (buddy_pfn < total_pages) {
-                struct page *buddy = pfn_to_page(buddy_pfn);
-                buddy->order = current_order;
-                buddy->refcount = 0;
-                buddy->flags = 0;
-                list_add(&buddy->list, &free_lists[current_order]);
-            }
+        
+        while (o > order) {
+            o--;
+            struct page *buddy = page + (1UL << o);
+            buddy->order = o;
+            buddy->refcount = 0;
+            buddy->flags = 0;
+            list_add(&buddy->list, &free_lists[o]);
         }
 
         page->order = order;
+        page->refcount = 1;
         num_free_pages -= (1UL << order);
         return page;
     }
-
-    return NULL;  /* Out of memory */
+    return NULL;
 }
 
-/**
- * __free_pages - Internal free (lock must be held)
- */
-static void __free_pages(struct page *page, unsigned int order)
-{
+static void __free_pages(struct page *page, unsigned int order) {
     size_t pfn = page_to_pfn(page);
-
-    if (page->flags & PG_RESERVED) {
-        pr_warn("buddy: trying to free reserved page %p\n",
-                (void *)page_to_phys(page));
-        return;
-    }
-
-    page->refcount = 0;
     num_free_pages += (1UL << order);
 
-    /* Try to coalesce with buddy */
     while (order < MAX_ORDER - 1) {
-        size_t buddy_pfn = get_buddy_pfn(pfn, order);
+        struct page *buddy = pfn_to_page(pfn ^ (1UL << order));
+        if (!pages_are_buddies(page, buddy, order)) break;
 
-        /* Check if buddy exists */
-        if (buddy_pfn >= total_pages) {
-            break;
-        }
-
-        struct page *buddy = pfn_to_page(buddy_pfn);
-
-        /* Check if we can merge */
-        if (!pages_are_buddies(page, buddy, order)) {
-            break;
-        }
-
-        /* Remove buddy from free list */
         list_del(&buddy->list);
-
-        /* Combine into larger block */
-        if (buddy_pfn < pfn) {
-            page = buddy;
-            pfn = buddy_pfn;
-        }
-
+        if (buddy < page) page = buddy;
+        pfn = page_to_pfn(page);
         order++;
     }
 
-    /* Add to appropriate free list */
     page->order = order;
+    page->refcount = 0;
     list_add(&page->list, &free_lists[order]);
 }
 
-/**
- * alloc_pages - Allocate 2^order contiguous pages
- */
-struct page *alloc_pages(unsigned int order)
-{
-    bool irq_state = arch_irq_save();
-    spin_lock(&buddy_lock);
+/* --- Public API --- */
 
-    struct page *page = __alloc_pages(order);
-    if (page) {
-        page->flags |= PG_KERNEL;
+struct page *alloc_pages(unsigned int order) {
+    struct page *page = NULL;
+    bool irq = arch_irq_save();
+
+    if (order == 0) {
+        struct pcp_area *pcp = &pcp_areas[arch_cpu_id()];
+        if (pcp->count == 0) {
+            spin_lock(&buddy_lock);
+            for (int i = 0; i < PCP_BATCH; i++) {
+                struct page *p = __alloc_pages(0);
+                if (!p) break;
+                list_add(&p->list, &pcp->list);
+                pcp->count++;
+            }
+            spin_unlock(&buddy_lock);
+        }
+        if (pcp->count > 0) {
+            page = list_first_entry(&pcp->list, struct page, list);
+            list_del(&page->list);
+            pcp->count--;
+        }
+    } else {
+        spin_lock(&buddy_lock);
+        page = __alloc_pages(order);
+        spin_unlock(&buddy_lock);
     }
 
-    spin_unlock(&buddy_lock);
-    arch_irq_restore(irq_state);
+    if (page) page->flags |= PG_KERNEL;
+    arch_irq_restore(irq);
     return page;
 }
 
-/**
- * free_pages - Free pages allocated with alloc_pages
- */
-void free_pages(struct page *page, unsigned int order)
-{
-    if (!page) {
-        return;
-    }
-
-    bool irq_state = arch_irq_save();
-    spin_lock(&buddy_lock);
-
+void free_pages(struct page *page, unsigned int order) {
+    if (!page) return;
+    bool irq = arch_irq_save();
     page->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB);
-    __free_pages(page, order);
 
-    spin_unlock(&buddy_lock);
-    arch_irq_restore(irq_state);
-}
-
-/**
- * pmm_total_pages - Get total number of managed pages
- */
-size_t pmm_total_pages(void)
-{
-    return total_pages;
-}
-
-/**
- * pmm_num_free_pages - Get number of free pages
- */
-size_t pmm_num_free_pages(void)
-{
-    return num_free_pages;
-}
-
-/*
- * Legacy API compatibility (Phase 0 interface)
- */
-
-/**
- * pmm_alloc_page - Allocate a single page (legacy API)
- */
-paddr_t pmm_alloc_page(void)
-{
-    struct page *page = alloc_pages(0);
-    return page ? page_to_phys(page) : 0;
-}
-
-/**
- * pmm_alloc_pages - Allocate contiguous pages (legacy API)
- */
-paddr_t pmm_alloc_pages(size_t count)
-{
-    if (count == 0) {
-        return 0;
-    }
-
-    /* Find the order that fits count pages */
-    unsigned int order = 0;
-    while ((1UL << order) < count && order < MAX_ORDER) {
-        order++;
-    }
-
-    if (order >= MAX_ORDER) {
-        return 0;
-    }
-
-    struct page *page = alloc_pages(order);
-    return page ? page_to_phys(page) : 0;
-}
-
-/**
- * pmm_free_page - Free a single page (legacy API)
- */
-void pmm_free_page(paddr_t pa)
-{
-    struct page *page = phys_to_page(pa);
-    if (page) {
-        free_pages(page, 0);
-    }
-}
-
-/**
- * pmm_free_pages - Free contiguous pages (legacy API)
- */
-void pmm_free_pages(paddr_t pa, size_t count)
-{
-    if (count == 0) {
-        return;
-    }
-
-    /* Find the order that fits count pages */
-    unsigned int order = 0;
-    while ((1UL << order) < count && order < MAX_ORDER) {
-        order++;
-    }
-
-    struct page *page = phys_to_page(pa);
-    if (page) {
-        free_pages(page, order);
-    }
-}
-
-/**
- * pmm_get_free_pages - Get number of free pages (legacy API)
- */
-size_t pmm_get_free_pages(void)
-{
-    return num_free_pages;
-}
-
-/**
- * pmm_get_total_pages - Get total number of pages (legacy API)
- */
-size_t pmm_get_total_pages(void)
-{
-    return total_pages;
-}
-
-/**
- * pmm_reserve_range - Mark a range as reserved (legacy API)
- */
-void pmm_reserve_range(paddr_t start, paddr_t end)
-{
-    if (start >= mem_end || end <= mem_start) {
-        return;
-    }
-
-    start = MAX(start, mem_start);
-    end = MIN(end, mem_end);
-
-    start = ALIGN_DOWN(start, PAGE_SIZE);
-    end = ALIGN_UP(end, PAGE_SIZE);
-
-    bool irq_state = arch_irq_save();
-    spin_lock(&buddy_lock);
-
-    for (paddr_t addr = start; addr < end; addr += PAGE_SIZE) {
-        struct page *page = phys_to_page(addr);
-        if (page && !(page->flags & PG_RESERVED)) {
-            page->flags |= PG_RESERVED;
-            /* Note: We don't adjust free count here as reserved
-             * pages were never added to free lists */
-        }
-    }
-
-    spin_unlock(&buddy_lock);
-    arch_irq_restore(irq_state);
-}
-
-/**
- * buddy_init_zone - Initialize a zone of pages into free lists
- */
-static void buddy_init_zone(size_t start_pfn, size_t end_pfn)
-{
-    size_t pfn = start_pfn;
-
-    while (pfn < end_pfn) {
-        /* Find the largest order that fits and is aligned */
-        unsigned int order = MAX_ORDER - 1;
-
-        while (order > 0) {
-            size_t block_size = 1UL << order;
-            /* Check alignment and fit */
-            if ((pfn & (block_size - 1)) == 0 &&
-                pfn + block_size <= end_pfn) {
-                break;
+    if (order == 0) {
+        struct pcp_area *pcp = &pcp_areas[arch_cpu_id()];
+        list_add(&page->list, &pcp->list);
+        if (++pcp->count >= PCP_HIGH) {
+            spin_lock(&buddy_lock);
+            for (int i = 0; i < PCP_BATCH; i++) {
+                struct page *p = list_first_entry(&pcp->list, struct page, list);
+                list_del(&p->list);
+                pcp->count--;
+                __free_pages(p, 0);
             }
-            order--;
+            spin_unlock(&buddy_lock);
         }
+    } else {
+        spin_lock(&buddy_lock);
+        __free_pages(page, order);
+        spin_unlock(&buddy_lock);
+    }
+    arch_irq_restore(irq);
+}
 
-        struct page *page = pfn_to_page(pfn);
-        page->flags = 0;
-        page->order = order;
-        page->refcount = 0;
-        INIT_LIST_HEAD(&page->list);
-        list_add_tail(&page->list, &free_lists[order]);
+/* --- Stats & Legacy --- */
 
-        size_t block_size = 1UL << order;
-        num_free_pages += block_size;
-        pfn += block_size;
+size_t pmm_total_pages(void) { return total_pages; }
+
+size_t pmm_num_free_pages(void) {
+    size_t total = num_free_pages;
+    for (int i = 0; i < CONFIG_MAX_CPUS; i++) total += pcp_areas[i].count;
+    return total;
+}
+
+paddr_t pmm_alloc_page(void) { return pmm_alloc_pages(1); }
+
+paddr_t pmm_alloc_pages(size_t count) {
+    if (!count) return 0;
+    unsigned int order = 0;
+    while ((1UL << order) < count && order < MAX_ORDER) order++;
+    if (order >= MAX_ORDER) return 0;
+    struct page *p = alloc_pages(order);
+    return p ? page_to_phys(p) : 0;
+}
+
+void pmm_free_page(paddr_t pa) { pmm_free_pages(pa, 1); }
+
+void pmm_free_pages(paddr_t pa, size_t count) {
+    if (!count) return;
+    unsigned int order = 0;
+    while ((1UL << order) < count && order < MAX_ORDER) order++;
+    struct page *p = phys_to_page(pa);
+    if (p) free_pages(p, order);
+}
+
+void pmm_reserve_range(paddr_t start, paddr_t end) {
+    start = MAX(ALIGN_DOWN(start, PAGE_SIZE), mem_start);
+    end = MIN(ALIGN_UP(end, PAGE_SIZE), mem_end);
+    
+    bool irq = arch_irq_save();
+    spin_lock(&buddy_lock);
+    for (paddr_t a = start; a < end; a += PAGE_SIZE) {
+        struct page *p = phys_to_page(a);
+        if (p) p->flags |= PG_RESERVED;
+    }
+    spin_unlock(&buddy_lock);
+    arch_irq_restore(irq);
+}
+
+/* --- Init --- */
+
+static void buddy_init_zone(size_t start_pfn, size_t end_pfn) {
+    size_t pfn = start_pfn;
+    while (pfn < end_pfn) {
+        unsigned int order = MAX_ORDER - 1;
+        while (order > 0 && ((pfn & ((1UL << order) - 1)) || pfn + (1UL << order) > end_pfn))
+            order--;
+
+        struct page *p = pfn_to_page(pfn);
+        p->order = order;
+        p->refcount = 0;
+        list_add_tail(&p->list, &free_lists[order]);
+        num_free_pages += (1UL << order);
+        pfn += (1UL << order);
     }
 }
 
-/**
- * pmm_init - Initialize the buddy allocator
- * @start: Start of usable physical memory
- * @end: End of usable physical memory
- */
-void pmm_init(paddr_t start, paddr_t end)
-{
-    /* Initialize lock */
+void pmm_init(paddr_t start, paddr_t end) {
     spin_init(&buddy_lock);
-
-    /* Initialize free lists */
-    for (int i = 0; i < MAX_ORDER; i++) {
-        INIT_LIST_HEAD(&free_lists[i]);
+    for (int i = 0; i < MAX_ORDER; i++) INIT_LIST_HEAD(&free_lists[i]);
+    for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
+        INIT_LIST_HEAD(&pcp_areas[i].list);
+        pcp_areas[i].count = 0;
     }
 
-    /* Align memory boundaries */
     mem_start = ALIGN_UP(start, PAGE_SIZE);
     mem_end = ALIGN_DOWN(end, PAGE_SIZE);
+    total_pages = MIN((mem_end - mem_start) >> PAGE_SHIFT, MAX_PAGES);
+    mem_end = mem_start + (total_pages << PAGE_SHIFT);
 
-    if (mem_end <= mem_start) {
-        panic("pmm_init: invalid memory range");
-    }
-
-    total_pages = (mem_end - mem_start) >> PAGE_SHIFT;
-    if (total_pages > MAX_PAGES) {
-        total_pages = MAX_PAGES;
-        mem_end = mem_start + (total_pages << PAGE_SHIFT);
-    }
-
-    /* Calculate space needed for page array */
-    size_t page_array_size = total_pages * sizeof(struct page);
-    page_array_pages = ALIGN_UP(page_array_size, PAGE_SIZE) >> PAGE_SHIFT;
-
-    /* Place page array at start of memory */
+    size_t array_pages = ALIGN_UP(total_pages * sizeof(struct page), PAGE_SIZE) >> PAGE_SHIFT;
     page_array = (struct page *)mem_start;
 
-    /* Initialize all page structs */
     for (size_t i = 0; i < total_pages; i++) {
-        page_array[i].flags = 0;
-        page_array[i].order = 0;
+        page_array[i].flags = (i < array_pages) ? PG_RESERVED : 0;
         page_array[i].refcount = 0;
         INIT_LIST_HEAD(&page_array[i].list);
     }
 
-    /* Mark page array pages as reserved */
-    for (size_t i = 0; i < page_array_pages; i++) {
-        page_array[i].flags = PG_RESERVED;
+    paddr_t ks = (paddr_t)_kernel_start, ke = ALIGN_UP((paddr_t)_kernel_end, PAGE_SIZE);
+    if (ks >= mem_start && ks < mem_end) {
+        for (size_t i = (ks - mem_start) >> PAGE_SHIFT; i < (ke - mem_start) >> PAGE_SHIFT && i < total_pages; i++)
+            page_array[i].flags |= PG_RESERVED | PG_KERNEL;
     }
 
-    /* Reserve kernel pages */
-    paddr_t kernel_start = (paddr_t)_kernel_start;
-    paddr_t kernel_end_addr = (paddr_t)_kernel_end;
+    size_t kernel_start_pfn = (ks >= mem_start && ks < mem_end) ? (ks - mem_start) >> PAGE_SHIFT : 0;
+    size_t kernel_end_pfn = (ks >= mem_start && ks < mem_end) ? (ke - mem_start) >> PAGE_SHIFT : 0;
 
-    if (kernel_start >= mem_start && kernel_start < mem_end) {
-        size_t start_pfn = (kernel_start - mem_start) >> PAGE_SHIFT;
-        size_t end_pfn = (ALIGN_UP(kernel_end_addr, PAGE_SIZE) - mem_start) >> PAGE_SHIFT;
+    if (kernel_start_pfn > array_pages) buddy_init_zone(array_pages, kernel_start_pfn);
+    if (kernel_end_pfn < total_pages) buddy_init_zone(MAX(kernel_end_pfn, array_pages), total_pages);
 
-        for (size_t i = start_pfn; i < end_pfn && i < total_pages; i++) {
-            page_array[i].flags = PG_RESERVED | PG_KERNEL;
-        }
-    }
-
-    num_free_pages = 0;
-
-    /* Initialize free memory into buddy lists */
-    /* Start after page array */
-    size_t first_free_pfn = page_array_pages;
-
-    /* Skip kernel if it's within our range */
-    size_t kernel_start_pfn = 0;
-    size_t kernel_end_pfn = 0;
-
-    if (kernel_start >= mem_start && kernel_start < mem_end) {
-        kernel_start_pfn = (kernel_start - mem_start) >> PAGE_SHIFT;
-        kernel_end_pfn = (ALIGN_UP(kernel_end_addr, PAGE_SIZE) - mem_start) >> PAGE_SHIFT;
-    }
-
-    /* Add free pages to buddy system */
-    if (kernel_start_pfn > first_free_pfn) {
-        /* Memory before kernel */
-        buddy_init_zone(first_free_pfn, kernel_start_pfn);
-    }
-
-    if (kernel_end_pfn > 0 && kernel_end_pfn < total_pages) {
-        /* Memory after kernel */
-        size_t start_after_kernel = MAX(kernel_end_pfn, first_free_pfn);
-        if (start_after_kernel < total_pages) {
-            buddy_init_zone(start_after_kernel, total_pages);
-        }
-    } else if (kernel_end_pfn == 0) {
-        /* Kernel not in our range, add all after page array */
-        buddy_init_zone(first_free_pfn, total_pages);
-    }
-
-    pr_info("PMM: Buddy allocator initialized\n");
-    pr_info("PMM: %lu pages (%lu MB), %lu free, page_array uses %lu pages\n",
-            total_pages,
-            (total_pages * PAGE_SIZE) >> 20,
-            num_free_pages,
-            page_array_pages);
-
-    /* Print free list statistics */
-    for (int i = 0; i < MAX_ORDER; i++) {
-        size_t count = 0;
-        struct list_head *pos;
-        list_for_each(pos, &free_lists[i]) {
-            count++;
-        }
-        if (count > 0) {
-            pr_debug("  Order %d (%lu KB): %lu blocks\n",
-                     i, (unsigned long)((PAGE_SIZE << i) >> 10), count);
-        }
-    }
+    pr_info("PMM: Buddy init, %lu MB, %lu free\n", (total_pages * PAGE_SIZE) >> 20, pmm_num_free_pages());
 }
