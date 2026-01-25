@@ -15,7 +15,7 @@ typedef unsigned long word_t;
 
 /* Constants for zero-byte detection magic */
 /* Works for both 32-bit and 64-bit provided word_t is correct */
-#define ONES ((word_t)-1 / 0xFF)
+#define ONES ((word_t) - 1 / 0xFF)
 #define HIGHS (ONES * 0x80)
 
 /*
@@ -27,8 +27,7 @@ typedef unsigned long word_t;
 /**
  * strlen - Calculate string length
  */
-size_t strlen(const char *s)
-{
+size_t strlen(const char *s) {
     const char *start = s;
 
     // Align to word boundary
@@ -57,8 +56,7 @@ size_t strlen(const char *s)
 /**
  * strcmp - Compare two strings
  */
-int strcmp(const char *s1, const char *s2)
-{
+int strcmp(const char *s1, const char *s2) {
     // Try word-sized comparison if aligned
     if ((((uintptr_t)s1 | (uintptr_t)s2) & WORD_MASK) == 0) {
         const word_t *w1 = (const word_t *)s1;
@@ -67,14 +65,14 @@ int strcmp(const char *s1, const char *s2)
         while (*w1 == *w2) {
             if (HAS_ZERO(*w1)) {
                 // Zero byte found inside identical words
-                // We need to find exactly where the strings end, 
+                // We need to find exactly where the strings end,
                 // but since words are identical, strings are equal up to here.
                 return 0;
             }
             w1++;
             w2++;
         }
-        
+
         // Difference found, fall back to byte comparison
         s1 = (const char *)w1;
         s2 = (const char *)w2;
@@ -90,12 +88,13 @@ int strcmp(const char *s1, const char *s2)
 /**
  * strncmp - Compare two strings up to n characters
  */
-int strncmp(const char *s1, const char *s2, size_t n)
-{
-    if (n == 0) return 0;
+int strncmp(const char *s1, const char *s2, size_t n) {
+    if (n == 0)
+        return 0;
 
-    // Optional: Add word optimization for large n (omitted for simplicity vs n check overhead)
-    
+    // Optional: Add word optimization for large n (omitted for simplicity vs n
+    // check overhead)
+
     while (n && *s1 && (*s1 == *s2)) {
         s1++;
         s2++;
@@ -108,16 +107,38 @@ int strncmp(const char *s1, const char *s2, size_t n)
 }
 
 /**
+ * strchr - Find first occurrence of character in string
+ */
+char *strchr(const char *s, int c) {
+    while (*s != (char)c) {
+        if (!*s++)
+            return NULL;
+    }
+    return (char *)s;
+}
+
+/**
+ * strrchr - Find last occurrence of character in string
+ */
+char *strrchr(const char *s, int c) {
+    const char *last = NULL;
+    do {
+        if (*s == (char)c)
+            last = s;
+    } while (*s++);
+    return (char *)last;
+}
+
+/**
  * strcpy - Copy a string
  */
-char *strcpy(char *dest, const char *src)
-{
+char *strcpy(char *dest, const char *src) {
     char *d = dest;
     const char *s = src;
 
     // Try to align dest to word boundary if src has same alignment offset
     if (((uintptr_t)d & WORD_MASK) == ((uintptr_t)s & WORD_MASK)) {
-        
+
         // Align
         while ((uintptr_t)d & WORD_MASK) {
             if ((*d++ = *s++) == '\0') {
@@ -128,7 +149,7 @@ char *strcpy(char *dest, const char *src)
         // Copy words
         word_t *wd = (word_t *)d;
         const word_t *ws = (const word_t *)s;
-        
+
         while (!HAS_ZERO(*ws)) {
             *wd++ = *ws++;
         }
@@ -138,18 +159,19 @@ char *strcpy(char *dest, const char *src)
         s = (const char *)ws;
     }
 
-    while ((*d++ = *s++));
+    while ((*d++ = *s++))
+        ;
     return dest;
 }
 
 /**
  * strncpy - Copy up to n characters of a string
  */
-char *strncpy(char *dest, const char *src, size_t n)
-{
+char *strncpy(char *dest, const char *src, size_t n) {
     size_t i;
-    
-    // Standard implementation (optimizing this is complex due to zero-padding requirement)
+
+    // Standard implementation (optimizing this is complex due to zero-padding
+    // requirement)
     for (i = 0; i < n && src[i] != '\0'; i++) {
         dest[i] = src[i];
     }
@@ -162,8 +184,7 @@ char *strncpy(char *dest, const char *src, size_t n)
 /**
  * strcat - Concatenate two strings
  */
-char *strcat(char *dest, const char *src)
-{
+char *strcat(char *dest, const char *src) {
     // Leverage optimized strlen and strcpy
     char *p = dest + strlen(dest);
     strcpy(p, src);
@@ -173,14 +194,13 @@ char *strcat(char *dest, const char *src)
 /**
  * memcpy - Copy memory area
  */
-void *memcpy(void *dest, const void *src, size_t n)
-{
+void *memcpy(void *dest, const void *src, size_t n) {
     char *d = dest;
     const char *s = src;
 
-    if (n >= WORD_SIZE && 
-       ((uintptr_t)d & WORD_MASK) == ((uintptr_t)s & WORD_MASK)) {
-        
+    if (n >= WORD_SIZE &&
+        ((uintptr_t)d & WORD_MASK) == ((uintptr_t)s & WORD_MASK)) {
+
         while ((uintptr_t)d & WORD_MASK) {
             *d++ = *s++;
             n--;
@@ -188,7 +208,7 @@ void *memcpy(void *dest, const void *src, size_t n)
 
         word_t *wd = (word_t *)d;
         const word_t *ws = (const word_t *)s;
-        
+
         while (n >= WORD_SIZE) {
             *wd++ = *ws++;
             n -= WORD_SIZE;
@@ -207,8 +227,7 @@ void *memcpy(void *dest, const void *src, size_t n)
 /**
  * memset - Fill memory with a constant byte
  */
-void *memset(void *s, int c, size_t n)
-{
+void *memset(void *s, int c, size_t n) {
     char *p = s;
 
     if (n < WORD_SIZE) {
@@ -225,7 +244,7 @@ void *memset(void *s, int c, size_t n)
 
     word_t *wp = (word_t *)p;
     word_t val = (unsigned char)c;
-    
+
     val |= val << 8;
     val |= val << 16;
     if (WORD_SIZE > 4) {
@@ -248,8 +267,7 @@ void *memset(void *s, int c, size_t n)
 /**
  * memmove - Copy memory area (handles overlapping)
  */
-void *memmove(void *dest, const void *src, size_t n)
-{
+void *memmove(void *dest, const void *src, size_t n) {
     char *d = dest;
     const char *s = src;
 
@@ -259,14 +277,14 @@ void *memmove(void *dest, const void *src, size_t n)
 
     if (d < s) {
         return memcpy(dest, src, n);
-    } 
-    
+    }
+
     d += n;
     s += n;
 
-    if (n >= WORD_SIZE && 
-       ((uintptr_t)d & WORD_MASK) == ((uintptr_t)s & WORD_MASK)) {
-        
+    if (n >= WORD_SIZE &&
+        ((uintptr_t)d & WORD_MASK) == ((uintptr_t)s & WORD_MASK)) {
+
         while ((uintptr_t)d & WORD_MASK) {
             *--d = *--s;
             n--;
@@ -274,7 +292,7 @@ void *memmove(void *dest, const void *src, size_t n)
 
         word_t *wd = (word_t *)d;
         const word_t *ws = (const word_t *)s;
-        
+
         while (n >= WORD_SIZE) {
             *--wd = *--ws;
             n -= WORD_SIZE;
@@ -287,24 +305,26 @@ void *memmove(void *dest, const void *src, size_t n)
     while (n--) {
         *--d = *--s;
     }
-    
+
     return dest;
 }
 
 /**
  * memcmp - Compare memory areas
  */
-int memcmp(const void *s1, const void *s2, size_t n)
-{
+int memcmp(const void *s1, const void *s2, size_t n) {
     const unsigned char *p1 = s1;
     const unsigned char *p2 = s2;
 
-    if (n >= WORD_SIZE && 
-       ((uintptr_t)p1 & WORD_MASK) == ((uintptr_t)p2 & WORD_MASK)) {
+    if (n >= WORD_SIZE &&
+        ((uintptr_t)p1 & WORD_MASK) == ((uintptr_t)p2 & WORD_MASK)) {
 
         while ((uintptr_t)p1 & WORD_MASK) {
-            if (*p1 != *p2) return *p1 - *p2;
-            p1++; p2++; n--;
+            if (*p1 != *p2)
+                return *p1 - *p2;
+            p1++;
+            p2++;
+            n--;
         }
 
         const word_t *w1 = (const word_t *)p1;
