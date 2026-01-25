@@ -3,6 +3,7 @@
  */
 
 #include <kairos/blkdev.h>
+#include <kairos/buf.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
@@ -14,16 +15,14 @@
 #define EXT2_ROOT_INO 2
 #define EXT2_NAME_LEN 255
 
-/* File types */
-#define EXT2_FT_UNKNOWN 0
-#define EXT2_FT_REG_FILE 1
-#define EXT2_FT_DIR 2
-#define EXT2_FT_SYMLINK 7
-
 /* Inode modes */
 #define EXT2_S_IFREG 0x8000
 #define EXT2_S_IFDIR 0x4000
 #define EXT2_S_IFLNK 0xA000
+
+/* File types */
+#define EXT2_FT_REG_FILE 1
+#define EXT2_FT_DIR 2
 
 struct ext2_superblock {
     uint32_t s_inodes_count, s_blocks_count, s_r_blocks_count,
@@ -82,17 +81,6 @@ struct ext2_inode_data {
     struct ext2_mount *mnt;
 };
 
-static int ext2_read_block(struct ext2_mount *mnt, uint32_t block, void *buf) {
-    uint32_t ratio = mnt->block_size / mnt->dev->sector_size;
-    return blkdev_read(mnt->dev, (uint64_t)block * ratio, buf, ratio);
-}
-
-static int ext2_write_block(struct ext2_mount *mnt, uint32_t block,
-                            const void *buf) {
-    uint32_t ratio = mnt->block_size / mnt->dev->sector_size;
-    return blkdev_write(mnt->dev, (uint64_t)block * ratio, buf, ratio);
-}
-
 static int ext2_read_inode(struct ext2_mount *mnt, ino_t ino,
                            struct ext2_inode *inode) {
     if (ino == 0 || ino > mnt->sb->s_inodes_count)
@@ -104,14 +92,12 @@ static int ext2_read_inode(struct ext2_mount *mnt, ino_t ino,
     uint32_t block = mnt->gdt[group].bg_inode_table + (index / ipb);
     uint32_t off = (index % ipb) * isz;
 
-    uint8_t *buf = kmalloc(mnt->block_size);
-    if (!buf)
-        return -ENOMEM;
-    int ret = ext2_read_block(mnt, block, buf);
-    if (ret >= 0)
-        memcpy(inode, buf + off, sizeof(*inode));
-    kfree(buf);
-    return ret;
+    struct buf *bp = bread(mnt->dev, block);
+    if (!bp)
+        return -EIO;
+    memcpy(inode, bp->data + off, sizeof(*inode));
+    brelse(bp);
+    return 0;
 }
 
 static int ext2_get_block(struct ext2_mount *mnt, struct ext2_inode *inode,
@@ -125,14 +111,12 @@ static int ext2_get_block(struct ext2_mount *mnt, struct ext2_inode *inode,
     if (idx >= ppb)
         return -ENOSYS;
 
-    uint32_t *buf = kmalloc(mnt->block_size);
-    if (!buf)
-        return -ENOMEM;
-    int ret = ext2_read_block(mnt, inode->i_block[12], buf);
-    if (ret >= 0)
-        *out = buf[idx];
-    kfree(buf);
-    return ret;
+    struct buf *bp = bread(mnt->dev, inode->i_block[12]);
+    if (!bp)
+        return -EIO;
+    *out = ((uint32_t *)bp->data)[idx];
+    brelse(bp);
+    return 0;
 }
 
 static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
@@ -143,10 +127,6 @@ static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
         return 0;
     if (offset + len > id->inode.i_size)
         len = id->inode.i_size - offset;
-
-    uint8_t *bb = kmalloc(mnt->block_size);
-    if (!bb)
-        return -ENOMEM;
 
     size_t total = 0;
     while (len > 0) {
@@ -159,15 +139,16 @@ static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
         if (bnum == 0)
             memset((char *)buf + total, 0, nr);
         else {
-            if (ext2_read_block(mnt, bnum, bb) < 0)
+            struct buf *bp = bread(mnt->dev, bnum);
+            if (!bp)
                 break;
-            memcpy((char *)buf + total, bb + boff, nr);
+            memcpy((char *)buf + total, bp->data + boff, nr);
+            brelse(bp);
         }
         total += nr;
         offset += nr;
         len -= nr;
     }
-    kfree(bb);
     return total;
 }
 
@@ -183,15 +164,13 @@ static int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent,
     if (ext2_get_block(mnt, &id->inode, bidx, &bnum) < 0 || bnum == 0)
         return 0;
 
-    uint8_t *bb = kmalloc(mnt->block_size);
-    if (!bb || ext2_read_block(mnt, bnum, bb) < 0) {
-        kfree(bb);
+    struct buf *bp = bread(mnt->dev, bnum);
+    if (!bp)
         return -EIO;
-    }
 
-    struct ext2_dirent *de = (struct ext2_dirent *)(bb + boff);
+    struct ext2_dirent *de = (struct ext2_dirent *)(bp->data + boff);
     if (de->inode == 0 || de->rec_len == 0) {
-        kfree(bb);
+        brelse(bp);
         return 0;
     }
 
@@ -206,7 +185,7 @@ static int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent,
     ent->d_name[nlen] = '\0';
 
     *offset += de->rec_len;
-    kfree(bb);
+    brelse(bp);
     return 1;
 }
 
@@ -223,141 +202,83 @@ static int ext2_write_inode(struct ext2_mount *mnt, ino_t ino,
              idx = (ino - 1) % mnt->inodes_per_group;
     uint32_t boff = (idx * isz) / mnt->block_size,
              ioff = (idx * isz) % mnt->block_size;
-    uint8_t *bb = kmalloc(mnt->block_size);
-    if (!bb)
-        return -ENOMEM;
 
-    uint32_t bnum = mnt->gdt[group].bg_inode_table + boff;
-    int ret = ext2_read_block(mnt, bnum, bb);
-    if (ret >= 0) {
-        memcpy(bb + ioff, inode, isz);
-        ret = ext2_write_block(mnt, bnum, bb);
-    }
-    kfree(bb);
-    return ret;
+    struct buf *bp = bread(mnt->dev, mnt->gdt[group].bg_inode_table + boff);
+    if (!bp)
+        return -EIO;
+    memcpy(bp->data + ioff, inode, isz);
+    bwrite(bp);
+    brelse(bp);
+    return 0;
 }
 
 static int ext2_write_gd(struct ext2_mount *mnt, uint32_t bg) {
     uint32_t bnum = 2 + (bg * sizeof(struct ext2_group_desc)) / mnt->block_size;
     uint32_t off = (bg * sizeof(struct ext2_group_desc)) % mnt->block_size;
-    uint8_t *bb = kmalloc(mnt->block_size);
-    if (!bb)
-        return -ENOMEM;
 
-    int ret = ext2_read_block(mnt, bnum, bb);
-    if (ret >= 0) {
-        memcpy(bb + off, &mnt->gdt[bg], sizeof(struct ext2_group_desc));
-        ret = ext2_write_block(mnt, bnum, bb);
-    }
-    kfree(bb);
-    return ret;
+    struct buf *bp = bread(mnt->dev, bnum);
+    if (!bp)
+        return -EIO;
+    memcpy(bp->data + off, &mnt->gdt[bg], sizeof(struct ext2_group_desc));
+    bwrite(bp);
+    brelse(bp);
+    return 0;
 }
 
 static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out) {
     spin_lock(&mnt->lock);
-    uint8_t *bm = kmalloc(mnt->block_size);
-    if (!bm) {
-        spin_unlock(&mnt->lock);
-        return -ENOMEM;
-    }
-
     for (uint32_t bg = 0; bg < mnt->groups_count; bg++) {
         if (mnt->gdt[bg].bg_free_blocks_count == 0)
             continue;
-        if (ext2_read_block(mnt, mnt->gdt[bg].bg_block_bitmap, bm) < 0)
+        struct buf *bp = bread(mnt->dev, mnt->gdt[bg].bg_block_bitmap);
+        if (!bp)
             continue;
 
         for (uint32_t i = 0; i < mnt->blocks_per_group; i++) {
-            if (!(bm[i / 8] & (1 << (i % 8)))) {
-                bm[i / 8] |= (1 << (i % 8));
-                ext2_write_block(mnt, mnt->gdt[bg].bg_block_bitmap, bm);
+            if (!(bp->data[i / 8] & (1 << (i % 8)))) {
+                bp->data[i / 8] |= (1 << (i % 8));
+                bwrite(bp);
                 mnt->gdt[bg].bg_free_blocks_count--;
                 ext2_write_gd(mnt, bg);
                 mnt->sb->s_free_blocks_count--;
                 *out = bg * mnt->blocks_per_group + i;
-                kfree(bm);
+                brelse(bp);
                 spin_unlock(&mnt->lock);
                 return 0;
             }
         }
+        brelse(bp);
     }
-    kfree(bm);
     spin_unlock(&mnt->lock);
     return -ENOSPC;
-}
-
-static int __attribute__((unused)) ext2_free_block(struct ext2_mount *mnt,
-                                                   uint32_t bnum) {
-    uint32_t bg = bnum / mnt->blocks_per_group,
-             idx = bnum % mnt->blocks_per_group;
-    if (bg >= mnt->groups_count)
-        return -EINVAL;
-
-    spin_lock(&mnt->lock);
-    uint8_t *bm = kmalloc(mnt->block_size);
-    if (bm && ext2_read_block(mnt, mnt->gdt[bg].bg_block_bitmap, bm) >= 0) {
-        bm[idx / 8] &= ~(1 << (idx % 8));
-        ext2_write_block(mnt, mnt->gdt[bg].bg_block_bitmap, bm);
-        mnt->gdt[bg].bg_free_blocks_count++;
-        ext2_write_gd(mnt, bg);
-        mnt->sb->s_free_blocks_count++;
-    }
-    kfree(bm);
-    spin_unlock(&mnt->lock);
-    return 0;
 }
 
 static int ext2_alloc_inode(struct ext2_mount *mnt, ino_t *out) {
     spin_lock(&mnt->lock);
-    uint8_t *bm = kmalloc(mnt->block_size);
-    if (!bm) {
-        spin_unlock(&mnt->lock);
-        return -ENOMEM;
-    }
-
     for (uint32_t bg = 0; bg < mnt->groups_count; bg++) {
         if (mnt->gdt[bg].bg_free_inodes_count == 0)
             continue;
-        if (ext2_read_block(mnt, mnt->gdt[bg].bg_inode_bitmap, bm) < 0)
+        struct buf *bp = bread(mnt->dev, mnt->gdt[bg].bg_inode_bitmap);
+        if (!bp)
             continue;
 
         for (uint32_t i = 0; i < mnt->inodes_per_group; i++) {
-            if (!(bm[i / 8] & (1 << (i % 8)))) {
-                bm[i / 8] |= (1 << (i % 8));
-                ext2_write_block(mnt, mnt->gdt[bg].bg_inode_bitmap, bm);
+            if (!(bp->data[i / 8] & (1 << (i % 8)))) {
+                bp->data[i / 8] |= (1 << (i % 8));
+                bwrite(bp);
                 mnt->gdt[bg].bg_free_inodes_count--;
                 ext2_write_gd(mnt, bg);
                 mnt->sb->s_free_inodes_count--;
                 *out = bg * mnt->inodes_per_group + i + 1;
-                kfree(bm);
+                brelse(bp);
                 spin_unlock(&mnt->lock);
                 return 0;
             }
         }
+        brelse(bp);
     }
-    kfree(bm);
     spin_unlock(&mnt->lock);
     return -ENOSPC;
-}
-
-static int ext2_free_inode(struct ext2_mount *mnt, ino_t ino) {
-    uint32_t bg = (ino - 1) / mnt->inodes_per_group,
-             idx = (ino - 1) % mnt->inodes_per_group;
-    if (bg >= mnt->groups_count)
-        return -EINVAL;
-
-    spin_lock(&mnt->lock);
-    uint8_t *bm = kmalloc(mnt->block_size);
-    if (bm && ext2_read_block(mnt, mnt->gdt[bg].bg_inode_bitmap, bm) >= 0) {
-        bm[idx / 8] &= ~(1 << (idx % 8));
-        ext2_write_block(mnt, mnt->gdt[bg].bg_inode_bitmap, bm);
-        mnt->gdt[bg].bg_free_inodes_count++;
-        ext2_write_gd(mnt, bg);
-        mnt->sb->s_free_inodes_count++;
-    }
-    kfree(bm);
-    spin_unlock(&mnt->lock);
-    return 0;
 }
 
 static ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
@@ -365,9 +286,6 @@ static ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
     struct ext2_inode_data *id = vn->fs_data;
     struct ext2_mount *mnt = id->mnt;
     size_t written = 0;
-    uint8_t *bb = kmalloc(mnt->block_size);
-    if (!bb)
-        return -ENOMEM;
 
     while (written < len) {
         uint32_t bidx = (offset + written) / mnt->block_size,
@@ -382,14 +300,14 @@ static ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
             id->inode.i_block[bidx] = bnum;
         }
 
-        if (nr < mnt->block_size && ext2_read_block(mnt, bnum, bb) < 0)
+        struct buf *bp = bread(mnt->dev, bnum);
+        if (!bp)
             break;
-        memcpy(bb + boff, (const uint8_t *)buf + written, nr);
-        if (ext2_write_block(mnt, bnum, bb) < 0)
-            break;
+        memcpy(bp->data + boff, (const uint8_t *)buf + written, nr);
+        bwrite(bp);
+        brelse(bp);
         written += nr;
     }
-    kfree(bb);
 
     if (offset + written > id->inode.i_size) {
         id->inode.i_size = offset + written;
@@ -416,7 +334,6 @@ static struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
     }
     id->ino = ino;
     id->mnt = mnt;
-
     uint32_t fmt = id->inode.i_mode & 0xF000;
     vn->type = (fmt == EXT2_S_IFDIR)   ? VNODE_DIR
                : (fmt == EXT2_S_IFLNK) ? VNODE_SYMLINK
@@ -455,55 +372,55 @@ static int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
     if (ext2_read_inode(mnt, dino, &di) < 0)
         return -EIO;
     size_t nlen = strlen(name), rlen = ALIGN_UP(8 + nlen, 4);
-    uint8_t *bb = kmalloc(mnt->block_size);
-    if (!bb)
-        return -ENOMEM;
 
     uint32_t blocks = (di.i_size + mnt->block_size - 1) / mnt->block_size;
     for (uint32_t i = 0; i < blocks; i++) {
         uint32_t bnum;
         if (ext2_get_block(mnt, &di, i, &bnum) < 0 || bnum == 0)
             continue;
-        if (ext2_read_block(mnt, bnum, bb) < 0)
+        struct buf *bp = bread(mnt->dev, bnum);
+        if (!bp)
             continue;
 
         for (uint32_t off = 0; off < mnt->block_size;) {
-            struct ext2_dirent *de = (struct ext2_dirent *)(bb + off);
+            struct ext2_dirent *de = (struct ext2_dirent *)(bp->data + off);
             size_t alen = ALIGN_UP(8 + de->name_len, 4);
             if (de->rec_len - alen >= rlen) {
                 struct ext2_dirent *new_de =
-                    (struct ext2_dirent *)(bb + off + alen);
+                    (struct ext2_dirent *)(bp->data + off + alen);
                 new_de->inode = ino;
                 new_de->rec_len = de->rec_len - alen;
                 new_de->name_len = nlen;
                 new_de->file_type = type;
                 memcpy(new_de->name, name, nlen);
                 de->rec_len = alen;
-                ext2_write_block(mnt, bnum, bb);
-                kfree(bb);
+                bwrite(bp);
+                brelse(bp);
                 return 0;
             }
             off += de->rec_len;
         }
+        brelse(bp);
     }
 
     uint32_t nb;
-    if (blocks >= 12 || ext2_alloc_block(mnt, &nb) < 0) {
-        kfree(bb);
+    if (blocks >= 12 || ext2_alloc_block(mnt, &nb) < 0)
         return -ENOSPC;
-    }
     di.i_block[blocks] = nb;
-    memset(bb, 0, mnt->block_size);
-    struct ext2_dirent *de = (struct ext2_dirent *)bb;
+    struct buf *bp = bread(mnt->dev, nb);
+    if (!bp)
+        return -EIO;
+    memset(bp->data, 0, mnt->block_size);
+    struct ext2_dirent *de = (struct ext2_dirent *)bp->data;
     de->inode = ino;
-    de->rec_len = mnt->block_size; /* Takes entire block */
+    de->rec_len = mnt->block_size;
     de->name_len = nlen;
     de->file_type = type;
     memcpy(de->name, name, nlen);
-    ext2_write_block(mnt, nb, bb);
+    bwrite(bp);
+    brelse(bp);
     di.i_size += mnt->block_size;
     ext2_write_inode(mnt, dino, &di);
-    kfree(bb);
     return 0;
 }
 
@@ -512,17 +429,13 @@ static int ext2_create(struct vnode *dir, const char *name, mode_t mode) {
     ino_t nino;
     if (ext2_alloc_inode(did->mnt, &nino) < 0)
         return -ENOSPC;
-
     struct ext2_inode ni;
     memset(&ni, 0, sizeof(ni));
     ni.i_mode = (mode & 0xFFF) | EXT2_S_IFREG;
     ni.i_links_count = 1;
     ext2_write_inode(did->mnt, nino, &ni);
-
-    if (ext2_add_dirent(did->mnt, did->ino, name, nino, EXT2_FT_REG_FILE) < 0) {
-        ext2_free_inode(did->mnt, nino);
+    if (ext2_add_dirent(did->mnt, did->ino, name, nino, EXT2_FT_REG_FILE) < 0)
         return -EIO;
-    }
     did->inode.i_links_count++;
     ext2_write_inode(did->mnt, did->ino, &did->inode);
     return 0;
@@ -535,32 +448,31 @@ static int ext2_mkdir(struct vnode *dir, const char *name, mode_t mode) {
     if (ext2_alloc_inode(did->mnt, &nino) < 0 ||
         ext2_alloc_block(did->mnt, &db) < 0)
         return -ENOSPC;
-
     struct ext2_inode ni;
     memset(&ni, 0, sizeof(ni));
     ni.i_mode = (mode & 0xFFF) | EXT2_S_IFDIR;
     ni.i_size = did->mnt->block_size;
-    ni.i_links_count = 2; /* . and parent */
+    ni.i_links_count = 2;
     ni.i_block[0] = db;
-
-    uint8_t *bb = kzalloc(did->mnt->block_size);
-    struct ext2_dirent *de = (struct ext2_dirent *)bb;
+    struct buf *bp = bread(did->mnt->dev, db);
+    if (!bp)
+        return -EIO;
+    memset(bp->data, 0, did->mnt->block_size);
+    struct ext2_dirent *de = (struct ext2_dirent *)bp->data;
     de->inode = nino;
-    de->rec_len = 12; /* 8 + strlen(".") + padding */
+    de->rec_len = 12;
     de->name_len = 1;
     de->file_type = EXT2_FT_DIR;
     de->name[0] = '.';
-
-    de = (struct ext2_dirent *)(bb + 12);
+    de = (struct ext2_dirent *)(bp->data + 12);
     de->inode = did->ino;
-    de->rec_len = did->mnt->block_size - 12; /* Rest of block */
+    de->rec_len = did->mnt->block_size - 12;
     de->name_len = 2;
     de->file_type = EXT2_FT_DIR;
     de->name[0] = '.';
     de->name[1] = '.';
-    ext2_write_block(did->mnt, db, bb);
-    kfree(bb);
-
+    bwrite(bp);
+    brelse(bp);
     ext2_write_inode(did->mnt, nino, &ni);
     ext2_add_dirent(did->mnt, did->ino, name, nino, EXT2_FT_DIR);
     did->inode.i_links_count++;
@@ -570,57 +482,55 @@ static int ext2_mkdir(struct vnode *dir, const char *name, mode_t mode) {
 
 static int ext2_mount(struct mount *mnt) {
     struct ext2_mount *e = kzalloc(sizeof(*e));
-    uint8_t *buf = kmalloc(4096);
-    if (!e || !buf)
-        goto err;
+    if (!e)
+        return -ENOMEM;
     e->dev = mnt->dev;
     spin_init(&e->lock);
 
-    /* Read superblock (located at offset 1024) */
-    if (blkdev_read(mnt->dev, 2, buf, 8) < 0)
-        goto err;
+    struct buf *bp =
+        bread(mnt->dev, 0); /* Read first 4K, superblock is at 1024 */
+    if (!bp) {
+        kfree(e);
+        return -EIO;
+    }
     e->sb = kmalloc(sizeof(struct ext2_superblock));
-    memcpy(e->sb, buf, sizeof(*e->sb));
-    if (e->sb->s_magic != EXT2_SUPER_MAGIC)
-        goto err;
+    memcpy(e->sb, bp->data + 1024, sizeof(*e->sb));
+    brelse(bp);
 
+    if (e->sb->s_magic != EXT2_SUPER_MAGIC) {
+        kfree(e->sb);
+        kfree(e);
+        return -EINVAL;
+    }
     e->block_size = 1024 << e->sb->s_log_block_size;
     e->inodes_per_group = e->sb->s_inodes_per_group;
     e->blocks_per_group = e->sb->s_blocks_per_group;
     e->groups_count = (e->sb->s_blocks_count + e->sb->s_blocks_per_group - 1) /
                       e->sb->s_blocks_per_group;
 
-    /* Read group descriptor table */
     size_t gsz = e->groups_count * sizeof(struct ext2_group_desc);
     e->gdt = kmalloc(gsz);
-    uint8_t *gb = kmalloc(e->block_size);
-    if (!e->gdt || !gb ||
-        ext2_read_block(e, e->sb->s_first_data_block + 1, gb) < 0) {
-        kfree(gb);
-        goto err;
+    struct buf *gbp = bread(e->dev, e->sb->s_first_data_block + 1);
+    if (!gbp) {
+        kfree(e->sb);
+        kfree(e);
+        return -EIO;
     }
-    memcpy(e->gdt, gb, gsz);
-    kfree(gb);
+    memcpy(e->gdt, gbp->data, gsz);
+    brelse(gbp);
 
-    /* Create root vnode */
     struct vnode *rv = ext2_create_vnode(e, EXT2_ROOT_INO);
-    if (!rv)
-        goto err;
-    rv->mount = mnt;
-    mnt->root = rv;
-    mnt->fs_data = e;
-    kfree(buf);
-    pr_info("ext2: mounted (%u bytes/block)\n", e->block_size);
-    return 0;
-
-err:
-    if (e) {
+    if (!rv) {
         kfree(e->gdt);
         kfree(e->sb);
         kfree(e);
+        return -EIO;
     }
-    kfree(buf);
-    return -EIO;
+    rv->mount = mnt;
+    mnt->root = rv;
+    mnt->fs_data = e;
+    pr_info("ext2: mounted (%u bytes/block)\n", e->block_size);
+    return 0;
 }
 
 static int ext2_unmount(struct mount *mnt) {

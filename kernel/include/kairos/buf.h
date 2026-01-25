@@ -5,13 +5,13 @@
 #ifndef _KAIROS_BUF_H
 #define _KAIROS_BUF_H
 
-#include <kairos/types.h>
 #include <kairos/list.h>
-#include <kairos/spinlock.h>
 #include <kairos/process.h>
+#include <kairos/spinlock.h>
+#include <kairos/types.h>
 
-#define B_VALID 0x1  /* Data has been read from disk */
-#define B_DIRTY 0x2  /* Data needs to be written to disk */
+#define B_VALID 0x1 /* Data has been read from disk */
+#define B_DIRTY 0x2 /* Data needs to be written to disk */
 
 struct buf {
     uint32_t flags;

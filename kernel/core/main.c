@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/blkdev.h>
+#include <kairos/buf.h>
 #include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
@@ -474,6 +475,7 @@ void kernel_main(unsigned long hartid, void *dtb) {
     /*
      * Phase 5: File System
      */
+    binit();
     vfs_init();
     devfs_init();
     ext2_init();
