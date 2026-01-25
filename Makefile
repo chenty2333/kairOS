@@ -127,6 +127,7 @@ CORE_SRCS := \
     kernel/core/proc/user_test.c \
     kernel/core/proc/elf.c \
     kernel/core/proc/fd.c \
+    kernel/core/proc/signal.c \
     kernel/core/sched/sched.c \
     kernel/syscall/syscall.c \
     kernel/lib/printk.c \

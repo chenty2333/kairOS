@@ -497,8 +497,8 @@ void kernel_main(unsigned long hartid, void *dtb) {
      * User Mode and Fork Test
      * NOTE: This test enters user mode and does not return!
      */
-    pr_info("Starting fork test...\n");
-    run_fork_test();
+    pr_info("Starting robustness test...\n");
+    run_crash_test();
 
     /* Should not reach here - fork test enters user mode */
     printk("\n");

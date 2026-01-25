@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/signal.h>
 #include <kairos/syscall.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
@@ -74,6 +75,15 @@ static void handle_exception(struct trap_frame *tf) {
             if (mm_handle_fault(cur->mm, tf->stval, f) == 0)
                 return;
         }
+        if (from_user) {
+            signal_send(cur->pid, SIGSEGV);
+            return;
+        }
+    }
+
+    if (cause == EXC_ILLEGAL_INST && from_user) {
+        signal_send(proc_current()->pid, SIGILL);
+        return;
     }
 
     pr_err("Exception: %s (cause=%lu, epc=%p, val=%p)\n",
@@ -84,9 +94,9 @@ static void handle_exception(struct trap_frame *tf) {
 
 static void handle_interrupt(struct trap_frame *tf) {
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
-    if (cause == IRQ_S_TIMER)
+    if (cause == IRQ_S_TIMER) {
         timer_interrupt_handler();
-    else if (cause == IRQ_S_SOFT) {
+    } else if (cause == IRQ_S_SOFT) {
         __asm__ __volatile__("csrc sip, %0" ::"r"(1UL << 1));
         struct percpu_data *cpu = arch_get_percpu();
         int pending = __sync_fetch_and_and(&cpu->ipi_pending_mask, 0);
@@ -103,10 +113,17 @@ void trap_dispatch(struct trap_frame *tf) {
     struct percpu_data *cpu = arch_get_percpu();
     struct trap_frame *old = cpu->current_tf;
     cpu->current_tf = tf;
+
     if (tf->scause & SCAUSE_INTERRUPT)
         handle_interrupt(tf);
     else
         handle_exception(tf);
+
+    /* Check for signals before returning to user mode */
+    if (!(tf->sstatus & SSTATUS_SPP)) {
+        signal_deliver_pending();
+    }
+
     cpu->current_tf = old;
 }
 

@@ -65,6 +65,7 @@ void proc_wakeup_all(void *channel);
 
 void run_fork_test(void);
 void run_user_test(void);
+void run_crash_test(void);
 
 struct wait_queue {
     spinlock_t lock;
