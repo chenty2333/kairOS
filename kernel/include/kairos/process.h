@@ -11,6 +11,7 @@
 #include <kairos/rbtree.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
+#include <kairos/wait.h>
 
 enum proc_state {
     PROC_UNUSED,
@@ -42,6 +43,7 @@ struct process {
 
     /* Signals & Waiting */
     uint64_t sig_pending, sig_blocked;
+    struct sigaction *sigactions;
     void *wait_channel;
     struct list_head children, sibling, wait_list;
     struct process *parent;
@@ -62,20 +64,11 @@ void proc_yield(void);
 void proc_wakeup(struct process *p);
 void proc_sleep(void *channel);
 void proc_wakeup_all(void *channel);
+void signal_init_process(struct process *p);
 
 void run_fork_test(void);
 void run_user_test(void);
 void run_crash_test(void);
-
-struct wait_queue {
-    spinlock_t lock;
-    struct list_head head;
-};
-void wait_queue_init(struct wait_queue *wq);
-void wait_queue_add(struct wait_queue *wq, struct process *p);
-void wait_queue_remove(struct wait_queue *wq, struct process *p);
-void wait_queue_wakeup_one(struct wait_queue *wq);
-void wait_queue_wakeup_all(struct wait_queue *wq);
 
 struct process *kthread_create(int (*fn)(void *), void *arg, const char *name);
 #define current proc_current()

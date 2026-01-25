@@ -127,8 +127,12 @@ void arch_mmu_init(paddr_t mem_base, size_t mem_size) {
                    (paddr_t)_kernel_start,
                PTE_READ | PTE_WRITE | PTE_EXEC);
 
-    /* 3. Map UART/Device MMIO (Common for QEMU virt) */
-    map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 64 << 10,
+    /* 3. Map PLIC MMIO (Standard for RISC-V virt machine) */
+    map_region(kernel_pgdir, 0x0c000000UL, 0x0c000000UL, 4 << 20, /* 4MB */
+               PTE_READ | PTE_WRITE);
+
+    /* 4. Map UART/Device MMIO (Common for QEMU virt) */
+    map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 1 << 20, /* 1MB */
                PTE_READ | PTE_WRITE);
 
     arch_mmu_switch(kernel_pgdir);

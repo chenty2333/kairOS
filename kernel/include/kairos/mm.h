@@ -8,6 +8,7 @@
 #include <kairos/list.h>
 #include <kairos/rbtree.h>
 #include <kairos/spinlock.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 
 #define MAX_ORDER 11
@@ -84,7 +85,7 @@ struct mm_struct {
     paddr_t pgdir;
     struct list_head vma_list;
     struct rb_root mm_rb;
-    spinlock_t lock;
+    struct mutex lock;
     vaddr_t brk, start_stack;
     uint32_t refcount;
 };

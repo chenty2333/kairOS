@@ -6,7 +6,7 @@
 #include <kairos/mm.h>
 #include <kairos/arch.h>
 #include <kairos/printk.h>
-#include <kairos/spinlock.h>
+#include <kairos/sync.h>
 #include <kairos/config.h>
 #include <kairos/string.h>
 
@@ -78,7 +78,7 @@ struct mm_struct *mm_create(void) {
     if (!(mm->pgdir = arch_mmu_create_table())) { kfree(mm); return NULL; }
     INIT_LIST_HEAD(&mm->vma_list);
     mm->mm_rb = RB_ROOT;
-    spin_init(&mm->lock);
+    mutex_init(&mm->lock, "mm_lock");
     mm->brk = USER_HEAP_START;
     mm->start_stack = USER_STACK_TOP;
     mm->refcount = 1;
@@ -87,22 +87,22 @@ struct mm_struct *mm_create(void) {
 
 void mm_destroy(struct mm_struct *mm) {
     if (!mm) return;
-    spin_lock(&mm->lock);
-    if (--mm->refcount > 0) { spin_unlock(&mm->lock); return; }
+    mutex_lock(&mm->lock);
+    if (--mm->refcount > 0) { mutex_unlock(&mm->lock); return; }
     struct vm_area *vma, *tmp;
     list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
         unmap_range(mm->pgdir, vma->start, vma->end);
         kfree(vma);
     }
     arch_mmu_destroy_table(mm->pgdir);
-    spin_unlock(&mm->lock);
+    mutex_unlock(&mm->lock);
     kfree(mm);
 }
 
 struct mm_struct *mm_clone(struct mm_struct *src) {
     struct mm_struct *dst = mm_create();
     if (!dst) return NULL;
-    spin_lock(&src->lock);
+    mutex_lock(&src->lock);
     dst->brk = src->brk;
     dst->start_stack = src->start_stack;
 
@@ -124,10 +124,10 @@ struct mm_struct *mm_clone(struct mm_struct *src) {
             if (arch_mmu_map(dst->pgdir, va, dpa, f) < 0) { pmm_free_page(dpa); goto fail; }
         }
     }
-    spin_unlock(&src->lock);
+    mutex_unlock(&src->lock);
     return dst;
 fail:
-    spin_unlock(&src->lock);
+    mutex_unlock(&src->lock);
     mm_destroy(dst);
     return NULL;
 }
@@ -135,50 +135,50 @@ fail:
 /* --- Fault & Syscall Hooks --- */
 
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
-    spin_lock(&mm->lock);
+    mutex_lock(&mm->lock);
     struct vm_area *vma = find_vma(mm, addr);
-    if (!vma || ((flags & PTE_WRITE) && !(vma->flags & VM_WRITE))) { spin_unlock(&mm->lock); return -EFAULT; }
+    if (!vma || ((flags & PTE_WRITE) && !(vma->flags & VM_WRITE))) { mutex_unlock(&mm->lock); return -EFAULT; }
 
     vaddr_t va = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
-    if (arch_mmu_translate(mm->pgdir, va)) { spin_unlock(&mm->lock); return -EEXIST; }
+    if (arch_mmu_translate(mm->pgdir, va)) { mutex_unlock(&mm->lock); return -EEXIST; }
 
     paddr_t pa = pmm_alloc_page();
-    if (!pa) { spin_unlock(&mm->lock); return -ENOMEM; }
+    if (!pa) { mutex_unlock(&mm->lock); return -ENOMEM; }
     memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
 
     uint64_t f = PTE_USER | PTE_READ | ((vma->flags & VM_WRITE) ? PTE_WRITE : 0) | ((vma->flags & VM_EXEC) ? PTE_EXEC : 0);
     int ret = arch_mmu_map(mm->pgdir, va, pa, f);
     if (ret < 0) pmm_free_page(pa);
-    spin_unlock(&mm->lock);
+    mutex_unlock(&mm->lock);
     return ret;
 }
 
 vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk) {
-    spin_lock(&mm->lock);
-    if (!newbrk || newbrk < USER_HEAP_START) { spin_unlock(&mm->lock); return mm->brk; }
+    mutex_lock(&mm->lock);
+    if (!newbrk || newbrk < USER_HEAP_START) { mutex_unlock(&mm->lock); return mm->brk; }
     newbrk = ALIGN_UP(newbrk, CONFIG_PAGE_SIZE);
-    if (newbrk >= mm->start_stack) { spin_unlock(&mm->lock); return mm->brk; }
+    if (newbrk >= mm->start_stack) { mutex_unlock(&mm->lock); return mm->brk; }
 
     if (newbrk < mm->brk) unmap_range(mm->pgdir, newbrk, mm->brk);
     mm->brk = newbrk;
 
     struct vm_area *vma = find_vma(mm, USER_HEAP_START);
     if (!vma) {
-        if (!(vma = kzalloc(sizeof(*vma)))) { spin_unlock(&mm->lock); return mm->brk; }
+        if (!(vma = kzalloc(sizeof(*vma)))) { mutex_unlock(&mm->lock); return mm->brk; }
         vma->start = USER_HEAP_START; vma->end = newbrk;
         vma->flags = VM_READ | VM_WRITE;
         INIT_LIST_HEAD(&vma->list);
         insert_vma(mm, vma);
     } else vma->end = newbrk;
 
-    spin_unlock(&mm->lock);
+    mutex_unlock(&mm->lock);
     return newbrk;
 }
 
 vaddr_t mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot, uint32_t flags, struct vnode *vn, off_t offset) {
     if (!len) return 0;
     len = ALIGN_UP(len, CONFIG_PAGE_SIZE);
-    spin_lock(&mm->lock);
+    mutex_lock(&mm->lock);
 
     if (!addr) {
         addr = ALIGN_UP(mm->brk, CONFIG_PAGE_SIZE);
@@ -190,56 +190,91 @@ vaddr_t mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot, u
     } else {
         addr = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
         if (find_vma_intersection(mm, addr, addr + len)) {
-            spin_unlock(&mm->lock); return 0;
+            mutex_unlock(&mm->lock); return 0;
         }
     }
 
-    if (addr + len >= mm->start_stack) { spin_unlock(&mm->lock); return 0; }
+    if (addr + len >= mm->start_stack) { mutex_unlock(&mm->lock); return 0; }
 
     struct vm_area *vma = kzalloc(sizeof(*vma));
-    if (!vma) { spin_unlock(&mm->lock); return 0; }
+    if (!vma) { mutex_unlock(&mm->lock); return 0; }
     vma->start = addr; vma->end = addr + len;
     vma->flags = prot | flags; vma->vnode = vn; vma->offset = offset;
     INIT_LIST_HEAD(&vma->list);
     insert_vma(mm, vma);
 
-    spin_unlock(&mm->lock);
+    mutex_unlock(&mm->lock);
     return addr;
 }
 
 int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
+
     if (!len) return -EINVAL;
+
     addr = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
+
     len = ALIGN_UP(len, CONFIG_PAGE_SIZE);
+
     vaddr_t end = addr + len;
 
-    spin_lock(&mm->lock);
+
+
+    mutex_lock(&mm->lock);
+
     struct vm_area *vma, *tmp;
+
     list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
+
         if (vma->start >= end || vma->end <= addr) continue;
 
+
+
         if (vma->start >= addr && vma->end <= end) {
+
             unmap_range(mm->pgdir, vma->start, vma->end);
+
             rb_erase(&vma->rb_node, &mm->mm_rb);
+
             list_del(&vma->list);
+
             kfree(vma);
+
         } else if (vma->start < addr && vma->end > end) {
+
             struct vm_area *nv = kzalloc(sizeof(*nv));
-            if (!nv) { spin_unlock(&mm->lock); return -ENOMEM; }
+
+            if (!nv) { mutex_unlock(&mm->lock); return -ENOMEM; }
+
             unmap_range(mm->pgdir, addr, end);
+
             *nv = *vma; nv->start = end; nv->offset += (end - vma->start);
+
             vma->end = addr;
+
             INIT_LIST_HEAD(&nv->list);
+
             insert_vma(mm, nv);
+
         } else if (vma->start < addr) {
+
             unmap_range(mm->pgdir, addr, vma->end);
+
             vma->end = addr;
+
         } else {
+
             unmap_range(mm->pgdir, vma->start, end);
+
             vma->offset += (end - vma->start);
+
             vma->start = end;
+
         }
+
     }
-    spin_unlock(&mm->lock);
+
+    mutex_unlock(&mm->lock);
+
     return 0;
+
 }

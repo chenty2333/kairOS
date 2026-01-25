@@ -9,6 +9,7 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
@@ -80,6 +81,7 @@ static struct process *proc_alloc(void) {
         return NULL;
     }
 
+    signal_init_process(p);
     p->start_time = arch_timer_ticks();
     return p;
 }
@@ -193,9 +195,9 @@ struct process *proc_fork(void) {
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         struct file *f = parent->files[i];
         if (f) {
-            spin_lock(&f->lock);
+            mutex_lock(&f->lock);
             f->refcount++;
-            spin_unlock(&f->lock);
+            mutex_unlock(&f->lock);
             child->files[i] = f;
         }
     }

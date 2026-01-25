@@ -7,6 +7,7 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
@@ -60,7 +61,7 @@ static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->fs_data = node;
     vn->mount = mnt;
     vn->refcount = 1;
-    spin_init(&vn->lock);
+    mutex_init(&vn->lock, "devfs_vnode");
 }
 
 static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
@@ -165,9 +166,11 @@ static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
         return -EINVAL;
 
     if (node->dev_type == DEVFS_CONSOLE) {
+        mutex_lock(&vn->lock);
         const char *p = buf;
         for (size_t i = 0; i < len; i++)
             arch_early_putchar(p[i]);
+        mutex_unlock(&vn->lock);
     }
     return (ssize_t)len;
 }

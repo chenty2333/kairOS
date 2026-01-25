@@ -7,7 +7,7 @@
 
 #include <kairos/list.h>
 #include <kairos/process.h>
-#include <kairos/spinlock.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 
 #define B_VALID 0x1 /* Data has been read from disk */
@@ -18,8 +18,7 @@ struct buf {
     struct blkdev *dev;
     uint32_t blockno;
     uint32_t refcount;
-    spinlock_t lock;
-    struct wait_queue wq;
+    struct mutex lock;
     struct list_head lru;  /* LRU list linkage */
     struct list_head hash; /* Hash table linkage */
     uint8_t *data;

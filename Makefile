@@ -129,7 +129,8 @@ CORE_SRCS := \
     kernel/core/proc/fd.c \
     kernel/core/proc/signal.c \
     kernel/core/sched/sched.c \
-    kernel/syscall/syscall.c \
+    kernel/core/sync/sync.c \
+    kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
     kernel/lib/fdt.c \
@@ -137,6 +138,7 @@ CORE_SRCS := \
     kernel/lib/string.c \
     kernel/fs/bio.c \
     kernel/fs/vfs/vfs.c \
+    kernel/fs/vfs/pipe.c \
     kernel/fs/devfs/devfs.c \
     kernel/fs/ext2/ext2.c \
     kernel/drivers/block/blkdev.c \
@@ -146,6 +148,7 @@ CORE_SRCS := \
 ARCH_SRCS := \
     kernel/arch/$(ARCH)/boot.S \
     kernel/arch/$(ARCH)/entry.c \
+    kernel/arch/$(ARCH)/plic.c \
     kernel/arch/$(ARCH)/mmu.c \
     kernel/arch/$(ARCH)/trapasm.S \
     kernel/arch/$(ARCH)/trap.c \

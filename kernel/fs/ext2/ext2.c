@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
@@ -72,7 +73,7 @@ struct ext2_mount {
     struct ext2_superblock *sb;
     struct ext2_group_desc *gdt;
     uint32_t block_size, groups_count, inodes_per_group, blocks_per_group;
-    spinlock_t lock;
+    struct mutex lock;
 };
 
 struct ext2_inode_data {
@@ -226,7 +227,7 @@ static int ext2_write_gd(struct ext2_mount *mnt, uint32_t bg) {
 }
 
 static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out) {
-    spin_lock(&mnt->lock);
+    mutex_lock(&mnt->lock);
     for (uint32_t bg = 0; bg < mnt->groups_count; bg++) {
         if (mnt->gdt[bg].bg_free_blocks_count == 0)
             continue;
@@ -243,18 +244,18 @@ static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out) {
                 mnt->sb->s_free_blocks_count--;
                 *out = bg * mnt->blocks_per_group + i;
                 brelse(bp);
-                spin_unlock(&mnt->lock);
+                mutex_unlock(&mnt->lock);
                 return 0;
             }
         }
         brelse(bp);
     }
-    spin_unlock(&mnt->lock);
+    mutex_unlock(&mnt->lock);
     return -ENOSPC;
 }
 
 static int ext2_alloc_inode(struct ext2_mount *mnt, ino_t *out) {
-    spin_lock(&mnt->lock);
+    mutex_lock(&mnt->lock);
     for (uint32_t bg = 0; bg < mnt->groups_count; bg++) {
         if (mnt->gdt[bg].bg_free_inodes_count == 0)
             continue;
@@ -271,13 +272,13 @@ static int ext2_alloc_inode(struct ext2_mount *mnt, ino_t *out) {
                 mnt->sb->s_free_inodes_count--;
                 *out = bg * mnt->inodes_per_group + i + 1;
                 brelse(bp);
-                spin_unlock(&mnt->lock);
+                mutex_unlock(&mnt->lock);
                 return 0;
             }
         }
         brelse(bp);
     }
-    spin_unlock(&mnt->lock);
+    mutex_unlock(&mnt->lock);
     return -ENOSPC;
 }
 
@@ -347,7 +348,7 @@ static struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
     vn->fs_data = id;
     vn->mount = NULL;
     vn->refcount = 1;
-    spin_init(&vn->lock);
+    mutex_init(&vn->lock, "ext2_vnode");
     return vn;
 }
 
@@ -485,7 +486,7 @@ static int ext2_mount(struct mount *mnt) {
     if (!e)
         return -ENOMEM;
     e->dev = mnt->dev;
-    spin_init(&e->lock);
+    mutex_init(&e->lock, "ext2_mount");
 
     struct buf *bp =
         bread(mnt->dev, 0); /* Read first 4K, superblock is at 1024 */

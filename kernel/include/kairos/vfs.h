@@ -7,7 +7,7 @@
 
 #include <kairos/config.h>
 #include <kairos/list.h>
-#include <kairos/spinlock.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 
 enum vnode_type {
@@ -67,14 +67,14 @@ struct vnode {
     void *fs_data;
     struct mount *mount;
     uint32_t refcount;
-    spinlock_t lock;
+    struct mutex lock;
 };
 
 struct file {
     struct vnode *vnode;
     off_t offset;
     uint32_t flags, refcount;
-    spinlock_t lock;
+    struct mutex lock;
 };
 
 #define O_RDONLY 0

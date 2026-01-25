@@ -10,6 +10,7 @@
 #include <kairos/mm.h>
 #include <kairos/spinlock.h>
 #include <kairos/list.h>
+#include <kairos/string.h>
 #include <kairos/types.h>
 
 /*
@@ -17,18 +18,6 @@
  */
 static LIST_HEAD(blkdev_list);
 static spinlock_t blkdev_lock = SPINLOCK_INIT;
-
-/**
- * Helper: string comparison
- */
-static int strcmp(const char *s1, const char *s2)
-{
-    while (*s1 && (*s1 == *s2)) {
-        s1++;
-        s2++;
-    }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
-}
 
 /**
  * blkdev_register - Register a block device

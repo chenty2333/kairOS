@@ -6,6 +6,7 @@
 
 #include <kairos/process.h>
 #include <kairos/spinlock.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
@@ -56,9 +57,9 @@ int fd_close(struct process *p, int fd) {
 }
 
 static inline void file_get(struct file *file) {
-    spin_lock(&file->lock);
+    mutex_lock(&file->lock);
     file->refcount++;
-    spin_unlock(&file->lock);
+    mutex_unlock(&file->lock);
 }
 
 /**

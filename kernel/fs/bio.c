@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
+#include <kairos/sync.h>
 
 #define NBUF 128
 #define HASH_SIZE 32
@@ -26,34 +27,31 @@ void binit(void) {
     for (int i = 0; i < NBUF; i++) {
         struct buf *b = &bufs[i];
         b->data = kmalloc(4096); /* Assume 4K block size for now */
-        spin_init(&b->lock);
-        wait_queue_init(&b->wq);
+        b->dev = NULL;
+        b->flags = 0;
+        b->refcount = 0;
+        mutex_init(&b->lock, "buffer");
         list_add(&b->lru, &lru_list);
     }
     pr_info("bio: initialized %d buffers\n", NBUF);
 }
 
+/**
+ * bget - Look for a buffer for the given device and block.
+ * Returns the buffer, locked.
+ */
 static struct buf *bget(struct blkdev *dev, uint32_t blockno) {
     struct buf *b;
     uint32_t h = BUF_HASH(dev, blockno);
 
-loop:
     spin_lock(&bcache_lock);
+
     /* 1. Check if in hash table */
     list_for_each_entry(b, &hashtable[h], hash) {
         if (b->dev == dev && b->blockno == blockno) {
             b->refcount++;
             spin_unlock(&bcache_lock);
-
-            spin_lock(&b->lock);
-            while (!(b->flags & B_VALID) && b->refcount > 1) {
-                /* Wait for IO if another process is reading this */
-                spin_unlock(&b->lock);
-                wait_queue_add(&b->wq, proc_current());
-                proc_sleep(&b->wq);
-                spin_lock(&b->lock);
-            }
-            spin_unlock(&b->lock);
+            mutex_lock(&b->lock);
             return b;
         }
     }
@@ -69,34 +67,47 @@ loop:
             b->refcount = 1;
             list_add(&b->hash, &hashtable[h]);
             spin_unlock(&bcache_lock);
+            mutex_lock(&b->lock);
             return b;
         }
     }
 
-    /* 3. No free buffers! */
     spin_unlock(&bcache_lock);
     panic("bio: out of buffers");
-    goto loop;
 }
 
+/**
+ * bread - Read a block from disk. Returns a locked buffer.
+ */
 struct buf *bread(struct blkdev *dev, uint32_t blockno) {
     struct buf *b = bget(dev, blockno);
     if (!(b->flags & B_VALID)) {
         blkdev_read(dev, (uint64_t)blockno * (4096 / dev->sector_size), b->data,
                     4096 / dev->sector_size);
         b->flags |= B_VALID;
-        wait_queue_wakeup_all(&b->wq);
     }
     return b;
 }
 
+/**
+ * bwrite - Write a buffer's content to disk.
+ * Buffer must be locked.
+ */
 void bwrite(struct buf *b) {
+    if (b->lock.holder != proc_current()) {
+        panic("bwrite: buffer not held by current process");
+    }
     b->flags &= ~B_DIRTY;
     blkdev_write(b->dev, (uint64_t)b->blockno * (4096 / b->dev->sector_size),
                  b->data, 4096 / b->dev->sector_size);
 }
 
+/**
+ * brelse - Release a locked buffer.
+ */
 void brelse(struct buf *b) {
+    mutex_unlock(&b->lock);
+
     spin_lock(&bcache_lock);
     b->refcount--;
     if (b->refcount == 0) {

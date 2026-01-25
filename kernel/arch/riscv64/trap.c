@@ -96,6 +96,8 @@ static void handle_interrupt(struct trap_frame *tf) {
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
     if (cause == IRQ_S_TIMER) {
         timer_interrupt_handler();
+    } else if (cause == IRQ_S_EXT) {
+        arch_irq_handler(tf);
     } else if (cause == IRQ_S_SOFT) {
         __asm__ __volatile__("csrc sip, %0" ::"r"(1UL << 1));
         struct percpu_data *cpu = arch_get_percpu();
@@ -130,6 +132,9 @@ void trap_dispatch(struct trap_frame *tf) {
 void arch_trap_init(void) {
     __asm__ __volatile__(
         "csrw stvec, %0\ncsrw sscratch, zero" ::"r"(trap_entry));
+    
+    arch_irq_init();
+
     uint64_t sie =
         (1UL << IRQ_S_SOFT) | (1UL << IRQ_S_TIMER) | (1UL << IRQ_S_EXT);
     __asm__ __volatile__("csrw sie, %0" ::"r"(sie));

@@ -9,6 +9,7 @@
 #include <kairos/process.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
@@ -266,7 +267,7 @@ int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
     file->vnode = vn;
     file->flags = flags;
     file->refcount = 1;
-    spin_init(&file->lock);
+    mutex_init(&file->lock, "file");
     if ((flags & O_TRUNC) && vn->ops->truncate)
         vn->ops->truncate(vn, 0);
     *fp = file;
@@ -276,12 +277,12 @@ int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
 int vfs_close(struct file *file) {
     if (!file)
         return -EINVAL;
-    spin_lock(&file->lock);
+    mutex_lock(&file->lock);
     if (--file->refcount > 0) {
-        spin_unlock(&file->lock);
+        mutex_unlock(&file->lock);
         return 0;
     }
-    spin_unlock(&file->lock);
+    mutex_unlock(&file->lock);
     if (file->vnode->ops->close)
         file->vnode->ops->close(file->vnode);
     vnode_put(file->vnode);
@@ -292,38 +293,38 @@ int vfs_close(struct file *file) {
 ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     if (!file || !file->vnode->ops->read)
         return -EINVAL;
-    spin_lock(&file->lock);
+    mutex_lock(&file->lock);
     ssize_t ret = file->vnode->ops->read(file->vnode, buf, len, file->offset);
     if (ret > 0)
         file->offset += ret;
-    spin_unlock(&file->lock);
+    mutex_unlock(&file->lock);
     return ret;
 }
 
 ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     if (!file || !file->vnode->ops->write)
         return -EINVAL;
-    spin_lock(&file->lock);
+    mutex_lock(&file->lock);
     if (file->flags & O_APPEND)
         file->offset = file->vnode->size;
     ssize_t ret = file->vnode->ops->write(file->vnode, buf, len, file->offset);
     if (ret > 0)
         file->offset += ret;
-    spin_unlock(&file->lock);
+    mutex_unlock(&file->lock);
     return ret;
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {
-    spin_lock(&file->lock);
+    mutex_lock(&file->lock);
     off_t next = (whence == SEEK_SET)   ? offset
                  : (whence == SEEK_CUR) ? file->offset + offset
                                         : file->vnode->size + offset;
     if (next < 0) {
-        spin_unlock(&file->lock);
+        mutex_unlock(&file->lock);
         return -EINVAL;
     }
     file->offset = next;
-    spin_unlock(&file->lock);
+    mutex_unlock(&file->lock);
     return next;
 }
 
@@ -374,9 +375,9 @@ int vfs_rmdir(const char *path) {
 int vfs_readdir(struct file *file, struct dirent *ent) {
     if (!file || !file->vnode->ops->readdir)
         return -ENOSYS;
-    spin_lock(&file->lock);
+    mutex_lock(&file->lock);
     int ret = file->vnode->ops->readdir(file->vnode, ent, &file->offset);
-    spin_unlock(&file->lock);
+    mutex_unlock(&file->lock);
     return ret;
 }
 
@@ -408,19 +409,19 @@ int vfs_rename(const char *old, const char *new) {
 
 void vnode_get(struct vnode *vn) {
     if (vn) {
-        spin_lock(&vn->lock);
+        mutex_lock(&vn->lock);
         vn->refcount++;
-        spin_unlock(&vn->lock);
+        mutex_unlock(&vn->lock);
     }
 }
 void vnode_put(struct vnode *vn) {
     if (!vn)
         return;
-    spin_lock(&vn->lock);
+    mutex_lock(&vn->lock);
     if (--vn->refcount == 0) {
-        spin_unlock(&vn->lock);
+        mutex_unlock(&vn->lock);
         if (vn->ops->close)
             vn->ops->close(vn);
     } else
-        spin_unlock(&vn->lock);
+        mutex_unlock(&vn->lock);
 }

@@ -1,0 +1,159 @@
+/**
+ * kernel/core/sync.c - Robust Mutex and Semaphore implementation
+ */
+
+#include <kairos/sync.h>
+#include <kairos/process.h>
+#include <kairos/sched.h>
+#include <kairos/printk.h>
+#include <kairos/mm.h>
+#include <kairos/string.h>
+
+/* --- User-space Semaphore Management --- */
+
+#define MAX_USER_SEMS 128
+static struct semaphore user_sems[MAX_USER_SEMS];
+static bool user_sem_used[MAX_USER_SEMS];
+static spinlock_t user_sem_lock = SPINLOCK_INIT;
+
+int do_sem_init(int count) {
+    if (count < 0) return -EINVAL;
+    spin_lock(&user_sem_lock);
+    for (int i = 0; i < MAX_USER_SEMS; i++) {
+        if (!user_sem_used[i]) {
+            user_sem_used[i] = true;
+            sem_init(&user_sems[i], count, "user_sem");
+            spin_unlock(&user_sem_lock);
+            return i;
+        }
+    }
+    spin_unlock(&user_sem_lock);
+    return -ENOSPC;
+}
+
+int do_sem_wait(int sem_id) {
+    if (sem_id < 0 || sem_id >= MAX_USER_SEMS || !user_sem_used[sem_id])
+        return -EINVAL;
+    sem_wait(&user_sems[sem_id]);
+    return 0;
+}
+
+int do_sem_post(int sem_id) {
+    if (sem_id < 0 || sem_id >= MAX_USER_SEMS || !user_sem_used[sem_id])
+        return -EINVAL;
+    sem_post(&user_sems[sem_id]);
+    return 0;
+}
+
+/* --- Mutex Implementation --- */
+
+void mutex_init(struct mutex *m, const char *name) {
+    spin_init(&m->lock);
+    m->locked = false;
+    m->holder = NULL;
+    m->name = name;
+    wait_queue_init(&m->wq);
+}
+
+void mutex_lock(struct mutex *m) {
+    struct process *curr = proc_current();
+    
+    /* 1. Deadlock detection: Check if we already hold this mutex */
+    if (m->holder == curr) {
+        panic("mutex_lock: recursive deadlock on mutex '%s' (pid %d)", 
+              m->name ? m->name : "unnamed", curr ? curr->pid : -1);
+    }
+
+    spin_lock(&m->lock);
+    while (m->locked) {
+        /* 2. Prepare to sleep: Add to queue and set state while holding the lock.
+         * This prevents the 'lost wakeup' race. */
+        wait_queue_add(&m->wq, curr);
+        curr->state = PROC_SLEEPING;
+        curr->wait_channel = m;
+        
+        spin_unlock(&m->lock);
+        schedule(); /* Yield CPU to other tasks */
+        spin_lock(&m->lock);
+    }
+    
+    m->locked = true;
+    m->holder = curr;
+    spin_unlock(&m->lock);
+}
+
+void mutex_unlock(struct mutex *m) {
+    spin_lock(&m->lock);
+    if (!m->locked) {
+        spin_unlock(&m->lock);
+        pr_warn("mutex_unlock: mutex '%s' was already unlocked\n", 
+                m->name ? m->name : "unnamed");
+        return;
+    }
+    
+    m->locked = false;
+    m->holder = NULL;
+    spin_unlock(&m->lock);
+    
+    /* 3. Wake up one waiter from the queue */
+    wait_queue_wakeup_one(&m->wq);
+}
+
+bool mutex_trylock(struct mutex *m) {
+    bool success = false;
+    spin_lock(&m->lock);
+    if (!m->locked) {
+        m->locked = true;
+        m->holder = proc_current();
+        success = true;
+    }
+    spin_unlock(&m->lock);
+    return success;
+}
+
+/* --- Semaphore Implementation --- */
+
+void sem_init(struct semaphore *s, int count, const char *name) {
+    spin_init(&s->lock);
+    s->count = count;
+    s->name = name;
+    wait_queue_init(&s->wq);
+}
+
+void sem_wait(struct semaphore *s) {
+    struct process *curr = proc_current();
+    
+    spin_lock(&s->lock);
+    while (s->count <= 0) {
+        /* Prevent lost wakeup by setting state under lock */
+        wait_queue_add(&s->wq, curr);
+        curr->state = PROC_SLEEPING;
+        curr->wait_channel = s;
+        
+        spin_unlock(&s->lock);
+        schedule();
+        spin_lock(&s->lock);
+    }
+    s->count--;
+    spin_unlock(&s->lock);
+}
+
+void sem_post(struct semaphore *s) {
+    spin_lock(&s->lock);
+    s->count++;
+    spin_unlock(&s->lock);
+    
+    /* Wake up one waiter */
+    wait_queue_wakeup_one(&s->wq);
+}
+
+bool sem_trywait(struct semaphore *s) {
+    bool success = false;
+    spin_lock(&s->lock);
+    if (s->count > 0) {
+        s->count--;
+        success = true;
+    }
+    spin_unlock(&s->lock);
+    return success;
+}

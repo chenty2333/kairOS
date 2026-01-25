@@ -88,6 +88,14 @@ enum trap_type {
     TRAP_IRQ,
     TRAP_UNKNOWN
 };
+
+/* Interrupt Controller Interface */
+void arch_irq_init(void);
+void arch_irq_enable_nr(int irq);
+void arch_irq_disable_nr(int irq);
+void arch_irq_handler(struct trap_frame *tf);
+void arch_irq_register(int irq, void (*handler)(void *), void *arg);
+
 struct trap_info {
     enum trap_type type;
     uint64_t fault_addr, error_code;
