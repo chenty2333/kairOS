@@ -486,22 +486,34 @@ void kernel_main(unsigned long hartid, void *dtb) {
 
     /*
      * User Mode and Fork Test
-     * NOTE: This test enters user mode and does not return!
      */
     pr_info("Starting robustness test...\n");
     run_crash_test();
 
-    /* Should not reach here - fork test enters user mode */
-    printk("\n");
+    /* Enable interrupts and wait for the test to complete */
+    arch_irq_enable();
+    int status;
+    while (proc_wait(-1, &status, 0) > 0) {
+        /* Keep waiting until no children are left */
+    }
+    arch_irq_disable();
 
     /* Print final statistics */
-    printk("Final statistics:\n");
+    pr_info("Tests complete. Stopping system...\n");
+    arch_irq_disable();
+    arch_send_ipi_all(IPI_STOP);
+    
+    /* Small delay to let others stop */
+    for (volatile int i = 0; i < 1000000; i++);
+
+    printk("\nFinal statistics:\n");
     printk("  Total timer ticks: %lu\n", system_ticks);
     printk("  Free pages: %lu (%lu MB)\n", pmm_num_free_pages(),
            (pmm_num_free_pages() * 4096) >> 20);
 
-    /* Halt for now */
-    printk("\nHalting...\n");
+    /* Shutdown if possible, or halt */
+    printk("\nSystem halted.\n");
+    arch_cpu_shutdown();
     while (1) {
         arch_cpu_halt();
     }

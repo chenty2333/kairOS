@@ -163,7 +163,10 @@ size_t pmm_total_pages(void) { return total_pages; }
 
 size_t pmm_num_free_pages(void) {
     size_t total = num_free_pages;
-    for (int i = 0; i < CONFIG_MAX_CPUS; i++) total += pcp_areas[i].count;
+    int ncpus = arch_cpu_count();
+    for (int i = 0; i < ncpus; i++) {
+        total += pcp_areas[i].count;
+    }
     return total;
 }
 

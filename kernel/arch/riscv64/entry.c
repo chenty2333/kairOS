@@ -95,9 +95,23 @@ void arch_send_ipi(int cpu, int type) {
     sbi_call(SBI_EXT_IPI, SBI_IPI_SEND, 1UL << cpu, 0, 0);
 }
 
-void arch_send_ipi_all(int type __attribute__((unused))) {
-    unsigned long self = arch_cpu_id();
-    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND, ~(1UL << self), 0, 0);
+void arch_send_ipi_all(int type) {
+    unsigned long mask = 0;
+    int self = arch_cpu_id();
+    int count = arch_cpu_count();
+
+    for (int i = 0; i < count; i++) {
+        if (i == self) continue;
+        struct percpu_data *data = sched_cpu_data(i);
+        if (data) {
+            __sync_fetch_and_or(&data->ipi_pending_mask, (1 << type));
+            mask |= (1UL << i);
+        }
+    }
+    
+    if (mask) {
+        sbi_call(SBI_EXT_IPI, SBI_IPI_SEND, mask, 0, 0);
+    }
 }
 
 static int num_cpus = 1;

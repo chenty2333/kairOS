@@ -77,12 +77,14 @@ static void handle_exception(struct trap_frame *tf) {
         }
         if (from_user) {
             signal_send(cur->pid, SIGSEGV);
+            signal_deliver_pending();
             return;
         }
     }
 
     if (cause == EXC_ILLEGAL_INST && from_user) {
         signal_send(proc_current()->pid, SIGILL);
+        signal_deliver_pending(); /* Deliver immediately, should not return */
         return;
     }
 

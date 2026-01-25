@@ -324,8 +324,10 @@ int virtio_blk_init(uint64_t mmio_addr) {
     vdev->blkdev.sector_size = 512;
     vdev->blkdev.ops = &virtio_blk_ops;
     vdev->blkdev.private = vdev;
+    
+    static int disk_count = 0;
     strncpy(vdev->blkdev.name, "vda", sizeof(vdev->blkdev.name));
-    vdev->blkdev.name[2] += (char)(vdev->irq - 1);
+    vdev->blkdev.name[2] += (char)(disk_count++);
 
     /* Register IRQ */
     arch_irq_register(vdev->irq, virtio_blk_intr, vdev);

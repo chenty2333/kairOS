@@ -74,6 +74,7 @@ int vprintk(const char *fmt, va_list args)
     
     if (len >= (int)sizeof(small_buf)) {
         using_global_buf = true;
+        (void)using_global_buf;
         buf = printk_buf;
         buf_size = PRINTK_BUF_SIZE;
         len = vsnprintf(printk_buf, PRINTK_BUF_SIZE, fmt, args);
@@ -109,6 +110,15 @@ noreturn void panic(const char *fmt, ...)
     va_list args;
 
     arch_irq_disable();
+    
+    /* Stop all other CPUs */
+    arch_send_ipi_all(IPI_STOP);
+    
+    /* Try to grab the lock to prevent garbled output, but don't hang */
+    if (!spin_trylock(&log_lock.lock)) {
+        /* If we can't get the lock, we might be in a deadlock or recursing.
+         * Just proceed, garbled output is better than no output. */
+    }
 
     /* Bypass lock if possible or just force it, but here we just print direct */
     puts_early("\n\n*** KERNEL PANIC ***\n");

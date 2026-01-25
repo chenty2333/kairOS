@@ -121,7 +121,6 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
     
     pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
     memcpy((void *)(pa + (sp % CONFIG_PAGE_SIZE)), u_argv, argv_ptr_size);
-    vaddr_t argv_start = sp;
 
     /* Push argc */
     sp -= sizeof(long);

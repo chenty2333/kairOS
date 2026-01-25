@@ -33,8 +33,6 @@ int64_t sys_exec(uint64_t path, uint64_t argv, uint64_t a2, uint64_t a3, uint64_
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) return -EFAULT;
-    
-    /* Simplified argv handling for now */
     return (int64_t)proc_exec(kpath, (char *const *)argv);
 }
 
@@ -106,6 +104,35 @@ int64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a
     return (int64_t)fd_close(proc_current(), (int)fd);
 }
 
+int64_t sys_stat(uint64_t path, uint64_t st_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    char kpath[CONFIG_PATH_MAX];
+    struct stat st;
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) return -EFAULT;
+    
+    int ret = vfs_stat(kpath, &st);
+    if (ret < 0) return ret;
+    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0) return -EFAULT;
+    return 0;
+}
+
+int64_t sys_fstat(uint64_t fd, uint64_t st_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f) return -EBADF;
+    
+    struct stat st;
+    int ret = vfs_fstat(f, &st);
+    if (ret < 0) return ret;
+    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0) return -EFAULT;
+    return 0;
+}
+
+int64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    return (int64_t)fd_dup2(proc_current(), (int)oldfd, (int)newfd);
+}
+
 int64_t sys_pipe(uint64_t fd_array, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     struct file *rf, *wf;
@@ -118,7 +145,7 @@ int64_t sys_pipe(uint64_t fd_array, uint64_t a1, uint64_t a2, uint64_t a3, uint6
     return 0;
 }
 
-/* --- Semaphore Handlers (Matching syscall_fn_t) --- */
+/* --- Semaphore Handlers --- */
 
 int64_t sys_sem_init(uint64_t count, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -148,6 +175,9 @@ syscall_fn_t syscall_table[SYS_MAX] = {
     [SYS_read]    = sys_read,
     [SYS_write]   = sys_write,
     [SYS_close]   = sys_close,
+    [SYS_stat]    = sys_stat,
+    [SYS_fstat]   = sys_fstat,
+    [SYS_dup2]    = sys_dup2,
     [SYS_pipe]    = sys_pipe,
     [SYS_sem_init] = sys_sem_init,
     [SYS_sem_wait] = sys_sem_wait,

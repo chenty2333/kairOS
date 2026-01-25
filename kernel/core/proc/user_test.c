@@ -84,33 +84,36 @@ fail:
     return NULL;
 }
 
-static noreturn void _run_test(struct process *p) {
-    p->state = PROC_RUNNING;
-    p->on_rq = false;
-    p->last_run_time = arch_timer_ticks() * (1000000000UL / CONFIG_HZ);
-    arch_mmu_switch(p->mm->pgdir);
-    proc_set_current(p);
-    struct percpu_data *cpu = arch_get_percpu();
-    cpu->curr_proc = p;
-    cpu->runqueue.curr = p;
-    arch_enter_user(p->context);
-    panic("ret");
+void run_user_test(void) {
+
+    pr_info("\n=== User Mode Test ===\n");
+
+    struct process *p = create_user_process("user_test", user_program, sizeof(user_program), proc_current());
+
+    if (p) sched_enqueue(p);
+
 }
 
-void run_user_test(void) {
-    pr_info("\n=== User Mode Test ===\n");
-    struct process *p = create_user_process("user_test", user_program, sizeof(user_program), NULL);
-    if (p) _run_test(p);
-}
+
 
 void run_fork_test(void) {
+
     pr_info("\n=== Fork Test ===\n");
-    struct process *p = create_user_process("fork_test", user_program, sizeof(user_program), NULL);
-    if (p) _run_test(p);
+
+    struct process *p = create_user_process("fork_test", user_program, sizeof(user_program), proc_current());
+
+    if (p) sched_enqueue(p);
+
 }
 
+
+
 void run_crash_test(void) {
+
     pr_info("\n=== Crash Test (Illegal Instruction) ===\n");
-    struct process *p = create_user_process("crash_test", crash_program, sizeof(crash_program), NULL);
-    if (p) _run_test(p);
+
+    struct process *p = create_user_process("crash_test", crash_program, sizeof(crash_program), proc_current());
+
+    if (p) sched_enqueue(p);
+
 }

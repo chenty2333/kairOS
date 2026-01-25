@@ -72,7 +72,17 @@ void arch_context_init(struct arch_context *ctx, vaddr_t entry, vaddr_t arg,
         ctx->kthread_fn = entry;
         ctx->kthread_arg = arg;
     } else {
-        ctx->ra = entry;
+        /* User process: Create a fake trap frame to return to U-mode */
+        struct trap_frame *tf = (struct trap_frame *)(ctx->kernel_stack - sizeof(struct trap_frame));
+        memset(tf, 0, sizeof(*tf));
+        
+        tf->sepc = entry;
+        tf->tf_sp = arg;
+        /* sstatus: SPIE=1 (enable interrupts after sret), SPP=0 (return to U-mode) */
+        tf->sstatus = (1UL << 5); 
+        
+        ctx->ra = (uint64_t)trap_return;
+        ctx->sp = (uint64_t)tf;
         ctx->user_stack = arg;
     }
 }

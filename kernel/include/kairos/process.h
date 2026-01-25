@@ -45,6 +45,7 @@ struct process {
     uint64_t sig_pending, sig_blocked;
     struct sigaction *sigactions;
     void *wait_channel;
+    struct wait_queue exit_wait;
     struct list_head children, sibling, wait_list;
     struct process *parent;
     struct arch_context *context;

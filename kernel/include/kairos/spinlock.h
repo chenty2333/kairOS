@@ -27,6 +27,10 @@ static inline void spin_unlock(spinlock_t *lock) {
     __atomic_clear(&lock->lock, __ATOMIC_RELEASE);
 }
 
+static inline bool spin_trylock(spinlock_t *lock) {
+    return !__atomic_test_and_set(&lock->lock, __ATOMIC_ACQUIRE);
+}
+
 typedef struct {
     spinlock_t lock;
     bool irq_state;
