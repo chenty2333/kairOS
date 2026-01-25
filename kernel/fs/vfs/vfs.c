@@ -17,10 +17,12 @@ static LIST_HEAD(fs_type_list);
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 static struct mount *root_mount = NULL;
 
+static struct kmem_cache *vnode_cache;
+static struct kmem_cache *file_cache;
+
 int vfs_normalize_path(const char *cwd, const char *input, char *output) {
     char temp[CONFIG_PATH_MAX], *stack[32];
     int top = 0;
-
     if (!output || !input)
         return -EINVAL;
 
@@ -50,10 +52,9 @@ int vfs_normalize_path(const char *cwd, const char *input, char *output) {
             p++;
         char saved = *p;
         *p = '\0';
-
-        if (strcmp(start, ".") == 0) {
-            /* ignore */
-        } else if (strcmp(start, "..") == 0) {
+        if (strcmp(start, ".") == 0)
+            ;
+        else if (strcmp(start, "..") == 0) {
             if (top > 0)
                 top--;
         } else {
@@ -79,7 +80,9 @@ int vfs_normalize_path(const char *cwd, const char *input, char *output) {
 }
 
 void vfs_init(void) {
-    pr_info("VFS: initialized\n");
+    vnode_cache = kmem_cache_create("vnode", sizeof(struct vnode), NULL);
+    file_cache = kmem_cache_create("file", sizeof(struct file), NULL);
+    pr_info("VFS: initialized (caches ready)\n");
 }
 
 int vfs_register_fs(struct fs_type *fs) {
@@ -87,16 +90,6 @@ int vfs_register_fs(struct fs_type *fs) {
         return -EINVAL;
     spin_lock(&vfs_lock);
     list_add_tail(&fs->list, &fs_type_list);
-    spin_unlock(&vfs_lock);
-    pr_info("VFS: registered %s\n", fs->name);
-    return 0;
-}
-
-int vfs_unregister_fs(struct fs_type *fs) {
-    if (!fs)
-        return -EINVAL;
-    spin_lock(&vfs_lock);
-    list_del(&fs->list);
     spin_unlock(&vfs_lock);
     return 0;
 }
@@ -115,16 +108,14 @@ static struct mount *find_mount(const char *path) {
     size_t best_len = 0;
     if (!root_mount)
         return NULL;
-
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
         size_t len = strlen(mnt->mountpoint);
-        if (strncmp(path, mnt->mountpoint, len) == 0) {
-            if (path[len] == '\0' || path[len] == '/' || len == 1) {
-                if (len > best_len) {
-                    best = mnt;
-                    best_len = len;
-                }
+        if (strncmp(path, mnt->mountpoint, len) == 0 &&
+            (path[len] == '\0' || path[len] == '/' || len == 1)) {
+            if (len > best_len) {
+                best = mnt;
+                best_len = len;
             }
         }
     }
@@ -132,44 +123,34 @@ static struct mount *find_mount(const char *path) {
     return best;
 }
 
-int vfs_mount(const char *source, const char *target, const char *fstype,
+int vfs_mount(const char *src, const char *tgt, const char *fstype,
               uint32_t flags) {
     struct fs_type *fs;
     struct mount *mnt = NULL;
     struct blkdev *dev = NULL;
     int ret = -ENOMEM;
-
     spin_lock(&vfs_lock);
     fs = find_fs_type(fstype);
     spin_unlock(&vfs_lock);
     if (!fs)
         return -ENODEV;
-
-    if (source && !(dev = blkdev_get(source)))
+    if (src && !(dev = blkdev_get(src)))
         return -ENODEV;
-
-    if (!(mnt = kzalloc(sizeof(*mnt))))
+    if (!(mnt = kzalloc(sizeof(*mnt))) ||
+        !(mnt->mountpoint = kmalloc(strlen(tgt) + 1)))
         goto err;
-    if (!(mnt->mountpoint = kmalloc(strlen(target) + 1)))
-        goto err;
-
-    strcpy(mnt->mountpoint, target);
+    strcpy(mnt->mountpoint, tgt);
     mnt->ops = fs->ops;
     mnt->dev = dev;
     mnt->flags = flags;
-
     if ((ret = mnt->ops->mount(mnt)) < 0)
         goto err;
-
     spin_lock(&vfs_lock);
     list_add_tail(&mnt->list, &mount_list);
-    if (strcmp(target, "/") == 0)
+    if (strcmp(tgt, "/") == 0)
         root_mount = mnt;
     spin_unlock(&vfs_lock);
-
-    pr_info("VFS: mounted %s at %s\n", source ? source : "none", target);
     return 0;
-
 err:
     if (mnt) {
         kfree(mnt->mountpoint);
@@ -180,11 +161,11 @@ err:
     return ret;
 }
 
-int vfs_umount(const char *target) {
+int vfs_umount(const char *tgt) {
     struct mount *mnt;
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
-        if (strcmp(mnt->mountpoint, target) == 0) {
+        if (strcmp(mnt->mountpoint, tgt) == 0) {
             list_del(&mnt->list);
             if (mnt == root_mount)
                 root_mount = NULL;
@@ -206,19 +187,15 @@ struct vnode *vfs_lookup(const char *path) {
     char norm[CONFIG_PATH_MAX], comp[CONFIG_NAME_MAX];
     struct vnode *vn, *dir;
     struct process *cur = proc_current();
-
     if (!path || vfs_normalize_path(cur ? cur->cwd : "/", path, norm) < 0)
         return NULL;
-
     struct mount *mnt = find_mount(norm);
     if (!mnt || !(dir = mnt->root))
         return NULL;
-
     vnode_get(dir);
     const char *p = norm + strlen(mnt->mountpoint);
     if (strlen(mnt->mountpoint) > 1 && *p == '/')
         p++;
-
     while (*p) {
         while (*p == '/')
             p++;
@@ -234,7 +211,6 @@ struct vnode *vfs_lookup(const char *path) {
         }
         memcpy(comp, p, len);
         comp[len] = '\0';
-
         if (!mnt->ops->lookup || !(vn = mnt->ops->lookup(dir, comp))) {
             vnode_put(dir);
             return NULL;
@@ -252,10 +228,8 @@ struct vnode *vfs_lookup_parent(const char *path, char *name) {
     const char *last = strrchr(path, '/');
     if (!last)
         return NULL;
-
     strncpy(name, last + 1, CONFIG_NAME_MAX - 1);
     name[CONFIG_NAME_MAX - 1] = '\0';
-
     if (last == path)
         return vfs_lookup("/");
     char parent[CONFIG_PATH_MAX];
@@ -271,31 +245,28 @@ int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
         char name[CONFIG_NAME_MAX];
         struct vnode *parent = vfs_lookup_parent(path, name);
         struct mount *mnt = find_mount(path);
-        if (parent && mnt && mnt->ops->create) {
-            if (mnt->ops->create(parent, name, mode) >= 0)
-                vn = vfs_lookup(path);
-        }
+        if (parent && mnt && mnt->ops->create &&
+            mnt->ops->create(parent, name, mode) >= 0)
+            vn = vfs_lookup(path);
         if (parent)
             vnode_put(parent);
     }
-
     if (!vn)
         return -ENOENT;
     if ((flags & O_DIRECTORY) && vn->type != VNODE_DIR) {
         vnode_put(vn);
         return -ENOTDIR;
     }
-
-    struct file *file = kzalloc(sizeof(*file));
+    struct file *file = kmem_cache_alloc(file_cache);
     if (!file) {
         vnode_put(vn);
         return -ENOMEM;
     }
+    memset(file, 0, sizeof(*file));
     file->vnode = vn;
     file->flags = flags;
     file->refcount = 1;
     spin_init(&file->lock);
-
     if ((flags & O_TRUNC) && vn->ops->truncate)
         vn->ops->truncate(vn, 0);
     *fp = file;
@@ -314,7 +285,7 @@ int vfs_close(struct file *file) {
     if (file->vnode->ops->close)
         file->vnode->ops->close(file->vnode);
     vnode_put(file->vnode);
-    kfree(file);
+    kmem_cache_free(file_cache, file);
     return 0;
 }
 
@@ -442,7 +413,6 @@ void vnode_get(struct vnode *vn) {
         spin_unlock(&vn->lock);
     }
 }
-
 void vnode_put(struct vnode *vn) {
     if (!vn)
         return;

@@ -12,7 +12,8 @@
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
-/* Process table */
+/* Process table and cache */
+static struct kmem_cache *proc_cache;
 static struct process proc_table[CONFIG_MAX_PROCESSES];
 static spinlock_t proc_table_lock = SPINLOCK_INIT;
 
@@ -23,9 +24,6 @@ static pid_t next_pid = 1;
 static struct process *current_proc = NULL;
 static struct process *idle_proc = NULL;
 
-/**
- * proc_init - Initialize process subsystem
- */
 void proc_init(void) {
     memset(proc_table, 0, sizeof(proc_table));
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
@@ -35,7 +33,8 @@ void proc_init(void) {
         INIT_LIST_HEAD(&proc_table[i].wait_list);
         INIT_LIST_HEAD(&proc_table[i].sched_list);
     }
-    pr_info("Process: initialized (max %d processes)\n", CONFIG_MAX_PROCESSES);
+    proc_cache = kmem_cache_create("process", sizeof(struct process), NULL);
+    pr_info("Process: initialized (cache ready)\n");
 }
 
 static void proc_set_name(struct process *p, const char *name) {
@@ -43,9 +42,6 @@ static void proc_set_name(struct process *p, const char *name) {
     p->name[sizeof(p->name) - 1] = '\0';
 }
 
-/**
- * proc_alloc - Allocate a new process structure
- */
 static struct process *proc_alloc(void) {
     struct process *p = NULL;
 
@@ -60,29 +56,19 @@ static struct process *proc_alloc(void) {
     }
     spin_unlock(&proc_table_lock);
 
-    if (!p) {
-        pr_err("proc_alloc: no free slots\n");
+    if (!p)
         return NULL;
-    }
 
-    /* Reset core fields */
-    p->ppid = 0;
+    /* Initialize essential fields */
+    p->ppid = p->uid = p->gid = p->vruntime = p->nice = 0;
     p->name[0] = '\0';
-    p->uid = p->gid = 0;
-    p->vruntime = 0;
-    p->nice = 0;
-    p->mm = NULL;
-    p->parent = NULL;
+    p->mm = p->parent = NULL;
     p->on_rq = false;
-    p->exit_code = 0;
-    p->sig_pending = 0;
-    p->sig_blocked = 0;
+    p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
-
     memset(p->files, 0, sizeof(p->files));
     strcpy(p->cwd, "/");
 
-    /* Critical: Initialize all list heads */
     INIT_LIST_HEAD(&p->children);
     INIT_LIST_HEAD(&p->sibling);
     INIT_LIST_HEAD(&p->wait_list);
@@ -125,7 +111,6 @@ static void proc_free(struct process *p) {
 struct process *proc_current(void) {
     return current_proc;
 }
-
 void proc_set_current(struct process *p) {
     current_proc = p;
 }
@@ -148,7 +133,6 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name) {
     struct process *p = proc_alloc();
     if (!p)
         return NULL;
-
     proc_set_name(p, name);
     arch_context_init(p->context, (vaddr_t)fn, (vaddr_t)arg, true);
     p->state = PROC_RUNNABLE;
@@ -169,17 +153,12 @@ struct process *proc_idle_init(void) {
     p->pid = 0;
     proc_set_name(p, "idle");
     p->nice = 19;
-
-    if (!(p->context = arch_context_alloc())) {
-        panic("Failed to allocate idle context");
-    }
-
+    if (!(p->context = arch_context_alloc()))
+        panic("Idle context fail");
     arch_context_init(p->context, (vaddr_t)idle_thread, 0, true);
     p->state = PROC_RUNNABLE;
     idle_proc = current_proc = p;
     sched_set_idle(p);
-
-    pr_info("Process: idle process created (pid 0)\n");
     return p;
 }
 
@@ -188,12 +167,8 @@ struct process *proc_idle(void) {
 }
 
 struct process *proc_fork(void) {
-    struct process *parent = current_proc;
-    struct process *child;
-
-    if (!parent || !parent->mm)
-        return NULL;
-    if (!(child = proc_alloc()))
+    struct process *parent = current_proc, *child;
+    if (!parent || !parent->mm || !(child = proc_alloc()))
         return NULL;
 
     strcpy(child->name, parent->name);
@@ -214,7 +189,6 @@ struct process *proc_fork(void) {
     }
 
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
-
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         struct file *f = parent->files[i];
         if (f) {
@@ -237,33 +211,26 @@ struct process *proc_fork(void) {
 
 noreturn void proc_exit(int status) {
     struct process *p = current_proc;
-
     if (p == idle_proc)
-        panic("Idle cannot exit");
-
-    pr_info("Process %d (%s) exiting: %d\n", p->pid, p->name, status);
+        panic("Idle exit");
+    pr_info("Process %d exiting: %d\n", p->pid, status);
     sched_dequeue(p);
     p->exit_code = status;
     p->state = PROC_ZOMBIE;
-
     if (p->parent)
         proc_wakeup(p->parent);
-
     if (p->mm && !p->parent) {
-        pr_info("Test process exited. Halted.\n");
         arch_irq_disable();
         while (1)
             arch_cpu_halt();
     }
-
     schedule();
-    panic("zombie returned!");
+    panic("zombie ret");
 }
 
 void proc_yield(void) {
     schedule();
 }
-
 void proc_wakeup(struct process *p) {
     if (p && p->state == PROC_SLEEPING) {
         p->state = PROC_RUNNABLE;
@@ -293,9 +260,7 @@ void proc_wakeup_all(void *channel) {
 }
 
 pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
-    struct process *p = current_proc;
-    struct process *child, *tmp;
-
+    struct process *p = current_proc, *child, *tmp;
     while (1) {
         bool found = false;
         spin_lock(&proc_table_lock);
@@ -303,7 +268,6 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
             found = true;
             if (pid > 0 && child->pid != pid)
                 continue;
-
             if (child->state == PROC_ZOMBIE) {
                 pid_t cpid = child->pid;
                 if (status)
@@ -355,7 +319,6 @@ static void _wait_queue_wakeup(struct wait_queue *wq, bool all) {
 void wait_queue_wakeup_one(struct wait_queue *wq) {
     _wait_queue_wakeup(wq, false);
 }
-
 void wait_queue_wakeup_all(struct wait_queue *wq) {
     _wait_queue_wakeup(wq, true);
 }
