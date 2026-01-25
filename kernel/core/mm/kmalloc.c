@@ -1,211 +1,173 @@
 /**
- * kmalloc.c - Kernel Memory Allocator
+ * kernel/core/mm/kmalloc.c - Generic SLUB Allocator
  */
 
-#include <kairos/types.h>
+#include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
-#include <kairos/config.h>
 #include <kairos/string.h>
-#include <kairos/arch.h>
-
-#ifdef CONFIG_SLUB_DEBUG
-#define REDZONE_SIZE  sizeof(void *)
-#define RZ_MAGIC      0xCC
-#define POISON_MAGIC  0xA5
-#else
-#define REDZONE_SIZE  0
-#endif
+#include <kairos/types.h>
 
 #define KMALLOC_BATCH 16
 #define KMALLOC_LIMIT 32
 
-static const size_t kmalloc_sizes[] = { 32, 64, 96, 128, 192, 256, 512, 1024, 2048 };
-#define NUM_SIZE_CLASSES (sizeof(kmalloc_sizes) / sizeof(size_t))
-
-struct size_class {
+struct kmem_cache {
+    char name[32];
+    size_t obj_size;
+    void (*ctor)(void *);
     void *freelist;
-    size_t block_size;
     size_t num_free, num_allocated;
     spinlock_t lock;
+
+    struct {
+        void *entries[KMALLOC_LIMIT];
+        int count;
+    } pcp[CONFIG_MAX_CPUS];
 };
 
-struct kmalloc_pcp {
-    void *entries[KMALLOC_LIMIT];
-    int count;
-};
+/* Generic kmalloc size classes */
+static const size_t kmalloc_sizes[] = {32,  64,  96,   128, 192,
+                                       256, 512, 1024, 2048};
+#define NUM_KMALLOC_CACHES ARRAY_SIZE(kmalloc_sizes)
+static struct kmem_cache *kmalloc_caches[NUM_KMALLOC_CACHES];
 
-static struct size_class size_classes[NUM_SIZE_CLASSES];
-static struct kmalloc_pcp pcp_caches[NUM_SIZE_CLASSES][CONFIG_MAX_CPUS];
-static spinlock_t kmalloc_lock;
-static size_t total_alloc, total_freed;
+/* --- Internal Core --- */
 
-/* --- Helpers --- */
+static int cache_grow(struct kmem_cache *c) {
+    spin_unlock(&c->lock);
+    struct page *pg = alloc_page();
+    spin_lock(&c->lock);
+    if (!pg)
+        return -ENOMEM;
 
-static inline int size_to_class(size_t size) {
-    size += REDZONE_SIZE * 2;
-    for (size_t i = 0; i < NUM_SIZE_CLASSES; i++)
-        if (size <= kmalloc_sizes[i]) return i;
-    return -1;
-}
+    pg->flags |= PG_SLAB;
+    pg->list.prev = (struct list_head *)c;
 
-static inline void *block_to_obj(void *block) { return (uint8_t *)block + REDZONE_SIZE; }
-static inline void *obj_to_block(void *obj) { return (uint8_t *)obj - REDZONE_SIZE; }
-
-#ifdef CONFIG_SLUB_DEBUG
-static void dbg_set_rz(void *b, size_t s) {
-    memset(b, RZ_MAGIC, REDZONE_SIZE);
-    memset((uint8_t *)b + s - REDZONE_SIZE, RZ_MAGIC, REDZONE_SIZE);
-}
-
-static void dbg_check_rz(void *b, size_t s) {
-    uint8_t *p = b, *e = (uint8_t *)b + s - REDZONE_SIZE;
-    for (int i = 0; i < (int)REDZONE_SIZE; i++)
-        if (p[i] != RZ_MAGIC || e[i] != RZ_MAGIC) panic("kmalloc: redzone violation at %p", b);
-}
-#else
-#define dbg_set_rz(b, s)
-#define dbg_check_rz(b, s)
-#endif
-
-/* --- Core --- */
-
-static int grow_cache(struct size_class *sc) {
-    spin_unlock(&sc->lock);
-    struct page *page = alloc_page();
-    spin_lock(&sc->lock);
-    if (!page) return -ENOMEM;
-
-    page->flags |= PG_SLAB;
-    page->list.prev = (struct list_head *)sc;
-    
-    uint8_t *base = (uint8_t *)page_to_phys(page);
-    for (size_t i = 0; i < CONFIG_PAGE_SIZE / sc->block_size; i++) {
-        void *b = base + i * sc->block_size;
-        *(void **)b = sc->freelist;
-        sc->freelist = b;
+    uint8_t *base = (uint8_t *)phys_to_virt(page_to_phys(pg));
+    for (size_t i = 0; i < CONFIG_PAGE_SIZE / c->obj_size; i++) {
+        void *obj = base + i * c->obj_size;
+        if (c->ctor)
+            c->ctor(obj);
+        *(void **)obj = c->freelist;
+        c->freelist = obj;
     }
-    sc->num_free += CONFIG_PAGE_SIZE / sc->block_size;
+    c->num_free += CONFIG_PAGE_SIZE / c->obj_size;
     return 0;
 }
 
-void *kmalloc(size_t size) {
-    if (!size) return NULL;
-    if (size > 2048) {
-        unsigned int order = 0;
-        while (((size_t)CONFIG_PAGE_SIZE << order) < size) order++;
-        bool irq = arch_irq_save();
-        spin_lock(&kmalloc_lock);
-        struct page *p = alloc_pages(order);
-        if (p) total_alloc += ((size_t)CONFIG_PAGE_SIZE << order);
-        spin_unlock(&kmalloc_lock);
-        arch_irq_restore(irq);
-        return p ? (void *)page_to_phys(p) : NULL;
-    }
+struct kmem_cache *kmem_cache_create(const char *name, size_t size,
+                                     void (*ctor)(void *)) {
+    struct kmem_cache *c = kmalloc(sizeof(*c));
+    if (!c)
+        return NULL;
 
-    int ci = size_to_class(size);
-    if (ci < 0) return NULL;
-    
-    struct size_class *sc = &size_classes[ci];
-    struct kmalloc_pcp *pcp = &pcp_caches[ci][arch_cpu_id()];
+    memset(c, 0, sizeof(*c));
+    strncpy(c->name, name, sizeof(c->name) - 1);
+    c->obj_size = MAX(size, sizeof(void *));
+    c->ctor = ctor;
+    spin_init(&c->lock);
+    return c;
+}
+
+void *kmem_cache_alloc(struct kmem_cache *c) {
     bool irq = arch_irq_save();
+    int cpu = arch_cpu_id();
 
-    if (pcp->count == 0) {
-        spin_lock(&sc->lock);
-        if (!sc->freelist && grow_cache(sc) < 0) {
-            spin_unlock(&sc->lock);
+    if (unlikely(c->pcp[cpu].count == 0)) {
+        spin_lock(&c->lock);
+        if (!c->freelist && cache_grow(c) < 0) {
+            spin_unlock(&c->lock);
             arch_irq_restore(irq);
             return NULL;
         }
-        while (pcp->count < KMALLOC_BATCH && sc->freelist) {
-            void *b = sc->freelist;
-            sc->freelist = *(void **)b;
-            pcp->entries[pcp->count++] = b;
-            sc->num_free--; sc->num_allocated++;
-            total_alloc += sc->block_size;
+        while (c->pcp[cpu].count < KMALLOC_BATCH && c->freelist) {
+            void *obj = c->freelist;
+            c->freelist = *(void **)obj;
+            c->pcp[cpu].entries[c->pcp[cpu].count++] = obj;
+            c->num_free--;
+            c->num_allocated++;
         }
-        spin_unlock(&sc->lock);
+        spin_unlock(&c->lock);
     }
 
-    if (pcp->count == 0) { arch_irq_restore(irq); return NULL; }
-    void *block = pcp->entries[--pcp->count];
+    void *obj = (c->pcp[cpu].count > 0)
+                    ? c->pcp[cpu].entries[--c->pcp[cpu].count]
+                    : NULL;
     arch_irq_restore(irq);
-    dbg_set_rz(block, sc->block_size);
-    return block_to_obj(block);
+    return obj;
+}
+
+void kmem_cache_free(struct kmem_cache *c, void *obj) {
+    if (!obj)
+        return;
+    bool irq = arch_irq_save();
+    int cpu = arch_cpu_id();
+
+    if (unlikely(c->pcp[cpu].count >= KMALLOC_LIMIT)) {
+        spin_lock(&c->lock);
+        for (int i = 0; i < KMALLOC_BATCH; i++) {
+            void *o = c->pcp[cpu].entries[--c->pcp[cpu].count];
+            *(void **)o = c->freelist;
+            c->freelist = o;
+            c->num_free++;
+            c->num_allocated--;
+        }
+        spin_unlock(&c->lock);
+    }
+    c->pcp[cpu].entries[c->pcp[cpu].count++] = obj;
+    arch_irq_restore(irq);
+}
+
+/* --- kmalloc/kfree Wrappers --- */
+
+void *kmalloc(size_t size) {
+    if (unlikely(!size))
+        return NULL;
+    if (size > 2048) {
+        unsigned int order = 0;
+        while (((size_t)CONFIG_PAGE_SIZE << order) < size)
+            order++;
+        struct page *pg = alloc_pages(order);
+        return pg ? (void *)phys_to_virt(page_to_phys(pg)) : NULL;
+    }
+
+    for (size_t i = 0; i < NUM_KMALLOC_CACHES; i++) {
+        if (size <= kmalloc_sizes[i])
+            return kmem_cache_alloc(kmalloc_caches[i]);
+    }
+    return NULL;
 }
 
 void kfree(void *ptr) {
-    if (!ptr) return;
-    struct page *p = phys_to_page((paddr_t)obj_to_block(ptr));
-    if (!p) return;
+    if (!ptr)
+        return;
+    struct page *pg = phys_to_page(virt_to_phys(ptr));
+    if (unlikely(!pg))
+        return;
 
-    if (!(p->flags & PG_SLAB)) {
-        bool irq = arch_irq_save();
-        spin_lock(&kmalloc_lock);
-        total_freed += ((size_t)CONFIG_PAGE_SIZE << p->order);
-        free_pages(p, p->order);
-        spin_unlock(&kmalloc_lock);
-        arch_irq_restore(irq);
+    if (!(pg->flags & PG_SLAB)) {
+        free_pages(pg, pg->order);
         return;
     }
-
-    void *block = obj_to_block(ptr);
-    struct size_class *sc = (struct size_class *)p->list.prev;
-    dbg_check_rz(block, sc->block_size);
-#ifdef CONFIG_SLUB_DEBUG
-    memset(block, POISON_MAGIC, sc->block_size);
-#endif
-
-    bool irq = arch_irq_save();
-    struct kmalloc_pcp *pcp = &pcp_caches[sc - size_classes][arch_cpu_id()];
-    if (pcp->count >= KMALLOC_LIMIT) {
-        spin_lock(&sc->lock);
-        for (int i = 0; i < KMALLOC_BATCH; i++) {
-            void *b = pcp->entries[--pcp->count];
-            *(void **)b = sc->freelist;
-            sc->freelist = b;
-            sc->num_free++; sc->num_allocated--;
-            total_freed += sc->block_size;
-        }
-        spin_unlock(&sc->lock);
-    }
-    pcp->entries[pcp->count++] = block;
-    arch_irq_restore(irq);
+    kmem_cache_free((struct kmem_cache *)pg->list.prev, ptr);
 }
 
 void kmalloc_init(void) {
-    spin_init(&kmalloc_lock);
-    for (size_t i = 0; i < NUM_SIZE_CLASSES; i++) {
-        struct size_class *sc = &size_classes[i];
-        sc->block_size = kmalloc_sizes[i];
-        spin_init(&sc->lock);
-        for (int cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++) pcp_caches[i][cpu].count = 0;
+    for (size_t i = 0; i < NUM_KMALLOC_CACHES; i++) {
+        /* We use a specialized create boot logic to avoid recursion */
+        kmalloc_caches[i] = kmalloc(sizeof(struct kmem_cache));
+        memset(kmalloc_caches[i], 0, sizeof(struct kmem_cache));
+        kmalloc_caches[i]->obj_size = kmalloc_sizes[i];
+        spin_init(&kmalloc_caches[i]->lock);
     }
-    pr_info("kmalloc: %lu classes init\n", NUM_SIZE_CLASSES);
+    pr_info("kmalloc: %lu classes init\n", NUM_KMALLOC_CACHES);
 }
 
 void *kzalloc(size_t size) {
     void *ptr = kmalloc(size);
-    if (ptr) memset(ptr, 0, size);
+    if (ptr)
+        memset(ptr, 0, size);
     return ptr;
-}
-
-void *kmalloc_aligned(size_t size, size_t align) {
-    if (align <= sizeof(void *)) return kmalloc(size);
-    void *raw = kmalloc(size + align + sizeof(void *));
-    if (!raw) return NULL;
-    uintptr_t addr = ALIGN_UP((uintptr_t)raw + sizeof(void *), align);
-    ((void **)addr)[-1] = raw;
-    return (void *)addr;
-}
-
-void kfree_aligned(void *ptr) { if (ptr) kfree(((void **)ptr)[-1]); }
-
-void kmalloc_stats(void) {
-    pr_info("kmalloc: in_use %lu\n", total_alloc - total_freed);
-    for (size_t i = 0; i < NUM_SIZE_CLASSES; i++) {
-        struct size_class *sc = &size_classes[i];
-        if (sc->num_allocated) pr_info("  %lu: %lu allocated\n", sc->block_size, sc->num_allocated);
-    }
 }

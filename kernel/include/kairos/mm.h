@@ -43,6 +43,16 @@ void kmalloc_init(void);
 void *kmalloc(size_t size);
 void kfree(void *ptr);
 void *kzalloc(size_t size);
+void *kmalloc_aligned(size_t size, size_t align);
+void kfree_aligned(void *ptr);
+
+/* kmem_cache (SLUB) Allocator */
+struct kmem_cache;
+
+struct kmem_cache *kmem_cache_create(const char *name, size_t size,
+                                     void (*ctor)(void *));
+void *kmem_cache_alloc(struct kmem_cache *cache);
+void kmem_cache_free(struct kmem_cache *cache, void *obj);
 
 /* Virtual Memory Manager */
 void vmm_init(void);
