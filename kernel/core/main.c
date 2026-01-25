@@ -304,37 +304,33 @@ extern void _secondary_start(void);
 /**
  * secondary_cpu_main - Entry point for secondary CPUs
  * @hartid: This CPU's hart ID
- *
- * Called from boot.S after stack setup.
  */
 void secondary_cpu_main(unsigned long hartid) {
-    /* Initialize this CPU */
+    /* Initialize CPU identification (sets tp) */
     arch_cpu_init((int)hartid);
 
     /* Initialize scheduler for this CPU */
     sched_init_cpu((int)hartid);
     sched_cpu_online((int)hartid);
 
-    /* Initialize trap handling for this CPU */
+    /* Initialize trap handling and PLIC for this CPU */
     arch_trap_init();
-
-    /* Initialize timer for this CPU */
     arch_timer_init(CONFIG_HZ);
+
+    /* Initialize per-CPU idle process */
+    proc_idle_init();
+
+    /* Signal that we're online */
+    __sync_fetch_and_add(&secondary_cpus_online, 1);
 
     pr_info("CPU %lu: online and ready\n", hartid);
 
-    /* Signal that we're online */
-    secondary_cpus_online++;
-
-    /* Enable interrupts and enter idle loop */
+    /* Enable interrupts and enter scheduler */
     arch_irq_enable();
-
-    /* Idle loop - wait for work */
+    
+    /* Enter the infinite scheduling loop */
     while (1) {
-        if (sched_need_resched()) {
-            schedule();
-        }
-        arch_cpu_halt();
+        schedule();
     }
 }
 
@@ -342,17 +338,20 @@ void secondary_cpu_main(unsigned long hartid) {
 extern int boot_hartid;
 
 /**
- * test_smp - Test SMP functionality
+ * smp_init - Wake up all secondary CPUs
  */
-static void test_smp(void) {
-    int my_hart = arch_cpu_id();
+static void smp_init(void) {
+    int my_hart = (int)arch_cpu_id();
     int started = 0;
 
-    for (int cpu = 0; cpu < CONFIG_MAX_CPUS && cpu < 4; cpu++) {
+    pr_info("SMP: Booting secondary CPUs...\n");
+
+    for (int cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++) {
         if (cpu == my_hart) {
             continue;
         }
 
+        /* Start CPU using the secondary entry point defined in boot.S */
         int ret = arch_start_cpu(cpu, (unsigned long)_secondary_start, 0);
         if (ret == 0) {
             started++;
@@ -360,26 +359,18 @@ static void test_smp(void) {
     }
 
     if (started == 0) {
-        pr_info("SMP: single-core system\n");
+        pr_info("SMP: Single-core system detected\n");
         return;
     }
 
-    /* Wait for secondary CPUs to come online */
-    int timeout = 1000;
+    /* Wait for secondary CPUs to come online with a timeout */
+    int timeout = 1000000;
     while (secondary_cpus_online < started && timeout > 0) {
-        arch_irq_enable();
-        for (volatile int i = 0; i < 100000; i++) {
-        }
-        arch_irq_disable();
+        arch_cpu_relax();
         timeout--;
     }
 
-    if (secondary_cpus_online >= started) {
-        pr_info("SMP: %d CPUs online\n", sched_cpu_count());
-    } else {
-        pr_warn("SMP: only %d/%d CPUs online\n", secondary_cpus_online,
-                started);
-    }
+    pr_info("SMP: %d CPUs active\n", started + 1);
 }
 
 /**
@@ -470,7 +461,7 @@ void kernel_main(unsigned long hartid, void *dtb) {
      */
     test_rbtree();
     test_cfs_priority();
-    test_smp();
+    smp_init();
 
     /*
      * Phase 5: File System

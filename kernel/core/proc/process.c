@@ -151,17 +151,25 @@ static int idle_thread(void *arg __attribute__((unused))) {
 }
 
 struct process *proc_idle_init(void) {
-    struct process *p = &proc_table[0];
-    p->state = PROC_EMBRYO;
-    p->pid = 0;
+    struct process *p = proc_alloc();
+    if (!p)
+        panic("Failed to allocate idle process");
+
+    p->pid = 0; /* Traditional PID for idle */
     proc_set_name(p, "idle");
-    p->nice = 19;
+    p->nice = 19; /* Lowest priority */
+    
     if (!(p->context = arch_context_alloc()))
         panic("Idle context fail");
+        
     arch_context_init(p->context, (vaddr_t)idle_thread, 0, true);
-    p->state = PROC_RUNNABLE;
-    idle_proc = current_proc = p;
+    p->state = PROC_RUNNING;
+    
+    struct percpu_data *cpu = arch_get_percpu();
+    cpu->idle_proc = p;
+    cpu->curr_proc = p;
     sched_set_idle(p);
+    
     return p;
 }
 

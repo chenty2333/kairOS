@@ -174,6 +174,39 @@ void sched_dequeue(struct process *p) {
     arch_irq_restore(state);
 }
 
+/**
+ * sched_steal_task - Try to steal a task from another CPU
+ * 
+ * Returns a pointer to the stolen process, or NULL if nothing found.
+ * Must be called with sched_lock held.
+ */
+static struct process *sched_steal_task(void) {
+    int self = arch_cpu_id();
+    
+    for (int i = 0; i < nr_cpus_online; i++) {
+        if (i == self) continue;
+        
+        struct cfs_rq *remote_rq = &cpu_data[i].runqueue;
+        if (remote_rq->nr_running > 0) {
+            struct rb_node *left = rb_first(&remote_rq->tasks_timeline);
+            if (left) {
+                struct process *p = rb_entry(left, struct process, sched_node);
+                
+                /* The Heist: Remove from remote queue */
+                rb_erase(&p->sched_node, &remote_rq->tasks_timeline);
+                p->on_rq = false;
+                remote_rq->nr_running--;
+                
+                /* Update process affinity */
+                p->cpu = self;
+                
+                return p;
+            }
+        }
+    }
+    return NULL;
+}
+
 void schedule(void) {
     struct percpu_data *cpu = arch_get_percpu();
     struct process *prev = proc_current(), *next;
@@ -183,8 +216,7 @@ void schedule(void) {
     spin_lock(&sched_lock);
     cpu->resched_needed = false;
 
-    /* 1. If prev was running, update its runtime and potentially put it back in
-     * the tree */
+    /* 1. Update current task state */
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
         if (prev->state == PROC_RUNNING) {
@@ -193,26 +225,30 @@ void schedule(void) {
             prev->on_rq = true;
             rq->nr_running++;
         } else if (prev->on_rq) {
-            /* If process is no longer runnable but still in tree, remove it */
             rb_erase(&prev->sched_node, &rq->tasks_timeline);
             prev->on_rq = false;
             rq->nr_running--;
         }
     }
 
-    /* 2. Pick next task: the leftmost in the tree */
+    /* 2. Pick next task */
     struct rb_node *left = rb_first(&rq->tasks_timeline);
     if (left) {
         next = rb_entry(left, struct process, sched_node);
-        /* IMPORTANT: A running process must NOT be in the tree */
         rb_erase(&next->sched_node, &rq->tasks_timeline);
         next->on_rq = false;
         rq->nr_running--;
     } else {
-        next = cpu->idle_proc;
+        /* Local queue is empty - TRY TO STEAL! */
+        next = sched_steal_task();
+        
+        /* If still nothing, fall back to idle */
+        if (!next) {
+            next = cpu->idle_proc;
+        }
     }
 
-    /* 3. Perform the switch if necessary */
+    /* 3. Perform the switch */
     if (next != prev) {
         next->last_run_time = arch_timer_ticks() * TICK_NS;
         rq->curr = next;

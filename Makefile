@@ -213,7 +213,7 @@ $(BUILD_DIR)/%.o: %.S
 # ============================================================
 
 # Common QEMU flags
-QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -nographic
+QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4 -nographic
 QEMU_FLAGS += -serial mon:stdio
 
 ifeq ($(ARCH),riscv64)
