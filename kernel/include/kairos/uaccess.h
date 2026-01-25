@@ -14,8 +14,7 @@
  *
  * Returns 0 on success, or -EFAULT on error.
  */
-static inline int copy_from_user(void *to, const void *from, size_t n)
-{
+static inline int copy_from_user(void *to, const void *from, size_t n) {
     if (!access_ok(from, n)) {
         return -EFAULT;
     }
@@ -34,8 +33,7 @@ static inline int copy_from_user(void *to, const void *from, size_t n)
  *
  * Returns 0 on success, or -EFAULT on error.
  */
-static inline int copy_to_user(void *to, const void *from, size_t n)
-{
+static inline int copy_to_user(void *to, const void *from, size_t n) {
     if (!access_ok(to, n)) {
         return -EFAULT;
     }
@@ -53,8 +51,8 @@ static inline int copy_to_user(void *to, const void *from, size_t n)
  *
  * Returns string length (excluding null), or -EFAULT.
  */
-static inline long strncpy_from_user(char *dest, const char *src, size_t count)
-{
+static inline long strncpy_from_user(char *dest, const char *src,
+                                     size_t count) {
     if (!access_ok(src, 1)) {
         return -EFAULT;
     }

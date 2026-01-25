@@ -5,70 +5,70 @@
 #ifndef _KAIROS_SIGNAL_H
 #define _KAIROS_SIGNAL_H
 
-#include <kairos/types.h>
 #include <kairos/config.h>
+#include <kairos/types.h>
 
 /*
  * Signal Numbers
  */
-#define SIGHUP      1       /* Hangup */
-#define SIGINT      2       /* Interrupt (Ctrl+C) */
-#define SIGQUIT     3       /* Quit */
-#define SIGILL      4       /* Illegal instruction */
-#define SIGTRAP     5       /* Trace trap */
-#define SIGABRT     6       /* Abort */
-#define SIGBUS      7       /* Bus error */
-#define SIGFPE      8       /* Floating point exception */
-#define SIGKILL     9       /* Kill (cannot be caught) */
-#define SIGUSR1     10      /* User defined 1 */
-#define SIGSEGV     11      /* Segmentation fault */
-#define SIGUSR2     12      /* User defined 2 */
-#define SIGPIPE     13      /* Broken pipe */
-#define SIGALRM     14      /* Alarm */
-#define SIGTERM     15      /* Termination */
-#define SIGCHLD     17      /* Child status changed */
-#define SIGCONT     18      /* Continue */
-#define SIGSTOP     19      /* Stop (cannot be caught) */
-#define SIGTSTP     20      /* Terminal stop */
-#define SIGTTIN     21      /* Background read */
-#define SIGTTOU     22      /* Background write */
+#define SIGHUP 1   /* Hangup */
+#define SIGINT 2   /* Interrupt (Ctrl+C) */
+#define SIGQUIT 3  /* Quit */
+#define SIGILL 4   /* Illegal instruction */
+#define SIGTRAP 5  /* Trace trap */
+#define SIGABRT 6  /* Abort */
+#define SIGBUS 7   /* Bus error */
+#define SIGFPE 8   /* Floating point exception */
+#define SIGKILL 9  /* Kill (cannot be caught) */
+#define SIGUSR1 10 /* User defined 1 */
+#define SIGSEGV 11 /* Segmentation fault */
+#define SIGUSR2 12 /* User defined 2 */
+#define SIGPIPE 13 /* Broken pipe */
+#define SIGALRM 14 /* Alarm */
+#define SIGTERM 15 /* Termination */
+#define SIGCHLD 17 /* Child status changed */
+#define SIGCONT 18 /* Continue */
+#define SIGSTOP 19 /* Stop (cannot be caught) */
+#define SIGTSTP 20 /* Terminal stop */
+#define SIGTTIN 21 /* Background read */
+#define SIGTTOU 22 /* Background write */
 
-#define NSIG        32      /* Number of signals */
+#define NSIG 32 /* Number of signals */
 
 /*
  * Signal Actions
  */
-#define SIG_DFL     ((void (*)(int))0)  /* Default action */
-#define SIG_IGN     ((void (*)(int))1)  /* Ignore signal */
-#define SIG_ERR     ((void (*)(int))-1) /* Error return */
+#define SIG_DFL ((void (*)(int))0)    /* Default action */
+#define SIG_IGN ((void (*)(int))1)    /* Ignore signal */
+#define SIG_ERR ((void (*)(int)) - 1) /* Error return */
 
 /*
  * sigaction flags
  */
-#define SA_NOCLDSTOP    (1 << 0)    /* Don't notify on child stop */
-#define SA_NOCLDWAIT    (1 << 1)    /* Don't create zombie */
-#define SA_SIGINFO      (1 << 2)    /* Use sa_sigaction instead of sa_handler */
-#define SA_RESTART      (1 << 3)    /* Restart syscall after signal */
-#define SA_NODEFER      (1 << 4)    /* Don't block signal during handler */
-#define SA_RESETHAND    (1 << 5)    /* Reset to SIG_DFL after handler */
+#define SA_NOCLDSTOP (1 << 0) /* Don't notify on child stop */
+#define SA_NOCLDWAIT (1 << 1) /* Don't create zombie */
+#define SA_SIGINFO (1 << 2)   /* Use sa_sigaction instead of sa_handler */
+#define SA_RESTART (1 << 3)   /* Restart syscall after signal */
+#define SA_NODEFER (1 << 4)   /* Don't block signal during handler */
+#define SA_RESETHAND (1 << 5) /* Reset to SIG_DFL after handler */
 
 /*
  * sigprocmask how values
  */
-#define SIG_BLOCK       0   /* Add signals to mask */
-#define SIG_UNBLOCK     1   /* Remove signals from mask */
-#define SIG_SETMASK     2   /* Set mask */
+#define SIG_BLOCK 0   /* Add signals to mask */
+#define SIG_UNBLOCK 1 /* Remove signals from mask */
+#define SIG_SETMASK 2 /* Set mask */
 
 /*
  * Signal Set (bitmap)
  */
 typedef uint64_t sigset_t;
 
-#define sigemptyset(set)        (*(set) = 0)
-#define sigfillset(set)         (*(set) = ~0ULL)
-#define sigaddset(set, sig)     (*(set) |= (1ULL << ((sig) - 1)))
-#define sigdelset(set, sig)     (*(set) &= ~(1ULL << ((sig) - 1)))
-#define sigismember(set, sig)   ((*(set) & (1ULL << ((sig) - 1))) != 0)
+#define sigemptyset(set) (*(set) = 0)
+#define sigfillset(set) (*(set) = ~0ULL)
+#define sigaddset(set, sig) (*(set) |= (1ULL << ((sig) - 1)))
+#define sigdelset(set, sig) (*(set) &= ~(1ULL << ((sig) - 1)))
+#define sigismember(set, sig) ((*(set) & (1ULL << ((sig) - 1))) != 0)
 
 /*
  * sigaction structure
@@ -76,9 +76,9 @@ typedef uint64_t sigset_t;
 struct sigaction {
     union {
         void (*sa_handler)(int);
-        void (*sa_sigaction)(int, void *, void *);  /* siginfo_t, ucontext_t */
+        void (*sa_sigaction)(int, void *, void *); /* siginfo_t, ucontext_t */
     };
-    sigset_t sa_mask;       /* Signals to block during handler */
+    sigset_t sa_mask; /* Signals to block during handler */
     int sa_flags;
 };
 
