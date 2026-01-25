@@ -55,6 +55,7 @@ void arch_mmu_switch(paddr_t table);
 paddr_t arch_mmu_current(void);
 void arch_mmu_flush_tlb(void);
 void arch_mmu_flush_tlb_page(vaddr_t va);
+void arch_mmu_flush_tlb_all(void);
 
 /* Timer & IPI */
 void arch_timer_init(uint64_t hz);
@@ -68,6 +69,7 @@ void arch_timer_ack(void);
 #define IPI_RESCHEDULE 0
 #define IPI_CALL 1
 #define IPI_STOP 2
+#define IPI_TLB_FLUSH 3
 void arch_send_ipi(int cpu, int type);
 void arch_send_ipi_all(int type);
 

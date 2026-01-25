@@ -1,7 +1,5 @@
 /**
  * kernel/core/proc/elf.c - ELF Binary Loader
- *
- * Loads ELF64 executables into a process address space.
  */
 
 #include <kairos/arch.h>
@@ -30,52 +28,30 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
         return -ENOEXEC;
     }
 
-    size_t phdr_end = ehdr->e_phoff + (ehdr->e_phnum * ehdr->e_phentsize);
-    if (phdr_end > size) {
-        pr_err("ELF: program headers extend past file\n");
-        return -ENOEXEC;
-    }
-
     const uint8_t *elf_bytes = (const uint8_t *)elf;
     const Elf64_Phdr *phdr = (const Elf64_Phdr *)(elf_bytes + ehdr->e_phoff);
 
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type != PT_LOAD) {
-            continue;
-        }
-
-        if (phdr[i].p_offset + phdr[i].p_filesz > size) {
-            return -ENOEXEC;
-        }
+        if (phdr[i].p_type != PT_LOAD) continue;
 
         vaddr_t seg_start = phdr[i].p_vaddr;
         vaddr_t seg_end = seg_start + phdr[i].p_memsz;
         vaddr_t page_start = ALIGN_DOWN(seg_start, CONFIG_PAGE_SIZE);
         vaddr_t page_end = ALIGN_UP(seg_end, CONFIG_PAGE_SIZE);
 
-        /* Map ELF flags to page table flags */
         uint64_t flags = PTE_USER;
-        if (phdr[i].p_flags & PF_R)
-            flags |= PTE_READ;
-        if (phdr[i].p_flags & PF_W)
-            flags |= PTE_WRITE;
-        if (phdr[i].p_flags & PF_X)
-            flags |= PTE_EXEC;
+        if (phdr[i].p_flags & PF_R) flags |= PTE_READ;
+        if (phdr[i].p_flags & PF_W) flags |= PTE_WRITE;
+        if (phdr[i].p_flags & PF_X) flags |= PTE_EXEC;
 
         for (vaddr_t va = page_start; va < page_end; va += CONFIG_PAGE_SIZE) {
             paddr_t pa = pmm_alloc_page();
-            if (!pa) {
-                return -ENOMEM;
-            }
-
+            if (!pa) return -ENOMEM;
             memset((void *)pa, 0, CONFIG_PAGE_SIZE);
 
-            /* Copy file data if this page overlaps with segment's file data */
             vaddr_t file_data_end = seg_start + phdr[i].p_filesz;
             vaddr_t copy_start = (va < seg_start) ? seg_start : va;
-            vaddr_t copy_end = (va + CONFIG_PAGE_SIZE < file_data_end)
-                                   ? va + CONFIG_PAGE_SIZE
-                                   : file_data_end;
+            vaddr_t copy_end = (va + CONFIG_PAGE_SIZE < file_data_end) ? va + CONFIG_PAGE_SIZE : file_data_end;
 
             if (copy_start < copy_end) {
                 size_t page_off = copy_start - va;
@@ -96,33 +72,68 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
 }
 
 /**
- * elf_setup_stack - Set up user stack with arguments
+ * elf_setup_stack - Set up user stack with arguments (argc, argv)
  */
 int elf_setup_stack(struct mm_struct *mm, char *const argv[],
                     char *const envp[], vaddr_t *sp_out) {
     vaddr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    paddr_t pa;
 
-    for (vaddr_t va = stack_bottom; va < USER_STACK_TOP;
-         va += CONFIG_PAGE_SIZE) {
+    /* 1. Map stack pages */
+    for (vaddr_t va = stack_bottom; va < USER_STACK_TOP; va += CONFIG_PAGE_SIZE) {
         paddr_t pa = pmm_alloc_page();
-        if (!pa) {
-            return -ENOMEM;
-        }
-
+        if (!pa) return -ENOMEM;
         memset((void *)pa, 0, CONFIG_PAGE_SIZE);
-        if (arch_mmu_map(mm->pgdir, va, pa, PTE_USER | PTE_READ | PTE_WRITE) <
-            0) {
+        if (arch_mmu_map(mm->pgdir, va, pa, PTE_USER | PTE_READ | PTE_WRITE) < 0) {
             pmm_free_page(pa);
             return -ENOMEM;
         }
     }
 
-    vaddr_t sp = USER_STACK_TOP - 16;
-    (void)argv;
-    (void)envp;
+    /* 2. Push arguments to stack */
+    vaddr_t sp = USER_STACK_TOP;
+    int argc = 0;
+    if (argv) {
+        while (argv[argc]) argc++;
+    }
+
+    vaddr_t u_argv[argc + 1];
+    
+    /* Push strings first */
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen(argv[i]) + 1;
+        sp -= len;
+        
+        /* Copy to user stack */
+        paddr_t pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
+        void *dst = (void *)(pa + (sp % CONFIG_PAGE_SIZE));
+        memcpy(dst, argv[i], len);
+        u_argv[i] = sp;
+    }
+    u_argv[argc] = 0;
+
+    /* Align SP to 16 bytes */
+    sp = ALIGN_DOWN(sp, 16);
+
+    /* Push argv pointers */
+    size_t argv_ptr_size = (argc + 1) * sizeof(vaddr_t);
+    sp -= argv_ptr_size;
+    
+    pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
+    memcpy((void *)(pa + (sp % CONFIG_PAGE_SIZE)), u_argv, argv_ptr_size);
+    vaddr_t argv_start = sp;
+
+    /* Push argc */
+    sp -= sizeof(long);
+    pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
+    *(long *)(pa + (sp % CONFIG_PAGE_SIZE)) = (long)argc;
+
+    /* Final alignment */
+    sp = ALIGN_DOWN(sp, 16);
 
     mm->start_stack = sp;
     *sp_out = sp;
+    (void)envp;
     return 0;
 }
 
@@ -133,9 +144,7 @@ struct process *proc_create(const char *name, const void *elf, size_t size) {
     struct process *p = proc_alloc_internal();
     vaddr_t entry, sp;
 
-    if (!p) {
-        return NULL;
-    }
+    if (!p) return NULL;
 
     strncpy(p->name, name, sizeof(p->name) - 1);
     p->name[sizeof(p->name) - 1] = '\0';

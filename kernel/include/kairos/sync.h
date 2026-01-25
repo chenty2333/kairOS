@@ -24,6 +24,7 @@ struct mutex {
 
 void mutex_init(struct mutex *m, const char *name);
 void mutex_lock(struct mutex *m);
+int mutex_lock_interruptible(struct mutex *m); /* Returns -EINTR if interrupted */
 void mutex_unlock(struct mutex *m);
 bool mutex_trylock(struct mutex *m);
 
@@ -39,6 +40,7 @@ struct semaphore {
 
 void sem_init(struct semaphore *s, int count, const char *name);
 void sem_wait(struct semaphore *s);
+int sem_wait_interruptible(struct semaphore *s);
 void sem_post(struct semaphore *s);
 bool sem_trywait(struct semaphore *s);
 

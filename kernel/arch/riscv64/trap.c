@@ -104,6 +104,8 @@ static void handle_interrupt(struct trap_frame *tf) {
         int pending = __sync_fetch_and_and(&cpu->ipi_pending_mask, 0);
         if (pending & (1 << IPI_RESCHEDULE))
             cpu->resched_needed = true;
+        if (pending & (1 << IPI_TLB_FLUSH))
+            arch_mmu_flush_tlb();
         if (pending & (1 << IPI_STOP)) {
             while (1)
                 arch_cpu_halt();

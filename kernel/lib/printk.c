@@ -9,6 +9,7 @@
 
 #include <kairos/printk.h>
 #include <kairos/arch.h>
+#include <kairos/spinlock.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
 #include <stdarg.h>
@@ -18,36 +19,22 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
 /* 
  * Log Buffer (Ring Buffer)
- * Stores a copy of all kernel messages for debugging/dmesg.
  */
 #define LOG_BUF_SHIFT 14
-#define LOG_BUF_LEN (1 << LOG_BUF_SHIFT) /* 16KB */
+#define LOG_BUF_LEN (1 << LOG_BUF_SHIFT)
 #define LOG_BUF_MASK (LOG_BUF_LEN - 1)
 
 static char log_buf[LOG_BUF_LEN];
-static unsigned long log_head = 0; /* Index for next write */
+static unsigned long log_head = 0;
 
 /* 
  * Global formatting buffer for large messages.
- * Protected by printk_lock.
  */
 #define PRINTK_BUF_SIZE 1024
 static char printk_buf[PRINTK_BUF_SIZE];
 
-/* Simple spinlock */
-static volatile int printk_lock = 0;
-
-static void lock_printk(void)
-{
-    while (__atomic_exchange_n(&printk_lock, 1, __ATOMIC_ACQUIRE)) {
-        arch_cpu_relax();
-    }
-}
-
-static void unlock_printk(void)
-{
-    __atomic_store_n(&printk_lock, 0, __ATOMIC_RELEASE);
-}
+/* Standard spinlock with IRQ state saving */
+static spinlock_irq_t log_lock = {.lock = SPINLOCK_INIT};
 
 /* Output string to early console */
 static void puts_early(const char *s)
@@ -72,49 +59,27 @@ static void log_store(const char *s, size_t len)
 
 int vprintk(const char *fmt, va_list args)
 {
-    /* 
-     * Optimization: Use a small stack buffer for most messages.
-     * This avoids acquiring the global lock just for formatting,
-     * significantly reducing contention on multicore systems.
-     */
     char small_buf[128];
     char *buf = small_buf;
     size_t buf_size = sizeof(small_buf);
     int len;
     bool using_global_buf = false;
-    bool irq_state;
 
-    /* First try: format into stack buffer */
     va_list args_copy;
     va_copy(args_copy, args);
     len = vsnprintf(small_buf, sizeof(small_buf), fmt, args_copy);
     va_end(args_copy);
 
-    /* 
-     * If the message didn't fit (len >= size), we need the big global buffer.
-     * Note: vsnprintf returns the length that WOULD have been written.
-     */
-    irq_state = arch_irq_save();
+    spin_lock_irqsave(&log_lock);
     
     if (len >= (int)sizeof(small_buf)) {
-        lock_printk();
         using_global_buf = true;
         buf = printk_buf;
         buf_size = PRINTK_BUF_SIZE;
-        
-        /* Re-format into global buffer */
         len = vsnprintf(printk_buf, PRINTK_BUF_SIZE, fmt, args);
-    } else {
-        /* 
-         * For small messages, we still need the lock to write to 
-         * the ring buffer and the serial console ensuring atomicity.
-         */
-        lock_printk();
     }
 
-    /* Store in log buffer */
     if (len > 0) {
-        /* Cap length for safety, though vsnprintf handles it */
         if ((size_t)len > buf_size - 1) {
              len = buf_size - 1;
         }
@@ -122,14 +87,7 @@ int vprintk(const char *fmt, va_list args)
         puts_early(buf);
     }
 
-    if (using_global_buf) {
-        /* We already hold the lock */
-        unlock_printk();
-    } else {
-        unlock_printk();
-    }
-    
-    arch_irq_restore(irq_state);
+    spin_unlock_irqrestore(&log_lock);
 
     return len;
 }

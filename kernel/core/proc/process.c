@@ -239,6 +239,85 @@ noreturn void proc_exit(int status) {
     panic("zombie ret");
 }
 
+int proc_exec(const char *path, char *const argv[]) {
+    struct vnode *vn;
+    struct mm_struct *old_mm, *new_mm;
+    vaddr_t entry, sp;
+    void *elf_data;
+    size_t size;
+
+    /* 1. Open the file */
+    vn = vfs_lookup(path);
+    if (!vn) return -ENOENT;
+    
+    if (vn->type != VNODE_FILE) {
+        vnode_put(vn);
+        return -EACCES;
+    }
+
+    size = vn->size;
+    if (size > 2 * 1024 * 1024) { /* 2MB limit for now */
+        vnode_put(vn);
+        return -E2BIG;
+    }
+
+    /* 2. Read ELF data into kernel buffer */
+    elf_data = kmalloc(size);
+    if (!elf_data) {
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+
+    struct file tmp_file = {.vnode = vn, .offset = 0};
+    if (vfs_read(&tmp_file, elf_data, size) < (ssize_t)size) {
+        kfree(elf_data);
+        vnode_put(vn);
+        return -EIO;
+    }
+    vnode_put(vn);
+
+    /* 3. Create new address space */
+    if (!(new_mm = mm_create())) {
+        kfree(elf_data);
+        return -ENOMEM;
+    }
+
+    /* 4. Load ELF and setup stack */
+    extern int elf_load(struct mm_struct *mm, const void *elf, size_t size, vaddr_t *entry_out);
+    extern int elf_setup_stack(struct mm_struct *mm, char *const argv[], char *const envp[], vaddr_t *sp_out);
+
+    if (elf_load(new_mm, elf_data, size, &entry) < 0 ||
+        elf_setup_stack(new_mm, argv, NULL, &sp) < 0) {
+        mm_destroy(new_mm);
+        kfree(elf_data);
+        return -ENOEXEC;
+    }
+    kfree(elf_data);
+
+    /* 5. Switch to new MM */
+    struct process *curr = proc_current();
+    old_mm = curr->mm;
+    curr->mm = new_mm;
+    arch_mmu_switch(new_mm->pgdir);
+    
+    if (old_mm) mm_destroy(old_mm);
+
+    /* Update process name */
+    const char *name = strrchr(path, '/');
+    strncpy(curr->name, name ? name + 1 : path, sizeof(curr->name) - 1);
+
+    /* 6. Update trap frame for return to user mode */
+    struct trap_frame *tf = get_current_trapframe();
+    if (tf) {
+        tf->sepc = entry;
+        tf->tf_sp = sp;
+        /* Clear args for new program */
+        tf->tf_a0 = 0; 
+    }
+
+    return 0;
+}
+
 void proc_yield(void) {
     schedule();
 }

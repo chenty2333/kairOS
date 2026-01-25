@@ -1,5 +1,5 @@
 /**
- * kernel/syscall/syscall.c - Optimized System Call Dispatch
+ * kernel/core/syscall/syscall.c - Optimized System Call Dispatch
  */
 
 #include <kairos/arch.h>
@@ -29,6 +29,15 @@ int64_t sys_fork(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
     return p ? (int64_t)p->pid : -1;
 }
 
+int64_t sys_exec(uint64_t path, uint64_t argv, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) return -EFAULT;
+    
+    /* Simplified argv handling for now */
+    return (int64_t)proc_exec(kpath, (char *const *)argv);
+}
+
 int64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return (int64_t)proc_current()->pid;
@@ -42,6 +51,11 @@ int64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options, uint64_t a
         if (copy_to_user((void *)status_ptr, &status, sizeof(status)) < 0) return -EFAULT;
     }
     return (int64_t)ret;
+}
+
+int64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return (int64_t)mm_brk(proc_current()->mm, (vaddr_t)addr);
 }
 
 /* --- File/IO Handlers --- */
@@ -126,8 +140,10 @@ int64_t sys_sem_post(uint64_t sem_id, uint64_t a1, uint64_t a2, uint64_t a3, uin
 syscall_fn_t syscall_table[SYS_MAX] = {
     [SYS_exit]    = sys_exit,
     [SYS_fork]    = sys_fork,
+    [SYS_exec]    = sys_exec,
     [SYS_getpid]  = sys_getpid,
     [SYS_wait]    = sys_wait,
+    [SYS_brk]     = sys_brk,
     [SYS_open]    = sys_open,
     [SYS_read]    = sys_read,
     [SYS_write]   = sys_write,

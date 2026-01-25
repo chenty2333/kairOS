@@ -11,9 +11,11 @@
 #define SBI_EXT_IPI 0x735049
 #define SBI_EXT_HSM 0x48534D
 #define SBI_EXT_SRST 0x53525354
+#define SBI_EXT_RFENCE 0x52464E43
 #define SBI_HSM_HART_START 0
 #define SBI_HSM_HART_STATUS 2
 #define SBI_IPI_SEND 0
+#define SBI_RFENCE_REMOTE_SFENCE_VMA 0
 
 /* Legacy SBI */
 #define SBI_CONSOLE_PUTCHAR 0x01
@@ -115,6 +117,11 @@ int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque) {
 
 int arch_cpu_status(int cpu) {
     return (int)sbi_call(SBI_EXT_HSM, SBI_HSM_HART_STATUS, cpu, 0, 0).value;
+}
+
+void arch_mmu_flush_tlb_all(void) {
+    /* Send remote SFENCE.VMA to all harts */
+    sbi_call(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_SFENCE_VMA, -1UL, 0, 0);
 }
 
 void arch_cpu_init(int cpu_id) {

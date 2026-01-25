@@ -25,6 +25,7 @@ static void unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end) {
             pmm_free_page(pa);
         }
     }
+    arch_mmu_flush_tlb_all();
 }
 
 static struct vm_area *find_vma(struct mm_struct *mm, vaddr_t addr) {
