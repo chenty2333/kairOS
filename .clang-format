@@ -1,0 +1,43 @@
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+
+# Indentation
+IndentWidth:     4
+UseTab:          Never
+
+# Braces
+BreakBeforeBraces: Attach  # K&R style: braces on same line
+AllowShortBlocksOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyBlock: false
+SpaceInEmptyParentheses: false
+
+# Line length
+ColumnLimit:     80
+
+# Sorting
+SortIncludes:    true
+IncludeBlocks:   Preserve
+
+# Formatting
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Right
+AlignOperands:   Align
+AlignTrailingComments: true
+
+# Keep pointers to the right (struct process *p)
+PointerAlignment: Right
+
+# C++ features to disable for kernel C code
+Standard:        C++11
+...
