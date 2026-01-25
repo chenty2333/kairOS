@@ -25,6 +25,12 @@
 #define EXT2_FT_REG_FILE 1
 #define EXT2_FT_DIR 2
 
+/* Indirect block levels */
+#define EXT2_IND_BLOCK 12
+#define EXT2_DIND_BLOCK 13
+#define EXT2_TIND_BLOCK 14
+#define EXT2_N_BLOCKS 15
+
 struct ext2_superblock {
     uint32_t s_inodes_count, s_blocks_count, s_r_blocks_count,
         s_free_blocks_count, s_free_inodes_count, s_first_data_block,
@@ -74,6 +80,8 @@ struct ext2_mount {
     struct ext2_group_desc *gdt;
     uint32_t block_size, groups_count, inodes_per_group, blocks_per_group;
     struct mutex lock;
+    uint32_t s_last_alloc_group_blk;
+    uint32_t s_last_alloc_group_ino;
 };
 
 struct ext2_inode_data {
@@ -81,6 +89,10 @@ struct ext2_inode_data {
     struct ext2_inode inode;
     struct ext2_mount *mnt;
 };
+
+/* Forward declarations */
+static int ext2_write_inode(struct ext2_mount *mnt, ino_t ino, struct ext2_inode *inode);
+static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out);
 
 static int ext2_read_inode(struct ext2_mount *mnt, ino_t ino,
                            struct ext2_inode *inode) {
@@ -101,22 +113,119 @@ static int ext2_read_inode(struct ext2_mount *mnt, ino_t ino,
     return 0;
 }
 
-static int ext2_get_block(struct ext2_mount *mnt, struct ext2_inode *inode,
-                          uint32_t idx, uint32_t *out) {
-    if (idx < 12) {
-        *out = inode->i_block[idx];
+struct ext2_path {
+    int depth;
+    uint32_t offsets[4];
+};
+
+static int ext2_block_to_path(struct ext2_mount *mnt, uint32_t i_block,
+                              struct ext2_path *path) {
+    uint32_t ptrs = mnt->block_size / 4;
+
+    if (i_block < 12) {
+        path->depth = 0;
+        path->offsets[0] = i_block;
         return 0;
     }
-    uint32_t ppb = mnt->block_size / 4;
-    idx -= 12;
-    if (idx >= ppb)
-        return -ENOSYS;
+    i_block -= 12;
 
-    struct buf *bp = bread(mnt->dev, inode->i_block[12]);
-    if (!bp)
+    if (i_block < ptrs) {
+        path->depth = 1;
+        path->offsets[0] = 12;
+        path->offsets[1] = i_block;
+        return 0;
+    }
+    i_block -= ptrs;
+
+    if (i_block < ptrs * ptrs) {
+        path->depth = 2;
+        path->offsets[0] = 13;
+        path->offsets[1] = i_block / ptrs;
+        path->offsets[2] = i_block % ptrs;
+        return 0;
+    }
+    i_block -= ptrs * ptrs;
+
+    if (i_block < ptrs * ptrs * ptrs) {
+        path->depth = 3;
+        path->offsets[0] = 14;
+        path->offsets[1] = i_block / (ptrs * ptrs);
+        path->offsets[2] = (i_block / ptrs) % ptrs;
+        path->offsets[3] = i_block % ptrs;
+        return 0;
+    }
+    return -1;
+}
+
+static int ext2_get_block(struct ext2_mount *mnt, struct ext2_inode_data *id,
+                          uint32_t idx, uint32_t *out, int create) {
+    struct ext2_path path;
+    if (ext2_block_to_path(mnt, idx, &path) < 0)
         return -EIO;
-    *out = ((uint32_t *)bp->data)[idx];
-    brelse(bp);
+
+    uint32_t *p = &id->inode.i_block[path.offsets[0]];
+    struct buf *bp = NULL;
+    uint32_t bnum = *p;
+
+    if (!bnum) {
+        if (!create) {
+            *out = 0;
+            return 0;
+        }
+        if (ext2_alloc_block(mnt, &bnum) < 0)
+            return -ENOSPC;
+        *p = bnum;
+        id->inode.i_blocks += (mnt->block_size / 512);
+        ext2_write_inode(mnt, id->ino, &id->inode);
+        // If this is an indirect block, it must be zeroed
+        if (path.depth > 0) {
+            struct buf *nbp = bread(mnt->dev, bnum);
+            if (nbp) {
+                memset(nbp->data, 0, mnt->block_size);
+                bwrite(nbp);
+                brelse(nbp);
+            }
+        }
+    }
+
+    for (int i = 1; i <= path.depth; i++) {
+        bp = bread(mnt->dev, bnum);
+        if (!bp)
+            return -EIO;
+
+        p = ((uint32_t *)bp->data) + path.offsets[i];
+        bnum = *p;
+
+        if (!bnum) {
+            if (!create) {
+                brelse(bp);
+                *out = 0;
+                return 0;
+            }
+            if (ext2_alloc_block(mnt, &bnum) < 0) {
+                brelse(bp);
+                return -ENOSPC;
+            }
+            *p = bnum;
+            bwrite(bp); // Update the parent indirect block
+            id->inode.i_blocks += (mnt->block_size / 512);
+            ext2_write_inode(mnt, id->ino, &id->inode); // Update accounting
+
+            // Zero the new block if it's still an intermediate node
+            // (not the final data block)
+            if (i < path.depth) {
+                struct buf *nbp = bread(mnt->dev, bnum);
+                if (nbp) {
+                    memset(nbp->data, 0, mnt->block_size);
+                    bwrite(nbp);
+                    brelse(nbp);
+                }
+            }
+        }
+        brelse(bp);
+    }
+
+    *out = bnum;
     return 0;
 }
 
@@ -134,7 +243,7 @@ static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
         uint32_t bidx = offset / mnt->block_size,
                  boff = offset % mnt->block_size;
         uint32_t nr = MIN(len, mnt->block_size - boff), bnum;
-        if (ext2_get_block(mnt, &id->inode, bidx, &bnum) < 0)
+        if (ext2_get_block(mnt, id, bidx, &bnum, 0) < 0)
             break;
 
         if (bnum == 0)
@@ -162,7 +271,7 @@ static int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent,
 
     uint32_t bidx = *offset / mnt->block_size, boff = *offset % mnt->block_size,
              bnum;
-    if (ext2_get_block(mnt, &id->inode, bidx, &bnum) < 0 || bnum == 0)
+    if (ext2_get_block(mnt, id, bidx, &bnum, 0) < 0 || bnum == 0)
         return 0;
 
     struct buf *bp = bread(mnt->dev, bnum);
@@ -228,21 +337,26 @@ static int ext2_write_gd(struct ext2_mount *mnt, uint32_t bg) {
 
 static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out) {
     mutex_lock(&mnt->lock);
-    for (uint32_t bg = 0; bg < mnt->groups_count; bg++) {
+    uint32_t start_bg = mnt->s_last_alloc_group_blk;
+
+    for (uint32_t i = 0; i < mnt->groups_count; i++) {
+        uint32_t bg = (start_bg + i) % mnt->groups_count;
+
         if (mnt->gdt[bg].bg_free_blocks_count == 0)
             continue;
         struct buf *bp = bread(mnt->dev, mnt->gdt[bg].bg_block_bitmap);
         if (!bp)
             continue;
 
-        for (uint32_t i = 0; i < mnt->blocks_per_group; i++) {
-            if (!(bp->data[i / 8] & (1 << (i % 8)))) {
-                bp->data[i / 8] |= (1 << (i % 8));
+        for (uint32_t j = 0; j < mnt->blocks_per_group; j++) {
+            if (!(bp->data[j / 8] & (1 << (j % 8)))) {
+                bp->data[j / 8] |= (1 << (j % 8));
                 bwrite(bp);
                 mnt->gdt[bg].bg_free_blocks_count--;
                 ext2_write_gd(mnt, bg);
                 mnt->sb->s_free_blocks_count--;
-                *out = bg * mnt->blocks_per_group + i;
+                *out = bg * mnt->blocks_per_group + j;
+                mnt->s_last_alloc_group_blk = bg;
                 brelse(bp);
                 mutex_unlock(&mnt->lock);
                 return 0;
@@ -256,21 +370,26 @@ static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out) {
 
 static int ext2_alloc_inode(struct ext2_mount *mnt, ino_t *out) {
     mutex_lock(&mnt->lock);
-    for (uint32_t bg = 0; bg < mnt->groups_count; bg++) {
+    uint32_t start_bg = mnt->s_last_alloc_group_ino;
+
+    for (uint32_t i = 0; i < mnt->groups_count; i++) {
+        uint32_t bg = (start_bg + i) % mnt->groups_count;
+
         if (mnt->gdt[bg].bg_free_inodes_count == 0)
             continue;
         struct buf *bp = bread(mnt->dev, mnt->gdt[bg].bg_inode_bitmap);
         if (!bp)
             continue;
 
-        for (uint32_t i = 0; i < mnt->inodes_per_group; i++) {
-            if (!(bp->data[i / 8] & (1 << (i % 8)))) {
-                bp->data[i / 8] |= (1 << (i % 8));
+        for (uint32_t j = 0; j < mnt->inodes_per_group; j++) {
+            if (!(bp->data[j / 8] & (1 << (j % 8)))) {
+                bp->data[j / 8] |= (1 << (j % 8));
                 bwrite(bp);
                 mnt->gdt[bg].bg_free_inodes_count--;
                 ext2_write_gd(mnt, bg);
                 mnt->sb->s_free_inodes_count--;
-                *out = bg * mnt->inodes_per_group + i + 1;
+                *out = bg * mnt->inodes_per_group + j + 1;
+                mnt->s_last_alloc_group_ino = bg;
                 brelse(bp);
                 mutex_unlock(&mnt->lock);
                 return 0;
@@ -293,13 +412,8 @@ static ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
                  boff = (offset + written) % mnt->block_size, bnum;
         size_t nr = MIN(len - written, mnt->block_size - boff);
 
-        if (ext2_get_block(mnt, &id->inode, bidx, &bnum) < 0)
+        if (ext2_get_block(mnt, id, bidx, &bnum, 1) < 0)
             break;
-        if (bnum == 0) {
-            if (bidx >= 12 || ext2_alloc_block(mnt, &bnum) < 0)
-                break;
-            id->inode.i_block[bidx] = bnum;
-        }
 
         struct buf *bp = bread(mnt->dev, bnum);
         if (!bp)
@@ -369,15 +483,17 @@ static struct vnode *ext2_lookup(struct vnode *dir, const char *name) {
 
 static int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
                            ino_t ino, uint8_t type) {
-    struct ext2_inode di;
-    if (ext2_read_inode(mnt, dino, &di) < 0)
+    struct ext2_inode_data di;
+    di.mnt = mnt;
+    di.ino = dino;
+    if (ext2_read_inode(mnt, dino, &di.inode) < 0)
         return -EIO;
     size_t nlen = strlen(name), rlen = ALIGN_UP(8 + nlen, 4);
 
-    uint32_t blocks = (di.i_size + mnt->block_size - 1) / mnt->block_size;
+    uint32_t blocks = (di.inode.i_size + mnt->block_size - 1) / mnt->block_size;
     for (uint32_t i = 0; i < blocks; i++) {
         uint32_t bnum;
-        if (ext2_get_block(mnt, &di, i, &bnum) < 0 || bnum == 0)
+        if (ext2_get_block(mnt, &di, i, &bnum, 0) < 0 || bnum == 0)
             continue;
         struct buf *bp = bread(mnt->dev, bnum);
         if (!bp)
@@ -385,6 +501,8 @@ static int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
 
         for (uint32_t off = 0; off < mnt->block_size;) {
             struct ext2_dirent *de = (struct ext2_dirent *)(bp->data + off);
+            if (de->rec_len == 0) // Corruption check
+                break;
             size_t alen = ALIGN_UP(8 + de->name_len, 4);
             if (de->rec_len - alen >= rlen) {
                 struct ext2_dirent *new_de =
@@ -404,14 +522,18 @@ static int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
         brelse(bp);
     }
 
+    // No space found, append a new block
     uint32_t nb;
-    if (blocks >= 12 || ext2_alloc_block(mnt, &nb) < 0)
+    // Use the new block index (current total blocks)
+    // ext2_get_block with create=1 will handle allocation and linkage
+    if (ext2_get_block(mnt, &di, blocks, &nb, 1) < 0)
         return -ENOSPC;
-    di.i_block[blocks] = nb;
+    
     struct buf *bp = bread(mnt->dev, nb);
     if (!bp)
         return -EIO;
-    memset(bp->data, 0, mnt->block_size);
+    
+    // The block is already zeroed by get_block, so we just init the dirent
     struct ext2_dirent *de = (struct ext2_dirent *)bp->data;
     de->inode = ino;
     de->rec_len = mnt->block_size;
@@ -420,8 +542,9 @@ static int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
     memcpy(de->name, name, nlen);
     bwrite(bp);
     brelse(bp);
-    di.i_size += mnt->block_size;
-    ext2_write_inode(mnt, dino, &di);
+
+    di.inode.i_size += mnt->block_size;
+    ext2_write_inode(mnt, dino, &di.inode);
     return 0;
 }
 
@@ -487,6 +610,8 @@ static int ext2_mount(struct mount *mnt) {
         return -ENOMEM;
     e->dev = mnt->dev;
     mutex_init(&e->lock, "ext2_mount");
+    e->s_last_alloc_group_blk = 0;
+    e->s_last_alloc_group_ino = 0;
 
     struct buf *bp =
         bread(mnt->dev, 0); /* Read first 4K, superblock is at 1024 */
