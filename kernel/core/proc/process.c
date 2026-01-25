@@ -62,7 +62,8 @@ static struct process *proc_alloc(void) {
     /* Initialize essential fields */
     p->ppid = p->uid = p->gid = p->vruntime = p->nice = 0;
     p->name[0] = '\0';
-    p->mm = p->parent = NULL;
+    p->mm = NULL;
+    p->parent = NULL;
     p->on_rq = false;
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;

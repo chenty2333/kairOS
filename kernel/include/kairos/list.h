@@ -60,6 +60,11 @@ static inline bool list_empty(const struct list_head *h) {
          &pos->member != (head);                                               \
          pos = list_entry(pos->member.next, typeof(*pos), member))
 
+#define list_for_each_entry_reverse(pos, head, member)                         \
+    for (pos = list_entry((head)->prev, typeof(*pos), member);                 \
+         &pos->member != (head);                                               \
+         pos = list_entry(pos->member.prev, typeof(*pos), member))
+
 #define list_for_each_entry_safe(pos, n, head, member)                         \
     for (pos = list_entry((head)->next, typeof(*pos), member),                 \
         n = list_entry(pos->member.next, typeof(*pos), member);                \

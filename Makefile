@@ -134,6 +134,7 @@ CORE_SRCS := \
     kernel/lib/fdt.c \
     kernel/lib/rbtree.c \
     kernel/lib/string.c \
+    kernel/fs/bio.c \
     kernel/fs/vfs/vfs.c \
     kernel/fs/devfs/devfs.c \
     kernel/fs/ext2/ext2.c \
