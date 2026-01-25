@@ -2,17 +2,17 @@
  * main.c - Kernel main entry point
  */
 
-#include <kairos/types.h>
-#include <kairos/printk.h>
 #include <kairos/arch.h>
-#include <kairos/mm.h>
-#include <kairos/syscall.h>
-#include <kairos/process.h>
-#include <kairos/sched.h>
-#include <kairos/rbtree.h>
-#include <kairos/config.h>
-#include <kairos/vfs.h>
 #include <kairos/blkdev.h>
+#include <kairos/config.h>
+#include <kairos/mm.h>
+#include <kairos/printk.h>
+#include <kairos/process.h>
+#include <kairos/rbtree.h>
+#include <kairos/sched.h>
+#include <kairos/syscall.h>
+#include <kairos/types.h>
+#include <kairos/vfs.h>
 
 /* FDT functions */
 int fdt_parse(void *fdt);
@@ -28,9 +28,9 @@ void virtio_blk_probe(void);
 extern volatile uint64_t system_ticks;
 
 /* Kernel version */
-#define KAIROS_VERSION_MAJOR    0
-#define KAIROS_VERSION_MINOR    1
-#define KAIROS_VERSION_PATCH    0
+#define KAIROS_VERSION_MAJOR 0
+#define KAIROS_VERSION_MINOR 1
+#define KAIROS_VERSION_PATCH 0
 
 /* External symbols from linker script */
 extern char _kernel_start[];
@@ -45,8 +45,7 @@ extern char _bss_end[];
  * and sys_getpid() returns 0. We test the dispatch mechanism here, not
  * the process-dependent syscalls.
  */
-static void test_syscall(void)
-{
+static void test_syscall(void) {
     int64_t ret;
 
     /* Test invalid syscall - should return -ENOSYS */
@@ -62,8 +61,7 @@ static void test_syscall(void)
 /**
  * test_timer - Test timer interrupts (quick version)
  */
-static void test_timer(void)
-{
+static void test_timer(void) {
     /* Enable interrupts */
     arch_irq_enable();
 
@@ -80,8 +78,7 @@ static void test_timer(void)
 /**
  * test_breakpoint - Test breakpoint exception
  */
-static void test_breakpoint(void)
-{
+static void test_breakpoint(void) {
     __asm__ __volatile__("ebreak");
     pr_info("Breakpoint exception: passed\n");
 }
@@ -93,8 +90,7 @@ static volatile int thread_a_count = 0;
 static volatile int thread_b_count = 0;
 static volatile bool threads_done = false;
 
-static int test_thread_a(void *arg)
-{
+static int test_thread_a(void *arg) {
     (void)arg;
     for (int i = 0; i < 5; i++) {
         thread_a_count++;
@@ -106,8 +102,7 @@ static int test_thread_a(void *arg)
 /**
  * Test kernel thread B
  */
-static int test_thread_b(void *arg)
-{
+static int test_thread_b(void *arg) {
     (void)arg;
     for (int i = 0; i < 5; i++) {
         thread_b_count++;
@@ -120,8 +115,7 @@ static int test_thread_b(void *arg)
 /**
  * test_kthreads - Test kernel thread creation and scheduling
  */
-static void test_kthreads(void)
-{
+static void test_kthreads(void) {
     struct process *p1 = kthread_create(test_thread_a, NULL, "test_a");
     struct process *p2 = kthread_create(test_thread_b, NULL, "test_b");
 
@@ -142,7 +136,8 @@ static void test_kthreads(void)
     if (thread_a_count == 5 && thread_b_count == 5) {
         pr_info("Kernel threads: passed\n");
     } else {
-        pr_err("Kernel threads: FAILED (A=%d, B=%d)\n", thread_a_count, thread_b_count);
+        pr_err("Kernel threads: FAILED (A=%d, B=%d)\n", thread_a_count,
+               thread_b_count);
     }
 }
 
@@ -159,8 +154,7 @@ struct test_node {
 /**
  * test_rbtree - Test red-black tree with 1000 integers
  */
-static void test_rbtree(void)
-{
+static void test_rbtree(void) {
     struct rb_root root = RB_ROOT;
     struct test_node *nodes;
     struct rb_node *rb;
@@ -234,25 +228,25 @@ static volatile int high_prio_count = 0;
 static volatile int low_prio_count = 0;
 static volatile bool cfs_test_done = false;
 
-static int high_prio_thread(void *arg)
-{
+static int high_prio_thread(void *arg) {
     (void)arg;
     for (int i = 0; i < 10; i++) {
         high_prio_count++;
         /* Busy loop to consume CPU */
-        for (volatile int j = 0; j < 10000; j++) { }
+        for (volatile int j = 0; j < 10000; j++) {
+        }
         proc_yield();
     }
     return 0;
 }
 
-static int low_prio_thread(void *arg)
-{
+static int low_prio_thread(void *arg) {
     (void)arg;
     for (int i = 0; i < 10; i++) {
         low_prio_count++;
         /* Busy loop to consume CPU */
-        for (volatile int j = 0; j < 10000; j++) { }
+        for (volatile int j = 0; j < 10000; j++) {
+        }
         proc_yield();
     }
     cfs_test_done = true;
@@ -262,8 +256,7 @@ static int low_prio_thread(void *arg)
 /**
  * test_cfs_priority - Test that high-priority tasks get more CPU time
  */
-static void test_cfs_priority(void)
-{
+static void test_cfs_priority(void) {
     high_prio_count = 0;
     low_prio_count = 0;
     cfs_test_done = false;
@@ -313,8 +306,7 @@ extern void _secondary_start(void);
  *
  * Called from boot.S after stack setup.
  */
-void secondary_cpu_main(unsigned long hartid)
-{
+void secondary_cpu_main(unsigned long hartid) {
     /* Initialize this CPU */
     arch_cpu_init((int)hartid);
 
@@ -351,8 +343,7 @@ extern int boot_hartid;
 /**
  * test_smp - Test SMP functionality
  */
-static void test_smp(void)
-{
+static void test_smp(void) {
     int my_hart = arch_cpu_id();
     int started = 0;
 
@@ -376,7 +367,8 @@ static void test_smp(void)
     int timeout = 1000;
     while (secondary_cpus_online < started && timeout > 0) {
         arch_irq_enable();
-        for (volatile int i = 0; i < 100000; i++) { }
+        for (volatile int i = 0; i < 100000; i++) {
+        }
         arch_irq_disable();
         timeout--;
     }
@@ -384,7 +376,8 @@ static void test_smp(void)
     if (secondary_cpus_online >= started) {
         pr_info("SMP: %d CPUs online\n", sched_cpu_count());
     } else {
-        pr_warn("SMP: only %d/%d CPUs online\n", secondary_cpus_online, started);
+        pr_warn("SMP: only %d/%d CPUs online\n", secondary_cpus_online,
+                started);
     }
 }
 
@@ -395,16 +388,15 @@ static void test_smp(void)
  *
  * Called from boot.S after basic setup is complete.
  */
-void kernel_main(unsigned long hartid, void *dtb)
-{
+void kernel_main(unsigned long hartid, void *dtb) {
     (void)hartid;
     (void)dtb;
 
     /* Print boot banner */
     printk("\n");
     printk("===========================================\n");
-    printk("  Kairos Kernel v%d.%d.%d\n",
-           KAIROS_VERSION_MAJOR, KAIROS_VERSION_MINOR, KAIROS_VERSION_PATCH);
+    printk("  Kairos Kernel v%d.%d.%d\n", KAIROS_VERSION_MAJOR,
+           KAIROS_VERSION_MINOR, KAIROS_VERSION_PATCH);
     printk("  A hobby operating system for RISC-V\n");
     printk("===========================================\n");
     printk("\n");
@@ -436,8 +428,7 @@ void kernel_main(unsigned long hartid, void *dtb)
     if (fdt_get_memory(0, &mem_base, &mem_size) < 0) {
         panic("No memory found in DTB");
     }
-    printk("Memory: base=%p, size=%lu MB\n",
-           (void *)mem_base, mem_size >> 20);
+    printk("Memory: base=%p, size=%lu MB\n", (void *)mem_base, mem_size >> 20);
 
     /*
      * Phase 1: Memory Management
@@ -448,7 +439,7 @@ void kernel_main(unsigned long hartid, void *dtb)
     paddr_t pmm_end = mem_base + mem_size;
     pmm_init(pmm_start, pmm_end);
     kmalloc_init();
-    arch_mmu_init();
+    arch_mmu_init(mem_base, mem_size);
     vmm_init();
 
     printk("Phase 1 complete!\n");
@@ -458,7 +449,7 @@ void kernel_main(unsigned long hartid, void *dtb)
      */
     syscall_init();
     arch_trap_init();
-    arch_timer_init(100);  /* 100 Hz */
+    arch_timer_init(100); /* 100 Hz */
 
     test_breakpoint();
     test_syscall();
@@ -513,8 +504,7 @@ void kernel_main(unsigned long hartid, void *dtb)
     /* Print final statistics */
     printk("Final statistics:\n");
     printk("  Total timer ticks: %lu\n", system_ticks);
-    printk("  Free pages: %lu (%lu MB)\n",
-           pmm_num_free_pages(),
+    printk("  Free pages: %lu (%lu MB)\n", pmm_num_free_pages(),
            (pmm_num_free_pages() * 4096) >> 20);
 
     /* Halt for now */

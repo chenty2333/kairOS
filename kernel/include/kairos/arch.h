@@ -83,9 +83,9 @@ void arch_context_free(struct arch_context *ctx);
 
 /* Initialize context for new process */
 void arch_context_init(struct arch_context *ctx,
-                       vaddr_t entry,      /* Entry point */
-                       vaddr_t stack,      /* User stack pointer */
-                       bool kernel);       /* Kernel thread? */
+                       vaddr_t entry, /* Entry point */
+                       vaddr_t stack, /* User stack pointer */
+                       bool kernel);  /* Kernel thread? */
 
 /* Switch context: save old, restore new */
 void arch_context_switch(struct arch_context *old, struct arch_context *new);
@@ -100,8 +100,8 @@ void arch_context_clone(struct arch_context *dst, struct arch_context *src);
 void arch_context_set_retval(struct arch_context *ctx, uint64_t val);
 
 /* Set argument registers (for signal delivery) */
-void arch_context_set_args(struct arch_context *ctx,
-                           uint64_t arg0, uint64_t arg1, uint64_t arg2);
+void arch_context_set_args(struct arch_context *ctx, uint64_t arg0,
+                           uint64_t arg1, uint64_t arg2);
 
 /*
  * ============================================================
@@ -109,8 +109,8 @@ void arch_context_set_args(struct arch_context *ctx,
  * ============================================================
  */
 
-/* Initialize MMU */
-void arch_mmu_init(void);
+/* Initialize MMU with given physical memory range */
+void arch_mmu_init(paddr_t mem_base, size_t mem_size);
 
 /* Create new page table, returns physical address */
 paddr_t arch_mmu_create_table(void);
@@ -173,17 +173,15 @@ void arch_timer_ack(void);
  */
 
 /* IPI types */
-#define IPI_RESCHEDULE  0       /* Reschedule on target CPU */
-#define IPI_CALL        1       /* Function call */
-#define IPI_STOP        2       /* Stop CPU */
+#define IPI_RESCHEDULE 0 /* Reschedule on target CPU */
+#define IPI_CALL 1       /* Function call */
+#define IPI_STOP 2       /* Stop CPU */
 
 /* Send IPI to specific CPU */
 void arch_send_ipi(int cpu, int type);
 
 /* Send IPI to all other CPUs */
 void arch_send_ipi_all(int type);
-
-
 
 /*
  * ============================================================
@@ -205,22 +203,22 @@ int arch_early_getchar(void);
 
 /* Trap types */
 enum trap_type {
-    TRAP_SYSCALL,       /* System call */
-    TRAP_PAGE_FAULT,    /* Page fault */
-    TRAP_ILLEGAL_INST,  /* Illegal instruction */
-    TRAP_BREAKPOINT,    /* Breakpoint */
-    TRAP_TIMER,         /* Timer interrupt */
-    TRAP_IRQ,           /* External interrupt */
-    TRAP_UNKNOWN,       /* Unknown */
+    TRAP_SYSCALL,      /* System call */
+    TRAP_PAGE_FAULT,   /* Page fault */
+    TRAP_ILLEGAL_INST, /* Illegal instruction */
+    TRAP_BREAKPOINT,   /* Breakpoint */
+    TRAP_TIMER,        /* Timer interrupt */
+    TRAP_IRQ,          /* External interrupt */
+    TRAP_UNKNOWN,      /* Unknown */
 };
 
 /* Trap information passed to generic handler */
 struct trap_info {
     enum trap_type type;
-    uint64_t fault_addr;        /* For page faults */
-    uint64_t error_code;        /* Architecture-specific */
-    bool is_write;              /* For page faults */
-    bool is_user;               /* Trapped from user mode? */
+    uint64_t fault_addr; /* For page faults */
+    uint64_t error_code; /* Architecture-specific */
+    bool is_write;       /* For page faults */
+    bool is_user;        /* Trapped from user mode? */
 };
 
 /* Initialize trap handling */
@@ -241,8 +239,10 @@ struct trap_frame;
 /* Get the current trap frame (for fork) */
 struct trap_frame *get_current_trapframe(void);
 
-/* Copy trap frame to a child's kernel stack and set up context for fork return */
-void arch_setup_fork_child(struct arch_context *child_ctx, struct trap_frame *parent_tf);
+/* Copy trap frame to a child's kernel stack and set up context for fork return
+ */
+void arch_setup_fork_child(struct arch_context *child_ctx,
+                           struct trap_frame *parent_tf);
 
 /*
  * ============================================================
