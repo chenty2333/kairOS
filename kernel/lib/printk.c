@@ -105,12 +105,20 @@ int printk(const char *fmt, ...)
     return ret;
 }
 
+static volatile int panic_in_progress = 0;
+
 noreturn void panic(const char *fmt, ...)
 {
     va_list args;
 
     arch_irq_disable();
     
+    /* Ensure only one CPU prints the panic message */
+    if (__sync_lock_test_and_set(&panic_in_progress, 1)) {
+        /* Another CPU is already panicking, just halt */
+        while (1) arch_cpu_halt();
+    }
+
     /* Stop all other CPUs */
     arch_send_ipi_all(IPI_STOP);
     

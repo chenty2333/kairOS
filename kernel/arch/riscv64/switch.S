@@ -60,6 +60,7 @@ arch_enter_user:
  */
 .globl kthread_entry
 kthread_entry:
+    call sched_post_switch_cleanup
     csrsi sstatus, 2    /* Enable interrupts */
     mv a0, s1           /* Argument */
     jalr s0             /* Call fn */

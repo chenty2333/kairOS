@@ -43,6 +43,7 @@ void arch_context_clone(struct arch_context *dst, struct arch_context *src);
 void arch_context_set_retval(struct arch_context *ctx, uint64_t val);
 void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
                            uint64_t a2);
+void arch_context_set_cpu(struct arch_context *ctx, int cpu);
 
 /* Memory Management (MMU) */
 void arch_mmu_init(paddr_t mem_base, size_t mem_size);

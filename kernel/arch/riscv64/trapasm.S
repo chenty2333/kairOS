@@ -30,6 +30,9 @@ trap_entry:
     addi sp, sp, -TF_SIZE
     do_regs sd, sp
 
+    /* Load Kernel TP (CPU ID) from stack top */
+    ld tp, TF_SIZE(sp)
+
     /* Save original SP from sscratch */
     csrr t0, sscratch
     beqz t0, 3f
@@ -47,6 +50,7 @@ trap_entry:
 
 .globl trap_return
 trap_return:
+    call sched_post_switch_cleanup
     ld t0, 31*8(sp); csrw sepc, t0
     ld t1, 32*8(sp); csrw sstatus, t1
 

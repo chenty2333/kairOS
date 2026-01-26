@@ -38,6 +38,7 @@ struct percpu_data {
     int cpu_id;
     struct cfs_rq runqueue;
     struct process *curr_proc, *idle_proc;
+    struct process *prev_task; /* Task that just switched out */
     struct trap_frame *current_tf;
     volatile int ipi_pending_mask;
     spinlock_t ipi_call_lock;

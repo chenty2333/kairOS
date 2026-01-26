@@ -42,19 +42,30 @@ struct arch_context *arch_context_alloc(void) {
     }
 
     memset(ctx, 0, sizeof(*ctx));
+    /* 
+     * Reserve 8 bytes at the top of the stack for CPU ID (Kernel TP).
+     * The trap handler will load tp from here.
+     */
     ctx->kernel_stack =
-        (uint64_t)phys_to_virt(page_to_phys(pg)) + (2 * CONFIG_PAGE_SIZE);
+        (uint64_t)phys_to_virt(page_to_phys(pg)) + (2 * CONFIG_PAGE_SIZE) - 8;
     ctx->sp = ctx->kernel_stack;
 
     return ctx;
+}
+
+void arch_context_set_cpu(struct arch_context *ctx, int cpu) {
+    if (ctx && ctx->kernel_stack) {
+        *(uint64_t*)ctx->kernel_stack = (uint64_t)cpu;
+    }
 }
 
 void arch_context_free(struct arch_context *ctx) {
     if (!ctx)
         return;
     if (ctx->kernel_stack) {
+        /* Adjust back to real page start */
         void *stack_bottom =
-            (void *)(ctx->kernel_stack - (2 * CONFIG_PAGE_SIZE));
+            (void *)(ctx->kernel_stack + 8 - (2 * CONFIG_PAGE_SIZE));
         struct page *pg = phys_to_page(virt_to_phys(stack_bottom));
         if (pg)
             free_pages(pg, 1);

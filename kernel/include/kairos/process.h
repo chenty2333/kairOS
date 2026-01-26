@@ -36,6 +36,7 @@ struct process {
     struct rb_node sched_node;
     struct list_head sched_list;
     bool on_rq;
+    bool on_cpu;
 
     struct mm_struct *mm;
     struct file *files[CONFIG_MAX_FILES_PER_PROC];

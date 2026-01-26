@@ -77,36 +77,6 @@ static void place_entity(struct cfs_rq *rq, struct process *p, bool initial) {
     if (p->vruntime < v) p->vruntime = v;
 }
 
-/**
- * sched_steal_task - Try to steal from other CPUs
- * Uses strict locking order (ascending CPU ID) to prevent deadlocks.
- */
-static struct process *sched_steal_task(int self_id) {
-    for (int i = 0; i < nr_cpus_online; i++) {
-        if (i == self_id) continue;
-        
-        struct cfs_rq *remote_rq = &cpu_data[i].runqueue;
-        
-        /* Attempt to lock remote queue without deadlocking */
-        if (!spin_trylock(&remote_rq->lock)) continue;
-        
-        struct process *p = NULL;
-        if (remote_rq->nr_running > 0) {
-            struct rb_node *left = rb_first(&remote_rq->tasks_timeline);
-            if (left) {
-                p = rb_entry(left, struct process, sched_node);
-                rb_erase(&p->sched_node, &remote_rq->tasks_timeline);
-                p->on_rq = false;
-                remote_rq->nr_running--;
-                p->cpu = self_id;
-            }
-        }
-        spin_unlock(&remote_rq->lock);
-        if (p) return p;
-    }
-    return NULL;
-}
-
 void sched_init(void) {
     /* Initialize local CPU. Secondary CPUs call sched_init_cpu. */
     sched_init_cpu(arch_cpu_id());
@@ -120,6 +90,15 @@ void sched_init_cpu(int cpu) {
     d->runqueue.tasks_timeline = RB_ROOT;
     spin_init(&d->runqueue.lock);
     spin_init(&d->ipi_call_lock);
+    d->prev_task = NULL;
+}
+
+void sched_post_switch_cleanup(void) {
+    struct percpu_data *cpu = arch_get_percpu();
+    if (cpu->prev_task) {
+        cpu->prev_task->on_cpu = false;
+        cpu->prev_task = NULL;
+    }
 }
 
 void sched_enqueue(struct process *p) {
@@ -136,6 +115,7 @@ void sched_enqueue(struct process *p) {
     __enqueue_entity(rq, p);
     p->on_rq = true;
     p->cpu = cpu;
+    p->on_cpu = false; /* Ensure it's marked as not running if it was just created/woken */
     rq->nr_running++;
     update_min_vruntime(rq);
 
@@ -163,6 +143,43 @@ void sched_dequeue(struct process *p) {
     arch_irq_restore(state);
 }
 
+/**
+ * sched_steal_task - Try to steal from other CPUs
+ * Uses strict locking order (ascending CPU ID) to prevent deadlocks.
+ */
+static struct process *sched_steal_task(int self_id) {
+    for (int i = 0; i < nr_cpus_online; i++) {
+        if (i == self_id) continue;
+        
+        struct cfs_rq *remote_rq = &cpu_data[i].runqueue;
+        
+        /* Attempt to lock remote queue without deadlocking */
+        if (!spin_trylock(&remote_rq->lock)) continue;
+        
+        struct process *p = NULL;
+        if (remote_rq->nr_running > 0) {
+            struct rb_node *left = rb_first(&remote_rq->tasks_timeline);
+            if (left) {
+                p = rb_entry(left, struct process, sched_node);
+                
+                /* CRITICAL: Do not steal a task that is currently running on the remote CPU! */
+                if (p->on_cpu) {
+                    spin_unlock(&remote_rq->lock);
+                    continue;
+                }
+
+                rb_erase(&p->sched_node, &remote_rq->tasks_timeline);
+                p->on_rq = false;
+                remote_rq->nr_running--;
+                p->cpu = self_id;
+            }
+        }
+        spin_unlock(&remote_rq->lock);
+        if (p) return p;
+    }
+    return NULL;
+}
+
 void schedule(void) {
     struct percpu_data *cpu = arch_get_percpu();
     struct process *prev = proc_current(), *next;
@@ -174,6 +191,9 @@ void schedule(void) {
 
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
+        /* Mark prev as currently running on this CPU */
+        prev->on_cpu = true;
+        
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_RUNNABLE;
             __enqueue_entity(rq, prev);
@@ -205,17 +225,33 @@ void schedule(void) {
         next->last_run_time = arch_timer_ticks() * TICK_NS;
         rq->curr = next;
         next->state = PROC_RUNNING;
+        next->on_cpu = true; /* Mark next as running to prevent stealing */
         cpu->curr_proc = next;
         proc_set_current(next);
 
         if (next->mm) arch_mmu_switch(next->mm->pgdir);
+        
+        /* Update the CPU ID in the next task's context (for tp restoration) */
+        if (next->context) arch_context_set_cpu(next->context, cpu->cpu_id);
+
+        /* Store prev for cleanup by next task */
+        cpu->prev_task = prev;
 
         spin_unlock(&rq->lock);
         if (prev && prev->context) arch_context_switch(prev->context, next->context);
+        
+        /* 
+         * Back from switch (as 'next' - now current).
+         * Cleanup the task that switched to us (which is cpu->prev_task).
+         */
+        sched_post_switch_cleanup();
+        
         arch_irq_restore(state);
     } else {
         next->state = PROC_RUNNING;
+        next->on_cpu = true;
         rq->curr = next;
+        if (cpu->prev_task) sched_post_switch_cleanup(); /* Just in case */
         spin_unlock(&rq->lock);
         arch_irq_restore(state);
     }

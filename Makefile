@@ -141,6 +141,11 @@ CORE_SRCS := \
     kernel/fs/vfs/pipe.c \
     kernel/fs/devfs/devfs.c \
     kernel/fs/ext2/ext2.c \
+    kernel/core/device.c \
+    kernel/drivers/bus/platform.c \
+    kernel/drivers/virtio/virtio.c \
+    kernel/drivers/virtio/virtio_mmio.c \
+    kernel/drivers/virtio/virtio_ring.c \
     kernel/drivers/block/blkdev.c \
     kernel/drivers/block/virtio_blk.c
 
