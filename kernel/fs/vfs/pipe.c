@@ -124,23 +124,23 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     vn->refcount = 2; /* One for reader, one for writer */
     mutex_init(&vn->lock, "pipe_vnode");
     
-    *read_pipe = kzalloc(sizeof(struct file));
-    *write_pipe = kzalloc(sizeof(struct file));
+    *read_pipe = vfs_file_alloc();
+    *write_pipe = vfs_file_alloc();
     
     if (!*read_pipe || !*write_pipe) {
-        /* Cleanup omitted for brevity */
+        if (*read_pipe) vfs_file_free(*read_pipe);
+        if (*write_pipe) vfs_file_free(*write_pipe);
+        kfree(vn);
+        kfree(p->data);
+        kfree(p);
         return -ENOMEM;
     }
     
     (*read_pipe)->vnode = vn;
     (*read_pipe)->flags = O_RDONLY;
-    (*read_pipe)->refcount = 1;
-    mutex_init(&(*read_pipe)->lock, "pipe_read_lock");
     
     (*write_pipe)->vnode = vn;
     (*write_pipe)->flags = O_WRONLY;
-    (*write_pipe)->refcount = 1;
-    mutex_init(&(*write_pipe)->lock, "pipe_write_lock");
     
     return 0;
 }

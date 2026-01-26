@@ -40,6 +40,21 @@ static const char *exc_names[] = {
     [12] = "Inst page fault",       [13] = "Load page fault",
     [15] = "Store page fault"};
 
+static void dump_trap_frame(struct trap_frame *tf, bool from_user) {
+    struct process *p = proc_current();
+    pr_err("Trap dump: cpu=%d mode=%s pid=%d name=%s\n", arch_cpu_id(),
+           from_user ? "user" : "kernel", p ? p->pid : -1,
+           p ? p->name : "-");
+    pr_err("  sepc=%p stval=%p scause=%p sstatus=%p\n",
+           (void *)tf->sepc, (void *)tf->stval, (void *)tf->scause,
+           (void *)tf->sstatus);
+    pr_err("  ra=%p sp=%p a0=%p a1=%p a2=%p a3=%p a4=%p a5=%p a6=%p a7=%p\n",
+           (void *)tf->tf_ra, (void *)tf->tf_sp, (void *)tf->tf_a0,
+           (void *)tf->tf_a1, (void *)tf->tf_a2, (void *)tf->tf_a3,
+           (void *)tf->tf_a4, (void *)tf->tf_a5, (void *)tf->tf_a6,
+           (void *)tf->tf_a7);
+}
+
 static void handle_exception(struct trap_frame *tf) {
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
     bool from_user = !(tf->sstatus & SSTATUS_SPP);
@@ -88,6 +103,7 @@ static void handle_exception(struct trap_frame *tf) {
         return;
     }
 
+    dump_trap_frame(tf, from_user);
     pr_err("Exception: %s (cause=%lu, epc=%p, val=%p)\n",
            cause < 16 ? exc_names[cause] : "Unknown", cause, (void *)tf->sepc,
            (void *)tf->stval);

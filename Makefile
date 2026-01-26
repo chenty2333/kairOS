@@ -179,6 +179,14 @@ SRCS := $(CORE_SRCS) $(ARCH_SRCS)
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(filter %.c,$(SRCS)))
 OBJS += $(patsubst %.S,$(BUILD_DIR)/%.o,$(filter %.S,$(SRCS)))
 
+# Embedded user init (riscv64 only)
+ifeq ($(ARCH),riscv64)
+USER_INIT_BLOB := kernel/core/proc/user_init_blob.h
+$(USER_INIT_BLOB): user/init/init.S user/init/linker.ld scripts/gen-user-init.sh
+	./scripts/gen-user-init.sh $(ARCH)
+$(OBJS): $(USER_INIT_BLOB)
+endif
+
 # Dependency files
 DEPS := $(OBJS:.o=.d)
 

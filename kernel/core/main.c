@@ -125,14 +125,24 @@ void kernel_main(unsigned long hartid, void *dtb) {
     smp_init();
 
     /* Tests and User Mode */
+#if CONFIG_KERNEL_TESTS
     pr_info("Starting robustness test...\n");
     run_crash_test();
 
     arch_irq_enable();
     int status;
-    while (proc_wait(-1, &status, 0) > 0);
-    
+    while (proc_wait(-1, &status, 0) > 0)
+        ;
+
     pr_info("Tests complete. Stopping system...\n");
     arch_cpu_shutdown();
     while (1) arch_cpu_halt();
+#else
+    if (!proc_start_init())
+        pr_warn("init: failed to start init thread\n");
+    arch_irq_enable();
+    /* No test harness: keep the scheduler running. */
+    while (1)
+        schedule();
+#endif
 }

@@ -13,8 +13,6 @@
 
 /* User program addresses */
 #define USER_CODE_ADDR 0x10000
-#define USER_STACK_TOP 0x80000000UL
-#define USER_STACK_SIZE (16 * 4096)
 
 static const uint8_t user_program[] = {
     0x13, 0x05, 0x10, 0x00, 0x97, 0x05, 0x00, 0x00, 0x93, 0x85, 0x05, 0x02,
@@ -52,7 +50,7 @@ static struct process *create_user_process(const char *name, const uint8_t *code
     for (size_t off = 0; off < code_size; off += CONFIG_PAGE_SIZE) {
         paddr_t pa = pmm_alloc_page();
         if (!pa) goto fail;
-        memset((void *)pa, 0, CONFIG_PAGE_SIZE);
+        memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
         size_t len = MIN(code_size - off, CONFIG_PAGE_SIZE);
         memcpy((void *)pa, code + off, len);
         if (arch_mmu_map(p->mm->pgdir, USER_CODE_ADDR + off, pa,
@@ -66,7 +64,7 @@ static struct process *create_user_process(const char *name, const uint8_t *code
          va += CONFIG_PAGE_SIZE) {
         paddr_t pa = pmm_alloc_page();
         if (!pa) goto fail;
-        memset((void *)pa, 0, CONFIG_PAGE_SIZE);
+        memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
         if (arch_mmu_map(p->mm->pgdir, va, pa,
                          PTE_USER | PTE_READ | PTE_WRITE) < 0) {
             pmm_free_page(pa);
@@ -75,6 +73,7 @@ static struct process *create_user_process(const char *name, const uint8_t *code
     }
 
     arch_context_init(p->context, USER_CODE_ADDR, USER_STACK_TOP - 16, false);
+    proc_setup_stdio(p);
     p->state = PROC_RUNNABLE;
     return p;
 

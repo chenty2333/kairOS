@@ -25,14 +25,21 @@
 trap_entry:
     csrrw sp, sscratch, sp
     bnez sp, 1f
+    
+    /* Kernel Trap */
     csrrw sp, sscratch, sp
-1:
     addi sp, sp, -TF_SIZE
     do_regs sd, sp
+    /* TP is already valid in kernel mode */
+    j 2f
 
+1:  /* User Trap */
+    addi sp, sp, -TF_SIZE
+    do_regs sd, sp
     /* Load Kernel TP (CPU ID) from stack top */
     ld tp, TF_SIZE(sp)
 
+2:
     /* Save original SP from sscratch */
     csrr t0, sscratch
     beqz t0, 3f
@@ -48,9 +55,13 @@ trap_entry:
     mv a0, sp
     call trap_dispatch
 
+.globl fork_ret
+fork_ret:
+    call sched_post_switch_cleanup
+    j trap_return
+
 .globl trap_return
 trap_return:
-    call sched_post_switch_cleanup
     ld t0, 31*8(sp); csrw sepc, t0
     ld t1, 32*8(sp); csrw sstatus, t1
 

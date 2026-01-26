@@ -63,7 +63,7 @@
  */
 #define CONFIG_DEBUG 1
 #define CONFIG_VERBOSE 0
-#define CONFIG_KERNEL_TESTS 1
+#define CONFIG_KERNEL_TESTS 0
 /* #define CONFIG_SLUB_DEBUG           1 */
 
 /*

@@ -90,16 +90,6 @@ static uint64_t flags_to_pte(uint64_t f) {
     return p;
 }
 
-static void pt_free_recursive(paddr_t table, int level) {
-    uint64_t *pt = (uint64_t *)table;
-    for (int i = 0; i < (level > 0 ? PTES_PER_PAGE : 0); i++) {
-        if ((pt[i] & PTE_V) && !(pt[i] & (PTE_R | PTE_W | PTE_X))) {
-            pt_free_recursive((paddr_t)pte_to_pa(pt[i]), level - 1);
-        }
-    }
-    pmm_free_page(table);
-}
-
 static int map_region(paddr_t root, vaddr_t va, paddr_t pa, size_t sz,
                       uint64_t f) {
     for (size_t off = 0; off < sz; off += PAGE_SIZE) {
@@ -150,7 +140,13 @@ paddr_t arch_mmu_create_table(void) {
 
 void arch_mmu_destroy_table(paddr_t table) {
     if (table && table != kernel_pgdir) {
-        pt_free_recursive(table, LEVELS - 1);
+        /*
+         * The current design shares kernel page table levels across mm
+         * instances (arch_mmu_create_table copies the root).
+         * Freeing recursively risks double-free of shared tables.
+         * For now, free only the top-level page to avoid corruption.
+         */
+        pmm_free_page(table);
     }
 }
 
@@ -160,6 +156,24 @@ int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
         return -ENOMEM;
     }
     *pte = pa_to_pte(pa) | flags_to_pte(flags);
+    return 0;
+}
+
+int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
+    uint64_t *pte = walk_pgtable(table, va, true);
+    if (!pte) {
+        return -ENOMEM;
+    }
+    uint64_t new_flags = flags_to_pte(flags);
+    if (*pte & PTE_V) {
+        paddr_t existing = (paddr_t)pte_to_pa(*pte);
+        if (existing != pa) {
+            return -EEXIST;
+        }
+        *pte |= new_flags;
+        return 0;
+    }
+    *pte = pa_to_pte(pa) | new_flags;
     return 0;
 }
 
@@ -197,6 +211,10 @@ void arch_mmu_flush_tlb(void) {
 
 void arch_mmu_flush_tlb_page(vaddr_t va) {
     __asm__ __volatile__("sfence.vma %0" ::"r"(va) : "memory");
+}
+
+paddr_t arch_mmu_get_kernel_pgdir(void) {
+    return kernel_pgdir;
 }
 
 /* --- KVM Helpers --- */

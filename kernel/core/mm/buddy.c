@@ -119,6 +119,8 @@ struct page *alloc_pages(unsigned int order) {
             page = list_first_entry(&pcp->list, struct page, list);
             list_del(&page->list);
             pcp->count--;
+            page->order = 0;
+            page->refcount = 1;
         }
     } else {
         spin_lock(&buddy_lock);
@@ -135,6 +137,8 @@ void free_pages(struct page *page, unsigned int order) {
     if (!page) return;
     bool irq = arch_irq_save();
     page->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB);
+    page->refcount = 0;
+    page->order = order;
 
     if (order == 0) {
         struct pcp_area *pcp = &pcp_areas[arch_cpu_id()];
@@ -142,6 +146,10 @@ void free_pages(struct page *page, unsigned int order) {
         if (++pcp->count >= PCP_HIGH) {
             spin_lock(&buddy_lock);
             for (int i = 0; i < PCP_BATCH; i++) {
+                if (list_empty(&pcp->list)) {
+                    pcp->count = 0;
+                    break;
+                }
                 struct page *p = list_first_entry(&pcp->list, struct page, list);
                 list_del(&p->list);
                 pcp->count--;

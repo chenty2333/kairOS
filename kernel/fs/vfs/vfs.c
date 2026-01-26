@@ -21,8 +21,21 @@ static struct mount *root_mount = NULL;
 static struct kmem_cache *vnode_cache;
 static struct kmem_cache *file_cache;
 
+int vfs_normalize_path(const char *cwd, const char *input, char *output);
+
+static int vfs_normalize_proc_path(const char *path, char *norm) {
+    struct process *cur = proc_current();
+    const char *cwd = (cur && cur->cwd[0]) ? cur->cwd : "/";
+    return vfs_normalize_path(cwd, path, norm);
+}
+
 int vfs_normalize_path(const char *cwd, const char *input, char *output) {
-    char temp[CONFIG_PATH_MAX], *stack[32];
+    struct path_comp {
+        char *s;
+        size_t len;
+    };
+    char temp[CONFIG_PATH_MAX];
+    struct path_comp stack[32];
     int top = 0;
     if (!output || !input)
         return -EINVAL;
@@ -51,6 +64,7 @@ int vfs_normalize_path(const char *cwd, const char *input, char *output) {
         char *start = p;
         while (*p && *p != '/')
             p++;
+        size_t len = (size_t)(p - start);
         char saved = *p;
         *p = '\0';
         if (strcmp(start, ".") == 0)
@@ -59,8 +73,11 @@ int vfs_normalize_path(const char *cwd, const char *input, char *output) {
             if (top > 0)
                 top--;
         } else {
-            if (top < 32)
-                stack[top++] = start;
+            if (top < 32) {
+                stack[top].s = start;
+                stack[top].len = len;
+                top++;
+            }
             else
                 return -ENAMETOOLONG;
         }
@@ -70,8 +87,8 @@ int vfs_normalize_path(const char *cwd, const char *input, char *output) {
     char *out = output;
     *out++ = '/';
     for (int i = 0; i < top; i++) {
-        size_t len = strlen(stack[i]);
-        memcpy(out, stack[i], len);
+        size_t len = stack[i].len;
+        memcpy(out, stack[i].s, len);
         out += len;
         if (i < top - 1)
             *out++ = '/';
@@ -84,6 +101,31 @@ void vfs_init(void) {
     vnode_cache = kmem_cache_create("vnode", sizeof(struct vnode), NULL);
     file_cache = kmem_cache_create("file", sizeof(struct file), NULL);
     pr_info("VFS: initialized (caches ready)\n");
+}
+
+struct file *vfs_file_alloc(void) {
+    struct file *file = kmem_cache_alloc(file_cache);
+    if (!file)
+        return NULL;
+    memset(file, 0, sizeof(*file));
+    file->refcount = 1;
+    mutex_init(&file->lock, "file");
+    return file;
+}
+
+void vfs_file_free(struct file *file) {
+    if (!file)
+        return;
+    kmem_cache_free(file_cache, file);
+}
+
+void vfs_dump_mounts(void) {
+    struct mount *mnt;
+    spin_lock(&vfs_lock);
+    list_for_each_entry(mnt, &mount_list, list) {
+        pr_info("VFS mount: %s\n", mnt->mountpoint);
+    }
+    spin_unlock(&vfs_lock);
 }
 
 int vfs_register_fs(struct fs_type *fs) {
@@ -107,8 +149,6 @@ static struct fs_type *find_fs_type(const char *name) {
 static struct mount *find_mount(const char *path) {
     struct mount *mnt, *best = NULL;
     size_t best_len = 0;
-    if (!root_mount)
-        return NULL;
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
         size_t len = strlen(mnt->mountpoint);
@@ -184,11 +224,10 @@ int vfs_umount(const char *tgt) {
     return -ENOENT;
 }
 
-struct vnode *vfs_lookup(const char *path) {
+struct vnode *vfs_lookup_at(const char *cwd, const char *path) {
     char norm[CONFIG_PATH_MAX], comp[CONFIG_NAME_MAX];
     struct vnode *vn, *dir;
-    struct process *cur = proc_current();
-    if (!path || vfs_normalize_path(cur ? cur->cwd : "/", path, norm) < 0)
+    if (!path || vfs_normalize_path(cwd ? cwd : "/", path, norm) < 0)
         return NULL;
     struct mount *mnt = find_mount(norm);
     if (!mnt || !(dir = mnt->root))
@@ -223,6 +262,11 @@ struct vnode *vfs_lookup(const char *path) {
     return dir;
 }
 
+struct vnode *vfs_lookup(const char *path) {
+    struct process *cur = proc_current();
+    return vfs_lookup_at(cur ? cur->cwd : "/", path);
+}
+
 struct vnode *vfs_lookup_parent(const char *path, char *name) {
     if (!path || !name || path[0] != '/')
         return NULL;
@@ -240,15 +284,19 @@ struct vnode *vfs_lookup_parent(const char *path, char *name) {
     return vfs_lookup(parent);
 }
 
-int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
-    struct vnode *vn = vfs_lookup(path);
+int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struct file **fp) {
+    struct vnode *vn = vfs_lookup_at(cwd, path);
     if (!vn && (flags & O_CREAT)) {
-        char name[CONFIG_NAME_MAX];
-        struct vnode *parent = vfs_lookup_parent(path, name);
-        struct mount *mnt = find_mount(path);
+        char norm[CONFIG_PATH_MAX], name[CONFIG_NAME_MAX];
+        const char *base = path;
+        if (vfs_normalize_path(cwd ? cwd : "/", path, norm) < 0)
+            return -EINVAL;
+        base = norm;
+        struct vnode *parent = vfs_lookup_parent(base, name);
+        struct mount *mnt = find_mount(base);
         if (parent && mnt && mnt->ops->create &&
             mnt->ops->create(parent, name, mode) >= 0)
-            vn = vfs_lookup(path);
+            vn = vfs_lookup_at("/", base);
         if (parent)
             vnode_put(parent);
     }
@@ -258,20 +306,22 @@ int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
         vnode_put(vn);
         return -ENOTDIR;
     }
-    struct file *file = kmem_cache_alloc(file_cache);
+    struct file *file = vfs_file_alloc();
     if (!file) {
         vnode_put(vn);
         return -ENOMEM;
     }
-    memset(file, 0, sizeof(*file));
     file->vnode = vn;
     file->flags = flags;
-    file->refcount = 1;
-    mutex_init(&file->lock, "file");
     if ((flags & O_TRUNC) && vn->ops->truncate)
         vn->ops->truncate(vn, 0);
     *fp = file;
     return 0;
+}
+
+int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
+    struct process *cur = proc_current();
+    return vfs_open_at(cur ? cur->cwd : "/", path, flags, mode, fp);
 }
 
 int vfs_close(struct file *file) {
@@ -286,7 +336,7 @@ int vfs_close(struct file *file) {
     if (file->vnode->ops->close)
         file->vnode->ops->close(file->vnode);
     vnode_put(file->vnode);
-    kmem_cache_free(file_cache, file);
+    vfs_file_free(file);
     return 0;
 }
 
@@ -350,9 +400,11 @@ int vfs_fstat(struct file *file, struct stat *st) {
 }
 
 int vfs_mkdir(const char *path, mode_t mode) {
-    char name[CONFIG_NAME_MAX];
-    struct vnode *parent = vfs_lookup_parent(path, name);
-    struct mount *mnt = find_mount(path);
+    char norm[CONFIG_PATH_MAX], name[CONFIG_NAME_MAX];
+    if (vfs_normalize_proc_path(path, norm) < 0)
+        return -EINVAL;
+    struct vnode *parent = vfs_lookup_parent(norm, name);
+    struct mount *mnt = find_mount(norm);
     int ret = (parent && mnt && mnt->ops->mkdir)
                   ? mnt->ops->mkdir(parent, name, mode)
                   : -ENOSYS;
@@ -362,9 +414,11 @@ int vfs_mkdir(const char *path, mode_t mode) {
 }
 
 int vfs_rmdir(const char *path) {
-    char name[CONFIG_NAME_MAX];
-    struct vnode *parent = vfs_lookup_parent(path, name);
-    struct mount *mnt = find_mount(path);
+    char norm[CONFIG_PATH_MAX], name[CONFIG_NAME_MAX];
+    if (vfs_normalize_proc_path(path, norm) < 0)
+        return -EINVAL;
+    struct vnode *parent = vfs_lookup_parent(norm, name);
+    struct mount *mnt = find_mount(norm);
     int ret = (parent && mnt && mnt->ops->rmdir) ? mnt->ops->rmdir(parent, name)
                                                  : -ENOSYS;
     if (parent)
@@ -382,9 +436,11 @@ int vfs_readdir(struct file *file, struct dirent *ent) {
 }
 
 int vfs_unlink(const char *path) {
-    char name[CONFIG_NAME_MAX];
-    struct vnode *parent = vfs_lookup_parent(path, name);
-    struct mount *mnt = find_mount(path);
+    char norm[CONFIG_PATH_MAX], name[CONFIG_NAME_MAX];
+    if (vfs_normalize_proc_path(path, norm) < 0)
+        return -EINVAL;
+    struct vnode *parent = vfs_lookup_parent(norm, name);
+    struct mount *mnt = find_mount(norm);
     int ret = (parent && mnt && mnt->ops->unlink)
                   ? mnt->ops->unlink(parent, name)
                   : -ENOSYS;
@@ -394,9 +450,14 @@ int vfs_unlink(const char *path) {
 }
 
 int vfs_rename(const char *old, const char *new) {
+    char oldn[CONFIG_PATH_MAX], newn[CONFIG_PATH_MAX];
+    if (vfs_normalize_proc_path(old, oldn) < 0)
+        return -EINVAL;
+    if (vfs_normalize_proc_path(new, newn) < 0)
+        return -EINVAL;
     char on[CONFIG_NAME_MAX], nn[CONFIG_NAME_MAX];
-    struct vnode *od = vfs_lookup_parent(old, on),
-                 *nd = vfs_lookup_parent(new, nn);
+    struct vnode *od = vfs_lookup_parent(oldn, on),
+                 *nd = vfs_lookup_parent(newn, nn);
     int ret = -EXDEV;
     if (od && nd && od->mount == nd->mount && od->mount->ops->rename)
         ret = od->mount->ops->rename(od, on, nd, nn);

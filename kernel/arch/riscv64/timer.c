@@ -43,15 +43,20 @@ void arch_timer_set_next(uint64_t t) {
 void arch_timer_ack(void) {}
 
 void timer_interrupt_handler(void) {
-    system_ticks++;
+    /* Use a single CPU as the timekeeper to avoid SMP races. */
+    uint64_t tick = 0;
+    if (arch_cpu_id() == 0) {
+        tick = __atomic_add_fetch(&system_ticks, 1, __ATOMIC_RELAXED);
+    }
     sbi_call(SBI_EXT_TIME, 0, rdtime() + ticks_per_int, 0, 0);
-    if (system_ticks % CONFIG_HZ == 0)
-        pr_debug("tick: %lu sec\n", system_ticks / CONFIG_HZ);
+    if (tick && (tick % CONFIG_HZ == 0))
+        pr_debug("tick: %lu sec\n", tick / CONFIG_HZ);
     sched_tick();
-    if (sched_need_resched())
+    struct trap_frame *tf = arch_get_percpu()->current_tf;
+    if (tf && !(tf->sstatus & SSTATUS_SPP) && sched_need_resched())
         schedule();
 }
 
 uint64_t arch_timer_get_ticks(void) {
-    return system_ticks;
+    return __atomic_load_n(&system_ticks, __ATOMIC_RELAXED);
 }

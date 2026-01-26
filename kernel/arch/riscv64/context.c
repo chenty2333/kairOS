@@ -28,6 +28,7 @@ struct arch_context {
 /* External entry points */
 extern void kthread_entry(void);
 extern void trap_return(void);
+extern void fork_ret(void);
 
 struct arch_context *arch_context_alloc(void) {
     struct arch_context *ctx = kmalloc(sizeof(*ctx));
@@ -41,13 +42,13 @@ struct arch_context *arch_context_alloc(void) {
         return NULL;
     }
 
+    void *stack_addr = phys_to_virt(page_to_phys(pg));
+    memset(stack_addr, 0, 2 * CONFIG_PAGE_SIZE);
+
     memset(ctx, 0, sizeof(*ctx));
-    /* 
-     * Reserve 8 bytes at the top of the stack for CPU ID (Kernel TP).
-     * The trap handler will load tp from here.
-     */
+    
     ctx->kernel_stack =
-        (uint64_t)phys_to_virt(page_to_phys(pg)) + (2 * CONFIG_PAGE_SIZE) - 8;
+        (uint64_t)stack_addr + (2 * CONFIG_PAGE_SIZE) - 8;
     ctx->sp = ctx->kernel_stack;
 
     return ctx;
@@ -92,18 +93,19 @@ void arch_context_init(struct arch_context *ctx, vaddr_t entry, vaddr_t arg,
         /* sstatus: SPIE=1 (enable interrupts after sret), SPP=0 (return to U-mode) */
         tf->sstatus = (1UL << 5); 
         
-        ctx->ra = (uint64_t)trap_return;
+        ctx->ra = (uint64_t)fork_ret;
         ctx->sp = (uint64_t)tf;
         ctx->user_stack = arg;
     }
 }
 
 void arch_context_clone(struct arch_context *dst, struct arch_context *src) {
-    uint64_t saved_kstack = dst->kernel_stack;
-    uint64_t saved_sp = dst->sp;
-    memcpy(dst, src, sizeof(*dst));
-    dst->kernel_stack = saved_kstack;
-    dst->sp = saved_sp;
+    dst->ra = src->ra;
+    memcpy(dst->s, src->s, sizeof(dst->s));
+    dst->user_stack = src->user_stack;
+    dst->satp = src->satp;
+    dst->kthread_fn = src->kthread_fn;
+    dst->kthread_arg = src->kthread_arg;
 }
 
 void arch_setup_fork_child(struct arch_context *ctx, struct trap_frame *tf) {
@@ -115,7 +117,7 @@ void arch_setup_fork_child(struct arch_context *ctx, struct trap_frame *tf) {
     child_tf->tf_a0 = 0; /* a0 = 0 for child */
     child_tf->sepc += 4; /* skip ecall */
 
-    ctx->ra = (uint64_t)trap_return;
+    ctx->ra = (uint64_t)fork_ret;
     ctx->sp = (uint64_t)child_tf;
 }
 

@@ -10,11 +10,6 @@
 #include <kairos/config.h>
 #include <kairos/string.h>
 
-#define USER_SPACE_START    0x00000000UL
-#define USER_SPACE_END      0x0000003FFFFFFFFFULL
-#define USER_HEAP_START     0x00000001000000UL
-#define USER_STACK_TOP      0x0000003FF0000000ULL
-
 /* --- Internal Helpers --- */
 
 static void unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end) {

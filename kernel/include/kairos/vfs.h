@@ -122,9 +122,14 @@ int vfs_mount(const char *src, const char *tgt, const char *type,
               uint32_t flags);
 int vfs_umount(const char *tgt);
 struct vnode *vfs_lookup(const char *path);
+struct vnode *vfs_lookup_at(const char *cwd, const char *path);
 struct vnode *vfs_lookup_parent(const char *path, char *name);
 int vfs_open(const char *path, int flags, mode_t mode, struct file **fp);
+int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struct file **fp);
 int vfs_close(struct file *file);
+struct file *vfs_file_alloc(void);
+void vfs_file_free(struct file *file);
+void vfs_dump_mounts(void);
 ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
 off_t vfs_seek(struct file *file, off_t offset, int whence);

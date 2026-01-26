@@ -11,10 +11,6 @@
 #include <kairos/string.h>
 #include <kairos/types.h>
 
-/* User stack configuration */
-#define USER_STACK_TOP 0x80000000UL
-#define USER_STACK_SIZE (64 * 1024) /* 64KB initial stack */
-
 /**
  * elf_load - Load an ELF binary into a process address space
  */
@@ -45,9 +41,16 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
         if (phdr[i].p_flags & PF_X) flags |= PTE_EXEC;
 
         for (vaddr_t va = page_start; va < page_end; va += CONFIG_PAGE_SIZE) {
-            paddr_t pa = pmm_alloc_page();
-            if (!pa) return -ENOMEM;
-            memset((void *)pa, 0, CONFIG_PAGE_SIZE);
+            paddr_t pa = arch_mmu_translate(mm->pgdir, va);
+            bool new_page = false;
+            if (pa) {
+                pa = ALIGN_DOWN(pa, CONFIG_PAGE_SIZE);
+            } else {
+                pa = pmm_alloc_page();
+                if (!pa) return -ENOMEM;
+                memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
+                new_page = true;
+            }
 
             vaddr_t file_data_end = seg_start + phdr[i].p_filesz;
             vaddr_t copy_start = (va < seg_start) ? seg_start : va;
@@ -57,11 +60,11 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
                 size_t page_off = copy_start - va;
                 size_t file_off = phdr[i].p_offset + (copy_start - seg_start);
                 size_t copy_len = copy_end - copy_start;
-                memcpy((void *)(pa + page_off), elf_bytes + file_off, copy_len);
+                memcpy((uint8_t *)phys_to_virt(pa) + page_off, elf_bytes + file_off, copy_len);
             }
 
-            if ((ret = arch_mmu_map(mm->pgdir, va, pa, flags)) < 0) {
-                pmm_free_page(pa);
+            if ((ret = arch_mmu_map_merge(mm->pgdir, va, pa, flags)) < 0) {
+                if (new_page) pmm_free_page(pa);
                 return ret;
             }
         }
@@ -83,7 +86,7 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
     for (vaddr_t va = stack_bottom; va < USER_STACK_TOP; va += CONFIG_PAGE_SIZE) {
         paddr_t pa = pmm_alloc_page();
         if (!pa) return -ENOMEM;
-        memset((void *)pa, 0, CONFIG_PAGE_SIZE);
+        memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
         if (arch_mmu_map(mm->pgdir, va, pa, PTE_USER | PTE_READ | PTE_WRITE) < 0) {
             pmm_free_page(pa);
             return -ENOMEM;
@@ -161,6 +164,7 @@ struct process *proc_create(const char *name, const void *elf, size_t size) {
     }
 
     arch_context_init(p->context, entry, sp, false);
+    proc_setup_stdio(p);
     p->state = PROC_RUNNABLE;
 
     pr_info("proc_create: created '%s' (pid %d) entry=%p sp=%p\n", p->name,

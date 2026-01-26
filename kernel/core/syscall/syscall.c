@@ -74,10 +74,18 @@ int64_t sys_open(uint64_t path, uint64_t flags, uint64_t mode, uint64_t a3, uint
 
 static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count, bool is_write) {
     struct file *f = fd_get(proc_current(), (int)fd);
-    if (!f) return -EBADF;
-
-    uint8_t kbuf[512]; 
+    uint8_t kbuf[512];
     size_t chunk = (count > sizeof(kbuf)) ? sizeof(kbuf) : count;
+
+    if (!f) {
+        if (is_write && (fd == 1 || fd == 2)) {
+            if (copy_from_user(kbuf, (const void *)buf, chunk) < 0) return -EFAULT;
+            for (size_t i = 0; i < chunk; i++)
+                arch_early_putchar((char)kbuf[i]);
+            return (int64_t)chunk;
+        }
+        return -EBADF;
+    }
     
     if (is_write) {
         if (copy_from_user(kbuf, (const void *)buf, chunk) < 0) return -EFAULT;
@@ -182,6 +190,10 @@ syscall_fn_t syscall_table[SYS_MAX] = {
     [SYS_sem_init] = sys_sem_init,
     [SYS_sem_wait] = sys_sem_wait,
     [SYS_sem_post] = sys_sem_post,
+    [SYS_kill]    = sys_kill,
+    [SYS_sigaction] = sys_sigaction,
+    [SYS_sigprocmask] = sys_sigprocmask,
+    [SYS_sigreturn] = sys_sigreturn,
 };
 
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {

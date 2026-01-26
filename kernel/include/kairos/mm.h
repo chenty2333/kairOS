@@ -71,6 +71,13 @@ void vmm_init(void);
 #define VM_SHARED (1 << 3)
 #define VM_STACK (1 << 4)
 
+/* User address space layout */
+#define USER_SPACE_START 0x00000000UL
+#define USER_SPACE_END 0x0000003FFFFFFFFFULL
+#define USER_HEAP_START 0x00000001000000UL
+#define USER_STACK_TOP 0x0000003FF0000000ULL
+#define USER_STACK_SIZE (64 * 1024)
+
 /* Virtual Memory Area (VMA) */
 struct vm_area {
     vaddr_t start, end;

@@ -13,6 +13,10 @@
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
+#ifdef ARCH_riscv64
+#include "user_init_blob.h"
+#endif
+
 static struct kmem_cache *proc_cache;
 static struct process proc_table[CONFIG_MAX_PROCESSES];
 static spinlock_t proc_table_lock = SPINLOCK_INIT;
@@ -33,6 +37,32 @@ void proc_init(void) {
 
 static void proc_set_name(struct process *p, const char *name) {
     strncpy(p->name, name, sizeof(p->name) - 1);
+    p->name[sizeof(p->name) - 1] = '\0';
+}
+
+static void proc_attach_console(struct process *p) {
+    struct file *f = NULL;
+    if (!p) return;
+    int ret = vfs_open_at("/", "/dev/console", O_RDWR, 0, &f);
+    if (ret < 0 || !f) {
+        pr_warn("stdio: failed to open /dev/console (ret=%d)\n", ret);
+        vfs_dump_mounts();
+        return;
+    }
+
+    int fd0 = fd_alloc(p, f);
+    if (fd0 < 0) {
+        vfs_close(f);
+        return;
+    }
+    fd_dup2(p, fd0, 1);
+    fd_dup2(p, fd0, 2);
+}
+
+void proc_setup_stdio(struct process *p) {
+    if (!p) return;
+    if (p->files[0] || p->files[1] || p->files[2]) return;
+    proc_attach_console(p);
 }
 
 static struct process *proc_alloc(void) {
@@ -52,7 +82,9 @@ static struct process *proc_alloc(void) {
 
     p->ppid = p->uid = p->gid = p->vruntime = p->nice = 0;
     p->name[0] = '\0'; p->mm = NULL; p->parent = NULL;
-    p->on_rq = false; p->exit_code = p->sig_pending = p->sig_blocked = 0;
+    p->on_rq = false; p->on_cpu = false; p->cpu = -1;
+    p->last_run_time = 0;
+    p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
     memset(p->files, 0, sizeof(p->files));
     strcpy(p->cwd, "/");
@@ -68,10 +100,21 @@ static struct process *proc_alloc(void) {
     return p;
 }
 
+static void proc_adopt_child(struct process *parent, struct process *child) {
+    if (!parent || !child) return;
+    child->parent = parent;
+    child->ppid = parent->pid;
+    spin_lock(&proc_table_lock);
+    list_add(&child->sibling, &parent->children);
+    spin_unlock(&proc_table_lock);
+    memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
+}
+
 struct process *proc_alloc_internal(void) { return proc_alloc(); }
 
 void proc_free_internal(struct process *p) {
     if (p && p->context) { arch_context_free(p->context); p->context = NULL; }
+    if (p && p->sigactions) { kfree(p->sigactions); p->sigactions = NULL; }
     if (p) { p->state = PROC_UNUSED; p->pid = 0; }
 }
 
@@ -115,7 +158,7 @@ struct process *proc_idle_init(void) {
     if (!p) panic("idle alloc fail");
     proc_set_name(p, "idle");
     p->nice = 19;
-    if (!(p->context = arch_context_alloc())) panic("idle ctx fail");
+    if (!p->context) panic("idle ctx missing");
     arch_context_init(p->context, (vaddr_t)idle_thread, 0, true);
     p->state = PROC_RUNNING;
     struct percpu_data *cpu = arch_get_percpu();
@@ -149,6 +192,7 @@ struct process *proc_fork(void) {
     else arch_context_clone(child->context, parent->context);
 
     child->state = PROC_RUNNABLE;
+    sched_enqueue(child);
     return child;
 }
 
@@ -213,15 +257,112 @@ int proc_exec(const char *path, char *const argv[]) {
     return 0;
 }
 
+static struct process *proc_spawn_from_vfs(const char *path, struct process *parent) {
+    struct vnode *vn = vfs_lookup(path);
+    if (!vn) return NULL;
+    if (vn->type != VNODE_FILE) { vnode_put(vn); return NULL; }
+
+    size_t size = vn->size;
+    if (size == 0 || size > 2 * 1024 * 1024) { vnode_put(vn); return NULL; }
+
+    void *elf_data = kmalloc(size);
+    if (!elf_data) { vnode_put(vn); return NULL; }
+
+    struct file tmp_file = {.vnode = vn, .offset = 0};
+    if (vfs_read(&tmp_file, elf_data, size) < (ssize_t)size) {
+        kfree(elf_data);
+        vnode_put(vn);
+        return NULL;
+    }
+    vnode_put(vn);
+
+    const char *name = strrchr(path, '/');
+    struct process *p = proc_create(name ? name + 1 : path, elf_data, size);
+    kfree(elf_data);
+    if (!p) return NULL;
+
+    if (parent) proc_adopt_child(parent, p);
+    else strcpy(p->cwd, "/");
+
+    return p;
+}
+
+static int init_thread(void *arg __attribute__((unused))) {
+    struct process *parent = proc_current();
+    const char *init_paths[] = {"/init", "/sbin/init", "/bin/init"};
+    struct process *child = NULL;
+
+    for (size_t i = 0; i < ARRAY_SIZE(init_paths); i++) {
+        child = proc_spawn_from_vfs(init_paths[i], parent);
+        if (child) {
+            pr_info("init: started %s (pid %d)\n", init_paths[i], child->pid);
+            sched_enqueue(child);
+            break;
+        }
+    }
+
+    if (!child) {
+#ifdef ARCH_riscv64
+        if (user_init_elf_size > 0) {
+            child = proc_create("init", user_init_elf, user_init_elf_size);
+            if (child) {
+                proc_adopt_child(parent, child);
+                pr_info("init: started embedded init (pid %d)\n", child->pid);
+                sched_enqueue(child);
+            }
+        }
+#endif
+    }
+
+    if (!child) {
+        pr_warn("init: no user init found, running built-in user test\n");
+        run_user_test();
+    }
+
+    while (1) {
+        int status;
+        pid_t pid = proc_wait(-1, &status, 0);
+        if (pid < 0) {
+            proc_yield();
+            continue;
+        }
+        pr_info("init: reaped pid %d (status %d)\n", pid, status);
+    }
+}
+
+struct process *proc_start_init(void) {
+    struct process *p = kthread_create(init_thread, NULL, "init");
+    if (!p) return NULL;
+    sched_enqueue(p);
+    return p;
+}
+
+static bool is_process_active(struct process *p) {
+    for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
+        struct percpu_data *cpu = sched_cpu_data(i);
+        if (!cpu) continue;
+        if (__atomic_load_n(&cpu->curr_proc, __ATOMIC_ACQUIRE) == p) return true;
+        if (__atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE) == p) return true;
+    }
+    return false;
+}
+
 pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
     struct process *p = proc_current(), *child, *tmp;
     while (1) {
         bool found = false;
+        bool busy_zombie = false;
         spin_lock(&proc_table_lock);
         list_for_each_entry_safe(child, tmp, &p->children, sibling) {
             found = true;
             if (pid > 0 && child->pid != pid) continue;
             if (child->state == PROC_ZOMBIE) {
+                if (__atomic_load_n(&child->on_cpu, __ATOMIC_ACQUIRE)) {
+                    if (is_process_active(child)) {
+                        busy_zombie = true;
+                        continue;
+                    }
+                }
                 pid_t cpid = child->pid;
                 if (status) *status = child->exit_code;
                 proc_free(child);
@@ -232,7 +373,11 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
         spin_unlock(&proc_table_lock);
         if (!found) return -ECHILD;
 
-        /* Standard Wait Pattern: Prepare to sleep on exit_wait */
+        if (busy_zombie) {
+            proc_yield();
+            continue;
+        }
+
         spin_lock(&p->exit_wait.lock);
         p->state = PROC_SLEEPING;
         p->wait_channel = &p->exit_wait;
@@ -245,7 +390,20 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
 
 void proc_yield(void) { schedule(); }
 void proc_wakeup(struct process *p) {
-    if (p && p->state == PROC_SLEEPING) { p->state = PROC_RUNNABLE; sched_enqueue(p); }
+    if (!p || p->state != PROC_SLEEPING)
+        return;
+
+    if (p->wait_channel && !list_empty(&p->wait_list)) {
+        struct wait_queue *wq = (struct wait_queue *)p->wait_channel;
+        spin_lock(&wq->lock);
+        if (!list_empty(&p->wait_list)) {
+            wait_queue_remove(wq, p);
+        }
+        spin_unlock(&wq->lock);
+    }
+    p->wait_channel = NULL;
+    p->state = PROC_RUNNABLE;
+    sched_enqueue(p);
 }
 
 void proc_sleep(void *channel) { 
@@ -275,6 +433,7 @@ static void _wait_queue_wakeup(struct wait_queue *wq, bool all) {
     while (!list_empty(&wq->head)) {
         struct process *p = list_first_entry(&wq->head, struct process, wait_list);
         list_del(&p->wait_list); INIT_LIST_HEAD(&p->wait_list);
+        p->wait_channel = NULL;
         proc_wakeup(p);
         if (!all) break;
     }

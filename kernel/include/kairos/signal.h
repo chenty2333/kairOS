@@ -33,6 +33,11 @@
 
 typedef uint64_t sigset_t;
 
+/* sigprocmask how values */
+#define SIG_BLOCK 0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
+
 struct sigaction {
     void (*sa_handler)(int);
     sigset_t sa_mask;
@@ -44,6 +49,7 @@ struct sigcontext {
     uint64_t regs[31];
     uint64_t sepc;
     uint64_t sstatus;
+    sigset_t sigmask;
     uint64_t trampoline[2]; /* li a7, SYS_sigreturn; ecall */
 };
 

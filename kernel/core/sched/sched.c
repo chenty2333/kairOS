@@ -12,7 +12,10 @@
 
 /* CFS Scheduler Tunables */
 #define SCHED_LATENCY_NS 6000000UL
-#define TICK_NS (1000000000UL / CONFIG_HZ)
+
+static inline uint64_t sched_clock_ns(void) {
+    return arch_timer_ticks_to_ns(arch_timer_ticks());
+}
 
 const int sched_nice_to_weight[40] = {
     88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916,
@@ -62,7 +65,7 @@ static void update_curr(struct cfs_rq *rq) {
     struct process *curr = rq->curr;
     if (!curr || curr == rq->idle) return;
 
-    uint64_t now = arch_timer_ticks() * TICK_NS;
+    uint64_t now = sched_clock_ns();
     uint64_t delta = (now > curr->last_run_time) ? now - curr->last_run_time : 0;
     if (delta == 0) return;
 
@@ -96,7 +99,7 @@ void sched_init_cpu(int cpu) {
 void sched_post_switch_cleanup(void) {
     struct percpu_data *cpu = arch_get_percpu();
     if (cpu->prev_task) {
-        cpu->prev_task->on_cpu = false;
+        __atomic_store_n(&cpu->prev_task->on_cpu, false, __ATOMIC_RELEASE);
         cpu->prev_task = NULL;
     }
 }
@@ -221,22 +224,33 @@ void schedule(void) {
         if (!next) next = cpu->idle_proc;
     }
 
+    if (next == prev && prev->state == PROC_ZOMBIE && prev != cpu->idle_proc) {
+        pr_err("SCHED: CPU %d trying to re-schedule ZOMBIE PID %d. idle_proc PID %d\n", 
+               cpu->cpu_id, prev->pid, cpu->idle_proc ? cpu->idle_proc->pid : -1);
+        panic("SCHED: Zombie Rescheduling");
+    }
+
     if (next != prev) {
-        next->last_run_time = arch_timer_ticks() * TICK_NS;
+        next->last_run_time = sched_clock_ns();
         rq->curr = next;
         next->state = PROC_RUNNING;
         next->on_cpu = true; /* Mark next as running to prevent stealing */
-        cpu->curr_proc = next;
+        __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
         proc_set_current(next);
 
-        if (next->mm) arch_mmu_switch(next->mm->pgdir);
+        if (next->mm) {
+            arch_mmu_switch(next->mm->pgdir);
+        } else {
+            /* Kernel thread: ensure we are on kernel page table */
+            arch_mmu_switch(arch_mmu_get_kernel_pgdir());
+        }
         
         /* Update the CPU ID in the next task's context (for tp restoration) */
         if (next->context) arch_context_set_cpu(next->context, cpu->cpu_id);
 
         /* Store prev for cleanup by next task */
         cpu->prev_task = prev;
-
+        
         spin_unlock(&rq->lock);
         if (prev && prev->context) arch_context_switch(prev->context, next->context);
         
@@ -269,6 +283,8 @@ void sched_tick(void) {
             rq->curr = curr;
             update_curr(rq);
         }
+        if (rq->nr_running > 0)
+            cpu->resched_needed = true;
         /* Preemption logic placeholder */
         spin_unlock(&rq->lock);
     }

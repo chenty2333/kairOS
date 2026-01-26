@@ -62,12 +62,14 @@ struct process *proc_find(pid_t pid);
 struct process *proc_current(void);
 void proc_set_current(struct process *p);
 struct process *proc_idle_init(void);
+struct process *proc_start_init(void);
 void proc_yield(void);
 int proc_exec(const char *path, char *const argv[]);
 void proc_wakeup(struct process *p);
 void proc_sleep(void *channel);
 void proc_wakeup_all(void *channel);
 void signal_init_process(struct process *p);
+void proc_setup_stdio(struct process *p);
 
 vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk);
 

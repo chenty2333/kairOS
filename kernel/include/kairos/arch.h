@@ -50,6 +50,7 @@ void arch_mmu_init(paddr_t mem_base, size_t mem_size);
 paddr_t arch_mmu_create_table(void);
 void arch_mmu_destroy_table(paddr_t table);
 int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);
+int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);
 int arch_mmu_unmap(paddr_t table, vaddr_t va);
 paddr_t arch_mmu_translate(paddr_t table, vaddr_t va);
 void arch_mmu_switch(paddr_t table);
@@ -57,6 +58,7 @@ paddr_t arch_mmu_current(void);
 void arch_mmu_flush_tlb(void);
 void arch_mmu_flush_tlb_page(vaddr_t va);
 void arch_mmu_flush_tlb_all(void);
+paddr_t arch_mmu_get_kernel_pgdir(void);
 
 /* Timer & IPI */
 void arch_timer_init(uint64_t hz);
