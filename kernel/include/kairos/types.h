@@ -24,6 +24,16 @@ struct timespec {
     int64_t tv_nsec;
 };
 
+struct rlimit {
+    uint64_t rlim_cur;
+    uint64_t rlim_max;
+};
+
+#define RLIMIT_STACK 3
+#define RLIMIT_NOFILE 7
+#define RLIM_NLIMITS 16
+#define RLIM_INFINITY (~0ULL)
+
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 

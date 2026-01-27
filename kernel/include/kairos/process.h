@@ -34,6 +34,7 @@ struct process {
     char name[16];
     uid_t uid;
     gid_t gid;
+    mode_t umask;
     enum syscall_abi syscall_abi;
     enum proc_state state;
     int exit_code;
@@ -50,6 +51,8 @@ struct process {
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
     struct mutex files_lock;
     char cwd[CONFIG_PATH_MAX];
+    uint64_t tid_address;
+    struct rlimit rlimits[RLIM_NLIMITS];
 
     /* Signals & Waiting */
     uint64_t sig_pending, sig_blocked;

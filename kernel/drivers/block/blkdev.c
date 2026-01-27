@@ -139,6 +139,41 @@ void blkdev_put(struct blkdev *dev)
     spin_unlock(&blkdev_lock);
 }
 
+int blkdev_for_each(blkdev_iter_fn_t fn, void *arg)
+{
+    if (!fn)
+        return -EINVAL;
+
+    size_t count = 0;
+    spin_lock(&blkdev_lock);
+    struct blkdev *dev;
+    list_for_each_entry(dev, &blkdev_list, list) {
+        count++;
+    }
+    spin_unlock(&blkdev_lock);
+
+    if (!count)
+        return 0;
+
+    struct blkdev **list = kmalloc(count * sizeof(*list));
+    if (!list)
+        return -ENOMEM;
+
+    size_t idx = 0;
+    spin_lock(&blkdev_lock);
+    list_for_each_entry(dev, &blkdev_list, list) {
+        if (idx < count)
+            list[idx++] = dev;
+    }
+    spin_unlock(&blkdev_lock);
+
+    for (size_t i = 0; i < idx; i++)
+        fn(list[i], arg);
+
+    kfree(list);
+    return (int)idx;
+}
+
 /**
  * blkdev_probe_partitions - Probe for partitions on a block device
  *

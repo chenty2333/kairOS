@@ -3,24 +3,29 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/blkdev.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
 #include <kairos/sync.h>
+#include <kairos/ioctl.h>
 #include <kairos/types.h>
+#include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 /* Device types */
 #define DEVFS_NULL 1
 #define DEVFS_ZERO 2
 #define DEVFS_CONSOLE 3
+#define DEVFS_BLOCK 4
 
 struct devfs_node {
     char name[CONFIG_NAME_MAX];
     ino_t ino;
     int dev_type;
+    struct blkdev *blk;
     struct vnode vn;
     struct devfs_node *next;
 };
@@ -32,6 +37,11 @@ struct devfs_mount {
     spinlock_t lock;
 };
 
+struct devfs_add_ctx {
+    struct devfs_mount *dm;
+    struct mount *mnt;
+};
+
 static struct vnode *devfs_lookup(struct vnode *dir, const char *name);
 static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
                               off_t offset);
@@ -41,11 +51,15 @@ static int devfs_dev_close(struct vnode *vn);
 static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset);
 static int devfs_dev_poll(struct vnode *vn, uint32_t events);
 static int devfs_dir_poll(struct vnode *vn, uint32_t events);
+static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg);
+
+static struct winsize devfs_console_winsize = {.ws_row = 24, .ws_col = 80};
 
 static struct file_ops devfs_dev_ops = {
     .read = devfs_dev_read,
     .write = devfs_dev_write,
     .close = devfs_dev_close,
+    .ioctl = devfs_dev_ioctl,
     .poll = devfs_dev_poll,
 };
 
@@ -72,7 +86,8 @@ static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
 
 static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
                                               struct mount *mnt,
-                                              const char *name, int type) {
+                                              const char *name, int type,
+                                              struct blkdev *blk) {
     struct devfs_node *node = kzalloc(sizeof(*node));
     if (!node)
         return NULL;
@@ -80,12 +95,21 @@ static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
     strncpy(node->name, name, CONFIG_NAME_MAX - 1);
     node->ino = dm->next_ino++;
     node->dev_type = type;
+    node->blk = blk;
     node->next = dm->devices;
     dm->devices = node;
 
-    devfs_init_vnode(&node->vn, mnt, node, VNODE_DEVICE, S_IFCHR | 0666,
+    mode_t mode = (type == DEVFS_BLOCK) ? (S_IFBLK | 0666) : (S_IFCHR | 0666);
+    devfs_init_vnode(&node->vn, mnt, node, VNODE_DEVICE, mode,
                      &devfs_dev_ops);
     return node;
+}
+
+static void devfs_add_blkdev(struct blkdev *dev, void *arg) {
+    struct devfs_add_ctx *ctx = (struct devfs_add_ctx *)arg;
+    if (!ctx || !ctx->dm || !ctx->mnt)
+        return;
+    devfs_create_device(ctx->dm, ctx->mnt, dev->name, DEVFS_BLOCK, dev);
 }
 
 static int devfs_mount(struct mount *mnt) {
@@ -105,9 +129,12 @@ static int devfs_mount(struct mount *mnt) {
     devfs_init_vnode(&dm->root->vn, mnt, dm->root, VNODE_DIR, S_IFDIR | 0755,
                      &devfs_dir_ops);
 
-    devfs_create_device(dm, mnt, "null", DEVFS_NULL);
-    devfs_create_device(dm, mnt, "zero", DEVFS_ZERO);
-    devfs_create_device(dm, mnt, "console", DEVFS_CONSOLE);
+    devfs_create_device(dm, mnt, "null", DEVFS_NULL, NULL);
+    devfs_create_device(dm, mnt, "zero", DEVFS_ZERO, NULL);
+    devfs_create_device(dm, mnt, "console", DEVFS_CONSOLE, NULL);
+
+    struct devfs_add_ctx ctx = {.dm = dm, .mnt = mnt};
+    blkdev_for_each(devfs_add_blkdev, &ctx);
 
     mnt->fs_data = dm;
     mnt->root = &dm->root->vn;
@@ -186,6 +213,63 @@ static int devfs_dev_close(struct vnode *vn __attribute__((unused))) {
     return 0;
 }
 
+static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
+    struct devfs_node *node = vn ? (struct devfs_node *)vn->fs_data : NULL;
+    if (!node)
+        return -EINVAL;
+    if (node->dev_type == DEVFS_BLOCK) {
+        if (cmd != BLKGETSIZE64)
+            return -ENOTTY;
+        if (!arg)
+            return -EFAULT;
+        if (!node->blk)
+            return -ENODEV;
+        uint64_t size = node->blk->sector_count * node->blk->sector_size;
+        if (copy_to_user((void *)arg, &size, sizeof(size)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    if (node->dev_type != DEVFS_CONSOLE)
+        return -ENOTTY;
+
+    switch (cmd) {
+    case TCGETS: {
+        if (!arg)
+            return -EFAULT;
+        struct termios t = {0};
+        if (copy_to_user((void *)arg, &t, sizeof(t)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TCSETS: {
+        if (!arg)
+            return -EFAULT;
+        struct termios t;
+        if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TIOCGWINSZ: {
+        if (!arg)
+            return -EFAULT;
+        if (copy_to_user((void *)arg, &devfs_console_winsize,
+                         sizeof(devfs_console_winsize)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TIOCSWINSZ: {
+        if (!arg)
+            return -EFAULT;
+        if (copy_from_user(&devfs_console_winsize, (void *)arg,
+                           sizeof(devfs_console_winsize)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    default:
+        return -ENOTTY;
+    }
+}
+
 static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset) {
     struct devfs_mount *dm = vn->mount->fs_data;
     if (vn->fs_data != dm->root)
@@ -207,7 +291,7 @@ static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset) {
     ent->d_ino = n->ino;
     ent->d_off = idx;
     ent->d_reclen = sizeof(*ent);
-    ent->d_type = DT_CHR;
+    ent->d_type = (n->dev_type == DEVFS_BLOCK) ? DT_BLK : DT_CHR;
     strncpy(ent->d_name, n->name, CONFIG_NAME_MAX - 1);
     *offset = idx + 1;
 
@@ -227,6 +311,7 @@ static int devfs_dev_poll(struct vnode *vn, uint32_t events) {
         break;
     case DEVFS_NULL:
     case DEVFS_ZERO:
+    case DEVFS_BLOCK:
         revents |= POLLIN | POLLOUT;
         break;
     default:

@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/futex.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -11,6 +12,7 @@
 #include <kairos/string.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
+#include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 #ifdef ARCH_riscv64
@@ -85,6 +87,7 @@ static struct process *proc_alloc(void) {
     if (!p) return NULL;
 
     p->ppid = p->uid = p->gid = p->vruntime = p->nice = 0;
+    p->umask = 022;
     p->syscall_abi = SYSCALL_ABI_LINUX;
     p->name[0] = '\0'; p->mm = NULL; p->parent = NULL;
     p->on_rq = false; p->on_cpu = false; p->cpu = -1;
@@ -94,6 +97,15 @@ static struct process *proc_alloc(void) {
     memset(p->files, 0, sizeof(p->files));
     mutex_init(&p->files_lock, "files_lock");
     strcpy(p->cwd, "/");
+    p->tid_address = 0;
+    for (int i = 0; i < RLIM_NLIMITS; i++) {
+        p->rlimits[i].rlim_cur = RLIM_INFINITY;
+        p->rlimits[i].rlim_max = RLIM_INFINITY;
+    }
+    p->rlimits[RLIMIT_NOFILE].rlim_cur = CONFIG_MAX_FILES_PER_PROC;
+    p->rlimits[RLIMIT_NOFILE].rlim_max = CONFIG_MAX_FILES_PER_PROC;
+    p->rlimits[RLIMIT_STACK].rlim_cur = USER_STACK_SIZE;
+    p->rlimits[RLIMIT_STACK].rlim_max = USER_STACK_SIZE;
 
     INIT_LIST_HEAD(&p->children);
     INIT_LIST_HEAD(&p->sibling);
@@ -111,6 +123,10 @@ static void proc_adopt_child(struct process *parent, struct process *child) {
     child->parent = parent;
     child->ppid = parent->pid;
     child->syscall_abi = parent->syscall_abi;
+    child->umask = parent->umask;
+    child->tid_address = parent->tid_address;
+    memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
+    child->umask = parent->umask;
     spin_lock(&proc_table_lock);
     list_add(&child->sibling, &parent->children);
     spin_unlock(&proc_table_lock);
@@ -185,6 +201,9 @@ struct process *proc_fork(void) {
 
     strcpy(child->name, parent->name);
     child->uid = parent->uid; child->gid = parent->gid;
+    child->umask = parent->umask;
+    child->tid_address = parent->tid_address;
+    memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->parent = parent; child->ppid = parent->pid;
     child->nice = parent->nice; child->vruntime = parent->vruntime;
 
@@ -219,6 +238,13 @@ struct process *proc_fork(void) {
 noreturn void proc_exit(int status) {
     struct process *p = proc_current();
     pr_info("Process %d exiting: %d\n", p->pid, status);
+
+    if (p->tid_address) {
+        uint32_t zero = 0;
+        copy_to_user((void *)p->tid_address, &zero, sizeof(zero));
+        futex_wake(p->tid_address, 1);
+        p->tid_address = 0;
+    }
 
     fd_close_all(p);
     proc_reparent_children(p);

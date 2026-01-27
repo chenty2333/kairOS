@@ -25,9 +25,12 @@ struct blkdev_ops {
     int (*flush)(struct blkdev *dev);
 };
 
+typedef void (*blkdev_iter_fn_t)(struct blkdev *dev, void *arg);
+
 int blkdev_register(struct blkdev *dev);
 struct blkdev *blkdev_get(const char *name);
 void blkdev_put(struct blkdev *dev);
+int blkdev_for_each(blkdev_iter_fn_t fn, void *arg);
 
 static inline int blkdev_read(struct blkdev *dev, uint64_t lba, void *buf,
                               size_t cnt) {

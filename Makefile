@@ -135,6 +135,14 @@ CORE_SRCS := \
     kernel/core/sync/wait.c \
     kernel/core/sync/pollwait.c \
     kernel/core/sync/futex.c \
+    kernel/core/syscall/abi_linux.c \
+    kernel/core/syscall/sys_dev.c \
+    kernel/core/syscall/sys_fs.c \
+    kernel/core/syscall/sys_mm.c \
+    kernel/core/syscall/sys_poll.c \
+    kernel/core/syscall/sys_proc.c \
+    kernel/core/syscall/sys_sync.c \
+    kernel/core/syscall/sys_time.c \
     kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \

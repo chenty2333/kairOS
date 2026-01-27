@@ -287,18 +287,19 @@ struct vnode *vfs_lookup_parent(const char *path, char *name) {
 }
 
 int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struct file **fp) {
-    struct vnode *vn = vfs_lookup_at(cwd, path);
+    char norm[CONFIG_PATH_MAX];
+    const char *base = cwd ? cwd : "/";
+    if (vfs_normalize_path(base, path, norm) < 0)
+        return -EINVAL;
+
+    struct vnode *vn = vfs_lookup_at("/", norm);
     if (!vn && (flags & O_CREAT)) {
-        char norm[CONFIG_PATH_MAX], name[CONFIG_NAME_MAX];
-        const char *base = path;
-        if (vfs_normalize_path(cwd ? cwd : "/", path, norm) < 0)
-            return -EINVAL;
-        base = norm;
-        struct vnode *parent = vfs_lookup_parent(base, name);
-        struct mount *mnt = find_mount(base);
+        char name[CONFIG_NAME_MAX];
+        struct vnode *parent = vfs_lookup_parent(norm, name);
+        struct mount *mnt = find_mount(norm);
         if (parent && mnt && mnt->ops->create &&
             mnt->ops->create(parent, name, mode) >= 0)
-            vn = vfs_lookup_at("/", base);
+            vn = vfs_lookup_at("/", norm);
         if (parent)
             vnode_put(parent);
     }
@@ -315,6 +316,7 @@ int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struc
     }
     file->vnode = vn;
     file->flags = flags;
+    strncpy(file->path, norm, sizeof(file->path) - 1);
     if ((flags & O_TRUNC) && vn->ops->truncate)
         vn->ops->truncate(vn, 0);
     *fp = file;
@@ -400,6 +402,12 @@ int vfs_poll(struct file *file, uint32_t events) {
         return pipe_poll_file(file, events);
     }
     return vfs_poll_vnode(file->vnode, events);
+}
+
+int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
+    if (!file || !file->vnode || !file->vnode->ops || !file->vnode->ops->ioctl)
+        return -ENOTTY;
+    return file->vnode->ops->ioctl(file->vnode, cmd, arg);
 }
 
 void vfs_poll_register(struct file *file, struct poll_waiter *waiter,

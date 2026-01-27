@@ -29,35 +29,58 @@ typedef uint64_t sigset_t;
 #define LINUX_NR_lseek 62
 #define LINUX_NR_read 63
 #define LINUX_NR_write 64
+#define LINUX_NR_mkdirat 34
+#define LINUX_NR_unlinkat 35
+#define LINUX_NR_symlinkat 36
+#define LINUX_NR_renameat 38
+#define LINUX_NR_faccessat 48
+#define LINUX_NR_chdir 49
+#define LINUX_NR_fchdir 50
+#define LINUX_NR_readlinkat 78
 #define LINUX_NR_newfstatat 79
 #define LINUX_NR_fstat 80
 #define LINUX_NR_exit 93
 #define LINUX_NR_exit_group 94
+#define LINUX_NR_set_tid_address 96
 #define LINUX_NR_futex 98
 #define LINUX_NR_nanosleep 101
 #define LINUX_NR_clock_gettime 113
+#define LINUX_NR_clock_nanosleep 115
 #define LINUX_NR_ppoll 73
 #define LINUX_NR_pselect6 72
 #define LINUX_NR_kill 129
+#define LINUX_NR_tgkill 131
 #define LINUX_NR_rt_sigaction 134
 #define LINUX_NR_rt_sigprocmask 135
 #define LINUX_NR_rt_sigreturn 139
 #define LINUX_NR_setgid 144
 #define LINUX_NR_setuid 146
 #define LINUX_NR_uname 160
+#define LINUX_NR_umask 166
+#define LINUX_NR_gettimeofday 169
 #define LINUX_NR_getpid 172
 #define LINUX_NR_getppid 173
 #define LINUX_NR_getuid 174
 #define LINUX_NR_getgid 176
+#define LINUX_NR_gettid 178
 #define LINUX_NR_brk 214
 #define LINUX_NR_munmap 215
 #define LINUX_NR_clone 220
+#define LINUX_NR_execve 221
 #define LINUX_NR_mmap 222
 #define LINUX_NR_mprotect 226
 #define LINUX_NR_wait4 260
+#define LINUX_NR_prlimit64 261
 
 #define AT_FDCWD (-100)
 #define O_CLOEXEC 02000000
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_REMOVEDIR 0x200
+#define AT_EACCESS 0x200
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
 
 #define SYS_exit 1
 #define SYS_fork 2
@@ -143,27 +166,80 @@ void syscall_init(void);
 /* Syscall Kernel Implementations */
 int64_t sys_exit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_exec(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_execve(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getpid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_gettid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_set_tid_address(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
+int64_t sys_tgkill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_open(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_openat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_stat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fstat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_newfstatat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
 int64_t sys_getdents64(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_dup(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_dup3(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_pipe(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_mmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_munmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_mprotect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_clock_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_nanosleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_clock_nanosleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
+int64_t sys_gettimeofday(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_uname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_getppid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_wait4(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_clone(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_brk(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_exit_group(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_prlimit64(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
 int64_t sys_futex(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pipe2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_sem_init(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_sem_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_sem_post(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getcwd(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_setuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_setgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_chdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fchdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_unlinkat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_mkdirat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_renameat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_readlinkat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
+int64_t sys_symlinkat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_faccessat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_umask(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_unlink(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_mkdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_rmdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_access(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sigprocmask(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_select(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_ppoll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_pselect6(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
 int64_t sys_epoll_create1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_epoll_ctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_epoll_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

@@ -55,6 +55,7 @@ struct stat {
 #define S_IFREG 0100000
 #define S_IFDIR 0040000
 #define S_IFCHR 0020000
+#define S_IFBLK 0060000
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 
@@ -77,6 +78,7 @@ struct file {
     struct vnode *vnode;
     off_t offset;
     uint32_t flags, refcount;
+    char path[CONFIG_PATH_MAX];
     struct mutex lock;
 };
 
@@ -119,6 +121,7 @@ struct file_ops {
     ssize_t (*write)(struct vnode *vn, const void *buf, size_t len, off_t off);
     int (*readdir)(struct vnode *vn, struct dirent *ent, off_t *off);
     int (*close)(struct vnode *vn);
+    int (*ioctl)(struct vnode *vn, uint64_t cmd, uint64_t arg);
     int (*stat)(struct vnode *vn, struct stat *st);
     int (*truncate)(struct vnode *vn, off_t length);
     int (*poll)(struct vnode *vn, uint32_t events);
@@ -144,6 +147,7 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
 int vfs_poll(struct file *file, uint32_t events);
 int vfs_poll_vnode(struct vnode *vn, uint32_t events);
+int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg);
 void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
                        uint32_t events);
 void vfs_poll_unregister(struct poll_waiter *waiter);
