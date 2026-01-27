@@ -5,6 +5,7 @@
 #include <asm/arch.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/pollwait.h>
 #include <kairos/printk.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
@@ -51,6 +52,8 @@ void timer_interrupt_handler(void) {
     sbi_call(SBI_EXT_TIME, 0, rdtime() + ticks_per_int, 0, 0);
     if (tick && (tick % CONFIG_HZ == 0))
         pr_debug("tick: %lu sec\n", tick / CONFIG_HZ);
+    if (tick)
+        poll_sleep_tick(tick);
     sched_tick();
     struct trap_frame *tf = arch_get_percpu()->current_tf;
     if (tf && !(tf->sstatus & SSTATUS_SPP) && sched_need_resched())

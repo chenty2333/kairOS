@@ -3,6 +3,7 @@
  */
 
 #include <kairos/mm.h>
+#include <kairos/pollwait.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/poll.h>
@@ -25,6 +26,7 @@ struct pipe {
     int writers;
     struct wait_queue rwait;
     struct wait_queue wwait;
+    struct poll_wait_head pollers;
     struct mutex lock;
 };
 
@@ -68,6 +70,7 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
         }
 
         wait_queue_wakeup_one(&p->wwait);
+        poll_wait_wake(&p->pollers);
         if (nonblock)
             break;
     }
@@ -141,6 +144,7 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
         }
 
         wait_queue_wakeup_one(&p->rwait);
+        poll_wait_wake(&p->pollers);
         if (len <= PIPE_BUF || nonblock)
             break;
     }
@@ -192,6 +196,7 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     p->writers = 1;
     wait_queue_init(&p->rwait);
     wait_queue_init(&p->wwait);
+    poll_wait_head_init(&p->pollers);
     mutex_init(&p->lock, "pipe_lock");
     
     struct vnode *vn = kzalloc(sizeof(*vn));
@@ -256,6 +261,7 @@ void pipe_close_end(struct vnode *vn, uint32_t flags) {
         wait_queue_wakeup_all(&p->rwait);
     if (dec_writer && readers == 0)
         wait_queue_wakeup_all(&p->wwait);
+    poll_wait_wake(&p->pollers);
 }
 
 ssize_t pipe_read_file(struct file *file, void *buf, size_t len) {
@@ -294,4 +300,14 @@ int pipe_poll_file(struct file *file, uint32_t events) {
     mutex_unlock(&p->lock);
 
     return (int)revents;
+}
+
+void pipe_poll_register_file(struct file *file, struct poll_waiter *waiter,
+                             uint32_t events) {
+    (void)events;
+    if (!file || !file->vnode || !waiter)
+        return;
+    struct pipe *p = file->vnode->fs_data;
+    waiter->proc = proc_current();
+    poll_wait_add(&p->pollers, waiter);
 }

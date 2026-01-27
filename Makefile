@@ -131,6 +131,7 @@ CORE_SRCS := \
     kernel/core/sched/sched.c \
     kernel/core/sync/sync.c \
     kernel/core/sync/wait.c \
+    kernel/core/sync/pollwait.c \
     kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \

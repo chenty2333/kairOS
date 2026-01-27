@@ -47,12 +47,17 @@ static struct process *create_user_process(const char *name, const uint8_t *code
 
     if (!(p->mm = mm_create())) goto fail;
 
+    if (mm_add_vma(p->mm, USER_CODE_ADDR, USER_CODE_ADDR + code_size,
+                   VM_READ | VM_EXEC, NULL, 0) < 0) {
+        goto fail;
+    }
+
     for (size_t off = 0; off < code_size; off += CONFIG_PAGE_SIZE) {
         paddr_t pa = pmm_alloc_page();
         if (!pa) goto fail;
         memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
         size_t len = MIN(code_size - off, CONFIG_PAGE_SIZE);
-        memcpy((void *)pa, code + off, len);
+        memcpy(phys_to_virt(pa), code + off, len);
         if (arch_mmu_map(p->mm->pgdir, USER_CODE_ADDR + off, pa,
                          PTE_USER | PTE_READ | PTE_EXEC) < 0) {
             pmm_free_page(pa);
@@ -60,7 +65,13 @@ static struct process *create_user_process(const char *name, const uint8_t *code
         }
     }
 
-    for (vaddr_t va = USER_STACK_TOP - USER_STACK_SIZE; va < USER_STACK_TOP;
+    vaddr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    if (mm_add_vma(p->mm, stack_bottom, USER_STACK_TOP,
+                   VM_READ | VM_WRITE | VM_STACK, NULL, 0) < 0) {
+        goto fail;
+    }
+
+    for (vaddr_t va = stack_bottom; va < USER_STACK_TOP;
          va += CONFIG_PAGE_SIZE) {
         paddr_t pa = pmm_alloc_page();
         if (!pa) goto fail;

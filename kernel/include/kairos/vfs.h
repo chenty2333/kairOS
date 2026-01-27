@@ -121,6 +121,8 @@ struct file_ops {
     int (*poll)(struct vnode *vn, uint32_t events);
 };
 
+struct poll_waiter;
+
 void vfs_init(void);
 int vfs_mount(const char *src, const char *tgt, const char *type,
               uint32_t flags);
@@ -137,6 +139,9 @@ void vfs_dump_mounts(void);
 ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
 int vfs_poll(struct file *file, uint32_t events);
+void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
+                       uint32_t events);
+void vfs_poll_unregister(struct poll_waiter *waiter);
 off_t vfs_seek(struct file *file, off_t offset, int whence);
 int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);

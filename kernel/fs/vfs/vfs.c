@@ -7,6 +7,7 @@
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/poll.h>
+#include <kairos/pollwait.h>
 #include <kairos/process.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
@@ -389,6 +390,22 @@ int vfs_poll(struct file *file, uint32_t events) {
     if (file->vnode->ops->poll)
         return file->vnode->ops->poll(file->vnode, events);
     return events & (POLLIN | POLLOUT);
+}
+
+void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
+                       uint32_t events) {
+    if (!file || !file->vnode || !waiter)
+        return;
+    if (file->vnode->type == VNODE_PIPE) {
+        extern void pipe_poll_register_file(struct file *file,
+                                            struct poll_waiter *waiter,
+                                            uint32_t events);
+        pipe_poll_register_file(file, waiter, events);
+    }
+}
+
+void vfs_poll_unregister(struct poll_waiter *waiter) {
+    poll_wait_remove(waiter);
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {

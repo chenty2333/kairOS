@@ -36,9 +36,22 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
         vaddr_t page_end = ALIGN_UP(seg_end, CONFIG_PAGE_SIZE);
 
         uint64_t flags = PTE_USER;
+        uint32_t vma_flags = 0;
         if (phdr[i].p_flags & PF_R) flags |= PTE_READ;
-        if (phdr[i].p_flags & PF_W) flags |= PTE_WRITE;
-        if (phdr[i].p_flags & PF_X) flags |= PTE_EXEC;
+        if (phdr[i].p_flags & PF_R) vma_flags |= VM_READ;
+        if (phdr[i].p_flags & PF_W) {
+            flags |= PTE_WRITE;
+            vma_flags |= VM_WRITE;
+        }
+        if (phdr[i].p_flags & PF_X) {
+            flags |= PTE_EXEC;
+            vma_flags |= VM_EXEC;
+        }
+
+        ret = mm_add_vma(mm, page_start, page_end, vma_flags, NULL, 0);
+        if (ret < 0) {
+            return ret;
+        }
 
         for (vaddr_t va = page_start; va < page_end; va += CONFIG_PAGE_SIZE) {
             paddr_t pa = arch_mmu_translate(mm->pgdir, va);
@@ -81,6 +94,13 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
                     char *const envp[], vaddr_t *sp_out) {
     vaddr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
     paddr_t pa;
+    int ret;
+
+    ret = mm_add_vma(mm, stack_bottom, USER_STACK_TOP,
+                     VM_READ | VM_WRITE | VM_STACK, NULL, 0);
+    if (ret < 0) {
+        return ret;
+    }
 
     /* 1. Map stack pages */
     for (vaddr_t va = stack_bottom; va < USER_STACK_TOP; va += CONFIG_PAGE_SIZE) {

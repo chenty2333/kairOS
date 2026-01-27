@@ -7,6 +7,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/poll.h>
+#include <kairos/pollwait.h>
 #include <kairos/select.h>
 #include <kairos/sched.h>
 #include <kairos/sync.h>
@@ -271,6 +272,30 @@ static int poll_check_fds(struct pollfd *fds, size_t nfds) {
     return ready;
 }
 
+static void poll_unregister_waiters(struct poll_waiter *waiters, size_t nfds) {
+    if (!waiters)
+        return;
+    for (size_t i = 0; i < nfds; i++)
+        vfs_poll_unregister(&waiters[i]);
+}
+
+static void poll_register_waiters(struct pollfd *fds, struct poll_waiter *waiters,
+                                  size_t nfds) {
+    struct process *curr = proc_current();
+    if (!waiters || !curr)
+        return;
+
+    for (size_t i = 0; i < nfds; i++) {
+        waiters[i].proc = curr;
+        if (fds[i].fd < 0 || fds[i].revents)
+            continue;
+        struct file *f = fd_get(curr, fds[i].fd);
+        if (!f)
+            continue;
+        vfs_poll_register(f, &waiters[i], (uint32_t)fds[i].events);
+    }
+}
+
 int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
                  uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
@@ -285,29 +310,54 @@ int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
         return -EFAULT;
     }
 
+    struct poll_waiter *waiters = kzalloc(nfds * sizeof(*waiters));
+    if (!waiters) {
+        kfree(kfds);
+        return -ENOMEM;
+    }
+
     int timeout = (int)timeout_ms;
     uint64_t start = arch_timer_get_ticks();
-    uint64_t deadline = (timeout < 0) ? 0 : start + (uint64_t)timeout * CONFIG_HZ / 1000;
+    uint64_t deadline = 0;
+    if (timeout > 0) {
+        uint64_t delta = ((uint64_t)timeout * CONFIG_HZ + 999) / 1000;
+        if (!delta)
+            delta = 1;
+        deadline = start + delta;
+    }
 
     int ready;
     do {
+        poll_unregister_waiters(waiters, (size_t)nfds);
         ready = poll_check_fds(kfds, (size_t)nfds);
         if (ready || timeout == 0)
             break;
-        if (timeout > 0) {
-            uint64_t now = arch_timer_get_ticks();
-            if (now >= deadline) {
-                ready = 0;
-                break;
-            }
+
+        uint64_t now = arch_timer_get_ticks();
+        if (deadline && now >= deadline) {
+            ready = 0;
+            break;
         }
-        schedule();
+
+        poll_register_waiters(kfds, waiters, (size_t)nfds);
+
+        struct process *curr = proc_current();
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        if (deadline)
+            poll_sleep_arm(&sleep, curr, deadline);
+        proc_sleep(&sleep);
+        poll_sleep_cancel(&sleep);
     } while (1);
 
+    poll_unregister_waiters(waiters, (size_t)nfds);
+
     if (copy_to_user((void *)fds_ptr, kfds, bytes) < 0) {
+        kfree(waiters);
         kfree(kfds);
         return -EFAULT;
     }
+    kfree(waiters);
     kfree(kfds);
     return ready;
 }
@@ -338,28 +388,57 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
         }
     }
 
+    if (count == 0)
+        return 0;
+
     int timeout_ms = -1;
     if (timeout_ptr) {
         struct timeval tv;
         if (copy_from_user(&tv, (void *)timeout_ptr, sizeof(tv)) < 0)
             return -EFAULT;
-        if (tv.tv_sec < 0 || tv.tv_usec < 0) return -EINVAL;
+        if (tv.tv_sec < 0 || tv.tv_usec < 0)
+            return -EINVAL;
         timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
     }
 
-    int ready = poll_check_fds(fds, count);
-    if (!ready && timeout_ms != 0) {
-        uint64_t start = arch_timer_get_ticks();
-        uint64_t deadline = (timeout_ms < 0) ? 0 : start + (uint64_t)timeout_ms * CONFIG_HZ / 1000;
-        while (ready == 0) {
-            if (timeout_ms > 0 && arch_timer_get_ticks() >= deadline)
-                break;
-            schedule();
-            ready = poll_check_fds(fds, count);
-            if (timeout_ms == 0)
-                break;
-        }
+    struct poll_waiter *waiters = kzalloc(count * sizeof(*waiters));
+    if (!waiters)
+        return -ENOMEM;
+
+    uint64_t start = arch_timer_get_ticks();
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
+        if (!delta)
+            delta = 1;
+        deadline = start + delta;
     }
+
+    int ready;
+    do {
+        poll_unregister_waiters(waiters, count);
+        ready = poll_check_fds(fds, count);
+        if (ready || timeout_ms == 0)
+            break;
+
+        uint64_t now = arch_timer_get_ticks();
+        if (deadline && now >= deadline) {
+            ready = 0;
+            break;
+        }
+
+        poll_register_waiters(fds, waiters, count);
+
+        struct process *curr = proc_current();
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        if (deadline)
+            poll_sleep_arm(&sleep, curr, deadline);
+        proc_sleep(&sleep);
+        poll_sleep_cancel(&sleep);
+    } while (1);
+
+    poll_unregister_waiters(waiters, count);
 
     if (readfds_ptr) rfds.bits = 0;
     if (writefds_ptr) wfds.bits = 0;
@@ -371,10 +450,11 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
     }
 
     if (readfds_ptr && copy_to_user((void *)readfds_ptr, &rfds, sizeof(rfds)) < 0)
-        return -EFAULT;
+        ready = -EFAULT;
     if (writefds_ptr && copy_to_user((void *)writefds_ptr, &wfds, sizeof(wfds)) < 0)
-        return -EFAULT;
+        ready = -EFAULT;
 
+    kfree(waiters);
     return ready;
 }
 

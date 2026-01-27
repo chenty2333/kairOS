@@ -44,12 +44,75 @@ static inline uint64_t pa_to_pte(paddr_t pa) {
     return ((pa >> PAGE_SHIFT) << PTE_PPN_SHIFT);
 }
 
+static inline bool pte_is_leaf(uint64_t pte) {
+    return (pte & (PTE_R | PTE_W | PTE_X)) != 0;
+}
+
+static inline bool pte_is_branch(uint64_t pte) {
+    return (pte & PTE_V) && !pte_is_leaf(pte);
+}
+
 static paddr_t pt_alloc(void) {
     paddr_t pa = pmm_alloc_page();
     if (pa) {
         memset((void *)pa, 0, PAGE_SIZE);
     }
     return pa;
+}
+
+static void destroy_pt(paddr_t table, int level) {
+    if (!table || table == kernel_pgdir) {
+        return;
+    }
+
+    uint64_t *pt = (uint64_t *)table;
+    if (level > 0) {
+        for (size_t i = 0; i < PTES_PER_PAGE; i++) {
+            uint64_t pte = pt[i];
+            if (pte_is_branch(pte)) {
+                destroy_pt((paddr_t)pte_to_pa(pte), level - 1);
+            }
+        }
+    }
+
+    pmm_free_page(table);
+}
+
+static paddr_t copy_pt(paddr_t src, int level) {
+    paddr_t dst = pt_alloc();
+    if (!dst) {
+        return 0;
+    }
+
+    uint64_t *src_pt = (uint64_t *)src;
+    uint64_t *dst_pt = (uint64_t *)dst;
+    memcpy(dst_pt, src_pt, PAGE_SIZE);
+
+    for (size_t i = 0; i < PTES_PER_PAGE; i++) {
+        uint64_t pte = dst_pt[i];
+        if (!(pte & PTE_V)) {
+            continue;
+        }
+
+        /* Strip any user mapping that leaked into the kernel tables. */
+        if (pte & PTE_U) {
+            dst_pt[i] = 0;
+            continue;
+        }
+
+        if (level > 0 && pte_is_branch(pte)) {
+            paddr_t child_src = (paddr_t)pte_to_pa(pte);
+            paddr_t child_dst = copy_pt(child_src, level - 1);
+            if (!child_dst) {
+                destroy_pt(dst, level);
+                return 0;
+            }
+            uint64_t flags = pte & ((1UL << PTE_PPN_SHIFT) - 1);
+            dst_pt[i] = pa_to_pte(child_dst) | flags;
+        }
+    }
+
+    return dst;
 }
 
 static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
@@ -135,23 +198,11 @@ void arch_mmu_init(paddr_t mem_base, size_t mem_size) {
 }
 
 paddr_t arch_mmu_create_table(void) {
-    paddr_t table = pt_alloc();
-    if (table) {
-        memcpy((void *)table, (void *)kernel_pgdir, PAGE_SIZE);
-    }
-    return table;
+    return copy_pt(kernel_pgdir, LEVELS - 1);
 }
 
 void arch_mmu_destroy_table(paddr_t table) {
-    if (table && table != kernel_pgdir) {
-        /*
-         * The current design shares kernel page table levels across mm
-         * instances (arch_mmu_create_table copies the root).
-         * Freeing recursively risks double-free of shared tables.
-         * For now, free only the top-level page to avoid corruption.
-         */
-        pmm_free_page(table);
-    }
+    destroy_pt(table, LEVELS - 1);
 }
 
 int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {

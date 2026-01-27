@@ -105,6 +105,8 @@ struct mm_struct *mm_create(void);
 void mm_destroy(struct mm_struct *mm);
 struct mm_struct *mm_clone(struct mm_struct *src);
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags);
+int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+               uint32_t flags, struct vnode *vn, off_t offset);
 
 void *phys_to_virt(paddr_t addr);
 paddr_t virt_to_phys(void *addr);
