@@ -411,3 +411,112 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
     return 0;
 
 }
+
+int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
+                uint32_t prot) {
+    if (!mm || !len)
+        return -EINVAL;
+
+    addr = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
+    len = ALIGN_UP(len, CONFIG_PAGE_SIZE);
+    vaddr_t end = addr + len;
+    uint32_t prot_mask = VM_READ | VM_WRITE | VM_EXEC;
+    uint32_t new_prot = prot & prot_mask;
+
+    /* Ensure the range is fully covered by existing mappings. */
+    mutex_lock(&mm->lock);
+    for (vaddr_t cur = addr; cur < end;) {
+        struct vm_area *vma = find_vma(mm, cur);
+        if (!vma || vma->start > cur) {
+            mutex_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+        cur = MIN(vma->end, end);
+    }
+
+    struct vm_area *vma, *tmp;
+    list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
+        if (vma->end <= addr || vma->start >= end)
+            continue;
+
+        uint32_t base_flags = vma->flags & ~prot_mask;
+        uint32_t mid_flags = base_flags | new_prot;
+
+        if (addr <= vma->start && end >= vma->end) {
+            vma->flags = mid_flags;
+            continue;
+        }
+
+        if (vma->start < addr && vma->end > end) {
+            struct vm_area *mid = kzalloc(sizeof(*mid));
+            struct vm_area *tail = kzalloc(sizeof(*tail));
+            if (!mid || !tail) {
+                kfree(mid);
+                kfree(tail);
+                mutex_unlock(&mm->lock);
+                return -ENOMEM;
+            }
+
+            *mid = *vma;
+            mid->start = addr;
+            mid->end = end;
+            mid->flags = mid_flags;
+            mid->offset += (addr - vma->start);
+            INIT_LIST_HEAD(&mid->list);
+            memset(&mid->rb_node, 0, sizeof(mid->rb_node));
+
+            *tail = *vma;
+            tail->start = end;
+            tail->offset += (end - vma->start);
+            INIT_LIST_HEAD(&tail->list);
+            memset(&tail->rb_node, 0, sizeof(tail->rb_node));
+
+            vma->end = addr;
+
+            insert_vma(mm, mid);
+            insert_vma(mm, tail);
+            continue;
+        }
+
+        if (vma->start < addr) {
+            struct vm_area *mid = kzalloc(sizeof(*mid));
+            if (!mid) {
+                mutex_unlock(&mm->lock);
+                return -ENOMEM;
+            }
+
+            *mid = *vma;
+            mid->start = addr;
+            mid->flags = mid_flags;
+            mid->offset += (addr - vma->start);
+            INIT_LIST_HEAD(&mid->list);
+            memset(&mid->rb_node, 0, sizeof(mid->rb_node));
+
+            vma->end = addr;
+            insert_vma(mm, mid);
+            continue;
+        }
+
+        /* vma->start >= addr and vma->end > end */
+        struct vm_area *mid = kzalloc(sizeof(*mid));
+        if (!mid) {
+            mutex_unlock(&mm->lock);
+            return -ENOMEM;
+        }
+
+        *mid = *vma;
+        mid->end = end;
+        mid->flags = mid_flags;
+        INIT_LIST_HEAD(&mid->list);
+        memset(&mid->rb_node, 0, sizeof(mid->rb_node));
+
+        remove_vma(mm, vma);
+        vma->offset += (end - vma->start);
+        vma->start = end;
+        insert_vma(mm, vma);
+        insert_vma(mm, mid);
+    }
+
+    mutex_unlock(&mm->lock);
+    return 0;
+}

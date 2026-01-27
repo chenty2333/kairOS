@@ -15,29 +15,50 @@
     .equ EPIPE, -32
     .equ HEAP_START, 0x00000001000000
     .equ PAGE_SIZE, 4096
+    .equ AT_FDCWD, -100
+    .equ SIGCHLD, 17
+
+    .equ SYS_openat, 56
+    .equ SYS_close, 57
+    .equ SYS_pipe2, 59
+    .equ SYS_read, 63
+    .equ SYS_write, 64
+    .equ SYS_dup3, 24
+    .equ SYS_fcntl, 25
+    .equ SYS_epoll_create1, 20
+    .equ SYS_epoll_ctl, 21
+    .equ SYS_epoll_pwait, 22
+    .equ SYS_exit, 93
+    .equ SYS_brk, 214
+    .equ SYS_clone, 220
+    .equ SYS_wait4, 260
 
 _start:
-    /* fd = open("/dev/console", O_RDWR, 0) */
-    la a0, path
-    li a1, 2
-    li a2, 0
-    li a7, 10 /* SYS_open */
+    /* fd = openat(AT_FDCWD, "/dev/console", O_RDWR, 0) */
+    li a0, AT_FDCWD
+    la a1, path
+    li a2, 2
+    li a3, 0
+    li a7, SYS_openat
     ecall
     mv s0, a0
 
-    /* if fd >= 0, dup2 to stdin/out/err */
+    /* if fd >= 0, dup3 to stdin/out/err */
     blt s0, zero, 1f
     mv a0, s0
     li a1, 0
-    li a7, 19 /* SYS_dup2 */
+    li a2, 0
+    li a7, SYS_dup3
     ecall
     mv a0, s0
     li a1, 1
-    li a7, 19 /* SYS_dup2 */
+    li a2, 0
+    li a7, SYS_dup3
     ecall
     mv a0, s0
     li a1, 2
-    li a7, 19 /* SYS_dup2 */
+    li a2, 0
+    li a7, SYS_dup3
     ecall
 1:
 
@@ -45,12 +66,13 @@ _start:
     li a0, 1
     la a1, msg_boot
     li a2, 22 /* strlen(msg_boot) */
-    li a7, 13 /* SYS_write */
+    li a7, SYS_write
     ecall
 
     /* pipe test */
     la a0, pipe_fds
-    li a7, 50 /* SYS_pipe */
+    li a1, 0
+    li a7, SYS_pipe2
     ecall
     blt a0, zero, pipe_fail
     la t0, pipe_fds
@@ -61,14 +83,14 @@ _start:
     mv a0, t2
     la a1, msg_pipe_data
     li a2, 5 /* "ping\n" */
-    li a7, 13 /* SYS_write */
+    li a7, SYS_write
     ecall
 
     /* read from pipe */
     mv a0, t1
     la a1, buf
     li a2, 5
-    li a7, 12 /* SYS_read */
+    li a7, SYS_read
     ecall
     mv t3, a0
 
@@ -76,20 +98,20 @@ _start:
     li a0, 1
     la a1, msg_pipe
     li a2, 6 /* "pipe: " */
-    li a7, 13 /* SYS_write */
+    li a7, SYS_write
     ecall
     li a0, 1
     la a1, buf
     mv a2, t3
-    li a7, 13 /* SYS_write */
+    li a7, SYS_write
     ecall
 
     /* close pipe fds */
     mv a0, t1
-    li a7, 11 /* SYS_close */
+    li a7, SYS_close
     ecall
     mv a0, t2
-    li a7, 11 /* SYS_close */
+    li a7, SYS_close
     ecall
     j after_pipe
 
@@ -97,14 +119,14 @@ pipe_fail:
     li a0, 1
     la a1, msg_pipe_fail
     li a2, 12 /* "pipe failed\n" */
-    li a7, 13
+    li a7, SYS_write
     ecall
 
 after_pipe:
     /* pipe2(O_NONBLOCK) + poll test */
     la a0, pipe_fds
     li a1, O_NONBLOCK
-    li a7, 51 /* SYS_pipe2 */
+    li a7, SYS_pipe2
     ecall
     blt a0, zero, pipe2_fail
 
@@ -116,7 +138,7 @@ after_pipe:
     mv a0, t1
     la a1, buf
     li a2, 1
-    li a7, 12 /* SYS_read */
+    li a7, SYS_read
     ecall
     li t3, EAGAIN
     bne a0, t3, nonblock_fail
@@ -124,18 +146,18 @@ after_pipe:
     li a0, 1
     la a1, msg_nonblock_ok
     li a2, 13
-    li a7, 13
+    li a7, SYS_write
     ecall
 
     /* write one byte and check readability via epoll */
     mv a0, t2
     la a1, msg_nb_data
     li a2, 1
-    li a7, 13
+    li a7, SYS_write
     ecall
 
     li a0, 0
-    li a7, 82 /* SYS_epoll_create1 */
+    li a7, SYS_epoll_create1
     ecall
     blt a0, zero, epoll_fail
     mv t4, a0
@@ -149,7 +171,7 @@ after_pipe:
     li a1, EPOLL_CTL_ADD
     mv a2, t1
     la a3, epoll_in
-    li a7, 83 /* SYS_epoll_ctl */
+    li a7, SYS_epoll_ctl
     ecall
     blt a0, zero, epoll_fail_close
 
@@ -157,7 +179,9 @@ after_pipe:
     la a1, epoll_out
     li a2, 1
     li a3, 0
-    li a7, 84 /* SYS_epoll_wait */
+    li a4, 0
+    li a5, 0
+    li a7, SYS_epoll_pwait
     ecall
     blez a0, epoll_fail_close
     la t5, epoll_out
@@ -168,18 +192,18 @@ after_pipe:
     li a0, 1
     la a1, msg_epoll_ok
     li a2, 10
-    li a7, 13
+    li a7, SYS_write
     ecall
 
     mv a0, t4
-    li a7, 11
+    li a7, SYS_close
     ecall
 
     /* read the byte back */
     mv a0, t1
     la a1, buf
     li a2, 1
-    li a7, 12
+    li a7, SYS_read
     ecall
     j pipe2_close
 
@@ -187,7 +211,7 @@ pipe2_fail:
     li a0, 1
     la a1, msg_pipe2_fail
     li a2, 13
-    li a7, 13
+    li a7, SYS_write
     ecall
     j fcntl_test
 
@@ -195,34 +219,35 @@ nonblock_fail:
     li a0, 1
     la a1, msg_nonblock_fail
     li a2, 15
-    li a7, 13
+    li a7, SYS_write
     ecall
     j pipe2_close
 
 epoll_fail_close:
     mv a0, t4
-    li a7, 11
+    li a7, SYS_close
     ecall
 
 epoll_fail:
     li a0, 1
     la a1, msg_epoll_fail
     li a2, 12
-    li a7, 13
+    li a7, SYS_write
     ecall
 
 pipe2_close:
     mv a0, t1
-    li a7, 11
+    li a7, SYS_close
     ecall
     mv a0, t2
-    li a7, 11
+    li a7, SYS_close
     ecall
 
 fcntl_test:
     /* fcntl(F_SETFL, O_NONBLOCK) + SIGPIPE test */
     la a0, pipe_fds
-    li a7, 50 /* SYS_pipe */
+    li a1, 0
+    li a7, SYS_pipe2
     ecall
     blt a0, zero, fcntl_fail
 
@@ -233,7 +258,7 @@ fcntl_test:
     mv a0, t1
     li a1, F_SETFL
     li a2, O_NONBLOCK
-    li a7, 20 /* SYS_fcntl */
+    li a7, SYS_fcntl
     ecall
     blt a0, zero, fcntl_fail_close
 
@@ -241,7 +266,7 @@ fcntl_test:
     mv a0, t1
     la a1, buf
     li a2, 1
-    li a7, 12
+    li a7, SYS_read
     ecall
     li t3, EAGAIN
     bne a0, t3, fcntl_fail_close
@@ -249,17 +274,17 @@ fcntl_test:
     li a0, 1
     la a1, msg_fcntl_ok
     li a2, 10
-    li a7, 13
+    li a7, SYS_write
     ecall
 
     /* close reader, write should raise SIGPIPE and return -EPIPE */
     mv a0, t1
-    li a7, 11
+    li a7, SYS_close
     ecall
     mv a0, t2
     la a1, msg_nb_data
     li a2, 1
-    li a7, 13
+    li a7, SYS_write
     ecall
     li t3, EPIPE
     bne a0, t3, sigpipe_fail
@@ -267,26 +292,26 @@ fcntl_test:
     li a0, 1
     la a1, msg_sigpipe_ok
     li a2, 12
-    li a7, 13
+    li a7, SYS_write
     ecall
     mv a0, t2
-    li a7, 11
+    li a7, SYS_close
     ecall
     j cow_test
 
 fcntl_fail_close:
     mv a0, t1
-    li a7, 11
+    li a7, SYS_close
     ecall
     mv a0, t2
-    li a7, 11
+    li a7, SYS_close
     ecall
 
 fcntl_fail:
     li a0, 1
     la a1, msg_fcntl_fail
     li a2, 12
-    li a7, 13
+    li a7, SYS_write
     ecall
     j cow_test
 
@@ -294,23 +319,28 @@ sigpipe_fail:
     li a0, 1
     la a1, msg_sigpipe_fail
     li a2, 14
-    li a7, 13
+    li a7, SYS_write
     ecall
     mv a0, t2
-    li a7, 11
+    li a7, SYS_close
     ecall
 
 cow_test:
     /* COW test: parent value should remain unchanged */
     li a0, HEAP_START + PAGE_SIZE
-    li a7, 40 /* SYS_brk */
+    li a7, SYS_brk
     ecall
 
     li t0, HEAP_START
     li t1, 0x11111111
     sw t1, 0(t0)
 
-    li a7, 2 /* SYS_fork */
+    li a0, SIGCHLD
+    li a1, 0
+    li a2, 0
+    li a3, 0
+    li a4, 0
+    li a7, SYS_clone
     ecall
     blt a0, zero, cow_fail
     beqz a0, cow_child
@@ -319,7 +349,8 @@ cow_test:
     li a0, -1
     la a1, status
     li a2, 0
-    li a7, 4
+    li a3, 0
+    li a7, SYS_wait4
     ecall
 
     li t0, HEAP_START
@@ -330,7 +361,7 @@ cow_test:
     li a0, 1
     la a1, msg_cow_ok
     li a2, 8
-    li a7, 13
+    li a7, SYS_write
     ecall
     j fork_test
 
@@ -339,19 +370,24 @@ cow_child:
     li t1, 0x22222222
     sw t1, 0(t0)
     li a0, 0
-    li a7, 1
+    li a7, SYS_exit
     ecall
 
 cow_fail:
     li a0, 1
     la a1, msg_cow_fail
     li a2, 10
-    li a7, 13
+    li a7, SYS_write
     ecall
 
 fork_test:
     /* fork test */
-    li a7, 2 /* SYS_fork */
+    li a0, SIGCHLD
+    li a1, 0
+    li a2, 0
+    li a3, 0
+    li a4, 0
+    li a7, SYS_clone
     ecall
     blt a0, zero, fork_fail
     beqz a0, child
@@ -360,12 +396,13 @@ fork_test:
     li a0, -1
     la a1, status
     li a2, 0
-    li a7, 4 /* SYS_wait */
+    li a3, 0
+    li a7, SYS_wait4
     ecall
     li a0, 1
     la a1, msg_parent
     li a2, 18 /* "parent: wait done\n" */
-    li a7, 13
+    li a7, SYS_write
     ecall
     j after_fork
 
@@ -373,23 +410,23 @@ child:
     li a0, 1
     la a1, msg_child
     li a2, 13 /* "child: hello\n" */
-    li a7, 13
+    li a7, SYS_write
     ecall
     li a0, 42
-    li a7, 1 /* SYS_exit */
+    li a7, SYS_exit
     ecall
 
 fork_fail:
     li a0, 1
     la a1, msg_fork_fail
     li a2, 12 /* "fork failed\n" */
-    li a7, 13
+    li a7, SYS_write
     ecall
 
 after_fork:
     /* exit(42) */
     li a0, 42
-    li a7, 1 /* SYS_exit */
+    li a7, SYS_exit
     ecall
 
 1:  j 1b

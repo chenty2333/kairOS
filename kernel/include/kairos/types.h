@@ -19,6 +19,14 @@ struct timeval {
     suseconds_t tv_usec;
 };
 
+struct timespec {
+    time_t tv_sec;
+    int64_t tv_nsec;
+};
+
+#define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2

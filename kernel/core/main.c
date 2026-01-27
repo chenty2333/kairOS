@@ -17,6 +17,8 @@
 #include <kairos/fdt.h>
 #include <kairos/device.h>
 #include <kairos/firmware.h>
+#include <kairos/futex.h>
+#include <kairos/net.h>
 #include <kairos/acpi.h>
 #include <kairos/pci.h>
 #include <kairos/platform.h>
@@ -25,6 +27,7 @@
 /* Drivers */
 extern struct driver virtio_mmio_driver;
 extern struct virtio_driver virtio_blk_driver;
+extern struct virtio_driver virtio_net_driver;
 
 /* File system initialization functions */
 void devfs_init(void);
@@ -103,6 +106,8 @@ void kernel_main(unsigned long hartid, void *dtb) {
 
     sched_init();
     proc_init();
+    futex_init();
+    net_init();
     proc_idle_init();
 
     /* Device Model and Driver Initialization */
@@ -113,6 +118,7 @@ void kernel_main(unsigned long hartid, void *dtb) {
     
     driver_register(&virtio_mmio_driver);
     virtio_register_driver(&virtio_blk_driver);
+    virtio_register_driver(&virtio_net_driver);
     
     fw_init();
     acpi_init();

@@ -24,11 +24,17 @@ enum proc_state {
     PROC_REAPING
 };
 
+enum syscall_abi {
+    SYSCALL_ABI_LINUX = 0,
+    SYSCALL_ABI_LEGACY = 1,
+};
+
 struct process {
     pid_t pid, ppid;
     char name[16];
     uid_t uid;
     gid_t gid;
+    enum syscall_abi syscall_abi;
     enum proc_state state;
     int exit_code;
 

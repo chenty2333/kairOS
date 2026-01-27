@@ -13,6 +13,52 @@ struct timespec;
 struct pollfd;
 typedef uint64_t sigset_t;
 
+/* Linux riscv64 syscall numbers (from asm-generic/unistd.h) */
+#define LINUX_NR_getcwd 17
+#define LINUX_NR_epoll_create1 20
+#define LINUX_NR_epoll_ctl 21
+#define LINUX_NR_epoll_pwait 22
+#define LINUX_NR_dup 23
+#define LINUX_NR_dup3 24
+#define LINUX_NR_fcntl 25
+#define LINUX_NR_ioctl 29
+#define LINUX_NR_openat 56
+#define LINUX_NR_close 57
+#define LINUX_NR_pipe2 59
+#define LINUX_NR_getdents64 61
+#define LINUX_NR_lseek 62
+#define LINUX_NR_read 63
+#define LINUX_NR_write 64
+#define LINUX_NR_newfstatat 79
+#define LINUX_NR_fstat 80
+#define LINUX_NR_exit 93
+#define LINUX_NR_exit_group 94
+#define LINUX_NR_futex 98
+#define LINUX_NR_nanosleep 101
+#define LINUX_NR_clock_gettime 113
+#define LINUX_NR_ppoll 73
+#define LINUX_NR_pselect6 72
+#define LINUX_NR_kill 129
+#define LINUX_NR_rt_sigaction 134
+#define LINUX_NR_rt_sigprocmask 135
+#define LINUX_NR_rt_sigreturn 139
+#define LINUX_NR_setgid 144
+#define LINUX_NR_setuid 146
+#define LINUX_NR_uname 160
+#define LINUX_NR_getpid 172
+#define LINUX_NR_getppid 173
+#define LINUX_NR_getuid 174
+#define LINUX_NR_getgid 176
+#define LINUX_NR_brk 214
+#define LINUX_NR_munmap 215
+#define LINUX_NR_clone 220
+#define LINUX_NR_mmap 222
+#define LINUX_NR_mprotect 226
+#define LINUX_NR_wait4 260
+
+#define AT_FDCWD (-100)
+#define O_CLOEXEC 02000000
+
 #define SYS_exit 1
 #define SYS_fork 2
 #define SYS_exec 3
@@ -98,6 +144,18 @@ void syscall_init(void);
 int64_t sys_exit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fork(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_openat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_lseek(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getdents64(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_mmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_munmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_mprotect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_clock_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_nanosleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_uname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getppid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_exit_group(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_futex(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pipe2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

@@ -6,12 +6,14 @@
 #include <kairos/config.h>
 #include <kairos/epoll.h>
 #include <kairos/epoll_internal.h>
+#include <kairos/futex.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
 #include <kairos/select.h>
 #include <kairos/sched.h>
+#include <kairos/signal.h>
 #include <kairos/sync.h>
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
@@ -23,6 +25,106 @@
 extern int do_sem_init(int count);
 extern int do_sem_wait(int sem_id);
 extern int do_sem_post(int sem_id);
+
+/* --- Linux ABI helpers --- */
+
+#define NS_PER_SEC 1000000000ULL
+
+#define PROT_READ 0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC 0x4
+
+#define MAP_SHARED 0x01
+#define MAP_PRIVATE 0x02
+#define MAP_FIXED 0x10
+#define MAP_ANONYMOUS 0x20
+#define MAP_STACK 0x20000
+
+struct linux_dirent64 {
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+    char d_name[];
+} __packed;
+
+/* Linux riscv64 struct stat from asm-generic/stat.h. */
+struct linux_stat {
+    unsigned long st_dev;
+    unsigned long st_ino;
+    unsigned int st_mode;
+    unsigned int st_nlink;
+    unsigned int st_uid;
+    unsigned int st_gid;
+    unsigned long st_rdev;
+    unsigned long __pad1;
+    long st_size;
+    int st_blksize;
+    int __pad2;
+    long st_blocks;
+    long st_atime;
+    unsigned long st_atime_nsec;
+    long st_mtime;
+    unsigned long st_mtime_nsec;
+    long st_ctime;
+    unsigned long st_ctime_nsec;
+    unsigned int __unused4;
+    unsigned int __unused5;
+};
+
+struct linux_utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
+
+static uint64_t ns_to_sched_ticks(uint64_t ns) {
+    uint64_t ticks = (ns * CONFIG_HZ + NS_PER_SEC - 1) / NS_PER_SEC;
+    return ticks ? ticks : 1;
+}
+
+static int copy_timespec_from_user(uint64_t ptr, struct timespec *out) {
+    if (!ptr || !out)
+        return 0;
+    if (copy_from_user(out, (const void *)ptr, sizeof(*out)) < 0)
+        return -EFAULT;
+    if (out->tv_sec < 0 || out->tv_nsec < 0 || out->tv_nsec >= (int64_t)NS_PER_SEC)
+        return -EINVAL;
+    return 1;
+}
+
+static void stat_to_linux(const struct stat *st, struct linux_stat *lst) {
+    memset(lst, 0, sizeof(*lst));
+    lst->st_dev = (unsigned long)st->st_dev;
+    lst->st_ino = (unsigned long)st->st_ino;
+    lst->st_mode = (unsigned int)st->st_mode;
+    lst->st_nlink = (unsigned int)st->st_nlink;
+    lst->st_uid = (unsigned int)st->st_uid;
+    lst->st_gid = (unsigned int)st->st_gid;
+    lst->st_rdev = (unsigned long)st->st_rdev;
+    lst->st_size = (long)st->st_size;
+    lst->st_blksize = (int)st->st_blksize;
+    lst->st_blocks = (long)st->st_blocks;
+    lst->st_atime = (long)st->st_atime;
+    lst->st_mtime = (long)st->st_mtime;
+    lst->st_ctime = (long)st->st_ctime;
+}
+
+static int copy_linux_stat_to_user(uint64_t st_ptr, const struct stat *st) {
+    struct linux_stat lst;
+    stat_to_linux(st, &lst);
+    if (copy_to_user((void *)st_ptr, &lst, sizeof(lst)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static bool use_linux_abi(void) {
+    struct process *p = proc_current();
+    return !p || p->syscall_abi == SYSCALL_ABI_LINUX;
+}
 
 /* --- Process Handlers --- */
 
@@ -49,6 +151,47 @@ int64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t 
     return (int64_t)proc_current()->pid;
 }
 
+int64_t sys_getppid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    return (int64_t)(p ? p->ppid : 0);
+}
+
+int64_t sys_getuid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    return (int64_t)(p ? p->uid : 0);
+}
+
+int64_t sys_getgid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    return (int64_t)(p ? p->gid : 0);
+}
+
+int64_t sys_setuid(uint64_t uid, uint64_t a1, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    p->uid = (uid_t)uid;
+    return 0;
+}
+
+int64_t sys_setgid(uint64_t gid, uint64_t a1, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    p->gid = (gid_t)gid;
+    return 0;
+}
+
 int64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     int status = 0;
@@ -59,25 +202,82 @@ int64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options, uint64_t a
     return (int64_t)ret;
 }
 
+int64_t sys_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
+                  uint64_t rusage_ptr, uint64_t a4, uint64_t a5) {
+    (void)rusage_ptr; (void)a4; (void)a5;
+    return sys_wait(pid, status_ptr, options, 0, 0, 0);
+}
+
 int64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return (int64_t)mm_brk(proc_current()->mm, (vaddr_t)addr);
 }
 
+int64_t sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2, uint64_t a3,
+                       uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return sys_exit(status, 0, 0, 0, 0, 0);
+}
+
+int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
+                  uint64_t child_tid, uint64_t tls, uint64_t a5) {
+    (void)newsp; (void)parent_tid; (void)child_tid; (void)tls; (void)a5;
+    /*
+     * Minimal clone: accept fork-like usage where only the low signal bits
+     * are set (e.g., SIGCHLD).
+     */
+    if ((flags & ~0xffULL) != 0)
+        return -ENOSYS;
+    struct process *p = proc_fork();
+    return p ? (int64_t)p->pid : -ENOMEM;
+}
+
+int64_t sys_getcwd(uint64_t buf_ptr, uint64_t size, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    if (!p || !buf_ptr || size == 0)
+        return -EINVAL;
+    size_t len = strlen(p->cwd) + 1;
+    if (len > size)
+        return -ERANGE;
+    if (copy_to_user((void *)buf_ptr, p->cwd, len) < 0)
+        return -EFAULT;
+    return (int64_t)len;
+}
+
 /* --- File/IO Handlers --- */
 
-int64_t sys_open(uint64_t path, uint64_t flags, uint64_t mode, uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a3; (void)a4; (void)a5;
+int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
+                   uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     struct file *f;
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) return -EFAULT;
-    
-    int ret = vfs_open(kpath, (int)flags, (mode_t)mode, &f);
-    if (ret < 0) return ret;
-    
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    struct process *p = proc_current();
+    const char *base = (kpath[0] == '/') ? "/" : (p ? p->cwd : "/");
+    int64_t dfd = (int64_t)dirfd;
+    if (kpath[0] != '/' && dfd != AT_FDCWD)
+        return -ENOSYS;
+
+    int ret = vfs_open_at(base, kpath, (int)flags, (mode_t)mode, &f);
+    if (ret < 0)
+        return ret;
+
     int fd = fd_alloc(proc_current(), f);
-    if (fd < 0) { vfs_close(f); return -EMFILE; }
+    if (fd < 0) {
+        vfs_close(f);
+        return -EMFILE;
+    }
     return fd;
+}
+
+int64_t sys_open(uint64_t path, uint64_t flags, uint64_t mode, uint64_t a3,
+                 uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    return sys_openat((uint64_t)(int64_t)AT_FDCWD, path, flags, mode, 0, 0);
 }
 
 static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count, bool is_write) {
@@ -140,32 +340,151 @@ int64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a
     return (int64_t)fd_close(proc_current(), (int)fd);
 }
 
+int64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    if (f->vnode && f->vnode->type == VNODE_PIPE)
+        return -ESPIPE;
+    return (int64_t)vfs_seek(f, (off_t)offset, (int)whence);
+}
+
 int64_t sys_stat(uint64_t path, uint64_t st_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     struct stat st;
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) return -EFAULT;
-    
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+        return -EFAULT;
+
     int ret = vfs_stat(kpath, &st);
-    if (ret < 0) return ret;
-    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0) return -EFAULT;
+    if (ret < 0)
+        return ret;
+    if (use_linux_abi())
+        return copy_linux_stat_to_user(st_ptr, &st);
+    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0)
+        return -EFAULT;
     return 0;
 }
 
 int64_t sys_fstat(uint64_t fd, uint64_t st_ptr, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     struct file *f = fd_get(proc_current(), (int)fd);
-    if (!f) return -EBADF;
-    
+    if (!f)
+        return -EBADF;
+
     struct stat st;
     int ret = vfs_fstat(f, &st);
-    if (ret < 0) return ret;
-    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0) return -EFAULT;
+    if (ret < 0)
+        return ret;
+    if (use_linux_abi())
+        return copy_linux_stat_to_user(st_ptr, &st);
+    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0)
+        return -EFAULT;
     return 0;
+}
+
+int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
+                       uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (flags != 0)
+        return -ENOSYS;
+
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    struct process *p = proc_current();
+    const char *base = (kpath[0] == '/') ? "/" : (p ? p->cwd : "/");
+    int64_t dfd = (int64_t)dirfd;
+    if (kpath[0] != '/' && dfd != AT_FDCWD)
+        return -ENOSYS;
+
+    char norm[CONFIG_PATH_MAX];
+    if (vfs_normalize_path(base, kpath, norm) < 0)
+        return -EINVAL;
+
+    struct stat st;
+    int ret = vfs_stat(norm, &st);
+    if (ret < 0)
+        return ret;
+    return copy_linux_stat_to_user(st_ptr, &st);
+}
+
+int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
+                       uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (!dirp || count == 0)
+        return -EINVAL;
+    if (count > 65536)
+        return -EINVAL;
+
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    if (!f->vnode || f->vnode->type != VNODE_DIR)
+        return -ENOTDIR;
+
+    uint8_t *kbuf = kmalloc((size_t)count);
+    if (!kbuf)
+        return -ENOMEM;
+
+    size_t pos = 0;
+    const size_t base = offsetof(struct linux_dirent64, d_name);
+
+    while (pos < (size_t)count) {
+        struct dirent ent;
+        int ret = vfs_readdir(f, &ent);
+        if (ret < 0) {
+            kfree(kbuf);
+            return ret;
+        }
+        if (ret == 0)
+            break;
+
+        size_t name_len = strlen(ent.d_name);
+        size_t reclen = ALIGN_UP(base + name_len + 1, 8);
+        if (pos + reclen > (size_t)count)
+            break;
+
+        struct linux_dirent64 *ld = (struct linux_dirent64 *)(kbuf + pos);
+        ld->d_ino = ent.d_ino;
+        ld->d_off = (int64_t)f->offset;
+        ld->d_reclen = (uint16_t)reclen;
+        ld->d_type = ent.d_type;
+        memcpy(ld->d_name, ent.d_name, name_len);
+        ld->d_name[name_len] = '\0';
+        pos += reclen;
+    }
+
+    if (pos > 0 && copy_to_user((void *)dirp, kbuf, pos) < 0) {
+        kfree(kbuf);
+        return -EFAULT;
+    }
+
+    kfree(kbuf);
+    return (int64_t)pos;
 }
 
 int64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    return (int64_t)fd_dup2(proc_current(), (int)oldfd, (int)newfd);
+}
+
+int64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
+                uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return (int64_t)fd_dup(proc_current(), (int)oldfd);
+}
+
+int64_t sys_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags, uint64_t a3,
+                 uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (flags != 0)
+        return -EINVAL;
+    if (oldfd == newfd)
+        return -EINVAL;
     return (int64_t)fd_dup2(proc_current(), (int)oldfd, (int)newfd);
 }
 
@@ -251,6 +570,154 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3, uint64_t
     }
 }
 
+int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)cmd; (void)arg; (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    return -ENOTTY;
+}
+
+/* --- Memory / Time / Futex (Linux ABI) --- */
+
+static uint32_t prot_to_vm(uint64_t prot) {
+    uint32_t vm = 0;
+    if (prot & PROT_READ)
+        vm |= VM_READ;
+    if (prot & PROT_WRITE)
+        vm |= VM_WRITE;
+    if (prot & PROT_EXEC)
+        vm |= VM_EXEC;
+    return vm;
+}
+
+int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
+                 uint64_t fd, uint64_t offset) {
+    (void)fd;
+    struct process *p = proc_current();
+    if (!p || !p->mm || len == 0)
+        return -EINVAL;
+
+    uint32_t vm_flags = prot_to_vm(prot);
+    if (flags & MAP_SHARED)
+        vm_flags |= VM_SHARED;
+    if (flags & MAP_STACK)
+        vm_flags |= VM_STACK;
+
+    if (flags & MAP_FIXED)
+        mm_munmap(p->mm, (vaddr_t)addr, (size_t)len);
+
+    vaddr_t mapped = mm_mmap(p->mm, (vaddr_t)addr, (size_t)len, vm_flags,
+                              vm_flags, NULL, (off_t)offset);
+    return mapped ? (int64_t)mapped : -ENOMEM;
+}
+
+int64_t sys_munmap(uint64_t addr, uint64_t len, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    if (!p || !p->mm)
+        return -EINVAL;
+    return (int64_t)mm_munmap(p->mm, (vaddr_t)addr, (size_t)len);
+}
+
+int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a3,
+                     uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    if (!p || !p->mm)
+        return -EINVAL;
+    return (int64_t)mm_mprotect(p->mm, (vaddr_t)addr, (size_t)len,
+                                prot_to_vm(prot));
+}
+
+int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!tp_ptr)
+        return -EINVAL;
+    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
+        return -EINVAL;
+
+    uint64_t ns = arch_timer_ticks_to_ns(arch_timer_ticks());
+    struct timespec ts = {
+        .tv_sec = (time_t)(ns / NS_PER_SEC),
+        .tv_nsec = (int64_t)(ns % NS_PER_SEC),
+    };
+    if (copy_to_user((void *)tp_ptr, &ts, sizeof(ts)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)rem_ptr; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct timespec req;
+    int rc = copy_timespec_from_user(req_ptr, &req);
+    if (rc < 0)
+        return rc;
+    if (rc == 0)
+        return -EINVAL;
+
+    uint64_t ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
+    uint64_t delta = ns_to_sched_ticks(ns);
+    uint64_t deadline = arch_timer_get_ticks() + delta;
+
+    struct process *curr = proc_current();
+    while (arch_timer_get_ticks() < deadline) {
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        poll_sleep_arm(&sleep, curr, deadline);
+        curr->state = PROC_SLEEPING;
+        curr->wait_channel = NULL;
+        schedule();
+        poll_sleep_cancel(&sleep);
+        if (curr->sig_pending)
+            return -EINTR;
+    }
+    return 0;
+}
+
+int64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!buf_ptr)
+        return -EINVAL;
+    struct linux_utsname uts;
+    memset(&uts, 0, sizeof(uts));
+    strcpy(uts.sysname, "Kairos");
+    strcpy(uts.nodename, "kairos");
+    strcpy(uts.release, "0.1.0");
+    strcpy(uts.version, "kairos");
+    strcpy(uts.machine, "riscv64");
+    if (copy_to_user((void *)buf_ptr, &uts, sizeof(uts)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_ptr,
+                  uint64_t uaddr2, uint64_t val3) {
+    (void)uaddr2; (void)val3;
+    uint32_t cmd = (uint32_t)(op & ~FUTEX_PRIVATE_FLAG);
+    switch (cmd) {
+    case FUTEX_WAIT: {
+        struct timespec ts;
+        struct timespec *tsp = NULL;
+        int rc = copy_timespec_from_user(timeout_ptr, &ts);
+        if (rc < 0)
+            return rc;
+        if (rc > 0)
+            tsp = &ts;
+        return futex_wait(uaddr, (uint32_t)val, tsp);
+    }
+    case FUTEX_WAKE:
+        return futex_wake(uaddr, (int)val);
+    default:
+        return -ENOSYS;
+    }
+}
+
 static int poll_check_fds(struct pollfd *fds, size_t nfds) {
     int ready = 0;
     for (size_t i = 0; i < nfds; i++) {
@@ -298,6 +765,48 @@ static void poll_register_waiters(struct pollfd *fds, struct poll_waiter *waiter
     }
 }
 
+static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
+    struct poll_waiter *waiters = kzalloc(nfds * sizeof(*waiters));
+    if (!waiters)
+        return -ENOMEM;
+
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
+        if (!delta)
+            delta = 1;
+        deadline = arch_timer_get_ticks() + delta;
+    }
+
+    int ready;
+    do {
+        poll_unregister_waiters(waiters, nfds);
+        ready = poll_check_fds(fds, nfds);
+        if (ready || timeout_ms == 0)
+            break;
+
+        uint64_t now = arch_timer_get_ticks();
+        if (deadline && now >= deadline) {
+            ready = 0;
+            break;
+        }
+
+        poll_register_waiters(fds, waiters, nfds);
+
+        struct process *curr = proc_current();
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        if (deadline)
+            poll_sleep_arm(&sleep, curr, deadline);
+        proc_sleep(&sleep);
+        poll_sleep_cancel(&sleep);
+    } while (1);
+
+    poll_unregister_waiters(waiters, nfds);
+    kfree(waiters);
+    return ready;
+}
+
 int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
                  uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
@@ -312,67 +821,31 @@ int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
         return -EFAULT;
     }
 
-    struct poll_waiter *waiters = kzalloc(nfds * sizeof(*waiters));
-    if (!waiters) {
+    int ready = poll_wait_kernel(kfds, (size_t)nfds, (int)timeout_ms);
+    if (ready < 0) {
         kfree(kfds);
-        return -ENOMEM;
+        return ready;
     }
-
-    int timeout = (int)timeout_ms;
-    uint64_t start = arch_timer_get_ticks();
-    uint64_t deadline = 0;
-    if (timeout > 0) {
-        uint64_t delta = ((uint64_t)timeout * CONFIG_HZ + 999) / 1000;
-        if (!delta)
-            delta = 1;
-        deadline = start + delta;
-    }
-
-    int ready;
-    do {
-        poll_unregister_waiters(waiters, (size_t)nfds);
-        ready = poll_check_fds(kfds, (size_t)nfds);
-        if (ready || timeout == 0)
-            break;
-
-        uint64_t now = arch_timer_get_ticks();
-        if (deadline && now >= deadline) {
-            ready = 0;
-            break;
-        }
-
-        poll_register_waiters(kfds, waiters, (size_t)nfds);
-
-        struct process *curr = proc_current();
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        proc_sleep(&sleep);
-        poll_sleep_cancel(&sleep);
-    } while (1);
-
-    poll_unregister_waiters(waiters, (size_t)nfds);
 
     if (copy_to_user((void *)fds_ptr, kfds, bytes) < 0) {
-        kfree(waiters);
         kfree(kfds);
         return -EFAULT;
     }
-    kfree(waiters);
     kfree(kfds);
     return ready;
 }
 
-int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
-                   uint64_t exceptfds_ptr, uint64_t timeout_ptr, uint64_t a5) {
-    (void)exceptfds_ptr; (void)a5;
-    if (nfds > FD_SETSIZE) return -EINVAL;
+static int do_select_common(uint64_t nfds, uint64_t readfds_ptr,
+                            uint64_t writefds_ptr, int timeout_ms) {
+    if (nfds > FD_SETSIZE)
+        return -EINVAL;
 
     fd_set rfds = {0}, wfds = {0};
-    if (readfds_ptr && copy_from_user(&rfds, (void *)readfds_ptr, sizeof(rfds)) < 0)
+    if (readfds_ptr &&
+        copy_from_user(&rfds, (void *)readfds_ptr, sizeof(rfds)) < 0)
         return -EFAULT;
-    if (writefds_ptr && copy_from_user(&wfds, (void *)writefds_ptr, sizeof(wfds)) < 0)
+    if (writefds_ptr &&
+        copy_from_user(&wfds, (void *)writefds_ptr, sizeof(wfds)) < 0)
         return -EFAULT;
 
     struct pollfd fds[FD_SETSIZE];
@@ -380,8 +853,10 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
     for (uint64_t fd = 0; fd < nfds; fd++) {
         uint64_t mask = 1ULL << fd;
         short events = 0;
-        if (readfds_ptr && (rfds.bits & mask)) events |= POLLIN;
-        if (writefds_ptr && (wfds.bits & mask)) events |= POLLOUT;
+        if (readfds_ptr && (rfds.bits & mask))
+            events |= POLLIN;
+        if (writefds_ptr && (wfds.bits & mask))
+            events |= POLLOUT;
         if (events) {
             fds[count].fd = (int)fd;
             fds[count].events = events;
@@ -393,6 +868,35 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
     if (count == 0)
         return 0;
 
+    int ready = poll_wait_kernel(fds, count, timeout_ms);
+    if (ready < 0)
+        return ready;
+
+    if (readfds_ptr)
+        rfds.bits = 0;
+    if (writefds_ptr)
+        wfds.bits = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (fds[i].revents & POLLIN)
+            rfds.bits |= (1ULL << fds[i].fd);
+        if (fds[i].revents & POLLOUT)
+            wfds.bits |= (1ULL << fds[i].fd);
+    }
+
+    if (readfds_ptr &&
+        copy_to_user((void *)readfds_ptr, &rfds, sizeof(rfds)) < 0)
+        ready = -EFAULT;
+    if (writefds_ptr &&
+        copy_to_user((void *)writefds_ptr, &wfds, sizeof(wfds)) < 0)
+        ready = -EFAULT;
+
+    return ready;
+}
+
+int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
+                   uint64_t exceptfds_ptr, uint64_t timeout_ptr, uint64_t a5) {
+    (void)exceptfds_ptr; (void)a5;
+
     int timeout_ms = -1;
     if (timeout_ptr) {
         struct timeval tv;
@@ -403,61 +907,7 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
         timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
     }
 
-    struct poll_waiter *waiters = kzalloc(count * sizeof(*waiters));
-    if (!waiters)
-        return -ENOMEM;
-
-    uint64_t start = arch_timer_get_ticks();
-    uint64_t deadline = 0;
-    if (timeout_ms > 0) {
-        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
-        if (!delta)
-            delta = 1;
-        deadline = start + delta;
-    }
-
-    int ready;
-    do {
-        poll_unregister_waiters(waiters, count);
-        ready = poll_check_fds(fds, count);
-        if (ready || timeout_ms == 0)
-            break;
-
-        uint64_t now = arch_timer_get_ticks();
-        if (deadline && now >= deadline) {
-            ready = 0;
-            break;
-        }
-
-        poll_register_waiters(fds, waiters, count);
-
-        struct process *curr = proc_current();
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        proc_sleep(&sleep);
-        poll_sleep_cancel(&sleep);
-    } while (1);
-
-    poll_unregister_waiters(waiters, count);
-
-    if (readfds_ptr) rfds.bits = 0;
-    if (writefds_ptr) wfds.bits = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (fds[i].revents & POLLIN)
-            rfds.bits |= (1ULL << fds[i].fd);
-        if (fds[i].revents & POLLOUT)
-            wfds.bits |= (1ULL << fds[i].fd);
-    }
-
-    if (readfds_ptr && copy_to_user((void *)readfds_ptr, &rfds, sizeof(rfds)) < 0)
-        ready = -EFAULT;
-    if (writefds_ptr && copy_to_user((void *)writefds_ptr, &wfds, sizeof(wfds)) < 0)
-        ready = -EFAULT;
-
-    kfree(waiters);
-    return ready;
+    return do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
 }
 
 int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -535,6 +985,142 @@ int64_t sys_sem_post(uint64_t sem_id, uint64_t a1, uint64_t a2, uint64_t a3, uin
     return (int64_t)do_sem_post((int)sem_id);
 }
 
+/* --- Linux ABI Dispatch --- */
+
+static int linux_timespec_to_timeout_ms(uint64_t tsp_ptr, int *out_ms) {
+    if (!out_ms)
+        return -EINVAL;
+    if (!tsp_ptr) {
+        *out_ms = -1;
+        return 0;
+    }
+
+    struct timespec ts;
+    int rc = copy_timespec_from_user(tsp_ptr, &ts);
+    if (rc < 0)
+        return rc;
+
+    uint64_t ns = (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
+    uint64_t ms = (ns + 999999ULL) / 1000000ULL;
+    if (ms > 0x7fffffffULL)
+        ms = 0x7fffffffULL;
+    *out_ms = (int)ms;
+    return 0;
+}
+
+static int64_t linux_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
+                           uint64_t sigmask_ptr, uint64_t sigsetsize,
+                           uint64_t a5) {
+    (void)sigmask_ptr; (void)sigsetsize; (void)a5;
+    int timeout_ms = -1;
+    int rc = linux_timespec_to_timeout_ms(tsp_ptr, &timeout_ms);
+    if (rc < 0)
+        return rc;
+    return sys_poll(fds_ptr, nfds, (uint64_t)timeout_ms, 0, 0, 0);
+}
+
+static int64_t linux_pselect6(uint64_t nfds, uint64_t readfds_ptr,
+                              uint64_t writefds_ptr, uint64_t exceptfds_ptr,
+                              uint64_t tsp_ptr, uint64_t sigmask_ptr) {
+    (void)exceptfds_ptr; (void)sigmask_ptr;
+    int timeout_ms = -1;
+    int rc = linux_timespec_to_timeout_ms(tsp_ptr, &timeout_ms);
+    if (rc < 0)
+        return rc;
+    return do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+}
+
+static int64_t linux_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1,
+                                      uint64_t a2, uint64_t a3, uint64_t a4,
+                                      uint64_t a5) {
+    switch (num) {
+    case LINUX_NR_getcwd:
+        return sys_getcwd(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_epoll_create1:
+        return sys_epoll_create1(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_epoll_ctl:
+        return sys_epoll_ctl(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_epoll_pwait:
+        return sys_epoll_wait(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_dup:
+        return sys_dup(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_dup3:
+        return sys_dup3(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_fcntl:
+        return sys_fcntl(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_ioctl:
+        return sys_ioctl(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_openat:
+        return sys_openat(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_close:
+        return sys_close(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_pipe2:
+        return sys_pipe2(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_getdents64:
+        return sys_getdents64(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_lseek:
+        return sys_lseek(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_read:
+        return sys_read(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_write:
+        return sys_write(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_ppoll:
+        return linux_ppoll(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_pselect6:
+        return linux_pselect6(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_newfstatat:
+        return sys_newfstatat(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_fstat:
+        return sys_fstat(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_exit:
+        return sys_exit(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_exit_group:
+        return sys_exit_group(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_futex:
+        return sys_futex(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_nanosleep:
+        return sys_nanosleep(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_clock_gettime:
+        return sys_clock_gettime(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_kill:
+        return sys_kill(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_rt_sigaction:
+        return sys_sigaction(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_rt_sigprocmask:
+        return sys_sigprocmask(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_rt_sigreturn:
+        return sys_sigreturn(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_setgid:
+        return sys_setgid(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_setuid:
+        return sys_setuid(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_uname:
+        return sys_uname(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_getpid:
+        return sys_getpid(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_getppid:
+        return sys_getppid(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_getuid:
+        return sys_getuid(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_getgid:
+        return sys_getgid(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_brk:
+        return sys_brk(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_munmap:
+        return sys_munmap(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_clone:
+        return sys_clone(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_mmap:
+        return sys_mmap(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_mprotect:
+        return sys_mprotect(a0, a1, a2, a3, a4, a5);
+    case LINUX_NR_wait4:
+        return sys_wait4(a0, a1, a2, a3, a4, a5);
+    default:
+        return -ENOSYS;
+    }
+}
+
 /* --- Table & Dispatch --- */
 
 syscall_fn_t syscall_table[SYS_MAX] = {
@@ -568,8 +1154,14 @@ syscall_fn_t syscall_table[SYS_MAX] = {
     [SYS_sigreturn] = sys_sigreturn,
 };
 
-int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-    if (num >= SYS_MAX || !syscall_table[num]) return -ENOSYS;
+int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+    struct process *p = proc_current();
+    if (!p || p->syscall_abi == SYSCALL_ABI_LINUX)
+        return linux_syscall_dispatch(num, a0, a1, a2, a3, a4, a5);
+
+    if (num >= SYS_MAX || !syscall_table[num])
+        return -ENOSYS;
     return syscall_table[num](a0, a1, a2, a3, a4, a5);
 }
 

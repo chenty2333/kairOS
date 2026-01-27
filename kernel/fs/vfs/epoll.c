@@ -99,7 +99,11 @@ static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
         epoll_item_put(item);
         return;
     }
-    uint32_t mask = events ? events : item->events;
+    uint32_t mask = events ? (events & item->events) : item->events;
+    if (!mask) {
+        epoll_item_put(item);
+        return;
+    }
     uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, mask);
     if (revents)
         epoll_mark_ready(item, revents);
@@ -363,46 +367,63 @@ static int epoll_collect_ready(struct epoll_instance *ep,
  * We take references under the epoll lock, then poll outside it.
  */
 static void epoll_rescan(struct epoll_instance *ep) {
-    size_t count = 0;
-    struct epoll_item *item;
+    for (;;) {
+        size_t count = 0;
+        struct epoll_item *item;
 
-    mutex_lock(&ep->lock);
-    list_for_each_entry(item, &ep->items, list) {
-        if (ep->closing || item->deleted || item->ready || item->dispatching)
-            continue;
-        count++;
-    }
-    mutex_unlock(&ep->lock);
-
-    if (count == 0)
-        return;
-
-    struct epoll_item **items = kmalloc(count * sizeof(*items));
-    if (!items)
-        return;
-
-    size_t idx = 0;
-    mutex_lock(&ep->lock);
-    list_for_each_entry(item, &ep->items, list) {
-        if (ep->closing || item->deleted || item->ready || item->dispatching)
-            continue;
-        epoll_item_get(item);
-        items[idx++] = item;
-    }
-    mutex_unlock(&ep->lock);
-
-    for (size_t i = 0; i < idx; i++) {
-        item = items[i];
-        if (!item->deleted && item->ep) {
-            uint32_t revents =
-                (uint32_t)vfs_poll_vnode(item->vn, item->events);
-            if (revents)
-                epoll_mark_ready(item, revents);
+        mutex_lock(&ep->lock);
+        list_for_each_entry(item, &ep->items, list) {
+            if (ep->closing || item->deleted || item->ready ||
+                item->dispatching)
+                continue;
+            count++;
         }
-        epoll_item_put(item);
-    }
+        mutex_unlock(&ep->lock);
 
-    kfree(items);
+        if (count == 0)
+            return;
+
+        struct epoll_item **items = kmalloc(count * sizeof(*items));
+        if (!items)
+            return;
+
+        bool overflow = false;
+        size_t idx = 0;
+        mutex_lock(&ep->lock);
+        list_for_each_entry(item, &ep->items, list) {
+            if (ep->closing || item->deleted || item->ready ||
+                item->dispatching)
+                continue;
+            if (idx >= count) {
+                overflow = true;
+                break;
+            }
+            epoll_item_get(item);
+            items[idx++] = item;
+        }
+        mutex_unlock(&ep->lock);
+
+        if (overflow) {
+            for (size_t i = 0; i < idx; i++)
+                epoll_item_put(items[i]);
+            kfree(items);
+            continue;
+        }
+
+        for (size_t i = 0; i < idx; i++) {
+            item = items[i];
+            if (!item->deleted && item->ep) {
+                uint32_t revents =
+                    (uint32_t)vfs_poll_vnode(item->vn, item->events);
+                if (revents)
+                    epoll_mark_ready(item, revents);
+            }
+            epoll_item_put(item);
+        }
+
+        kfree(items);
+        return;
+    }
 }
 
 int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,

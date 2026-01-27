@@ -85,6 +85,7 @@ static struct process *proc_alloc(void) {
     if (!p) return NULL;
 
     p->ppid = p->uid = p->gid = p->vruntime = p->nice = 0;
+    p->syscall_abi = SYSCALL_ABI_LINUX;
     p->name[0] = '\0'; p->mm = NULL; p->parent = NULL;
     p->on_rq = false; p->on_cpu = false; p->cpu = -1;
     p->last_run_time = 0;
@@ -109,6 +110,7 @@ static void proc_adopt_child(struct process *parent, struct process *child) {
     if (!parent || !child) return;
     child->parent = parent;
     child->ppid = parent->pid;
+    child->syscall_abi = parent->syscall_abi;
     spin_lock(&proc_table_lock);
     list_add(&child->sibling, &parent->children);
     spin_unlock(&proc_table_lock);
@@ -192,6 +194,7 @@ struct process *proc_fork(void) {
 
     if (!(child->mm = mm_clone(parent->mm))) { proc_free(child); return NULL; }
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
+    child->syscall_abi = parent->syscall_abi;
     mutex_lock(&parent->files_lock);
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         struct file *f = parent->files[i];

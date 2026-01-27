@@ -130,9 +130,11 @@ CORE_SRCS := \
     kernel/core/proc/fd.c \
     kernel/core/proc/signal.c \
     kernel/core/sched/sched.c \
+    kernel/core/net/net.c \
     kernel/core/sync/sync.c \
     kernel/core/sync/wait.c \
     kernel/core/sync/pollwait.c \
+    kernel/core/sync/futex.c \
     kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
@@ -153,7 +155,8 @@ CORE_SRCS := \
     kernel/drivers/virtio/virtio_mmio.c \
     kernel/drivers/virtio/virtio_ring.c \
     kernel/drivers/block/blkdev.c \
-    kernel/drivers/block/virtio_blk.c
+    kernel/drivers/block/virtio_blk.c \
+    kernel/drivers/net/virtio_net.c
 
 # Architecture-specific sources
 ARCH_SRCS := \
@@ -262,7 +265,11 @@ ifeq ($(HOSTFWD_PORT),)
 else
   QEMU_FLAGS += -netdev user,id=net0,hostfwd=tcp::$(HOSTFWD_PORT)-:80
 endif
-QEMU_FLAGS += -device virtio-net-pci,netdev=net0
+ifeq ($(ARCH),riscv64)
+  QEMU_FLAGS += -device virtio-net-device,netdev=net0
+else
+  QEMU_FLAGS += -device virtio-net-pci,netdev=net0
+endif
 
 run: $(KERNEL)
 	$(QEMU) $(QEMU_FLAGS)
