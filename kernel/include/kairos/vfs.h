@@ -7,6 +7,7 @@
 
 #include <kairos/config.h>
 #include <kairos/list.h>
+#include <kairos/pollwait.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
 
@@ -69,6 +70,7 @@ struct vnode {
     struct mount *mount;
     uint32_t refcount;
     struct mutex lock;
+    struct poll_wait_head pollers;
 };
 
 struct file {
@@ -148,6 +150,7 @@ void vfs_poll_unregister(struct poll_waiter *waiter);
 void vfs_poll_watch(struct vnode *vn, struct poll_watch *watch,
                     uint32_t events);
 void vfs_poll_unwatch(struct poll_watch *watch);
+void vfs_poll_wake(struct vnode *vn, uint32_t events);
 off_t vfs_seek(struct file *file, off_t offset, int whence);
 int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);

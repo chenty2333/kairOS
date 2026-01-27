@@ -230,6 +230,7 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     vn->fs_data = p;
     vn->refcount = 2; /* One for reader, one for writer */
     mutex_init(&vn->lock, "pipe_vnode");
+    poll_wait_head_init(&vn->pollers);
     
     *read_pipe = vfs_file_alloc();
     *write_pipe = vfs_file_alloc();
@@ -337,4 +338,13 @@ void pipe_poll_watch_vnode(struct vnode *vn, struct poll_watch *watch,
     struct pipe *p = vn->fs_data;
     watch->events = events;
     poll_watch_add(&p->pollers, watch);
+}
+
+void pipe_poll_wake_vnode(struct vnode *vn, uint32_t events) {
+    if (!vn || vn->type != VNODE_PIPE)
+        return;
+    struct pipe *p = vn->fs_data;
+    if (!p)
+        return;
+    poll_wait_wake(&p->pollers, events);
 }

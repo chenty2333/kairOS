@@ -23,6 +23,7 @@ struct epoll_item {
     struct poll_watch watch;
     int refcount;
     bool ready;
+    bool dispatching;
     bool deleted;
     struct list_head list;
     struct list_head ready_node;
@@ -82,7 +83,7 @@ static void epoll_mark_ready(struct epoll_item *item, uint32_t revents) {
     mutex_lock(&ep->lock);
     if (!ep->closing && !item->deleted) {
         item->revents = revents;
-        if (!item->ready) {
+        if (!item->ready && !item->dispatching) {
             item->ready = true;
             list_add_tail(&item->ready_node, &ep->ready);
         }
@@ -123,10 +124,10 @@ static int epoll_close(struct vnode *vn) {
             struct epoll_item *item =
                 list_first_entry(&ep->items, struct epoll_item, list);
             list_del(&item->list);
-            if (item->ready) {
+            if (item->ready && !item->dispatching) {
                 list_del(&item->ready_node);
-                item->ready = false;
             }
+            item->ready = false;
             list_add_tail(&item->list, &local);
         }
         mutex_unlock(&ep->lock);
@@ -175,6 +176,7 @@ int epoll_create_file(struct file **out) {
     vn->fs_data = ep;
     vn->refcount = 1;
     mutex_init(&vn->lock, "epoll_vnode");
+    poll_wait_head_init(&vn->pollers);
 
     file->vnode = vn;
     file->flags = O_RDONLY;
@@ -222,6 +224,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->vn = target->vnode;
         item->refcount = 1;
         item->ready = false;
+        item->dispatching = false;
         item->deleted = false;
         item->watch.head = NULL;
         item->watch.prepare = epoll_item_prepare;
@@ -247,10 +250,10 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
             return -ENOENT;
         }
         list_del(&item->list);
-        if (item->ready) {
+        if (item->ready && !item->dispatching) {
             list_del(&item->ready_node);
-            item->ready = false;
         }
+        item->ready = false;
         item->deleted = true;
         break;
     default:
@@ -318,7 +321,9 @@ static int epoll_collect_ready(struct epoll_instance *ep,
         struct epoll_item *item =
             list_first_entry(&ep->ready, struct epoll_item, ready_node);
         list_del(&item->ready_node);
-        item->ready = false;
+        /* Keep ready=true while dispatching to block concurrent requeue. */
+        item->dispatching = true;
+        item->ready = true;
         epoll_item_get(item);
         list_add_tail(&item->ready_node, &local_ready);
         pulled++;
@@ -329,21 +334,75 @@ static int epoll_collect_ready(struct epoll_instance *ep,
     struct epoll_item *item, *tmp;
     list_for_each_entry_safe(item, tmp, &local_ready, ready_node) {
         list_del(&item->ready_node);
-        if (item->deleted || !item->ep) {
-            epoll_item_put(item);
-            continue;
+        uint32_t revents = 0;
+        if (!item->deleted && item->ep)
+            revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
+
+        if (revents && out < (int)maxevents) {
+            events[out].events = revents;
+            events[out].data = item->data;
+            out++;
         }
-        uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
-        if (!revents) {
-            epoll_item_put(item);
-            continue;
-        }
-        events[out].events = revents;
-        events[out].data = item->data;
-        out++;
+
+        bool can_requeue = (revents != 0);
+        mutex_lock(&ep->lock);
+        item->dispatching = false;
+        if (ep->closing || item->deleted || !item->ep)
+            can_requeue = false;
+        if (can_requeue)
+            list_add_tail(&item->ready_node, &ep->ready);
+        item->ready = can_requeue;
+        mutex_unlock(&ep->lock);
         epoll_item_put(item);
     }
     return out;
+}
+
+/*
+ * Fallback rescan for vnodes that do not actively wake pollers yet.
+ * We take references under the epoll lock, then poll outside it.
+ */
+static void epoll_rescan(struct epoll_instance *ep) {
+    size_t count = 0;
+    struct epoll_item *item;
+
+    mutex_lock(&ep->lock);
+    list_for_each_entry(item, &ep->items, list) {
+        if (ep->closing || item->deleted || item->ready || item->dispatching)
+            continue;
+        count++;
+    }
+    mutex_unlock(&ep->lock);
+
+    if (count == 0)
+        return;
+
+    struct epoll_item **items = kmalloc(count * sizeof(*items));
+    if (!items)
+        return;
+
+    size_t idx = 0;
+    mutex_lock(&ep->lock);
+    list_for_each_entry(item, &ep->items, list) {
+        if (ep->closing || item->deleted || item->ready || item->dispatching)
+            continue;
+        epoll_item_get(item);
+        items[idx++] = item;
+    }
+    mutex_unlock(&ep->lock);
+
+    for (size_t i = 0; i < idx; i++) {
+        item = items[i];
+        if (!item->deleted && item->ep) {
+            uint32_t revents =
+                (uint32_t)vfs_poll_vnode(item->vn, item->events);
+            if (revents)
+                epoll_mark_ready(item, revents);
+        }
+        epoll_item_put(item);
+    }
+
+    kfree(items);
 }
 
 int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
@@ -369,6 +428,12 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         if (ready != 0 || timeout_ms == 0)
             return ready;
 
+        /* Rescan once before blocking to cover non-event-driven vnodes. */
+        epoll_rescan(ep);
+        ready = epoll_collect_ready(ep, events, maxevents);
+        if (ready)
+            return ready;
+
         uint64_t now = arch_timer_get_ticks();
         if (deadline && now >= deadline)
             return 0;
@@ -379,6 +444,14 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         waiter.proc = curr;
         poll_wait_add(&ep->waiters, &waiter);
 
+        ready = epoll_collect_ready(ep, events, maxevents);
+        if (ready) {
+            poll_wait_remove(&waiter);
+            return ready;
+        }
+
+        /* One more rescan after registering the waiter to close the race. */
+        epoll_rescan(ep);
         ready = epoll_collect_ready(ep, events, maxevents);
         if (ready) {
             poll_wait_remove(&waiter);

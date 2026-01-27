@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
@@ -38,16 +39,20 @@ static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
                                off_t offset);
 static int devfs_dev_close(struct vnode *vn);
 static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset);
+static int devfs_dev_poll(struct vnode *vn, uint32_t events);
+static int devfs_dir_poll(struct vnode *vn, uint32_t events);
 
 static struct file_ops devfs_dev_ops = {
     .read = devfs_dev_read,
     .write = devfs_dev_write,
     .close = devfs_dev_close,
+    .poll = devfs_dev_poll,
 };
 
 static struct file_ops devfs_dir_ops = {
     .close = devfs_dev_close,
     .readdir = devfs_readdir,
+    .poll = devfs_dir_poll,
 };
 
 static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
@@ -62,6 +67,7 @@ static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->mount = mnt;
     vn->refcount = 1;
     mutex_init(&vn->lock, "devfs_vnode");
+    poll_wait_head_init(&vn->pollers);
 }
 
 static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
@@ -172,6 +178,7 @@ static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
             arch_early_putchar(p[i]);
         mutex_unlock(&vn->lock);
     }
+    vfs_poll_wake(vn, POLLIN | POLLOUT);
     return (ssize_t)len;
 }
 
@@ -206,6 +213,32 @@ static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset) {
 
     spin_unlock(&dm->lock);
     return 1;
+}
+
+static int devfs_dev_poll(struct vnode *vn, uint32_t events) {
+    struct devfs_node *node = vn ? (struct devfs_node *)vn->fs_data : NULL;
+    if (!node)
+        return POLLNVAL;
+
+    uint32_t revents = 0;
+    switch (node->dev_type) {
+    case DEVFS_CONSOLE:
+        revents |= POLLOUT;
+        break;
+    case DEVFS_NULL:
+    case DEVFS_ZERO:
+        revents |= POLLIN | POLLOUT;
+        break;
+    default:
+        revents |= POLLERR;
+        break;
+    }
+    return (int)(revents & events);
+}
+
+static int devfs_dir_poll(struct vnode *vn __attribute__((unused)),
+                          uint32_t events) {
+    return (int)(events & (POLLIN | POLLOUT));
 }
 
 static struct vfs_ops devfs_vfs_ops = {

@@ -5,6 +5,7 @@
 #include <kairos/blkdev.h>
 #include <kairos/buf.h>
 #include <kairos/mm.h>
+#include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
@@ -93,6 +94,7 @@ struct ext2_inode_data {
 /* Forward declarations */
 static int ext2_write_inode(struct ext2_mount *mnt, ino_t ino, struct ext2_inode *inode);
 static int ext2_alloc_block(struct ext2_mount *mnt, uint32_t *out);
+static int ext2_vnode_poll(struct vnode *vn, uint32_t events);
 
 static int ext2_read_inode(struct ext2_mount *mnt, ino_t ino,
                            struct ext2_inode *inode) {
@@ -429,6 +431,7 @@ static ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
         vn->size = id->inode.i_size;
         ext2_write_inode(mnt, id->ino, &id->inode);
     }
+    vfs_poll_wake(vn, POLLIN | POLLOUT);
     return written;
 }
 
@@ -437,6 +440,7 @@ static struct file_ops ext2_file_ops = {
     .write = ext2_vnode_write,
     .close = ext2_vnode_close,
     .readdir = ext2_vnode_readdir,
+    .poll = ext2_vnode_poll,
 };
 
 static struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
@@ -463,7 +467,16 @@ static struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
     vn->mount = NULL;
     vn->refcount = 1;
     mutex_init(&vn->lock, "ext2_vnode");
+    poll_wait_head_init(&vn->pollers);
     return vn;
+}
+
+static int ext2_vnode_poll(struct vnode *vn, uint32_t events) {
+    if (!vn)
+        return POLLNVAL;
+
+    uint32_t revents = (vn->type == VNODE_DIR) ? POLLIN : (POLLIN | POLLOUT);
+    return (int)(revents & events);
 }
 
 static struct vnode *ext2_lookup(struct vnode *dir, const char *name) {

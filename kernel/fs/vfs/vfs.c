@@ -411,7 +411,9 @@ void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
                                             struct poll_waiter *waiter,
                                             uint32_t events);
         pipe_poll_register_file(file, waiter, events);
+        return;
     }
+    poll_wait_add(&file->vnode->pollers, waiter);
 }
 
 void vfs_poll_unregister(struct poll_waiter *waiter) {
@@ -427,11 +429,25 @@ void vfs_poll_watch(struct vnode *vn, struct poll_watch *watch,
                                           struct poll_watch *watch,
                                           uint32_t events);
         pipe_poll_watch_vnode(vn, watch, events);
+        return;
     }
+    watch->events = events;
+    poll_watch_add(&vn->pollers, watch);
 }
 
 void vfs_poll_unwatch(struct poll_watch *watch) {
     poll_watch_remove(watch);
+}
+
+void vfs_poll_wake(struct vnode *vn, uint32_t events) {
+    if (!vn)
+        return;
+    if (vn->type == VNODE_PIPE) {
+        extern void pipe_poll_wake_vnode(struct vnode *vn, uint32_t events);
+        pipe_poll_wake_vnode(vn, events);
+        return;
+    }
+    poll_wait_wake(&vn->pollers, events);
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {
