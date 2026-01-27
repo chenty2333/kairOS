@@ -27,6 +27,9 @@ paddr_t pmm_alloc_page(void);
 paddr_t pmm_alloc_pages(size_t count);
 void pmm_free_page(paddr_t pa);
 void pmm_free_pages(paddr_t pa, size_t count);
+void pmm_get_page(paddr_t pa);
+void pmm_put_page(paddr_t pa);
+int pmm_page_refcount(paddr_t pa);
 size_t pmm_num_free_pages(void);
 struct page *alloc_pages(unsigned int order);
 void free_pages(struct page *page, unsigned int order);
@@ -64,6 +67,7 @@ void vmm_init(void);
 #define PTE_EXEC (1 << 3)
 #define PTE_USER (1 << 4)
 #define PTE_GLOBAL (1 << 5)
+#define PTE_COW (1 << 8)
 
 #define VM_READ (1 << 0)
 #define VM_WRITE (1 << 1)

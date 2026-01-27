@@ -37,7 +37,7 @@ static inline void list_add_tail(struct list_head *n, struct list_head *h) {
 static inline void list_del(struct list_head *e) {
     e->next->prev = e->prev;
     e->prev->next = e->next;
-    e->next = e->prev = NULL;
+    e->next = e->prev = e;
 }
 
 static inline bool list_empty(const struct list_head *h) {

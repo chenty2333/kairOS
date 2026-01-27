@@ -1,93 +1,170 @@
 /**
- * kernel/fs/vfs/pipe.c - Pipe Implementation using Semaphores
+ * kernel/fs/vfs/pipe.c - Pipe Implementation
  */
 
 #include <kairos/mm.h>
 #include <kairos/process.h>
+#include <kairos/sched.h>
+#include <kairos/poll.h>
+#include <kairos/signal.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
+#include <kairos/string.h>
 #include <kairos/vfs.h>
+#include <kairos/wait.h>
 
 #define PIPE_SIZE 4096
+#define PIPE_BUF 4096
 
 struct pipe {
     uint8_t *data;
     size_t head;
     size_t tail;
-    struct semaphore sem_full;  /* Items available to read */
-    struct semaphore sem_empty; /* Space available to write */
+    size_t count;
+    int readers;
+    int writers;
+    struct wait_queue rwait;
+    struct wait_queue wwait;
     struct mutex lock;
-    bool closed;
 };
+
+static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool nonblock) {
+    size_t read = 0;
+
+    mutex_lock(&p->lock);
+    while (read < len) {
+        while (p->count == 0) {
+            if (p->writers == 0) {
+                mutex_unlock(&p->lock);
+                return read;
+            }
+            if (nonblock) {
+                mutex_unlock(&p->lock);
+                return read ? (ssize_t)read : -EAGAIN;
+            }
+            wait_queue_add(&p->rwait, proc_current());
+            proc_current()->state = PROC_SLEEPING;
+            proc_current()->wait_channel = &p->rwait;
+            mutex_unlock(&p->lock);
+            schedule();
+            mutex_lock(&p->lock);
+        }
+
+        size_t want = len - read;
+        size_t can = (p->count < want) ? p->count : want;
+        size_t tail_space = PIPE_SIZE - p->tail;
+        size_t n1 = (can < tail_space) ? can : tail_space;
+        memcpy((uint8_t *)buf + read, p->data + p->tail, n1);
+        p->tail = (p->tail + n1) % PIPE_SIZE;
+        p->count -= n1;
+        read += n1;
+
+        size_t n2 = can - n1;
+        if (n2) {
+            memcpy((uint8_t *)buf + read, p->data + p->tail, n2);
+            p->tail = (p->tail + n2) % PIPE_SIZE;
+            p->count -= n2;
+            read += n2;
+        }
+
+        wait_queue_wakeup_one(&p->wwait);
+        if (nonblock)
+            break;
+    }
+    mutex_unlock(&p->lock);
+    return read;
+}
+
+static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, bool nonblock) {
+    size_t written = 0;
+    struct process *curr = proc_current();
+
+    mutex_lock(&p->lock);
+    while (written < len) {
+        if (p->readers == 0) {
+            mutex_unlock(&p->lock);
+            if (curr)
+                signal_send(curr->pid, SIGPIPE);
+            return written ? (ssize_t)written : -EPIPE;
+        }
+
+        size_t space = PIPE_SIZE - p->count;
+        if (len <= PIPE_BUF) {
+            while (space < len) {
+                if (p->readers == 0) {
+                    mutex_unlock(&p->lock);
+                    if (curr)
+                        signal_send(curr->pid, SIGPIPE);
+                    return written ? (ssize_t)written : -EPIPE;
+                }
+                if (nonblock) {
+                    mutex_unlock(&p->lock);
+                    return written ? (ssize_t)written : -EAGAIN;
+                }
+                wait_queue_add(&p->wwait, proc_current());
+                proc_current()->state = PROC_SLEEPING;
+                proc_current()->wait_channel = &p->wwait;
+                mutex_unlock(&p->lock);
+                schedule();
+                mutex_lock(&p->lock);
+                space = PIPE_SIZE - p->count;
+            }
+        } else if (space == 0) {
+            if (nonblock) {
+                mutex_unlock(&p->lock);
+                return written ? (ssize_t)written : -EAGAIN;
+            }
+            wait_queue_add(&p->wwait, proc_current());
+            proc_current()->state = PROC_SLEEPING;
+            proc_current()->wait_channel = &p->wwait;
+            mutex_unlock(&p->lock);
+            schedule();
+            mutex_lock(&p->lock);
+            continue;
+        }
+
+        size_t want = len - written;
+        size_t can = (PIPE_SIZE - p->count < want) ? (PIPE_SIZE - p->count) : want;
+        size_t head_space = PIPE_SIZE - p->head;
+        size_t n1 = (can < head_space) ? can : head_space;
+        memcpy(p->data + p->head, (const uint8_t *)buf + written, n1);
+        p->head = (p->head + n1) % PIPE_SIZE;
+        p->count += n1;
+        written += n1;
+
+        size_t n2 = can - n1;
+        if (n2) {
+            memcpy(p->data + p->head, (const uint8_t *)buf + written, n2);
+            p->head = (p->head + n2) % PIPE_SIZE;
+            p->count += n2;
+            written += n2;
+        }
+
+        wait_queue_wakeup_one(&p->rwait);
+        if (len <= PIPE_BUF || nonblock)
+            break;
+    }
+    mutex_unlock(&p->lock);
+    return written;
+}
 
 static ssize_t pipe_read(struct vnode *vn, void *buf, size_t len, off_t off) {
     (void)off;
-    struct pipe *p = vn->fs_data;
-    size_t read = 0;
-
-    for (size_t i = 0; i < len; i++) {
-        /* Wait for data if pipe is empty */
-        sem_wait(&p->sem_full);
-        
-        mutex_lock(&p->lock);
-        if (p->closed && p->head == p->tail) {
-            mutex_unlock(&p->lock);
-            break;
-        }
-        
-        ((uint8_t *)buf)[i] = p->data[p->tail];
-        p->tail = (p->tail + 1) % PIPE_SIZE;
-        read++;
-        mutex_unlock(&p->lock);
-        
-        /* Signal that space is now available */
-        sem_post(&p->sem_empty);
-    }
-    
-    return read;
+    return pipe_read_internal(vn->fs_data, buf, len, false);
 }
 
 static ssize_t pipe_write(struct vnode *vn, const void *buf, size_t len, off_t off) {
     (void)off;
-    struct pipe *p = vn->fs_data;
-    size_t written = 0;
-
-    for (size_t i = 0; i < len; i++) {
-        /* Wait for space if pipe is full */
-        sem_wait(&p->sem_empty);
-        
-        mutex_lock(&p->lock);
-        if (p->closed) {
-            mutex_unlock(&p->lock);
-            break;
-        }
-        
-        p->data[p->head] = ((const uint8_t *)buf)[i];
-        p->head = (p->head + 1) % PIPE_SIZE;
-        written++;
-        mutex_unlock(&p->lock);
-        
-        /* Signal that data is now available */
-        sem_post(&p->sem_full);
-    }
-    
-    return written;
+    return pipe_write_internal(vn->fs_data, buf, len, false);
 }
 
 static int pipe_close(struct vnode *vn) {
     struct pipe *p = vn->fs_data;
-    mutex_lock(&p->lock);
-    /* For a real pipe, we'd need reference counting for readers/writers */
-    /* This is a simplified version */
-    p->closed = true;
-    mutex_unlock(&p->lock);
-    
-    /* Wake up any waiters */
-    sem_post(&p->sem_full);
-    sem_post(&p->sem_empty);
-    
-    /* If it's the last reference, free the pipe */
-    /* (This part depends on VFS refcounting logic) */
+    if (!p)
+        return 0;
+    kfree(p->data);
+    kfree(p);
+    kfree(vn);
     return 0;
 }
 
@@ -95,6 +172,7 @@ static struct file_ops pipe_ops = {
     .read = pipe_read,
     .write = pipe_write,
     .close = pipe_close,
+    .poll = NULL,
 };
 
 int pipe_create(struct file **read_pipe, struct file **write_pipe) {
@@ -107,8 +185,13 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
         return -ENOMEM;
     }
     
-    sem_init(&p->sem_full, 0, "pipe_full");
-    sem_init(&p->sem_empty, PIPE_SIZE, "pipe_empty");
+    p->head = 0;
+    p->tail = 0;
+    p->count = 0;
+    p->readers = 1;
+    p->writers = 1;
+    wait_queue_init(&p->rwait);
+    wait_queue_init(&p->wwait);
     mutex_init(&p->lock, "pipe_lock");
     
     struct vnode *vn = kzalloc(sizeof(*vn));
@@ -143,4 +226,72 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     (*write_pipe)->flags = O_WRONLY;
     
     return 0;
+}
+
+void pipe_close_end(struct vnode *vn, uint32_t flags) {
+    struct pipe *p = vn->fs_data;
+    int readers, writers;
+    bool dec_reader = false;
+    bool dec_writer = false;
+    if (!p)
+        return;
+    mutex_lock(&p->lock);
+    if ((flags & O_RDWR) == O_RDWR) {
+        dec_reader = true;
+        dec_writer = true;
+    } else if (flags & O_WRONLY) {
+        dec_writer = true;
+    } else {
+        dec_reader = true;
+    }
+    if (dec_reader)
+        p->readers--;
+    if (dec_writer)
+        p->writers--;
+    readers = p->readers;
+    writers = p->writers;
+    mutex_unlock(&p->lock);
+
+    if (dec_reader && writers == 0)
+        wait_queue_wakeup_all(&p->rwait);
+    if (dec_writer && readers == 0)
+        wait_queue_wakeup_all(&p->wwait);
+}
+
+ssize_t pipe_read_file(struct file *file, void *buf, size_t len) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    return pipe_read_internal(file->vnode->fs_data, buf, len,
+                              (file->flags & O_NONBLOCK) != 0);
+}
+
+ssize_t pipe_write_file(struct file *file, const void *buf, size_t len) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    return pipe_write_internal(file->vnode->fs_data, buf, len,
+                               (file->flags & O_NONBLOCK) != 0);
+}
+
+int pipe_poll_file(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+    struct pipe *p = file->vnode->fs_data;
+    uint32_t revents = 0;
+
+    mutex_lock(&p->lock);
+    if (events & POLLIN) {
+        if (p->count > 0 || p->writers == 0)
+            revents |= POLLIN;
+    }
+    if (events & POLLOUT) {
+        if (p->readers == 0)
+            revents |= POLLERR;
+        else if (p->count < PIPE_SIZE)
+            revents |= POLLOUT;
+    }
+    if (p->writers == 0)
+        revents |= POLLHUP;
+    mutex_unlock(&p->lock);
+
+    return (int)revents;
 }

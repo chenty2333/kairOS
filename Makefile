@@ -130,6 +130,7 @@ CORE_SRCS := \
     kernel/core/proc/signal.c \
     kernel/core/sched/sched.c \
     kernel/core/sync/sync.c \
+    kernel/core/sync/wait.c \
     kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
@@ -250,7 +251,12 @@ else
 endif
 
 # Add network (virtio-net for development)
-QEMU_FLAGS += -netdev user,id=net0,hostfwd=tcp::8080-:80
+HOSTFWD_PORT ?=
+ifeq ($(HOSTFWD_PORT),)
+  QEMU_FLAGS += -netdev user,id=net0
+else
+  QEMU_FLAGS += -netdev user,id=net0,hostfwd=tcp::$(HOSTFWD_PORT)-:80
+endif
 QEMU_FLAGS += -device virtio-net-pci,netdev=net0
 
 run: $(KERNEL)

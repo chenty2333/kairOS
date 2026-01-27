@@ -12,6 +12,8 @@
 
 /* CFS Scheduler Tunables */
 #define SCHED_LATENCY_NS 6000000UL
+#define SCHED_MIN_GRANULARITY_NS 1000000UL
+#define SCHED_WAKEUP_GRANULARITY_NS 2000000UL
 
 static inline uint64_t sched_clock_ns(void) {
     return arch_timer_ticks_to_ns(arch_timer_ticks());
@@ -122,8 +124,15 @@ void sched_enqueue(struct process *p) {
     rq->nr_running++;
     update_min_vruntime(rq);
 
+    struct process *curr = rq->curr;
     spin_unlock(&rq->lock);
     
+    if (curr && curr != rq->idle && curr != p) {
+        if (p->vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr->vruntime) {
+            cpu_data[cpu].resched_needed = true;
+        }
+    }
+
     if (cpu != arch_cpu_id())
         arch_send_ipi(cpu, IPI_RESCHEDULE);
         
@@ -277,14 +286,24 @@ void sched_tick(void) {
     struct process *curr = proc_current();
 
     cpu->ticks++;
+    uint64_t now = sched_clock_ns();
+    uint64_t delta = (curr && now > curr->last_run_time) ? now - curr->last_run_time : 0;
     /* We don't necessarily need the lock for simple status check, but safety first */
     if (spin_trylock(&rq->lock)) {
         if (curr && curr != cpu->idle_proc) {
             rq->curr = curr;
             update_curr(rq);
         }
-        if (rq->nr_running > 0)
+        if (curr && curr != cpu->idle_proc) {
+            uint32_t nr = rq->nr_running + 1;
+            uint64_t slice = SCHED_LATENCY_NS / (nr ? nr : 1);
+            if (slice < SCHED_MIN_GRANULARITY_NS)
+                slice = SCHED_MIN_GRANULARITY_NS;
+            if (delta >= slice)
+                cpu->resched_needed = true;
+        } else if (rq->nr_running > 0) {
             cpu->resched_needed = true;
+        }
         /* Preemption logic placeholder */
         spin_unlock(&rq->lock);
     }

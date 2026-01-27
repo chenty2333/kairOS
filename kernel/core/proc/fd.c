@@ -18,13 +18,15 @@ int fd_alloc(struct process *p, struct file *file) {
         return -EINVAL;
     }
 
+    mutex_lock(&p->files_lock);
     for (int fd = 0; fd < CONFIG_MAX_FILES_PER_PROC; fd++) {
         if (!p->files[fd]) {
             p->files[fd] = file;
+            mutex_unlock(&p->files_lock);
             return fd;
         }
     }
-
+    mutex_unlock(&p->files_lock);
     return -EMFILE;
 }
 
@@ -35,7 +37,10 @@ struct file *fd_get(struct process *p, int fd) {
     if (!p || fd < 0 || fd >= CONFIG_MAX_FILES_PER_PROC) {
         return NULL;
     }
-    return p->files[fd];
+    mutex_lock(&p->files_lock);
+    struct file *file = p->files[fd];
+    mutex_unlock(&p->files_lock);
+    return file;
 }
 
 /**
@@ -48,11 +53,14 @@ int fd_close(struct process *p, int fd) {
         return -EBADF;
     }
 
+    mutex_lock(&p->files_lock);
     if (!(file = p->files[fd])) {
+        mutex_unlock(&p->files_lock);
         return -EBADF;
     }
 
     p->files[fd] = NULL;
+    mutex_unlock(&p->files_lock);
     return vfs_close(file);
 }
 
@@ -66,12 +74,16 @@ static inline void file_get(struct file *file) {
  * fd_dup - Duplicate a file descriptor
  */
 int fd_dup(struct process *p, int oldfd) {
-    struct file *file = fd_get(p, oldfd);
+    struct file *file;
+    mutex_lock(&p->files_lock);
+    file = (oldfd >= 0 && oldfd < CONFIG_MAX_FILES_PER_PROC) ? p->files[oldfd] : NULL;
     if (!file) {
+        mutex_unlock(&p->files_lock);
         return -EBADF;
     }
 
     file_get(file);
+    mutex_unlock(&p->files_lock);
     return fd_alloc(p, file);
 }
 
@@ -80,22 +92,31 @@ int fd_dup(struct process *p, int oldfd) {
  */
 int fd_dup2(struct process *p, int oldfd, int newfd) {
     struct file *file;
+    struct file *old_new;
 
     if (newfd < 0 || newfd >= CONFIG_MAX_FILES_PER_PROC) {
         return -EBADF;
     }
 
-    if (!(file = fd_get(p, oldfd))) {
+    mutex_lock(&p->files_lock);
+    file = (oldfd >= 0 && oldfd < CONFIG_MAX_FILES_PER_PROC) ? p->files[oldfd] : NULL;
+    if (!file) {
+        mutex_unlock(&p->files_lock);
         return -EBADF;
     }
 
     if (oldfd == newfd) {
+        mutex_unlock(&p->files_lock);
         return newfd;
     }
 
-    fd_close(p, newfd);
-    file_get(file);
+    old_new = p->files[newfd];
     p->files[newfd] = file;
+    file_get(file);
+    mutex_unlock(&p->files_lock);
+
+    if (old_new)
+        vfs_close(old_new);
 
     return newfd;
 }

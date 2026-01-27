@@ -101,6 +101,7 @@ struct mm_struct *mm_clone(struct mm_struct *src) {
     mutex_lock(&src->lock);
     dst->brk = src->brk;
     dst->start_stack = src->start_stack;
+    bool cow_updated = false;
 
     struct vm_area *sv;
     list_for_each_entry(sv, &src->vma_list, list) {
@@ -113,14 +114,35 @@ struct mm_struct *mm_clone(struct mm_struct *src) {
         for (vaddr_t va = sv->start; va < sv->end; va += CONFIG_PAGE_SIZE) {
             paddr_t spa = arch_mmu_translate(src->pgdir, va);
             if (!spa) continue;
-            paddr_t dpa = pmm_alloc_page();
-            if (!dpa) goto fail;
-            memcpy(phys_to_virt(dpa), phys_to_virt(spa), CONFIG_PAGE_SIZE);
-            uint64_t f = PTE_USER | PTE_READ | ((dv->flags & VM_WRITE) ? PTE_WRITE : 0) | ((dv->flags & VM_EXEC) ? PTE_EXEC : 0);
-            if (arch_mmu_map(dst->pgdir, va, dpa, f) < 0) { pmm_free_page(dpa); goto fail; }
+            paddr_t pa = ALIGN_DOWN(spa, CONFIG_PAGE_SIZE);
+
+            uint64_t f = PTE_USER | PTE_READ | ((dv->flags & VM_EXEC) ? PTE_EXEC : 0);
+            bool cow = (dv->flags & VM_WRITE) != 0;
+            if (cow)
+                f |= PTE_COW;
+            else
+                f |= (dv->flags & VM_WRITE) ? PTE_WRITE : 0;
+
+            if (arch_mmu_map(dst->pgdir, va, pa, f) < 0) goto fail;
+            pmm_get_page(pa);
+
+            if (cow) {
+                uint64_t spte = arch_mmu_get_pte(src->pgdir, va);
+                if (spte & PTE_WRITE) {
+                    spte = (spte & ~PTE_WRITE) | PTE_COW;
+                    arch_mmu_set_pte(src->pgdir, va, spte);
+                    cow_updated = true;
+                } else if (!(spte & PTE_COW)) {
+                    spte |= PTE_COW;
+                    arch_mmu_set_pte(src->pgdir, va, spte);
+                    cow_updated = true;
+                }
+            }
         }
     }
     mutex_unlock(&src->lock);
+    if (cow_updated)
+        arch_mmu_flush_tlb_all();
     return dst;
 fail:
     mutex_unlock(&src->lock);
@@ -136,7 +158,36 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
     if (!vma || ((flags & PTE_WRITE) && !(vma->flags & VM_WRITE))) { mutex_unlock(&mm->lock); return -EFAULT; }
 
     vaddr_t va = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
-    if (arch_mmu_translate(mm->pgdir, va)) { mutex_unlock(&mm->lock); return -EEXIST; }
+    uint64_t pte = arch_mmu_get_pte(mm->pgdir, va);
+    if (pte & PTE_VALID) {
+        if ((flags & PTE_WRITE) && (pte & PTE_COW)) {
+            paddr_t old_pa = ALIGN_DOWN(arch_mmu_translate(mm->pgdir, va), CONFIG_PAGE_SIZE);
+            if (!old_pa) { mutex_unlock(&mm->lock); return -EFAULT; }
+
+            if (pmm_page_refcount(old_pa) == 1) {
+                pte = (pte & ~PTE_COW) | PTE_WRITE;
+                arch_mmu_set_pte(mm->pgdir, va, pte);
+                arch_mmu_flush_tlb_page(va);
+                mutex_unlock(&mm->lock);
+                return 0;
+            }
+
+            paddr_t new_pa = pmm_alloc_page();
+            if (!new_pa) { mutex_unlock(&mm->lock); return -ENOMEM; }
+            memcpy(phys_to_virt(new_pa), phys_to_virt(old_pa), CONFIG_PAGE_SIZE);
+
+            uint64_t keep_flags = pte & ((1UL << 10) - 1);
+            pte = ((new_pa / CONFIG_PAGE_SIZE) << 10) | keep_flags;
+            pte = (pte & ~PTE_COW) | PTE_WRITE;
+            arch_mmu_set_pte(mm->pgdir, va, pte);
+            arch_mmu_flush_tlb_page(va);
+            pmm_put_page(old_pa);
+            mutex_unlock(&mm->lock);
+            return 0;
+        }
+        mutex_unlock(&mm->lock);
+        return 0;
+    }
 
     paddr_t pa = pmm_alloc_page();
     if (!pa) { mutex_unlock(&mm->lock); return -ENOMEM; }

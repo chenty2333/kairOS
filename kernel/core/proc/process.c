@@ -21,6 +21,9 @@ static struct kmem_cache *proc_cache;
 static struct process proc_table[CONFIG_MAX_PROCESSES];
 static spinlock_t proc_table_lock = SPINLOCK_INIT;
 static pid_t next_pid = 1;
+static struct process *reaper_proc = NULL;
+
+static void proc_reparent_children(struct process *p);
 
 void proc_init(void) {
     memset(proc_table, 0, sizeof(proc_table));
@@ -29,6 +32,7 @@ void proc_init(void) {
         INIT_LIST_HEAD(&proc_table[i].children);
         INIT_LIST_HEAD(&proc_table[i].sibling);
         INIT_LIST_HEAD(&proc_table[i].wait_list);
+        mutex_init(&proc_table[i].files_lock, "files_lock");
         wait_queue_init(&proc_table[i].exit_wait);
     }
     proc_cache = kmem_cache_create("process", sizeof(struct process), NULL);
@@ -87,6 +91,7 @@ static struct process *proc_alloc(void) {
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
     memset(p->files, 0, sizeof(p->files));
+    mutex_init(&p->files_lock, "files_lock");
     strcpy(p->cwd, "/");
 
     INIT_LIST_HEAD(&p->children);
@@ -121,7 +126,12 @@ void proc_free_internal(struct process *p) {
 static void proc_free(struct process *p) {
     if (!p) return;
     if (p->mm) mm_destroy(p->mm);
-    if (!list_empty(&p->sibling)) list_del(&p->sibling);
+    if (!list_empty(&p->sibling)) {
+        spin_lock(&proc_table_lock);
+        if (!list_empty(&p->sibling))
+            list_del(&p->sibling);
+        spin_unlock(&proc_table_lock);
+    }
     proc_free_internal(p);
 }
 
@@ -182,10 +192,17 @@ struct process *proc_fork(void) {
 
     if (!(child->mm = mm_clone(parent->mm))) { proc_free(child); return NULL; }
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
+    mutex_lock(&parent->files_lock);
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         struct file *f = parent->files[i];
-        if (f) { mutex_lock(&f->lock); f->refcount++; mutex_unlock(&f->lock); child->files[i] = f; }
+        if (f) {
+            mutex_lock(&f->lock);
+            f->refcount++;
+            mutex_unlock(&f->lock);
+            child->files[i] = f;
+        }
     }
+    mutex_unlock(&parent->files_lock);
 
     struct trap_frame *tf = get_current_trapframe();
     if (tf) arch_setup_fork_child(child->context, tf);
@@ -199,7 +216,10 @@ struct process *proc_fork(void) {
 noreturn void proc_exit(int status) {
     struct process *p = proc_current();
     pr_info("Process %d exiting: %d\n", p->pid, status);
-    
+
+    fd_close_all(p);
+    proc_reparent_children(p);
+
     sched_dequeue(p);
     p->exit_code = status;
     p->state = PROC_ZOMBIE;
@@ -333,8 +353,30 @@ static int init_thread(void *arg __attribute__((unused))) {
 struct process *proc_start_init(void) {
     struct process *p = kthread_create(init_thread, NULL, "init");
     if (!p) return NULL;
+    reaper_proc = p;
     sched_enqueue(p);
     return p;
+}
+
+static void proc_reparent_children(struct process *p) {
+    struct process *reaper = reaper_proc;
+    if (!reaper || reaper == p)
+        return;
+
+    bool wake_reaper = false;
+    spin_lock(&proc_table_lock);
+    struct process *child, *tmp;
+    list_for_each_entry_safe(child, tmp, &p->children, sibling) {
+        list_del(&child->sibling);
+        child->parent = reaper;
+        child->ppid = reaper->pid;
+        list_add_tail(&child->sibling, &reaper->children);
+        if (child->state == PROC_ZOMBIE)
+            wake_reaper = true;
+    }
+    spin_unlock(&proc_table_lock);
+    if (wake_reaper)
+        wait_queue_wakeup_all(&reaper->exit_wait);
 }
 
 static bool is_process_active(struct process *p) {
@@ -352,6 +394,7 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
     while (1) {
         bool found = false;
         bool busy_zombie = false;
+        struct process *reap = NULL;
         spin_lock(&proc_table_lock);
         list_for_each_entry_safe(child, tmp, &p->children, sibling) {
             found = true;
@@ -363,14 +406,19 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
                         continue;
                     }
                 }
-                pid_t cpid = child->pid;
-                if (status) *status = child->exit_code;
-                proc_free(child);
-                spin_unlock(&proc_table_lock);
-                return cpid;
+                child->state = PROC_REAPING;
+                list_del(&child->sibling);
+                reap = child;
+                break;
             }
         }
         spin_unlock(&proc_table_lock);
+        if (reap) {
+            pid_t cpid = reap->pid;
+            if (status) *status = reap->exit_code;
+            proc_free(reap);
+            return cpid;
+        }
         if (!found) return -ECHILD;
 
         if (busy_zombie) {
@@ -378,11 +426,9 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
             continue;
         }
 
-        spin_lock(&p->exit_wait.lock);
         p->state = PROC_SLEEPING;
         p->wait_channel = &p->exit_wait;
         wait_queue_add(&p->exit_wait, p);
-        spin_unlock(&p->exit_wait.lock);
         
         schedule();
     }
@@ -393,14 +439,8 @@ void proc_wakeup(struct process *p) {
     if (!p || p->state != PROC_SLEEPING)
         return;
 
-    if (p->wait_channel && !list_empty(&p->wait_list)) {
-        struct wait_queue *wq = (struct wait_queue *)p->wait_channel;
-        spin_lock(&wq->lock);
-        if (!list_empty(&p->wait_list)) {
-            wait_queue_remove(wq, p);
-        }
-        spin_unlock(&wq->lock);
-    }
+    if (p->wait_channel && !list_empty(&p->wait_list))
+        wait_queue_remove((struct wait_queue *)p->wait_channel, p);
     p->wait_channel = NULL;
     p->state = PROC_RUNNABLE;
     sched_enqueue(p);
@@ -423,21 +463,3 @@ void proc_wakeup_all(void *channel) {
     }
     spin_unlock(&proc_table_lock);
 }
-
-void wait_queue_init(struct wait_queue *wq) { spin_init(&wq->lock); INIT_LIST_HEAD(&wq->head); }
-void wait_queue_add(struct wait_queue *wq, struct process *p) { list_add_tail(&p->wait_list, &wq->head); }
-void wait_queue_remove(struct wait_queue *wq, struct process *p) { (void)wq; list_del(&p->wait_list); INIT_LIST_HEAD(&p->wait_list); }
-
-static void _wait_queue_wakeup(struct wait_queue *wq, bool all) {
-    spin_lock(&wq->lock);
-    while (!list_empty(&wq->head)) {
-        struct process *p = list_first_entry(&wq->head, struct process, wait_list);
-        list_del(&p->wait_list); INIT_LIST_HEAD(&p->wait_list);
-        p->wait_channel = NULL;
-        proc_wakeup(p);
-        if (!all) break;
-    }
-    spin_unlock(&wq->lock);
-}
-void wait_queue_wakeup_one(struct wait_queue *wq) { _wait_queue_wakeup(wq, false); }
-void wait_queue_wakeup_all(struct wait_queue *wq) { _wait_queue_wakeup(wq, true); }

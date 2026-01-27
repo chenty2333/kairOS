@@ -14,6 +14,10 @@ typedef uint32_t uid_t, gid_t, mode_t, dev_t, blksize_t;
 typedef int64_t off_t, ssize_t, time_t, suseconds_t;
 typedef uint64_t ino_t, blkcnt_t, nlink_t, useconds_t, paddr_t, vaddr_t,
     pgoff_t;
+struct timeval {
+    time_t tv_sec;
+    suseconds_t tv_usec;
+};
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

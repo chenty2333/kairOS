@@ -83,7 +83,10 @@ struct file {
 #define O_CREAT 0100
 #define O_TRUNC 01000
 #define O_APPEND 02000
+#define O_NONBLOCK 04000
 #define O_DIRECTORY 0200000
+#define F_GETFL 3
+#define F_SETFL 4
 
 struct mount {
     char *mountpoint;
@@ -115,6 +118,7 @@ struct file_ops {
     int (*close)(struct vnode *vn);
     int (*stat)(struct vnode *vn, struct stat *st);
     int (*truncate)(struct vnode *vn, off_t length);
+    int (*poll)(struct vnode *vn, uint32_t events);
 };
 
 void vfs_init(void);
@@ -132,6 +136,7 @@ void vfs_file_free(struct file *file);
 void vfs_dump_mounts(void);
 ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
+int vfs_poll(struct file *file, uint32_t events);
 off_t vfs_seek(struct file *file, off_t offset, int whence);
 int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);

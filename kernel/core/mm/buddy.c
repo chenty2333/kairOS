@@ -189,7 +189,27 @@ paddr_t pmm_alloc_pages(size_t count) {
     return p ? page_to_phys(p) : 0;
 }
 
-void pmm_free_page(paddr_t pa) { pmm_free_pages(pa, 1); }
+void pmm_get_page(paddr_t pa) {
+    struct page *p = phys_to_page(pa);
+    if (p)
+        __atomic_add_fetch(&p->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void pmm_put_page(paddr_t pa) {
+    struct page *p = phys_to_page(pa);
+    if (!p)
+        return;
+    if (__atomic_sub_fetch(&p->refcount, 1, __ATOMIC_RELAXED) == 0) {
+        free_pages(p, 0);
+    }
+}
+
+int pmm_page_refcount(paddr_t pa) {
+    struct page *p = phys_to_page(pa);
+    return p ? __atomic_load_n(&p->refcount, __ATOMIC_RELAXED) : 0;
+}
+
+void pmm_free_page(paddr_t pa) { pmm_put_page(pa); }
 
 void pmm_free_pages(paddr_t pa, size_t count) {
     if (!count) return;

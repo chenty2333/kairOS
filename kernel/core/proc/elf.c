@@ -109,7 +109,7 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
         
         /* Copy to user stack */
         paddr_t pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
-        void *dst = (void *)(pa + (sp % CONFIG_PAGE_SIZE));
+        void *dst = (uint8_t *)phys_to_virt(pa) + (sp % CONFIG_PAGE_SIZE);
         memcpy(dst, argv[i], len);
         u_argv[i] = sp;
     }
@@ -123,12 +123,12 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
     sp -= argv_ptr_size;
     
     pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
-    memcpy((void *)(pa + (sp % CONFIG_PAGE_SIZE)), u_argv, argv_ptr_size);
+    memcpy((uint8_t *)phys_to_virt(pa) + (sp % CONFIG_PAGE_SIZE), u_argv, argv_ptr_size);
 
     /* Push argc */
     sp -= sizeof(long);
     pa = arch_mmu_translate(mm->pgdir, ALIGN_DOWN(sp, CONFIG_PAGE_SIZE));
-    *(long *)(pa + (sp % CONFIG_PAGE_SIZE)) = (long)argc;
+    *(long *)((uint8_t *)phys_to_virt(pa) + (sp % CONFIG_PAGE_SIZE)) = (long)argc;
 
     /* Final alignment */
     sp = ALIGN_DOWN(sp, 16);

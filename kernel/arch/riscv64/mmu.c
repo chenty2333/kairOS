@@ -24,6 +24,7 @@
 #define PTE_A (1UL << 6)
 #define PTE_D (1UL << 7)
 #define PTE_PPN_SHIFT 10
+#define PTE_RSW0 (1UL << 8)
 
 #define SATP_MODE_SV39 (8UL << 60)
 static paddr_t kernel_pgdir;
@@ -86,6 +87,9 @@ static uint64_t flags_to_pte(uint64_t f) {
     }
     if (f & PTE_GLOBAL) {
         p |= PTE_G;
+    }
+    if (f & PTE_COW) {
+        p |= PTE_RSW0;
     }
     return p;
 }
@@ -192,6 +196,19 @@ paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
     return (pte && (*pte & PTE_V))
                ? (paddr_t)pte_to_pa(*pte) | (va & (PAGE_SIZE - 1))
                : 0;
+}
+
+uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
+    uint64_t *pte = walk_pgtable(table, va, false);
+    return pte ? *pte : 0;
+}
+
+int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte) {
+    uint64_t *entry = walk_pgtable(table, va, false);
+    if (!entry)
+        return -ENOENT;
+    *entry = pte;
+    return 0;
 }
 
 void arch_mmu_switch(paddr_t table) {

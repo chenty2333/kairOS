@@ -53,6 +53,8 @@ int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);
 int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);
 int arch_mmu_unmap(paddr_t table, vaddr_t va);
 paddr_t arch_mmu_translate(paddr_t table, vaddr_t va);
+uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va);
+int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte);
 void arch_mmu_switch(paddr_t table);
 paddr_t arch_mmu_current(void);
 void arch_mmu_flush_tlb(void);
@@ -66,6 +68,7 @@ uint64_t arch_timer_ticks(void);
 uint64_t arch_timer_freq(void);
 uint64_t arch_timer_ticks_to_ns(uint64_t ticks);
 uint64_t arch_timer_ns_to_ticks(uint64_t ns);
+uint64_t arch_timer_get_ticks(void);
 void arch_timer_set_next(uint64_t ticks);
 void arch_timer_ack(void);
 

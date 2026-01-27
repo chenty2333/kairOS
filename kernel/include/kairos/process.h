@@ -10,6 +10,7 @@
 #include <kairos/mm.h>
 #include <kairos/rbtree.h>
 #include <kairos/spinlock.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/wait.h>
 
@@ -19,7 +20,8 @@ enum proc_state {
     PROC_RUNNABLE,
     PROC_RUNNING,
     PROC_SLEEPING,
-    PROC_ZOMBIE
+    PROC_ZOMBIE,
+    PROC_REAPING
 };
 
 struct process {
@@ -40,6 +42,7 @@ struct process {
 
     struct mm_struct *mm;
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
+    struct mutex files_lock;
     char cwd[CONFIG_PATH_MAX];
 
     /* Signals & Waiting */

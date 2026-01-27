@@ -6,6 +6,7 @@
 #include <kairos/list.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
@@ -333,15 +334,23 @@ int vfs_close(struct file *file) {
         return 0;
     }
     mutex_unlock(&file->lock);
-    if (file->vnode->ops->close)
-        file->vnode->ops->close(file->vnode);
+    if (file->vnode && file->vnode->type == VNODE_PIPE) {
+        extern void pipe_close_end(struct vnode *vn, uint32_t flags);
+        pipe_close_end(file->vnode, file->flags);
+    }
     vnode_put(file->vnode);
     vfs_file_free(file);
     return 0;
 }
 
 ssize_t vfs_read(struct file *file, void *buf, size_t len) {
-    if (!file || !file->vnode->ops->read)
+    if (!file)
+        return -EINVAL;
+    if (file->vnode->type == VNODE_PIPE) {
+        extern ssize_t pipe_read_file(struct file *file, void *buf, size_t len);
+        return pipe_read_file(file, buf, len);
+    }
+    if (!file->vnode->ops->read)
         return -EINVAL;
     mutex_lock(&file->lock);
     ssize_t ret = file->vnode->ops->read(file->vnode, buf, len, file->offset);
@@ -352,7 +361,13 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
 }
 
 ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
-    if (!file || !file->vnode->ops->write)
+    if (!file)
+        return -EINVAL;
+    if (file->vnode->type == VNODE_PIPE) {
+        extern ssize_t pipe_write_file(struct file *file, const void *buf, size_t len);
+        return pipe_write_file(file, buf, len);
+    }
+    if (!file->vnode->ops->write)
         return -EINVAL;
     mutex_lock(&file->lock);
     if (file->flags & O_APPEND)
@@ -362,6 +377,18 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
         file->offset += ret;
     mutex_unlock(&file->lock);
     return ret;
+}
+
+int vfs_poll(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+    if (file->vnode->type == VNODE_PIPE) {
+        extern int pipe_poll_file(struct file *file, uint32_t events);
+        return pipe_poll_file(file, events);
+    }
+    if (file->vnode->ops->poll)
+        return file->vnode->ops->poll(file->vnode, events);
+    return events & (POLLIN | POLLOUT);
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {

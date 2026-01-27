@@ -3,13 +3,18 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
+#include <kairos/poll.h>
+#include <kairos/select.h>
+#include <kairos/sched.h>
 #include <kairos/sync.h>
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 #include <kairos/string.h>
+#include <kairos/mm.h>
 
 /* Forward declarations for internal implementations */
 extern int do_sem_init(int count);
@@ -75,26 +80,46 @@ int64_t sys_open(uint64_t path, uint64_t flags, uint64_t mode, uint64_t a3, uint
 static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count, bool is_write) {
     struct file *f = fd_get(proc_current(), (int)fd);
     uint8_t kbuf[512];
-    size_t chunk = (count > sizeof(kbuf)) ? sizeof(kbuf) : count;
+    size_t done = 0;
 
     if (!f) {
         if (is_write && (fd == 1 || fd == 2)) {
-            if (copy_from_user(kbuf, (const void *)buf, chunk) < 0) return -EFAULT;
-            for (size_t i = 0; i < chunk; i++)
-                arch_early_putchar((char)kbuf[i]);
-            return (int64_t)chunk;
+            while (done < count) {
+                size_t chunk = (count - done > sizeof(kbuf)) ? sizeof(kbuf) : (size_t)(count - done);
+                if (copy_from_user(kbuf, (const void *)(buf + done), chunk) < 0)
+                    return done ? (int64_t)done : -EFAULT;
+                for (size_t i = 0; i < chunk; i++)
+                    arch_early_putchar((char)kbuf[i]);
+                done += chunk;
+            }
+            return (int64_t)done;
         }
         return -EBADF;
     }
     
-    if (is_write) {
-        if (copy_from_user(kbuf, (const void *)buf, chunk) < 0) return -EFAULT;
-        return (int64_t)vfs_write(f, kbuf, chunk);
-    } else {
-        ssize_t n = vfs_read(f, kbuf, chunk);
-        if (n > 0 && copy_to_user((void *)buf, kbuf, (size_t)n) < 0) return -EFAULT;
-        return (int64_t)n;
+    while (done < count) {
+        size_t chunk = (count - done > sizeof(kbuf)) ? sizeof(kbuf) : (size_t)(count - done);
+        if (is_write) {
+            if (copy_from_user(kbuf, (const void *)(buf + done), chunk) < 0)
+                return done ? (int64_t)done : -EFAULT;
+            ssize_t n = vfs_write(f, kbuf, chunk);
+            if (n < 0)
+                return done ? (int64_t)done : (int64_t)n;
+            if (n == 0)
+                break;
+            done += (size_t)n;
+        } else {
+            ssize_t n = vfs_read(f, kbuf, chunk);
+            if (n < 0)
+                return done ? (int64_t)done : (int64_t)n;
+            if (n == 0)
+                break;
+            if (copy_to_user((void *)(buf + done), kbuf, (size_t)n) < 0)
+                return done ? (int64_t)done : -EFAULT;
+            done += (size_t)n;
+        }
     }
+    return (int64_t)done;
 }
 
 int64_t sys_read(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -141,16 +166,216 @@ int64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2, uint64_t a3, uint6
     return (int64_t)fd_dup2(proc_current(), (int)oldfd, (int)newfd);
 }
 
-int64_t sys_pipe(uint64_t fd_array, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    struct file *rf, *wf;
-    int fds[2], ret;
+static int pipe_create_fds(uint64_t fd_array, uint32_t flags) {
+    struct file *rf = NULL, *wf = NULL;
+    int fds[2] = {-1, -1}, ret = 0;
     extern int pipe_create(struct file **read_pipe, struct file **write_pipe);
 
-    if ((ret = pipe_create(&rf, &wf)) < 0) return ret;
-    if ((fds[0] = fd_alloc(proc_current(), rf)) < 0 || (fds[1] = fd_alloc(proc_current(), wf)) < 0) return -EMFILE;
-    if (copy_to_user((void *)fd_array, fds, sizeof(fds)) < 0) return -EFAULT;
+    if ((ret = pipe_create(&rf, &wf)) < 0)
+        return ret;
+
+    if (flags & O_NONBLOCK) {
+        mutex_lock(&rf->lock);
+        rf->flags |= O_NONBLOCK;
+        mutex_unlock(&rf->lock);
+        mutex_lock(&wf->lock);
+        wf->flags |= O_NONBLOCK;
+        mutex_unlock(&wf->lock);
+    }
+
+    if ((fds[0] = fd_alloc(proc_current(), rf)) < 0) {
+        ret = -EMFILE;
+        goto err;
+    }
+    if ((fds[1] = fd_alloc(proc_current(), wf)) < 0) {
+        ret = -EMFILE;
+        goto err;
+    }
+    if (copy_to_user((void *)fd_array, fds, sizeof(fds)) < 0) {
+        ret = -EFAULT;
+        goto err;
+    }
     return 0;
+err:
+    if (fds[0] >= 0) {
+        fd_close(proc_current(), fds[0]);
+    } else if (rf) {
+        vfs_close(rf);
+    }
+    if (fds[1] >= 0) {
+        fd_close(proc_current(), fds[1]);
+    } else if (wf) {
+        vfs_close(wf);
+    }
+    return ret;
+}
+
+int64_t sys_pipe(uint64_t fd_array, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return (int64_t)pipe_create_fds(fd_array, 0);
+}
+
+int64_t sys_pipe2(uint64_t fd_array, uint64_t flags, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    uint32_t allowed = O_NONBLOCK;
+    if (flags & ~allowed)
+        return -EINVAL;
+    return (int64_t)pipe_create_fds(fd_array, (uint32_t)flags);
+}
+
+int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f) return -EBADF;
+
+    switch ((int)cmd) {
+    case F_GETFL: {
+        mutex_lock(&f->lock);
+        int flags = (int)f->flags;
+        mutex_unlock(&f->lock);
+        return flags;
+    }
+    case F_SETFL: {
+        uint32_t setmask = O_NONBLOCK | O_APPEND;
+        mutex_lock(&f->lock);
+        f->flags = (f->flags & ~setmask) | ((uint32_t)arg & setmask);
+        int flags = (int)f->flags;
+        mutex_unlock(&f->lock);
+        return flags;
+    }
+    default:
+        return -EINVAL;
+    }
+}
+
+static int poll_check_fds(struct pollfd *fds, size_t nfds) {
+    int ready = 0;
+    for (size_t i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+        if (fds[i].fd < 0) {
+            fds[i].revents = POLLNVAL;
+            ready++;
+            continue;
+        }
+        struct file *f = fd_get(proc_current(), fds[i].fd);
+        if (!f) {
+            fds[i].revents = POLLNVAL;
+            ready++;
+            continue;
+        }
+        uint32_t revents = (uint32_t)vfs_poll(f, (uint32_t)fds[i].events);
+        fds[i].revents = (short)revents;
+        if (revents)
+            ready++;
+    }
+    return ready;
+}
+
+int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
+                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (nfds == 0) return 0;
+    if (nfds > 1024) return -EINVAL;
+
+    size_t bytes = nfds * sizeof(struct pollfd);
+    struct pollfd *kfds = kmalloc(bytes);
+    if (!kfds) return -ENOMEM;
+    if (copy_from_user(kfds, (void *)fds_ptr, bytes) < 0) {
+        kfree(kfds);
+        return -EFAULT;
+    }
+
+    int timeout = (int)timeout_ms;
+    uint64_t start = arch_timer_get_ticks();
+    uint64_t deadline = (timeout < 0) ? 0 : start + (uint64_t)timeout * CONFIG_HZ / 1000;
+
+    int ready;
+    do {
+        ready = poll_check_fds(kfds, (size_t)nfds);
+        if (ready || timeout == 0)
+            break;
+        if (timeout > 0) {
+            uint64_t now = arch_timer_get_ticks();
+            if (now >= deadline) {
+                ready = 0;
+                break;
+            }
+        }
+        schedule();
+    } while (1);
+
+    if (copy_to_user((void *)fds_ptr, kfds, bytes) < 0) {
+        kfree(kfds);
+        return -EFAULT;
+    }
+    kfree(kfds);
+    return ready;
+}
+
+int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
+                   uint64_t exceptfds_ptr, uint64_t timeout_ptr, uint64_t a5) {
+    (void)exceptfds_ptr; (void)a5;
+    if (nfds > FD_SETSIZE) return -EINVAL;
+
+    fd_set rfds = {0}, wfds = {0};
+    if (readfds_ptr && copy_from_user(&rfds, (void *)readfds_ptr, sizeof(rfds)) < 0)
+        return -EFAULT;
+    if (writefds_ptr && copy_from_user(&wfds, (void *)writefds_ptr, sizeof(wfds)) < 0)
+        return -EFAULT;
+
+    struct pollfd fds[FD_SETSIZE];
+    size_t count = 0;
+    for (uint64_t fd = 0; fd < nfds; fd++) {
+        uint64_t mask = 1ULL << fd;
+        short events = 0;
+        if (readfds_ptr && (rfds.bits & mask)) events |= POLLIN;
+        if (writefds_ptr && (wfds.bits & mask)) events |= POLLOUT;
+        if (events) {
+            fds[count].fd = (int)fd;
+            fds[count].events = events;
+            fds[count].revents = 0;
+            count++;
+        }
+    }
+
+    int timeout_ms = -1;
+    if (timeout_ptr) {
+        struct timeval tv;
+        if (copy_from_user(&tv, (void *)timeout_ptr, sizeof(tv)) < 0)
+            return -EFAULT;
+        if (tv.tv_sec < 0 || tv.tv_usec < 0) return -EINVAL;
+        timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+    }
+
+    int ready = poll_check_fds(fds, count);
+    if (!ready && timeout_ms != 0) {
+        uint64_t start = arch_timer_get_ticks();
+        uint64_t deadline = (timeout_ms < 0) ? 0 : start + (uint64_t)timeout_ms * CONFIG_HZ / 1000;
+        while (ready == 0) {
+            if (timeout_ms > 0 && arch_timer_get_ticks() >= deadline)
+                break;
+            schedule();
+            ready = poll_check_fds(fds, count);
+            if (timeout_ms == 0)
+                break;
+        }
+    }
+
+    if (readfds_ptr) rfds.bits = 0;
+    if (writefds_ptr) wfds.bits = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (fds[i].revents & POLLIN)
+            rfds.bits |= (1ULL << fds[i].fd);
+        if (fds[i].revents & POLLOUT)
+            wfds.bits |= (1ULL << fds[i].fd);
+    }
+
+    if (readfds_ptr && copy_to_user((void *)readfds_ptr, &rfds, sizeof(rfds)) < 0)
+        return -EFAULT;
+    if (writefds_ptr && copy_to_user((void *)writefds_ptr, &wfds, sizeof(wfds)) < 0)
+        return -EFAULT;
+
+    return ready;
 }
 
 /* --- Semaphore Handlers --- */
@@ -186,10 +411,14 @@ syscall_fn_t syscall_table[SYS_MAX] = {
     [SYS_stat]    = sys_stat,
     [SYS_fstat]   = sys_fstat,
     [SYS_dup2]    = sys_dup2,
+    [SYS_fcntl]   = sys_fcntl,
     [SYS_pipe]    = sys_pipe,
+    [SYS_pipe2]   = sys_pipe2,
     [SYS_sem_init] = sys_sem_init,
     [SYS_sem_wait] = sys_sem_wait,
     [SYS_sem_post] = sys_sem_post,
+    [SYS_poll]    = sys_poll,
+    [SYS_select]  = sys_select,
     [SYS_kill]    = sys_kill,
     [SYS_sigaction] = sys_sigaction,
     [SYS_sigprocmask] = sys_sigprocmask,
