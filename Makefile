@@ -123,6 +123,7 @@ CORE_SRCS := \
     kernel/core/mm/buddy.c \
     kernel/core/mm/kmalloc.c \
     kernel/core/mm/vmm.c \
+    kernel/core/dev/firmware.c \
     kernel/core/proc/process.c \
     kernel/core/proc/user_test.c \
     kernel/core/proc/elf.c \
@@ -135,16 +136,19 @@ CORE_SRCS := \
     kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
-    kernel/lib/fdt.c \
+    kernel/firmware/acpi.c \
+    kernel/firmware/fdt.c \
     kernel/lib/rbtree.c \
     kernel/lib/string.c \
     kernel/fs/bio.c \
     kernel/fs/vfs/vfs.c \
     kernel/fs/vfs/pipe.c \
+    kernel/fs/vfs/epoll.c \
     kernel/fs/devfs/devfs.c \
     kernel/fs/ext2/ext2.c \
-    kernel/core/device.c \
-    kernel/drivers/bus/platform.c \
+    kernel/core/dev/device.c \
+    kernel/bus/platform.c \
+    kernel/bus/pci.c \
     kernel/drivers/virtio/virtio.c \
     kernel/drivers/virtio/virtio_mmio.c \
     kernel/drivers/virtio/virtio_ring.c \

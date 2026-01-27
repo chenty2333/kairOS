@@ -14,6 +14,7 @@ struct process;
 struct poll_wait_head {
     spinlock_t lock;
     struct list_head head;
+    struct list_head watches;
 };
 
 struct poll_waiter {
@@ -21,6 +22,18 @@ struct poll_waiter {
     struct poll_wait_head *head;
     struct process *proc;
     bool active;
+};
+
+struct poll_watch {
+    struct list_head node;
+    struct list_head notify_node;
+    struct poll_wait_head *head;
+    void (*prepare)(struct poll_watch *watch);
+    void (*notify)(struct poll_watch *watch, uint32_t events);
+    uint32_t events;
+    void *data;
+    bool active;
+    bool notifying;
 };
 
 struct poll_sleep {
@@ -33,7 +46,10 @@ struct poll_sleep {
 void poll_wait_head_init(struct poll_wait_head *head);
 void poll_wait_add(struct poll_wait_head *head, struct poll_waiter *waiter);
 void poll_wait_remove(struct poll_waiter *waiter);
-void poll_wait_wake(struct poll_wait_head *head);
+void poll_wait_wake(struct poll_wait_head *head, uint32_t events);
+
+void poll_watch_add(struct poll_wait_head *head, struct poll_watch *watch);
+void poll_watch_remove(struct poll_watch *watch);
 
 void poll_sleep_arm(struct poll_sleep *sleep, struct process *proc,
                     uint64_t deadline);

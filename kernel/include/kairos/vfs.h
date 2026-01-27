@@ -16,7 +16,8 @@ enum vnode_type {
     VNODE_DEVICE,
     VNODE_PIPE,
     VNODE_SOCKET,
-    VNODE_SYMLINK
+    VNODE_SYMLINK,
+    VNODE_EPOLL
 };
 
 struct dirent {
@@ -122,6 +123,7 @@ struct file_ops {
 };
 
 struct poll_waiter;
+struct poll_watch;
 
 void vfs_init(void);
 int vfs_mount(const char *src, const char *tgt, const char *type,
@@ -139,9 +141,13 @@ void vfs_dump_mounts(void);
 ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
 int vfs_poll(struct file *file, uint32_t events);
+int vfs_poll_vnode(struct vnode *vn, uint32_t events);
 void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
                        uint32_t events);
 void vfs_poll_unregister(struct poll_waiter *waiter);
+void vfs_poll_watch(struct vnode *vn, struct poll_watch *watch,
+                    uint32_t events);
+void vfs_poll_unwatch(struct poll_watch *watch);
 off_t vfs_seek(struct file *file, off_t offset, int whence);
 int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);

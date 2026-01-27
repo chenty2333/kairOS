@@ -28,9 +28,13 @@ struct bus_type {
  */
 struct device {
     char name[32];              /* Unique name, e.g., "virtio-mmio.0" */
+    char compatible[64];        /* Firmware compatible string */
     struct bus_type *bus;       /* Bus this device sits on */
     struct driver *driver;      /* Bound driver (NULL if unbound) */
     void *platform_data;        /* Bus-specific data (e.g., MMIO addr, IRQ) */
+    struct resource *resources; /* Resource array */
+    size_t num_resources;
+    void *driver_data;          /* Driver private data */
     struct list_head list;      /* Global device list node */
     struct list_head bus_list;  /* Bus-specific device list node */
 };
@@ -57,7 +61,6 @@ void device_unregister(struct device *dev);
 int driver_register(struct driver *drv);
 void driver_unregister(struct driver *drv);
 
-/* Resource helper (simple version for now) */
 struct resource {
     uint64_t start;
     uint64_t end;
@@ -65,5 +68,11 @@ struct resource {
 };
 #define IORESOURCE_MEM 0x1
 #define IORESOURCE_IRQ 0x2
+
+const struct resource *device_get_resource(struct device *dev, uint64_t type,
+                                           size_t index);
+void dev_set_drvdata(struct device *dev, void *data);
+void *dev_get_drvdata(struct device *dev);
+void *dev_ioremap_resource(struct device *dev, size_t index);
 
 #endif

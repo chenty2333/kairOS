@@ -4,6 +4,8 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/epoll.h>
+#include <kairos/epoll_internal.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/poll.h>
@@ -458,6 +460,64 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
     return ready;
 }
 
+int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (flags != 0)
+        return -EINVAL;
+
+    struct file *file = NULL;
+    int ret = epoll_create_file(&file);
+    if (ret < 0)
+        return ret;
+
+    int fd = fd_alloc(proc_current(), file);
+    if (fd < 0) {
+        vfs_close(file);
+        return fd;
+    }
+    return fd;
+}
+
+int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
+                      uint64_t event_ptr, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    struct epoll_event ev = {0};
+
+    if (op != EPOLL_CTL_DEL) {
+        if (!event_ptr)
+            return -EFAULT;
+        if (copy_from_user(&ev, (void *)event_ptr, sizeof(ev)) < 0)
+            return -EFAULT;
+    }
+
+    return epoll_ctl_fd((int)epfd, (int)op, (int)fd,
+                        (op == EPOLL_CTL_DEL) ? NULL : &ev);
+}
+
+int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
+                       uint64_t timeout_ms, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (!events_ptr || maxevents == 0 || maxevents > 1024)
+        return -EINVAL;
+
+    struct epoll_event *out = kzalloc(maxevents * sizeof(*out));
+    if (!out) {
+        return -ENOMEM;
+    }
+
+    int ready = epoll_wait_events((int)epfd, out, (size_t)maxevents,
+                                  (int)timeout_ms);
+    int64_t ret = ready;
+    if (ready > 0 &&
+        copy_to_user((void *)events_ptr, out,
+                     (size_t)ready * sizeof(*out)) < 0)
+        ret = -EFAULT;
+
+    kfree(out);
+    return ret;
+}
+
 /* --- Semaphore Handlers --- */
 
 int64_t sys_sem_init(uint64_t count, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -499,6 +559,9 @@ syscall_fn_t syscall_table[SYS_MAX] = {
     [SYS_sem_post] = sys_sem_post,
     [SYS_poll]    = sys_poll,
     [SYS_select]  = sys_select,
+    [SYS_epoll_create1] = sys_epoll_create1,
+    [SYS_epoll_ctl] = sys_epoll_ctl,
+    [SYS_epoll_wait] = sys_epoll_wait,
     [SYS_kill]    = sys_kill,
     [SYS_sigaction] = sys_sigaction,
     [SYS_sigprocmask] = sys_sigprocmask,

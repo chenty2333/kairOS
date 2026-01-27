@@ -9,7 +9,8 @@
     .equ O_NONBLOCK, 04000
     .equ F_GETFL, 3
     .equ F_SETFL, 4
-    .equ POLLIN, 0x0001
+    .equ EPOLL_CTL_ADD, 1
+    .equ EPOLLIN, 0x0001
     .equ EAGAIN, -11
     .equ EPIPE, -32
     .equ HEAP_START, 0x00000001000000
@@ -126,33 +127,52 @@ after_pipe:
     li a7, 13
     ecall
 
-    /* write one byte and poll for readability */
+    /* write one byte and check readability via epoll */
     mv a0, t2
     la a1, msg_nb_data
     li a2, 1
     li a7, 13
     ecall
 
-    la t4, pollfd
-    sw t1, 0(t4)
-    li t5, POLLIN
-    sh t5, 4(t4)
-    sh zero, 6(t4)
-
-    la a0, pollfd
-    li a1, 1
-    li a2, 0
-    li a7, 80 /* SYS_poll */
+    li a0, 0
+    li a7, 82 /* SYS_epoll_create1 */
     ecall
-    blez a0, poll_fail
-    lhu t6, 6(t4)
-    andi t6, t6, POLLIN
-    beqz t6, poll_fail
+    blt a0, zero, epoll_fail
+    mv t4, a0
+
+    la t5, epoll_in
+    li t6, EPOLLIN
+    sw t6, 0(t5)
+    sd t1, 8(t5)
+
+    mv a0, t4
+    li a1, EPOLL_CTL_ADD
+    mv a2, t1
+    la a3, epoll_in
+    li a7, 83 /* SYS_epoll_ctl */
+    ecall
+    blt a0, zero, epoll_fail_close
+
+    mv a0, t4
+    la a1, epoll_out
+    li a2, 1
+    li a3, 0
+    li a7, 84 /* SYS_epoll_wait */
+    ecall
+    blez a0, epoll_fail_close
+    la t5, epoll_out
+    lw t6, 0(t5)
+    andi t6, t6, EPOLLIN
+    beqz t6, epoll_fail_close
 
     li a0, 1
-    la a1, msg_poll_ok
-    li a2, 9
+    la a1, msg_epoll_ok
+    li a2, 10
     li a7, 13
+    ecall
+
+    mv a0, t4
+    li a7, 11
     ecall
 
     /* read the byte back */
@@ -179,10 +199,15 @@ nonblock_fail:
     ecall
     j pipe2_close
 
-poll_fail:
+epoll_fail_close:
+    mv a0, t4
+    li a7, 11
+    ecall
+
+epoll_fail:
     li a0, 1
-    la a1, msg_poll_fail
-    li a2, 11
+    la a1, msg_epoll_fail
+    li a2, 12
     li a7, 13
     ecall
 
@@ -386,10 +411,10 @@ msg_nonblock_ok:
     .asciz "nonblock: ok\n"
 msg_nonblock_fail:
     .asciz "nonblock: fail\n"
-msg_poll_ok:
-    .asciz "poll: ok\n"
-msg_poll_fail:
-    .asciz "poll: fail\n"
+msg_epoll_ok:
+    .asciz "epoll: ok\n"
+msg_epoll_fail:
+    .asciz "epoll: fail\n"
 msg_fcntl_ok:
     .asciz "fcntl: ok\n"
 msg_fcntl_fail:
@@ -417,8 +442,10 @@ pipe_fds:
     .space 8
 status:
     .space 4
-pollfd:
-    .space 8
+epoll_in:
+    .space 16
+epoll_out:
+    .space 16
     .align 8
 buf:
     .space 64

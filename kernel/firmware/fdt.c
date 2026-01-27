@@ -1,11 +1,12 @@
 /**
- * fdt.c - Flattened Device Tree (FDT) parser
+ * kernel/firmware/fdt.c - Flattened Device Tree (FDT) parser
  */
 
 #include <kairos/types.h>
 #include <kairos/string.h>
 #include <kairos/fdt.h>
 #include <kairos/device.h>
+#include <kairos/firmware.h>
 #include <kairos/platform.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
@@ -137,16 +138,41 @@ static void fdt_process_node(struct scan_ctx *ctx) {
 
             int irq = ctx->irq ? (int)be32_to_cpu(*ctx->irq) : 0;
 
-            struct device *dev = kzalloc(sizeof(*dev));
+            struct fw_device_desc *desc = kzalloc(sizeof(*desc));
             struct platform_device_info *info = kzalloc(sizeof(*info));
-            if (dev && info) {
-                strncpy(dev->name, ctx->node_name, sizeof(dev->name) - 1);
-                info->base = base; info->size = size; info->irq = irq;
-                strncpy(info->compatible, "virtio,mmio", sizeof(info->compatible) - 1);
-                dev->bus = &platform_bus_type;
-                dev->platform_data = info;
-                pr_info("fdt: found virtio-mmio @ %p (irq %d)\n", (void *)base, irq);
-                device_register(dev);
+            size_t num_res = irq ? 2 : 1;
+            struct resource *res = kzalloc(num_res * sizeof(*res));
+            if (desc && info && res && size) {
+                strncpy(desc->name, ctx->node_name, sizeof(desc->name) - 1);
+                strncpy(desc->compatible, "virtio,mmio",
+                        sizeof(desc->compatible) - 1);
+
+                info->base = base;
+                info->size = size;
+                info->irq = irq;
+                strncpy(info->compatible, "virtio,mmio",
+                        sizeof(info->compatible) - 1);
+
+                res[0].start = base;
+                res[0].end = base + size - 1;
+                res[0].flags = IORESOURCE_MEM;
+                if (irq) {
+                    res[1].start = (uint64_t)irq;
+                    res[1].end = (uint64_t)irq;
+                    res[1].flags = IORESOURCE_IRQ;
+                }
+
+                desc->resources = res;
+                desc->num_resources = num_res;
+                desc->fw_data = info;
+
+                pr_info("fdt: found virtio-mmio @ %p (irq %d)\n",
+                        (void *)base, irq);
+                fw_register_desc(desc);
+            } else {
+                kfree(desc);
+                kfree(info);
+                kfree(res);
             }
         }
     }

@@ -11,14 +11,14 @@ static bool poll_sleep_head_init_done;
 static void poll_sleep_head_init(void) {
     if (poll_sleep_head_init_done)
         return;
-    spin_init(&poll_sleep_head.lock);
-    INIT_LIST_HEAD(&poll_sleep_head.head);
+    poll_wait_head_init(&poll_sleep_head);
     poll_sleep_head_init_done = true;
 }
 
 void poll_wait_head_init(struct poll_wait_head *head) {
     spin_init(&head->lock);
     INIT_LIST_HEAD(&head->head);
+    INIT_LIST_HEAD(&head->watches);
 }
 
 void poll_wait_add(struct poll_wait_head *head, struct poll_waiter *waiter) {
@@ -48,11 +48,43 @@ void poll_wait_remove(struct poll_waiter *waiter) {
     spin_unlock(&head->lock);
 }
 
-void poll_wait_wake(struct poll_wait_head *head) {
+void poll_watch_add(struct poll_wait_head *head, struct poll_watch *watch) {
+    if (!head || !watch || !watch->notify)
+        return;
+
+    spin_lock(&head->lock);
+    if (!watch->active) {
+        watch->head = head;
+        watch->active = true;
+        watch->notifying = false;
+        INIT_LIST_HEAD(&watch->notify_node);
+        list_add_tail(&watch->node, &head->watches);
+    }
+    spin_unlock(&head->lock);
+}
+
+void poll_watch_remove(struct poll_watch *watch) {
+    if (!watch || !watch->active || !watch->head)
+        return;
+
+    struct poll_wait_head *head = watch->head;
+    spin_lock(&head->lock);
+    if (watch->active) {
+        watch->active = false;
+        if (!watch->notifying) {
+            list_del(&watch->node);
+            watch->head = NULL;
+        }
+    }
+    spin_unlock(&head->lock);
+}
+
+void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
     if (!head)
         return;
 
     LIST_HEAD(wake_list);
+    LIST_HEAD(notify_list);
 
     spin_lock(&head->lock);
     while (!list_empty(&head->head)) {
@@ -63,6 +95,18 @@ void poll_wait_wake(struct poll_wait_head *head) {
         waiter->head = NULL;
         list_add_tail(&waiter->node, &wake_list);
     }
+
+    struct poll_watch *watch;
+    list_for_each_entry(watch, &head->watches, node) {
+        if (!watch->active || watch->notifying)
+            continue;
+        if (events && !(watch->events & events))
+            continue;
+        if (watch->prepare)
+            watch->prepare(watch);
+        watch->notifying = true;
+        list_add_tail(&watch->notify_node, &notify_list);
+    }
     spin_unlock(&head->lock);
 
     struct poll_waiter *waiter, *tmp;
@@ -70,6 +114,20 @@ void poll_wait_wake(struct poll_wait_head *head) {
         list_del(&waiter->node);
         if (waiter->proc)
             proc_wakeup(waiter->proc);
+    }
+
+    struct poll_watch *wtmp;
+    list_for_each_entry_safe(watch, wtmp, &notify_list, notify_node) {
+        list_del(&watch->notify_node);
+        watch->notify(watch, events);
+
+        spin_lock(&head->lock);
+        watch->notifying = false;
+        if (!watch->active) {
+            list_del(&watch->node);
+            watch->head = NULL;
+        }
+        spin_unlock(&head->lock);
     }
 }
 
@@ -127,4 +185,3 @@ void poll_sleep_tick(uint64_t now) {
             proc_wakeup(sleep->proc);
     }
 }
-

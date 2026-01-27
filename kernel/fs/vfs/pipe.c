@@ -30,6 +30,19 @@ struct pipe {
     struct mutex lock;
 };
 
+static uint32_t pipe_poll_events_locked(struct pipe *p) {
+    uint32_t revents = 0;
+    if (p->count > 0 || p->writers == 0)
+        revents |= POLLIN;
+    if (p->readers == 0)
+        revents |= POLLERR;
+    else if (p->count < PIPE_SIZE)
+        revents |= POLLOUT;
+    if (p->writers == 0)
+        revents |= POLLHUP;
+    return revents;
+}
+
 static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool nonblock) {
     size_t read = 0;
 
@@ -70,7 +83,10 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
         }
 
         wait_queue_wakeup_one(&p->wwait);
-        poll_wait_wake(&p->pollers);
+        uint32_t revents = pipe_poll_events_locked(p);
+        mutex_unlock(&p->lock);
+        poll_wait_wake(&p->pollers, revents);
+        mutex_lock(&p->lock);
         if (nonblock)
             break;
     }
@@ -144,7 +160,10 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
         }
 
         wait_queue_wakeup_one(&p->rwait);
-        poll_wait_wake(&p->pollers);
+        uint32_t revents = pipe_poll_events_locked(p);
+        mutex_unlock(&p->lock);
+        poll_wait_wake(&p->pollers, revents);
+        mutex_lock(&p->lock);
         if (len <= PIPE_BUF || nonblock)
             break;
     }
@@ -261,7 +280,7 @@ void pipe_close_end(struct vnode *vn, uint32_t flags) {
         wait_queue_wakeup_all(&p->rwait);
     if (dec_writer && readers == 0)
         wait_queue_wakeup_all(&p->wwait);
-    poll_wait_wake(&p->pollers);
+    poll_wait_wake(&p->pollers, POLLIN | POLLOUT | POLLHUP | POLLERR);
 }
 
 ssize_t pipe_read_file(struct file *file, void *buf, size_t len) {
@@ -282,23 +301,22 @@ int pipe_poll_file(struct file *file, uint32_t events) {
     if (!file || !file->vnode)
         return POLLNVAL;
     struct pipe *p = file->vnode->fs_data;
-    uint32_t revents = 0;
+    uint32_t revents;
 
     mutex_lock(&p->lock);
-    if (events & POLLIN) {
-        if (p->count > 0 || p->writers == 0)
-            revents |= POLLIN;
-    }
-    if (events & POLLOUT) {
-        if (p->readers == 0)
-            revents |= POLLERR;
-        else if (p->count < PIPE_SIZE)
-            revents |= POLLOUT;
-    }
-    if (p->writers == 0)
-        revents |= POLLHUP;
+    revents = pipe_poll_events_locked(p) & events;
     mutex_unlock(&p->lock);
 
+    return (int)revents;
+}
+
+int pipe_poll_vnode(struct vnode *vn, uint32_t events) {
+    if (!vn || vn->type != VNODE_PIPE)
+        return POLLNVAL;
+    struct pipe *p = vn->fs_data;
+    mutex_lock(&p->lock);
+    uint32_t revents = pipe_poll_events_locked(p) & events;
+    mutex_unlock(&p->lock);
     return (int)revents;
 }
 
@@ -310,4 +328,13 @@ void pipe_poll_register_file(struct file *file, struct poll_waiter *waiter,
     struct pipe *p = file->vnode->fs_data;
     waiter->proc = proc_current();
     poll_wait_add(&p->pollers, waiter);
+}
+
+void pipe_poll_watch_vnode(struct vnode *vn, struct poll_watch *watch,
+                           uint32_t events) {
+    if (!vn || vn->type != VNODE_PIPE || !watch)
+        return;
+    struct pipe *p = vn->fs_data;
+    watch->events = events;
+    poll_watch_add(&p->pollers, watch);
 }

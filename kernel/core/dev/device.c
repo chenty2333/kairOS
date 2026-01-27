@@ -1,5 +1,5 @@
 /**
- * kernel/core/device.c - Device Model Core
+ * kernel/core/dev/device.c - Device Model Core
  */
 
 #include <kairos/device.h>
@@ -84,4 +84,38 @@ int driver_register(struct driver *drv) {
 void driver_unregister(struct driver *drv) {
     if (drv) list_del(&drv->list);
     /* TODO: Detach from devices */
+}
+
+const struct resource *device_get_resource(struct device *dev, uint64_t type,
+                                           size_t index) {
+    if (!dev || !dev->resources || dev->num_resources == 0)
+        return NULL;
+
+    size_t seen = 0;
+    for (size_t i = 0; i < dev->num_resources; i++) {
+        const struct resource *res = &dev->resources[i];
+        if (!(res->flags & type))
+            continue;
+        if (seen == index)
+            return res;
+        seen++;
+    }
+    return NULL;
+}
+
+void dev_set_drvdata(struct device *dev, void *data) {
+    if (dev)
+        dev->driver_data = data;
+}
+
+void *dev_get_drvdata(struct device *dev) {
+    return dev ? dev->driver_data : NULL;
+}
+
+void *dev_ioremap_resource(struct device *dev, size_t index) {
+    const struct resource *res = device_get_resource(dev, IORESOURCE_MEM, index);
+    if (!res || res->end < res->start)
+        return NULL;
+    size_t size = (size_t)(res->end - res->start + 1);
+    return ioremap((paddr_t)res->start, size);
 }

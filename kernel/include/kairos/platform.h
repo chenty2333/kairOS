@@ -27,6 +27,7 @@ struct platform_device_info {
 };
 
 int platform_bus_init(void);
+int platform_bus_enumerate(void);
 
 /* Helpers to verify if a device is on the platform bus */
 static inline int is_platform_device(struct device *dev) {

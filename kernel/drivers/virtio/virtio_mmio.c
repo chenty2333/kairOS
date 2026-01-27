@@ -126,20 +126,24 @@ static void virtio_mmio_intr(void *arg) {
 }
 
 static int virtio_mmio_probe(struct device *dev) {
-    struct platform_device_info *info = dev->platform_data;
-    if (!info) return -ENODEV;
+    void *base = dev_ioremap_resource(dev, 0);
+    const struct resource *irq_res = device_get_resource(dev, IORESOURCE_IRQ, 0);
+    int irq = irq_res ? (int)irq_res->start : 0;
 
-    void *base = (void *)info->base;
-    if (readl(base + VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976) return -ENODEV;
+    if (!base || irq <= 0)
+        return -ENODEV;
+    if (readl(base + VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976)
+        return -ENODEV;
     
     uint32_t virtio_id = readl(base + VIRTIO_MMIO_DEVICE_ID);
-    if (virtio_id == 0) return -ENODEV; // Reserved
+    if (virtio_id == 0)
+        return -ENODEV; /* Reserved */
 
     struct virtio_mmio_device *mdev = kzalloc(sizeof(*mdev));
     if (!mdev) return -ENOMEM;
 
     mdev->base = base;
-    mdev->irq = info->irq;
+    mdev->irq = irq;
     mdev->vdev.id = virtio_id;
     mdev->vdev.ops = &mmio_ops;
     

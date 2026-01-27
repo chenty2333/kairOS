@@ -65,6 +65,9 @@ typedef uint64_t sigset_t;
 
 #define SYS_poll 80
 #define SYS_select 81
+#define SYS_epoll_create1 82
+#define SYS_epoll_ctl 83
+#define SYS_epoll_wait 84
 
 #define SYS_getuid 90
 #define SYS_getgid 91
@@ -103,5 +106,8 @@ int64_t sys_sigprocmask(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64
 int64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_select(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_epoll_create1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_epoll_ctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_epoll_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 #endif

@@ -16,6 +16,9 @@
 #include <kairos/vfs.h>
 #include <kairos/fdt.h>
 #include <kairos/device.h>
+#include <kairos/firmware.h>
+#include <kairos/acpi.h>
+#include <kairos/pci.h>
 #include <kairos/platform.h>
 #include <kairos/virtio.h>
 
@@ -105,13 +108,17 @@ void kernel_main(unsigned long hartid, void *dtb) {
     /* Device Model and Driver Initialization */
     printk("\n=== Phase 5: Device Discovery ===\n");
     platform_bus_init();
+    pci_bus_init();
     bus_register(&virtio_bus_type);
     
     driver_register(&virtio_mmio_driver);
     virtio_register_driver(&virtio_blk_driver);
     
-    /* This will automatically probe matched drivers */
+    fw_init();
+    acpi_init();
     fdt_scan_devices(dtb);
+    platform_bus_enumerate();
+    pci_enumerate();
 
     /* File System Initialization */
     binit();
