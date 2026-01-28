@@ -60,6 +60,7 @@ struct process {
     struct dentry *cwd_dentry;
     struct mount_ns *mnt_ns;
     uint64_t tid_address;
+    uint64_t tid_set_address;
     struct rlimit rlimits[RLIM_NLIMITS];
 
     /* Signals & Waiting */
@@ -70,6 +71,8 @@ struct process {
     struct wait_queue_entry wait_entry;
     struct list_head children, sibling;
     struct process *parent;
+    struct process *vfork_parent;
+    bool vfork_done;
     struct arch_context *context;
     uint64_t utime, stime, start_time;
 };
@@ -77,6 +80,13 @@ struct process {
 void proc_init(void);
 struct process *proc_create(const char *name, const void *elf, size_t size);
 struct process *proc_fork(void);
+struct proc_fork_opts {
+    uint64_t child_stack;
+    uint64_t tid_set_address;
+    uint64_t tid_clear_address;
+    struct process *vfork_parent;
+};
+struct process *proc_fork_ex(const struct proc_fork_opts *opts);
 noreturn void proc_exit(int status);
 pid_t proc_wait(pid_t pid, int *status, int options);
 struct process *proc_find(pid_t pid);
@@ -91,6 +101,7 @@ void proc_sleep(void *channel);
 void proc_wakeup_all(void *channel);
 void signal_init_process(struct process *p);
 void proc_setup_stdio(struct process *p);
+void proc_fork_child_setup(void);
 
 vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk);
 

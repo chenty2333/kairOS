@@ -132,3 +132,11 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
     tf->tf_a1 = a1;
     tf->tf_a2 = a2;
 }
+
+void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {
+    if (!ctx)
+        return;
+    struct trap_frame *tf = (struct trap_frame *)ctx->sp;
+    tf->tf_sp = sp;
+    ctx->user_stack = sp;
+}

@@ -135,13 +135,69 @@ int64_t sys_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
 
 int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                   uint64_t child_tid, uint64_t tls, uint64_t a5) {
-    (void)newsp; (void)parent_tid; (void)child_tid; (void)tls; (void)a5;
-    /* Minimal clone: accept fork-like usage where only the low signal bits
-     * are set, otherwise return ENOSYS so callers can fall back. */
-    if (flags & ~0xFF)
+    (void)a5;
+
+    /* Linux clone flag subset */
+    enum {
+        CLONE_VM             = 0x00000100,
+        CLONE_VFORK          = 0x00004000,
+        CLONE_SETTLS         = 0x00080000,
+        CLONE_PARENT_SETTID  = 0x00100000,
+        CLONE_CHILD_CLEARTID = 0x00200000,
+        CLONE_CHILD_SETTID   = 0x01000000,
+    };
+
+    uint64_t kflags = flags & ~0xFFULL;
+    uint64_t supported = CLONE_VM | CLONE_VFORK | CLONE_SETTLS |
+                         CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
+                         CLONE_CHILD_SETTID;
+
+    if (kflags & ~supported)
+        return -ENOSYS;
+    if ((flags & CLONE_VM) && !(flags & CLONE_VFORK))
+        return -ENOSYS;
+    if (newsp) {
+        if (!access_ok((void *)(newsp - 1), 1))
+            return -EFAULT;
+    }
+    if (tls && !(flags & CLONE_SETTLS))
         return -EINVAL;
-    struct process *p = proc_fork();
-    return p ? (int64_t)p->pid : -ENOMEM;
+
+    struct proc_fork_opts opts = {0};
+    if (newsp)
+        opts.child_stack = newsp;
+    if ((flags & CLONE_CHILD_SETTID) || (flags & CLONE_CHILD_CLEARTID)) {
+        if (!child_tid)
+            return -EINVAL;
+        if (!access_ok((void *)child_tid, sizeof(pid_t)))
+            return -EFAULT;
+        if (flags & CLONE_CHILD_SETTID)
+            opts.tid_set_address = child_tid;
+        if (flags & CLONE_CHILD_CLEARTID)
+            opts.tid_clear_address = child_tid;
+    }
+    if (flags & CLONE_VFORK)
+        opts.vfork_parent = proc_current();
+
+    struct process *p = proc_fork_ex(&opts);
+    if (!p)
+        return -ENOMEM;
+
+    if (flags & CLONE_PARENT_SETTID) {
+        if (!parent_tid)
+            return -EINVAL;
+        if (!access_ok((void *)parent_tid, sizeof(pid_t)))
+            return -EFAULT;
+        if (copy_to_user((void *)parent_tid, &p->pid, sizeof(p->pid)) < 0)
+            return -EFAULT;
+    }
+
+    if (flags & CLONE_VFORK) {
+        while (!__atomic_load_n(&p->vfork_done, __ATOMIC_ACQUIRE))
+            proc_sleep(p);
+    }
+
+    return (int64_t)p->pid;
 }
 
 int64_t sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2,

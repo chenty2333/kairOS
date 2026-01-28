@@ -113,6 +113,7 @@ static struct process *proc_alloc(void) {
     }
     p->mnt_ns = vfs_mount_ns_get();
     p->tid_address = 0;
+    p->tid_set_address = 0;
     for (int i = 0; i < RLIM_NLIMITS; i++) {
         p->rlimits[i].rlim_cur = RLIM_INFINITY;
         p->rlimits[i].rlim_max = RLIM_INFINITY;
@@ -130,6 +131,8 @@ static struct process *proc_alloc(void) {
     if (!(p->context = arch_context_alloc())) { p->state = PROC_UNUSED; return NULL; }
     signal_init_process(p);
     p->start_time = arch_timer_ticks();
+    p->vfork_parent = NULL;
+    p->vfork_done = true;
     return p;
 }
 
@@ -231,7 +234,7 @@ struct process *proc_idle_init(void) {
     return p;
 }
 
-struct process *proc_fork(void) {
+struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     struct process *parent = proc_current(), *child;
     if (!parent || !parent->mm || !(child = proc_alloc())) return NULL;
 
@@ -239,9 +242,23 @@ struct process *proc_fork(void) {
     child->uid = parent->uid; child->gid = parent->gid;
     child->umask = parent->umask;
     child->tid_address = parent->tid_address;
+    child->tid_set_address = 0;
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->parent = parent; child->ppid = parent->pid;
     child->nice = parent->nice; child->vruntime = parent->vruntime;
+    child->vfork_parent = NULL;
+    child->vfork_done = true;
+
+    if (opts) {
+        if (opts->tid_set_address)
+            child->tid_set_address = opts->tid_set_address;
+        if (opts->tid_clear_address)
+            child->tid_address = opts->tid_clear_address;
+        if (opts->vfork_parent) {
+            child->vfork_parent = opts->vfork_parent;
+            child->vfork_done = false;
+        }
+    }
 
     spin_lock(&proc_table_lock);
     list_add(&child->sibling, &parent->children);
@@ -270,17 +287,41 @@ struct process *proc_fork(void) {
     mutex_unlock(&parent->files_lock);
 
     struct trap_frame *tf = get_current_trapframe();
-    if (tf) arch_setup_fork_child(child->context, tf);
-    else arch_context_clone(child->context, parent->context);
+    if (tf) {
+        arch_setup_fork_child(child->context, tf);
+        if (opts && opts->child_stack)
+            arch_context_set_user_sp(child->context, opts->child_stack);
+    } else {
+        arch_context_clone(child->context, parent->context);
+    }
 
     child->state = PROC_RUNNABLE;
     sched_enqueue(child);
     return child;
 }
 
+struct process *proc_fork(void) { return proc_fork_ex(NULL); }
+
+void proc_fork_child_setup(void) {
+    struct process *p = proc_current();
+    if (!p)
+        return;
+    if (p->tid_set_address) {
+        pid_t tid = p->pid;
+        copy_to_user((void *)p->tid_set_address, &tid, sizeof(tid));
+        p->tid_set_address = 0;
+    }
+}
+
 noreturn void proc_exit(int status) {
     struct process *p = proc_current();
     pr_info("Process %d exiting: %d\n", p->pid, status);
+
+    if (p->vfork_parent) {
+        __atomic_store_n(&p->vfork_done, true, __ATOMIC_RELEASE);
+        proc_wakeup_all(p);
+        p->vfork_parent = NULL;
+    }
 
     if (p->tid_address) {
         uint32_t zero = 0;
@@ -447,6 +488,11 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
 
     struct trap_frame *tf = get_current_trapframe();
     if (tf) { tf->sepc = entry; tf->tf_sp = sp; tf->tf_a0 = 0; }
+    if (curr->vfork_parent) {
+        __atomic_store_n(&curr->vfork_done, true, __ATOMIC_RELEASE);
+        proc_wakeup_all(curr);
+        curr->vfork_parent = NULL;
+    }
     ret = 0;
     goto out;
 

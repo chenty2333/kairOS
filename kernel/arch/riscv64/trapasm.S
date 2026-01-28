@@ -58,6 +58,7 @@ trap_entry:
 .globl fork_ret
 fork_ret:
     call sched_post_switch_cleanup
+    call proc_fork_child_setup
     j trap_return
 
 .globl trap_return
