@@ -463,8 +463,8 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
 
         struct process *curr = proc_current();
         struct poll_waiter waiter = {0};
-        INIT_LIST_HEAD(&waiter.node);
-        waiter.proc = curr;
+        INIT_LIST_HEAD(&waiter.entry.node);
+        waiter.entry.proc = curr;
         poll_wait_add(&ep->waiters, &waiter);
 
         ready = epoll_collect_ready(ep, events, maxevents);

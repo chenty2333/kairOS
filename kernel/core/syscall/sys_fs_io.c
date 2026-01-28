@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
@@ -37,6 +38,11 @@ static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
     if (is_write && accmode == O_RDONLY)
         return -EBADF;
 
+    if (!is_write && (f->flags & O_NONBLOCK)) {
+        if (!(vfs_poll(f, POLLIN) & POLLIN))
+            return -EAGAIN;
+    }
+
     while (done < count) {
         size_t chunk = (count - done > sizeof(kbuf)) ? sizeof(kbuf)
                                                      : (size_t)(count - done);
@@ -58,6 +64,8 @@ static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
             if (copy_to_user((void *)(buf + done), kbuf, (size_t)n) < 0)
                 return done ? (int64_t)done : -EFAULT;
             done += (size_t)n;
+            if ((size_t)n < chunk)
+                break;
         }
     }
     return (int64_t)done;
@@ -90,4 +98,72 @@ int64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3,
     if (f->vnode && f->vnode->type == VNODE_PIPE)
         return -ESPIPE;
     return (int64_t)vfs_seek(f, (off_t)offset, (int)whence);
+}
+
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+int64_t sys_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > 1024)
+        return -EINVAL;
+
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f) {
+        /* Fallback for stdout/stderr without file */
+        if (fd != 1 && fd != 2)
+            return -EBADF;
+    }
+
+    size_t total = 0;
+    for (size_t i = 0; i < iovcnt; i++) {
+        struct iovec iov;
+        if (copy_from_user(&iov, (void *)(iov_ptr + i * sizeof(struct iovec)),
+                           sizeof(iov)) < 0)
+            return total ? (int64_t)total : -EFAULT;
+        if (iov.iov_len == 0)
+            continue;
+        int64_t ret = sys_read_write(fd, (uint64_t)iov.iov_base, iov.iov_len, true);
+        if (ret < 0)
+            return total ? (int64_t)total : ret;
+        total += (size_t)ret;
+        if ((size_t)ret < iov.iov_len)
+            break;
+    }
+    return (int64_t)total;
+}
+
+int64_t sys_readv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > 1024)
+        return -EINVAL;
+
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+
+    size_t total = 0;
+    for (size_t i = 0; i < iovcnt; i++) {
+        struct iovec iov;
+        if (copy_from_user(&iov, (void *)(iov_ptr + i * sizeof(struct iovec)),
+                           sizeof(iov)) < 0)
+            return total ? (int64_t)total : -EFAULT;
+        if (iov.iov_len == 0)
+            continue;
+        int64_t ret = sys_read_write(fd, (uint64_t)iov.iov_base, iov.iov_len, false);
+        if (ret < 0)
+            return total ? (int64_t)total : ret;
+        total += (size_t)ret;
+        if ((size_t)ret < iov.iov_len)
+            break;
+    }
+    return (int64_t)total;
 }

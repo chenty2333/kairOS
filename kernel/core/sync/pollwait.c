@@ -16,43 +16,30 @@ static void poll_sleep_head_init(void) {
 }
 
 void poll_wait_head_init(struct poll_wait_head *head) {
-    spin_init(&head->lock);
-    INIT_LIST_HEAD(&head->head);
+    wait_queue_init(&head->wq);
     INIT_LIST_HEAD(&head->watches);
 }
 
 void poll_wait_add(struct poll_wait_head *head, struct poll_waiter *waiter) {
-    if (!head || !waiter || !waiter->proc)
+    if (!head || !waiter || !waiter->entry.proc)
         return;
 
-    spin_lock(&head->lock);
-    if (!waiter->active) {
-        waiter->head = head;
-        waiter->active = true;
-        list_add_tail(&waiter->node, &head->head);
-    }
-    spin_unlock(&head->lock);
+    waiter->head = head;
+    wait_queue_add_entry(&head->wq, &waiter->entry);
 }
 
 void poll_wait_remove(struct poll_waiter *waiter) {
-    if (!waiter || !waiter->active || !waiter->head)
+    if (!waiter)
         return;
-
-    struct poll_wait_head *head = waiter->head;
-    spin_lock(&head->lock);
-    if (waiter->active) {
-        list_del(&waiter->node);
-        waiter->active = false;
-        waiter->head = NULL;
-    }
-    spin_unlock(&head->lock);
+    wait_queue_remove_entry(&waiter->entry);
+    waiter->head = NULL;
 }
 
 void poll_watch_add(struct poll_wait_head *head, struct poll_watch *watch) {
     if (!head || !watch || !watch->notify)
         return;
 
-    spin_lock(&head->lock);
+    spin_lock(&head->wq.lock);
     if (!watch->active) {
         watch->head = head;
         watch->active = true;
@@ -60,7 +47,7 @@ void poll_watch_add(struct poll_wait_head *head, struct poll_watch *watch) {
         INIT_LIST_HEAD(&watch->notify_node);
         list_add_tail(&watch->node, &head->watches);
     }
-    spin_unlock(&head->lock);
+    spin_unlock(&head->wq.lock);
 }
 
 void poll_watch_remove(struct poll_watch *watch) {
@@ -68,7 +55,7 @@ void poll_watch_remove(struct poll_watch *watch) {
         return;
 
     struct poll_wait_head *head = watch->head;
-    spin_lock(&head->lock);
+    spin_lock(&head->wq.lock);
     if (watch->active) {
         watch->active = false;
         if (!watch->notifying) {
@@ -76,7 +63,7 @@ void poll_watch_remove(struct poll_watch *watch) {
             watch->head = NULL;
         }
     }
-    spin_unlock(&head->lock);
+    spin_unlock(&head->wq.lock);
 }
 
 void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
@@ -86,14 +73,14 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
     LIST_HEAD(wake_list);
     LIST_HEAD(notify_list);
 
-    spin_lock(&head->lock);
-    while (!list_empty(&head->head)) {
-        struct poll_waiter *waiter =
-            list_first_entry(&head->head, struct poll_waiter, node);
-        list_del(&waiter->node);
-        waiter->active = false;
-        waiter->head = NULL;
-        list_add_tail(&waiter->node, &wake_list);
+    spin_lock(&head->wq.lock);
+    while (!list_empty(&head->wq.head)) {
+        struct wait_queue_entry *entry =
+            list_first_entry(&head->wq.head, struct wait_queue_entry, node);
+        list_del(&entry->node);
+        entry->active = false;
+        entry->wq = NULL;
+        list_add_tail(&entry->node, &wake_list);
     }
 
     struct poll_watch *watch;
@@ -107,13 +94,13 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
         watch->notifying = true;
         list_add_tail(&watch->notify_node, &notify_list);
     }
-    spin_unlock(&head->lock);
+    spin_unlock(&head->wq.lock);
 
-    struct poll_waiter *waiter, *tmp;
-    list_for_each_entry_safe(waiter, tmp, &wake_list, node) {
-        list_del(&waiter->node);
-        if (waiter->proc)
-            proc_wakeup(waiter->proc);
+    struct wait_queue_entry *entry, *tmp;
+    list_for_each_entry_safe(entry, tmp, &wake_list, node) {
+        list_del(&entry->node);
+        if (entry->proc)
+            proc_wakeup(entry->proc);
     }
 
     struct poll_watch *wtmp;
@@ -121,13 +108,13 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
         list_del(&watch->notify_node);
         watch->notify(watch, events);
 
-        spin_lock(&head->lock);
+        spin_lock(&head->wq.lock);
         watch->notifying = false;
         if (!watch->active) {
             list_del(&watch->node);
             watch->head = NULL;
         }
-        spin_unlock(&head->lock);
+        spin_unlock(&head->wq.lock);
     }
 }
 
@@ -138,14 +125,14 @@ void poll_sleep_arm(struct poll_sleep *sleep, struct process *proc,
 
     poll_sleep_head_init();
 
-    spin_lock(&poll_sleep_head.lock);
+    spin_lock(&poll_sleep_head.wq.lock);
     if (sleep->active)
         list_del(&sleep->node);
     sleep->proc = proc;
     sleep->deadline = deadline;
     sleep->active = true;
-    list_add_tail(&sleep->node, &poll_sleep_head.head);
-    spin_unlock(&poll_sleep_head.lock);
+    list_add_tail(&sleep->node, &poll_sleep_head.wq.head);
+    spin_unlock(&poll_sleep_head.wq.lock);
 }
 
 void poll_sleep_cancel(struct poll_sleep *sleep) {
@@ -154,12 +141,12 @@ void poll_sleep_cancel(struct poll_sleep *sleep) {
 
     poll_sleep_head_init();
 
-    spin_lock(&poll_sleep_head.lock);
+    spin_lock(&poll_sleep_head.wq.lock);
     if (sleep->active) {
         list_del(&sleep->node);
         sleep->active = false;
     }
-    spin_unlock(&poll_sleep_head.lock);
+    spin_unlock(&poll_sleep_head.wq.lock);
 }
 
 void poll_sleep_tick(uint64_t now) {
@@ -168,16 +155,16 @@ void poll_sleep_tick(uint64_t now) {
 
     LIST_HEAD(wake_list);
 
-    spin_lock(&poll_sleep_head.lock);
+    spin_lock(&poll_sleep_head.wq.lock);
     struct poll_sleep *sleep, *tmp;
-    list_for_each_entry_safe(sleep, tmp, &poll_sleep_head.head, node) {
+    list_for_each_entry_safe(sleep, tmp, &poll_sleep_head.wq.head, node) {
         if (sleep->deadline && sleep->deadline <= now) {
             list_del(&sleep->node);
             sleep->active = false;
             list_add_tail(&sleep->node, &wake_list);
         }
     }
-    spin_unlock(&poll_sleep_head.lock);
+    spin_unlock(&poll_sleep_head.wq.lock);
 
     list_for_each_entry_safe(sleep, tmp, &wake_list, node) {
         list_del(&sleep->node);

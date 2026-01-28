@@ -8,20 +8,20 @@
 #include <kairos/list.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
+#include <kairos/wait.h>
 
 struct process;
+struct vnode;
 
 struct poll_wait_head {
-    spinlock_t lock;
-    struct list_head head;
+    struct wait_queue wq;
     struct list_head watches;
 };
 
 struct poll_waiter {
-    struct list_head node;
+    struct wait_queue_entry entry;
     struct poll_wait_head *head;
-    struct process *proc;
-    bool active;
+    struct vnode *vn;
 };
 
 struct poll_watch {

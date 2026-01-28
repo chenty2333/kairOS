@@ -6,6 +6,7 @@
 #include <kairos/epoll_internal.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
+#include <kairos/syscall.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
@@ -20,7 +21,8 @@ int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
     if (ret < 0)
         return ret;
 
-    int fd = fd_alloc(proc_current(), file);
+    uint32_t fd_flags = (flags & EPOLL_CLOEXEC) ? FD_CLOEXEC : 0;
+    int fd = fd_alloc_flags(proc_current(), file, fd_flags);
     if (fd < 0) {
         vfs_close(file);
         return fd;

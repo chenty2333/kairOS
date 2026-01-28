@@ -16,6 +16,7 @@ int virtqueue_add_buf(struct virtqueue *vq, struct virtq_desc *descs, uint32_t c
         vq->desc[i] = descs[i];
     }
 
+    mb();
     vq->avail->ring[vq->avail->idx % vq->num] = 0; // Head of chain
     mb();
     vq->avail->idx++;

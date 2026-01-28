@@ -5,6 +5,7 @@
  */
 
 #include <kairos/process.h>
+#include <kairos/syscall.h>
 #include <kairos/spinlock.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
@@ -14,6 +15,10 @@
  * fd_alloc - Allocate a file descriptor for a process
  */
 int fd_alloc(struct process *p, struct file *file) {
+    return fd_alloc_flags(p, file, 0);
+}
+
+int fd_alloc_flags(struct process *p, struct file *file, uint32_t fd_flags) {
     if (!p || !file) {
         return -EINVAL;
     }
@@ -22,6 +27,7 @@ int fd_alloc(struct process *p, struct file *file) {
     for (int fd = 0; fd < CONFIG_MAX_FILES_PER_PROC; fd++) {
         if (!p->files[fd]) {
             p->files[fd] = file;
+            p->fd_flags[fd] = fd_flags;
             mutex_unlock(&p->files_lock);
             return fd;
         }
@@ -60,6 +66,7 @@ int fd_close(struct process *p, int fd) {
     }
 
     p->files[fd] = NULL;
+    p->fd_flags[fd] = 0;
     mutex_unlock(&p->files_lock);
     return vfs_close(file);
 }
@@ -91,6 +98,10 @@ int fd_dup(struct process *p, int oldfd) {
  * fd_dup2 - Duplicate a file descriptor to a specific fd
  */
 int fd_dup2(struct process *p, int oldfd, int newfd) {
+    return fd_dup2_flags(p, oldfd, newfd, 0);
+}
+
+int fd_dup2_flags(struct process *p, int oldfd, int newfd, uint32_t fd_flags) {
     struct file *file;
     struct file *old_new;
 
@@ -112,6 +123,7 @@ int fd_dup2(struct process *p, int oldfd, int newfd) {
 
     old_new = p->files[newfd];
     p->files[newfd] = file;
+    p->fd_flags[newfd] = fd_flags;
     file_get(file);
     mutex_unlock(&p->files_lock);
 
@@ -131,5 +143,28 @@ void fd_close_all(struct process *p) {
 
     for (int fd = 0; fd < CONFIG_MAX_FILES_PER_PROC; fd++) {
         fd_close(p, fd);
+    }
+}
+
+void fd_close_cloexec(struct process *p) {
+    if (!p) {
+        return;
+    }
+
+    struct file *to_close[CONFIG_MAX_FILES_PER_PROC];
+    int count = 0;
+
+    mutex_lock(&p->files_lock);
+    for (int fd = 0; fd < CONFIG_MAX_FILES_PER_PROC; fd++) {
+        if (p->files[fd] && (p->fd_flags[fd] & FD_CLOEXEC)) {
+            to_close[count++] = p->files[fd];
+            p->files[fd] = NULL;
+            p->fd_flags[fd] = 0;
+        }
+    }
+    mutex_unlock(&p->files_lock);
+
+    for (int i = 0; i < count; i++) {
+        vfs_close(to_close[i]);
     }
 }

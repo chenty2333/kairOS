@@ -329,7 +329,7 @@ void pipe_poll_register_file(struct file *file, struct poll_waiter *waiter,
     if (!file || !file->vnode || !waiter)
         return;
     struct pipe *p = file->vnode->fs_data;
-    waiter->proc = proc_current();
+    waiter->entry.proc = proc_current();
     poll_wait_add(&p->pollers, waiter);
 }
 

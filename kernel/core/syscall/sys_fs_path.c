@@ -6,6 +6,7 @@
 #include <kairos/dentry.h>
 #include <kairos/namei.h>
 #include <kairos/process.h>
+#include <kairos/printk.h>
 #include <kairos/syscall.h>
 #include <kairos/string.h>
 #include <kairos/uaccess.h>
@@ -126,7 +127,8 @@ int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
         return ret;
     }
 
-    int fd_out = fd_alloc(proc_current(), f);
+    uint32_t fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    int fd_out = fd_alloc_flags(proc_current(), f, fd_flags);
     if (fd_out < 0) {
         vfs_close(f);
         return -EMFILE;
@@ -166,6 +168,35 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
             dentry_put(resolved.dentry);
         return -ENOENT;
     }
+
+    if (mode != F_OK) {
+        struct process *p = proc_current();
+        uid_t uid = p ? p->uid : 0;
+        gid_t gid = p ? p->gid : 0;
+        struct vnode *vn = resolved.dentry->vnode;
+        mode_t perms = vn->mode & 0777;
+        uint32_t bits = 0;
+        if (uid == vn->uid)
+            bits = (perms >> 6) & 0x7;
+        else if (gid == vn->gid)
+            bits = (perms >> 3) & 0x7;
+        else
+            bits = perms & 0x7;
+
+        if ((mode & R_OK) && !(bits & 0x4)) {
+            dentry_put(resolved.dentry);
+            return -EACCES;
+        }
+        if ((mode & W_OK) && !(bits & 0x2)) {
+            dentry_put(resolved.dentry);
+            return -EACCES;
+        }
+        if ((mode & X_OK) && !(bits & 0x1)) {
+            dentry_put(resolved.dentry);
+            return -EACCES;
+        }
+    }
+
     dentry_put(resolved.dentry);
     return 0;
 }

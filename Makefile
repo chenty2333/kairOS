@@ -45,7 +45,7 @@ ifeq ($(ARCH),riscv64)
   CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
-  QEMU_CPU := rv64
+  QEMU_CPU := rv64gc
   KERNEL_LOAD := 0x80200000
 else ifeq ($(ARCH),x86_64)
   CROSS_COMPILE ?=
@@ -123,6 +123,7 @@ CORE_SRCS := \
     kernel/core/mm/buddy.c \
     kernel/core/mm/kmalloc.c \
     kernel/core/mm/vmm.c \
+    kernel/core/mm/vma.c \
     kernel/core/dev/firmware.c \
     kernel/core/proc/process.c \
     kernel/core/proc/user_test.c \
@@ -160,6 +161,7 @@ CORE_SRCS := \
     kernel/fs/vfs/vfs.c \
     kernel/fs/vfs/pipe.c \
     kernel/fs/vfs/epoll.c \
+    kernel/fs/vfs/poll.c \
     kernel/fs/vfs/dentry.c \
     kernel/fs/vfs/namei.c \
     kernel/fs/devfs/devfs.c \
@@ -170,6 +172,7 @@ CORE_SRCS := \
     kernel/drivers/virtio/virtio.c \
     kernel/drivers/virtio/virtio_mmio.c \
     kernel/drivers/virtio/virtio_ring.c \
+    kernel/drivers/char/console.c \
     kernel/drivers/block/blkdev.c \
     kernel/drivers/block/virtio_blk.c \
     kernel/drivers/net/virtio_net.c
@@ -252,7 +255,7 @@ $(BUILD_DIR)/%.o: %.S
 
 # Common QEMU flags
 QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4 -nographic
-QEMU_FLAGS += -serial mon:stdio
+QEMU_FLAGS += -serial stdio -monitor none
 
 ifeq ($(ARCH),riscv64)
   QEMU_FLAGS += -bios default -kernel $(KERNEL)
@@ -287,7 +290,19 @@ else
   QEMU_FLAGS += -device virtio-net-pci,netdev=net0
 endif
 
+check-disk:
+	@if [ -f "$(DISK_IMG)" ]; then \
+		if debugfs -R "stat /bin/busybox" "$(DISK_IMG)" >/dev/null 2>&1; then \
+			echo "disk: /bin/busybox present"; \
+		else \
+			echo "WARN: disk.img missing /bin/busybox (run: BUSYBOX_BIN=... ./scripts/make-disk.sh)"; \
+		fi; \
+	else \
+		echo "WARN: disk.img not found (run: ./scripts/make-disk.sh)"; \
+	fi
+
 run: $(KERNEL)
+	@$(MAKE) --no-print-directory check-disk
 	$(QEMU) $(QEMU_FLAGS)
 
 # Run with e1000 network card (for testing)

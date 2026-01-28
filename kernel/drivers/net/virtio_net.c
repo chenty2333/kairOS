@@ -2,6 +2,7 @@
  * kernel/drivers/net/virtio_net.c - Minimal VirtIO network driver
  */
 
+#include <kairos/config.h>
 #include <kairos/dma.h>
 #include <kairos/mm.h>
 #include <kairos/net.h>
@@ -53,11 +54,17 @@ static struct virtqueue *virtio_net_alloc_vq(struct virtio_device *vdev,
     vq->vdev = vdev;
     vq->index = index;
     vq->num = VIRTQ_SIZE;
-    vq->desc = kzalloc(VIRTQ_SIZE * sizeof(struct virtq_desc));
-    vq->avail =
-        kzalloc(sizeof(struct virtq_avail) + VIRTQ_SIZE * sizeof(uint16_t));
-    vq->used = kzalloc(sizeof(struct virtq_used) +
-                       VIRTQ_SIZE * sizeof(struct virtq_used_elem));
+    size_t desc_sz = ALIGN_UP(VIRTQ_SIZE * sizeof(struct virtq_desc),
+                              CONFIG_PAGE_SIZE);
+    size_t avail_sz = ALIGN_UP(sizeof(struct virtq_avail) +
+                                   VIRTQ_SIZE * sizeof(uint16_t),
+                               CONFIG_PAGE_SIZE);
+    size_t used_sz = ALIGN_UP(sizeof(struct virtq_used) +
+                                  VIRTQ_SIZE * sizeof(struct virtq_used_elem),
+                              CONFIG_PAGE_SIZE);
+    vq->desc = kzalloc(desc_sz);
+    vq->avail = kzalloc(avail_sz);
+    vq->used = kzalloc(used_sz);
     if (!vq->desc || !vq->avail || !vq->used) {
         kfree(vq->desc);
         kfree(vq->avail);

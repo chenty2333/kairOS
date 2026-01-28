@@ -36,7 +36,7 @@ void proc_init(void) {
         proc_table[i].state = PROC_UNUSED;
         INIT_LIST_HEAD(&proc_table[i].children);
         INIT_LIST_HEAD(&proc_table[i].sibling);
-        INIT_LIST_HEAD(&proc_table[i].wait_list);
+        wait_queue_entry_init(&proc_table[i].wait_entry, &proc_table[i]);
         mutex_init(&proc_table[i].files_lock, "files_lock");
         wait_queue_init(&proc_table[i].exit_wait);
     }
@@ -98,6 +98,7 @@ static struct process *proc_alloc(void) {
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
     memset(p->files, 0, sizeof(p->files));
+    memset(p->fd_flags, 0, sizeof(p->fd_flags));
     mutex_init(&p->files_lock, "files_lock");
     strcpy(p->cwd, "/");
     p->cwd_vnode = NULL;
@@ -123,7 +124,7 @@ static struct process *proc_alloc(void) {
 
     INIT_LIST_HEAD(&p->children);
     INIT_LIST_HEAD(&p->sibling);
-    INIT_LIST_HEAD(&p->wait_list);
+    wait_queue_entry_init(&p->wait_entry, p);
     wait_queue_init(&p->exit_wait);
 
     if (!(p->context = arch_context_alloc())) { p->state = PROC_UNUSED; return NULL; }
@@ -263,6 +264,7 @@ struct process *proc_fork(void) {
             f->refcount++;
             mutex_unlock(&f->lock);
             child->files[i] = f;
+            child->fd_flags[i] = parent->fd_flags[i];
         }
     }
     mutex_unlock(&parent->files_lock);
@@ -438,6 +440,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     old_mm = curr->mm; curr->mm = new_mm;
     arch_mmu_switch(new_mm->pgdir);
     if (old_mm) mm_destroy(old_mm);
+    fd_close_cloexec(curr);
 
     const char *name = strrchr(path, '/');
     strncpy(curr->name, name ? name + 1 : path, sizeof(curr->name) - 1);
@@ -628,8 +631,8 @@ void proc_wakeup(struct process *p) {
     if (!p || p->state != PROC_SLEEPING)
         return;
 
-    if (p->wait_channel && !list_empty(&p->wait_list))
-        wait_queue_remove((struct wait_queue *)p->wait_channel, p);
+    if (p->wait_channel && p->wait_entry.active)
+        wait_queue_remove_entry(&p->wait_entry);
     p->wait_channel = NULL;
     p->state = PROC_RUNNABLE;
     sched_enqueue(p);

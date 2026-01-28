@@ -2,6 +2,7 @@
  * kernel/drivers/block/virtio_blk.c - VirtIO Block Device Driver
  */
 
+#include <kairos/config.h>
 #include <kairos/virtio.h>
 #include <kairos/blkdev.h>
 #include <kairos/mm.h>
@@ -116,9 +117,18 @@ static int virtio_blk_probe(struct virtio_device *vdev) {
     vb->vq->vdev = vdev;
     vb->vq->index = 0;
     vb->vq->num = VIRTQ_SIZE;
-    vb->vq->desc = kzalloc(VIRTQ_SIZE * sizeof(struct virtq_desc));
-    vb->vq->avail = kzalloc(sizeof(struct virtq_avail) + VIRTQ_SIZE * sizeof(uint16_t));
-    vb->vq->used = kzalloc(sizeof(struct virtq_used) + VIRTQ_SIZE * sizeof(struct virtq_used_elem));
+    size_t desc_sz = ALIGN_UP(VIRTQ_SIZE * sizeof(struct virtq_desc),
+                              CONFIG_PAGE_SIZE);
+    size_t avail_sz = ALIGN_UP(sizeof(struct virtq_avail) +
+                                   VIRTQ_SIZE * sizeof(uint16_t),
+                               CONFIG_PAGE_SIZE);
+    size_t used_sz = ALIGN_UP(sizeof(struct virtq_used) +
+                                  VIRTQ_SIZE * sizeof(struct virtq_used_elem),
+                              CONFIG_PAGE_SIZE);
+
+    vb->vq->desc = kzalloc(desc_sz);
+    vb->vq->avail = kzalloc(avail_sz);
+    vb->vq->used = kzalloc(used_sz);
     
     vdev->ops->setup_vq(vdev, 0, vb->vq);
 

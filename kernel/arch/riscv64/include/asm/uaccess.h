@@ -1,6 +1,10 @@
 #ifndef _ASM_RISCV64_UACCESS_H
 #define _ASM_RISCV64_UACCESS_H
 
+#include <kairos/arch.h>
+#include <kairos/config.h>
+#include <kairos/mm.h>
+#include <kairos/process.h>
 #include <kairos/types.h>
 
 /*
@@ -16,12 +20,30 @@
  *
  * Returns true if the range is within user space.
  */
-static inline bool access_ok(const void *addr, size_t size)
-{
-    unsigned long ptr = (unsigned long)addr;
-    unsigned long limit = USER_DS_LIMIT;
-    
-    return (ptr <= limit) && (size <= limit - ptr);
+static inline bool access_ok(const void *addr, size_t size) {
+    if (size == 0)
+        return true;
+    unsigned long start = (unsigned long)addr;
+    unsigned long end = start + size - 1;
+    if (end < start)
+        return false;
+    if (end >= USER_DS_LIMIT)
+        return false;
+
+    struct process *p = proc_current();
+    if (!p || !p->mm)
+        return false;
+
+    for (unsigned long va = start; va <= end;
+         va = ALIGN_DOWN(va, CONFIG_PAGE_SIZE) + CONFIG_PAGE_SIZE) {
+        uint64_t pte = arch_mmu_get_pte(p->mm->pgdir, (vaddr_t)va);
+        if (!(pte & PTE_VALID) || !(pte & PTE_USER))
+            return false;
+        if (va + CONFIG_PAGE_SIZE < va)
+            break;
+    }
+
+    return true;
 }
 
 /*

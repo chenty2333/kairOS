@@ -30,6 +30,20 @@ struct winsize {
     uint16_t ws_ypixel;
 };
 
+/* Minimal termios flags (Linux-compatible values) */
+#define IGNCR  0000200
+#define INLCR  0000100
+#define ICRNL  0000400
+
+#define OPOST  0000001
+#define ONLCR  0000004
+
+#define ISIG   0000001
+#define ICANON 0000002
+#define ECHO   0000010
+#define ECHOE  0000020
+#define ECHOK  0000040
+
 #define TCGETS 0x5401
 #define TCSETS 0x5402
 #define TCSETSW 0x5403

@@ -5,6 +5,7 @@
 #include <asm/arch.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/console.h>
 #include <kairos/pollwait.h>
 #include <kairos/printk.h>
 #include <kairos/sched.h>
@@ -50,6 +51,7 @@ void timer_interrupt_handler(void) {
         tick = __atomic_add_fetch(&system_ticks, 1, __ATOMIC_RELAXED);
     }
     sbi_call(SBI_EXT_TIME, 0, rdtime() + ticks_per_int, 0, 0);
+    console_poll_input();
     if (tick && (tick % CONFIG_HZ == 0))
         pr_debug("tick: %lu sec\n", tick / CONFIG_HZ);
     if (tick)

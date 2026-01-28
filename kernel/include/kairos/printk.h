@@ -39,7 +39,7 @@ int vprintk(const char *fmt, va_list args);
 #define pr_notice(fmt, ...) printk("[NOTICE] " fmt, ##__VA_ARGS__)
 #define pr_info(fmt, ...) printk("[INFO] " fmt, ##__VA_ARGS__)
 
-#ifdef CONFIG_DEBUG
+#if CONFIG_DEBUG
 #define pr_debug(fmt, ...)                                                     \
     printk("[DEBUG] %s:%d: " fmt, __func__, __LINE__, ##__VA_ARGS__)
 #else
@@ -74,7 +74,7 @@ noreturn void panic(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
                     __func__);                                                 \
     } while (0)
 
-#ifdef CONFIG_DEBUG
+#if CONFIG_DEBUG
 #define ASSERT(cond)                                                           \
     do {                                                                       \
         if (unlikely(!(cond)))                                                 \

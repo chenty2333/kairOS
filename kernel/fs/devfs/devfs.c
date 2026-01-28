@@ -2,8 +2,8 @@
  * kernel/fs/devfs/devfs.c - Device File System
  */
 
-#include <kairos/arch.h>
 #include <kairos/blkdev.h>
+#include <kairos/console.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
@@ -54,8 +54,6 @@ static int devfs_dev_poll(struct vnode *vn, uint32_t events);
 static int devfs_dir_poll(struct vnode *vn, uint32_t events);
 static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg);
 
-static struct winsize devfs_console_winsize = {.ws_row = 24, .ws_col = 80};
-
 static struct file_ops devfs_dev_ops = {
     .read = devfs_dev_read,
     .write = devfs_dev_write,
@@ -105,6 +103,8 @@ static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
     mode_t mode = (type == DEVFS_BLOCK) ? (S_IFBLK | 0666) : (S_IFCHR | 0666);
     devfs_init_vnode(&node->vn, mnt, node, VNODE_DEVICE, mode,
                      &devfs_dev_ops);
+    if (type == DEVFS_CONSOLE)
+        console_attach_vnode(&node->vn);
     return node;
 }
 
@@ -184,12 +184,17 @@ static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
     if (!node || !buf)
         return -EINVAL;
 
+    if (len == 0)
+        return 0;
+
     switch (node->dev_type) {
     case DEVFS_NULL:
         return 0;
     case DEVFS_ZERO:
         memset(buf, 0, len);
         return (ssize_t)len;
+    case DEVFS_CONSOLE:
+        return console_read(vn, buf, len, 0);
     default:
         return -ENOSYS;
     }
@@ -201,14 +206,8 @@ static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
     if (!node || !buf)
         return -EINVAL;
 
-    if (node->dev_type == DEVFS_CONSOLE) {
-        mutex_lock(&vn->lock);
-        const char *p = buf;
-        for (size_t i = 0; i < len; i++)
-            arch_early_putchar(p[i]);
-        mutex_unlock(&vn->lock);
-    }
-    vfs_poll_wake(vn, POLLIN | POLLOUT);
+    if (node->dev_type == DEVFS_CONSOLE)
+        return console_write(vn, buf, len, off);
     return (ssize_t)len;
 }
 
@@ -255,83 +254,9 @@ static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             return -ENOTTY;
         }
     }
-    if (node->dev_type != DEVFS_CONSOLE)
-        return -ENOTTY;
-
-    switch (cmd) {
-    case TCGETS: {
-        if (!arg)
-            return -EFAULT;
-        struct termios t = {0};
-        if (copy_to_user((void *)arg, &t, sizeof(t)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case TCSETS: {
-        if (!arg)
-            return -EFAULT;
-        struct termios t;
-        if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case TCSETSW:
-    case TCSETSF: {
-        if (!arg)
-            return -EFAULT;
-        struct termios t;
-        if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case TIOCGPGRP: {
-        if (!arg)
-            return -EFAULT;
-        pid_t pgrp = 0;
-        struct process *p = proc_current();
-        if (p)
-            pgrp = p->pid;
-        if (copy_to_user((void *)arg, &pgrp, sizeof(pgrp)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case TIOCSPGRP: {
-        if (!arg)
-            return -EFAULT;
-        pid_t pgrp;
-        if (copy_from_user(&pgrp, (void *)arg, sizeof(pgrp)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case TIOCSCTTY:
-        return 0;
-    case TIOCGWINSZ: {
-        if (!arg)
-            return -EFAULT;
-        if (copy_to_user((void *)arg, &devfs_console_winsize,
-                         sizeof(devfs_console_winsize)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case TIOCSWINSZ: {
-        if (!arg)
-            return -EFAULT;
-        if (copy_from_user(&devfs_console_winsize, (void *)arg,
-                           sizeof(devfs_console_winsize)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    case FIONREAD: {
-        if (!arg)
-            return -EFAULT;
-        int avail = 0;
-        if (copy_to_user((void *)arg, &avail, sizeof(avail)) < 0)
-            return -EFAULT;
-        return 0;
-    }
-    default:
-        return -ENOTTY;
-    }
+    if (node->dev_type == DEVFS_CONSOLE)
+        return console_ioctl(vn, cmd, arg);
+    return -ENOTTY;
 }
 
 static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset) {
@@ -371,8 +296,7 @@ static int devfs_dev_poll(struct vnode *vn, uint32_t events) {
     uint32_t revents = 0;
     switch (node->dev_type) {
     case DEVFS_CONSOLE:
-        revents |= POLLOUT;
-        break;
+        return console_poll(vn, events);
     case DEVFS_NULL:
     case DEVFS_ZERO:
     case DEVFS_BLOCK:

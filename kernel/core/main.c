@@ -162,12 +162,13 @@ void kernel_main(unsigned long hartid, void *dtb) {
     while (1) arch_cpu_halt();
 #else
     struct process *initp = proc_start_init();
-    if (!initp)
+    if (!initp) {
         pr_warn("init: failed to start init thread\n");
-    else
+    }
     arch_irq_enable();
     /* No test harness: keep the scheduler running. */
-    while (1)
+    while (1) {
         schedule();
+    }
 #endif
 }

@@ -52,7 +52,7 @@ static void poll_register_waiters(struct pollfd *fds, struct poll_waiter *waiter
         return;
 
     for (size_t i = 0; i < nfds; i++) {
-        waiters[i].proc = curr;
+        waiters[i].entry.proc = curr;
         if (fds[i].fd < 0 || fds[i].revents)
             continue;
         struct file *f = fd_get(curr, fds[i].fd);
@@ -78,17 +78,19 @@ static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
     int ready;
     do {
         poll_unregister_waiters(waiters, nfds);
+        poll_register_waiters(fds, waiters, nfds);
         ready = poll_check_fds(fds, nfds);
-        if (ready || timeout_ms == 0)
-            break;
-
-        uint64_t now = arch_timer_get_ticks();
-        if (deadline && now >= deadline) {
-            ready = 0;
+        if (ready || timeout_ms == 0) {
+            poll_unregister_waiters(waiters, nfds);
             break;
         }
 
-        poll_register_waiters(fds, waiters, nfds);
+        uint64_t now = arch_timer_get_ticks();
+        if (deadline && now >= deadline) {
+            poll_unregister_waiters(waiters, nfds);
+            ready = 0;
+            break;
+        }
 
         struct process *curr = proc_current();
         struct poll_sleep sleep = {0};
@@ -99,7 +101,6 @@ static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
         poll_sleep_cancel(&sleep);
     } while (1);
 
-    poll_unregister_waiters(waiters, nfds);
     kfree(waiters);
     return ready;
 }

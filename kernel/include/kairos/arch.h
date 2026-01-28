@@ -81,7 +81,13 @@ void arch_send_ipi_all(int type);
 
 /* I/O & Debug */
 void arch_early_putchar(char c);
+#ifdef ARCH_riscv64
 int arch_early_getchar(void);
+int arch_early_getchar_nb(void);
+#else
+static inline int arch_early_getchar(void) { return -1; }
+static inline int arch_early_getchar_nb(void) { return -1; }
+#endif
 void arch_breakpoint(void);
 void arch_dump_regs(struct arch_context *ctx);
 void arch_backtrace(void);

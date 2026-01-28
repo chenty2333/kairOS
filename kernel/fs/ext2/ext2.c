@@ -302,41 +302,48 @@ static int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent,
                               off_t *offset) {
     struct ext2_inode_data *id = vn->fs_data;
     struct ext2_mount *mnt = id->mnt;
-    if (*offset >= (off_t)id->inode.i_size)
-        return 0;
+    while (*offset < (off_t)id->inode.i_size) {
+        uint32_t bidx = *offset / mnt->block_size;
+        uint32_t boff = *offset % mnt->block_size;
+        uint32_t bnum;
+        if (ext2_get_block(mnt, id, bidx, &bnum, 0) < 0 || bnum == 0)
+            return 0;
 
-    uint32_t bidx = *offset / mnt->block_size, boff = *offset % mnt->block_size,
-             bnum;
-    if (ext2_get_block(mnt, id, bidx, &bnum, 0) < 0 || bnum == 0)
-        return 0;
+        uint32_t blk_off = 0;
+        struct buf *bp = ext2_bread(mnt, bnum, &blk_off);
+        if (!bp)
+            return -EIO;
 
-    uint32_t blk_off = 0;
-    struct buf *bp = ext2_bread(mnt, bnum, &blk_off);
-    if (!bp)
-        return -EIO;
+        struct ext2_dirent *de =
+            (struct ext2_dirent *)(bp->data + blk_off + boff);
+        if (de->rec_len < 8 ||
+            de->rec_len > (mnt->block_size - boff)) {
+            brelse(bp);
+            return -EIO;
+        }
 
-    struct ext2_dirent *de =
-        (struct ext2_dirent *)(bp->data + blk_off + boff);
-    if (de->inode == 0 || de->rec_len == 0 ||
-        de->rec_len < 8 ||
-        de->rec_len > (mnt->block_size - boff)) {
+        if (de->inode == 0) {
+            *offset += de->rec_len;
+            brelse(bp);
+            continue;
+        }
+
+        ent->d_ino = de->inode;
+        ent->d_off = *offset;
+        ent->d_reclen = sizeof(*ent);
+        static const uint8_t map[] = {DT_UNKNOWN, DT_REG,  DT_DIR,  DT_CHR,
+                                      DT_BLK,     DT_FIFO, DT_SOCK, DT_LNK};
+        ent->d_type = (de->file_type < 8) ? map[de->file_type] : DT_UNKNOWN;
+        size_t nlen = MIN(de->name_len, CONFIG_NAME_MAX - 1);
+        memcpy(ent->d_name, de->name, nlen);
+        ent->d_name[nlen] = '\0';
+
+        *offset += de->rec_len;
         brelse(bp);
-        return 0;
+        return 1;
     }
 
-    ent->d_ino = de->inode;
-    ent->d_off = *offset;
-    ent->d_reclen = sizeof(*ent);
-    static const uint8_t map[] = {DT_UNKNOWN, DT_REG,  DT_DIR,  DT_CHR,
-                                  DT_BLK,     DT_FIFO, DT_SOCK, DT_LNK};
-    ent->d_type = (de->file_type < 8) ? map[de->file_type] : DT_UNKNOWN;
-    size_t nlen = MIN(de->name_len, CONFIG_NAME_MAX - 1);
-    memcpy(ent->d_name, de->name, nlen);
-    ent->d_name[nlen] = '\0';
-
-    *offset += de->rec_len;
-    brelse(bp);
-    return 1;
+    return 0;
 }
 
 static int ext2_vnode_close(struct vnode *vn) {

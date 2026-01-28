@@ -6,6 +6,12 @@
 
 set -e
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BUSYBOX_SRC="${BUSYBOX_BIN:-}"
+if [[ -z "$BUSYBOX_SRC" && -f "${ROOT_DIR}/busybox" ]]; then
+  BUSYBOX_SRC="${ROOT_DIR}/busybox"
+fi
+
 DISK_IMG="${1:-disk.img}"
 DISK_SIZE=64  # MB
 MOUNT_POINT="/tmp/kairos-disk-$$"
@@ -37,6 +43,16 @@ sudo mkdir -p "$MOUNT_POINT/dev"
 # Create some files in subdirectories
 echo "root:x:0:0:root:/root:/bin/sh" | sudo tee "$MOUNT_POINT/etc/passwd" >/dev/null
 echo "127.0.0.1 localhost" | sudo tee "$MOUNT_POINT/etc/hosts" >/dev/null
+
+# Install busybox if provided
+if [[ -n "$BUSYBOX_SRC" && -f "$BUSYBOX_SRC" ]]; then
+  echo "Installing busybox from $BUSYBOX_SRC"
+  sudo cp "$BUSYBOX_SRC" "$MOUNT_POINT/bin/busybox"
+  sudo chmod 0755 "$MOUNT_POINT/bin/busybox"
+  sudo ln -sf /bin/busybox "$MOUNT_POINT/bin/sh"
+else
+  echo "WARN: busybox not found; set BUSYBOX_BIN or place ./busybox in repo root"
+fi
 
 # Show contents
 echo ""

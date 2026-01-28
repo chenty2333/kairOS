@@ -27,7 +27,9 @@ int64_t sys_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags, uint64_t a3,
         return -EINVAL;
     if (oldfd == newfd)
         return -EINVAL;
-    return (int64_t)fd_dup2(proc_current(), (int)oldfd, (int)newfd);
+    uint32_t fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    return (int64_t)fd_dup2_flags(proc_current(), (int)oldfd, (int)newfd,
+                                  fd_flags);
 }
 
 static int pipe_create_fds(uint64_t fd_array, uint32_t flags) {
@@ -47,11 +49,12 @@ static int pipe_create_fds(uint64_t fd_array, uint32_t flags) {
         mutex_unlock(&wf->lock);
     }
 
-    if ((fds[0] = fd_alloc(proc_current(), rf)) < 0) {
+    uint32_t fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    if ((fds[0] = fd_alloc_flags(proc_current(), rf, fd_flags)) < 0) {
         ret = -EMFILE;
         goto err;
     }
-    if ((fds[1] = fd_alloc(proc_current(), wf)) < 0) {
+    if ((fds[1] = fd_alloc_flags(proc_current(), wf, fd_flags)) < 0) {
         ret = -EMFILE;
         goto err;
     }

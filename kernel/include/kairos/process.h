@@ -53,6 +53,7 @@ struct process {
 
     struct mm_struct *mm;
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
+    uint32_t fd_flags[CONFIG_MAX_FILES_PER_PROC];
     struct mutex files_lock;
     char cwd[CONFIG_PATH_MAX];
     struct vnode *cwd_vnode;
@@ -66,7 +67,8 @@ struct process {
     struct sigaction *sigactions;
     void *wait_channel;
     struct wait_queue exit_wait;
-    struct list_head children, sibling, wait_list;
+    struct wait_queue_entry wait_entry;
+    struct list_head children, sibling;
     struct process *parent;
     struct arch_context *context;
     uint64_t utime, stime, start_time;
@@ -101,11 +103,14 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name);
 
 /* FD management */
 int fd_alloc(struct process *p, struct file *file);
+int fd_alloc_flags(struct process *p, struct file *file, uint32_t fd_flags);
 struct file *fd_get(struct process *p, int fd);
 int fd_close(struct process *p, int fd);
 int fd_dup(struct process *p, int oldfd);
 int fd_dup2(struct process *p, int oldfd, int newfd);
+int fd_dup2_flags(struct process *p, int oldfd, int newfd, uint32_t fd_flags);
 void fd_close_all(struct process *p);
+void fd_close_cloexec(struct process *p);
 
 struct process *proc_alloc_internal(void);
 void proc_free_internal(struct process *p);

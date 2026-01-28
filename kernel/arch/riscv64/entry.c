@@ -22,11 +22,24 @@
 #define SBI_CONSOLE_GETCHAR 0x02
 #define SBI_SHUTDOWN 0x08
 
+/* QEMU virt UART0 (16550 compatible) */
+#define UART0_BASE 0x10000000UL
+#define UART_RHR   0x00
+#define UART_LSR   0x05
+#define UART_LSR_DR 0x01
+
 static inline long sbi_legacy_call(int ext, unsigned long arg0) {
     register unsigned long a0 __asm__("a0") = arg0;
     register unsigned long a7 __asm__("a7") = ext;
     __asm__ __volatile__("ecall" : "+r"(a0) : "r"(a7) : "memory");
     return a0;
+}
+
+static inline int uart_getchar_nb(void) {
+    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
+    if (uart[UART_LSR] & UART_LSR_DR)
+        return (int)uart[UART_RHR];
+    return -1;
 }
 
 void arch_early_putchar(char c) {
@@ -37,6 +50,13 @@ int arch_early_getchar(void) {
     long ret;
     while ((ret = sbi_legacy_call(SBI_CONSOLE_GETCHAR, 0)) < 0) {
     }
+    return (int)ret;
+}
+
+int arch_early_getchar_nb(void) {
+    long ret = sbi_legacy_call(SBI_CONSOLE_GETCHAR, 0);
+    if (ret < 0)
+        return uart_getchar_nb();
     return (int)ret;
 }
 

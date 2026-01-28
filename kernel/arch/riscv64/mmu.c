@@ -54,9 +54,15 @@ static inline bool pte_is_branch(uint64_t pte) {
 
 static paddr_t pt_alloc(void) {
     paddr_t pa = pmm_alloc_page();
-    if (pa) {
-        memset((void *)pa, 0, PAGE_SIZE);
+    if (!pa) {
+        return 0;
     }
+    /* Validate that pa is in the valid RAM region */
+    if (!phys_to_page(pa)) {
+        pr_err("pt_alloc: pmm returned invalid address %p\n", (void *)pa);
+        return 0;
+    }
+    memset((void *)pa, 0, PAGE_SIZE);
     return pa;
 }
 

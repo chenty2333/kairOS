@@ -20,7 +20,9 @@
     .equ SIGUSR1, 10
     .equ RLIMIT_NOFILE, 7
     .equ PROT_READ, 0x1
+    .equ PROT_WRITE, 0x2
     .equ MAP_PRIVATE, 0x02
+    .equ MAP_ANONYMOUS, 0x20
 
     .equ SYS_openat, 56
     .equ SYS_close, 57
@@ -845,6 +847,7 @@ mmap_test:
     li a1, PAGE_SIZE
     li a7, SYS_munmap
     ecall
+    blt a0, zero, munmap_fail
 
     mv a0, s2
     li a7, SYS_close
@@ -855,7 +858,7 @@ mmap_test:
     li a2, 9
     li a7, SYS_write
     ecall
-    j pivot_root_test
+    j anon_mmap_test
 
 mmap_fail_close:
     mv a0, s2
@@ -870,15 +873,56 @@ mmap_fail:
     ecall
     j pivot_root_test
 
+munmap_fail:
+    li a0, 1
+    la a1, msg_munmap_fail
+    li a2, 13
+    li a7, SYS_write
+    ecall
+    j pivot_root_test
+
+anon_mmap_test:
+    li a0, 0
+    li a1, PAGE_SIZE
+    li a2, PROT_READ | PROT_WRITE
+    li a3, MAP_PRIVATE | MAP_ANONYMOUS
+    li a4, -1
+    li a5, 0
+    li a7, SYS_mmap
+    ecall
+    blt a0, zero, anon_mmap_fail
+    mv s4, a0
+
+    li t0, 0x12345678
+    sw t0, 0(s4)
+    lw t1, 0(s4)
+    bne t0, t1, anon_mmap_fail
+
+    mv a0, s4
+    li a1, PAGE_SIZE
+    li a7, SYS_munmap
+    ecall
+    blt a0, zero, anon_mmap_fail
+
+    li a0, 1
+    la a1, msg_anon_mmap_ok
+    li a2, 14
+    li a7, SYS_write
+    ecall
+    j pivot_root_test
+
+anon_mmap_fail:
+    li a0, 1
+    la a1, msg_anon_mmap_fail
+    li a2, 16
+    li a7, SYS_write
+    ecall
+    j pivot_root_test
+
 pivot_root_test:
-    /* mkdir /newroot and /newroot/oldroot */
+    /* mkdir /newroot */
     li a0, AT_FDCWD
     la a1, path_newroot
-    li a2, 0755
-    li a7, SYS_mkdirat
-    ecall
-    li a0, AT_FDCWD
-    la a1, path_oldroot
     li a2, 0755
     li a7, SYS_mkdirat
     ecall
@@ -892,6 +936,13 @@ pivot_root_test:
     li a7, SYS_mount
     ecall
     blt a0, zero, pivot_fail
+
+    /* mkdir /newroot/oldroot after bind mount */
+    li a0, AT_FDCWD
+    la a1, path_oldroot
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
 
     la a0, path_newroot
     la a1, path_oldroot
@@ -920,9 +971,22 @@ pivot_root_test:
     j exit_now
 
 pivot_fail:
+    mv t1, a0
     li a0, 1
     la a1, msg_pivot_fail
     li a2, 17
+    li a7, SYS_write
+    ecall
+    li a0, 1
+    la a1, msg_pivot_errno
+    li a2, 17
+    li a7, SYS_write
+    ecall
+    mv a0, t1
+    jal ra, print_errno
+    li a0, 1
+    la a1, msg_newline
+    li a2, 1
     li a7, SYS_write
     ecall
 
@@ -1008,6 +1072,52 @@ exec_busybox:
     ecall
 
 1:  j 1b
+
+print_errno:
+    la t0, err_buf_end
+    mv t2, a0
+    li t3, 0
+    blt t2, zero, 1f
+    j 2f
+1:
+    neg t2, t2
+    li t3, 1
+2:
+    beqz t2, 3f
+4:
+    li t4, 0
+    mv t5, t2
+5:
+    li t6, 10
+    blt t5, t6, 6f
+    addi t5, t5, -10
+    addi t4, t4, 1
+    j 5b
+6:
+    addi t5, t5, '0'
+    addi t0, t0, -1
+    sb t5, 0(t0)
+    mv t2, t4
+    bnez t2, 4b
+    j 5f
+3:
+    addi t0, t0, -1
+    li t4, '0'
+    sb t4, 0(t0)
+5:
+    beqz t3, 7f
+    addi t0, t0, -1
+    li t4, '-'
+    sb t4, 0(t0)
+7:
+    la t5, err_buf_end
+    sub t6, t5, t0
+    li a0, 1
+    mv a1, t0
+    mv a2, t6
+    li a7, SYS_write
+    ecall
+    ret
 
     .section .rodata
 path:
@@ -1102,12 +1212,20 @@ msg_mmap_ok:
     .asciz "mmap: ok\n"
 msg_mmap_fail:
     .asciz "mmap: fail\n"
+msg_munmap_fail:
+    .asciz "munmap: fail\n"
+msg_anon_mmap_ok:
+    .asciz "anon mmap: ok\n"
+msg_anon_mmap_fail:
+    .asciz "anon mmap: fail\n"
 msg_mmap_data:
     .asciz "mmap ok\n"
 msg_pivot_ok:
     .asciz "pivot_root: ok\n"
 msg_pivot_fail:
     .asciz "pivot_root: fail\n"
+msg_pivot_errno:
+    .asciz "pivot_root errno="
 msg_exec_fail:
     .asciz "exec: /bin/busybox failed\n"
 msg_exec_old_fail:
@@ -1153,6 +1271,9 @@ path_oldroot_short:
 
     .section .bss
     .align 4
+err_buf:
+    .space 32
+err_buf_end:
 pipe_fds:
     .space 8
 status:

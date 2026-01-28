@@ -13,8 +13,37 @@
 #include <kairos/vfs.h>
 
 static int elf_check_ehdr(const Elf64_Ehdr *ehdr, size_t size) {
-    if (size < sizeof(Elf64_Ehdr) || elf_validate(ehdr) < 0) {
-        pr_err("ELF: invalid or too small header\n");
+    if (size < sizeof(Elf64_Ehdr)) {
+        pr_err("ELF: too small header\n");
+        return -ENOEXEC;
+    }
+    if (ehdr->e_ident[EI_MAG0] != 0x7f || ehdr->e_ident[EI_MAG1] != 'E' ||
+        ehdr->e_ident[EI_MAG2] != 'L' || ehdr->e_ident[EI_MAG3] != 'F') {
+        pr_err("ELF: bad magic\n");
+        return -ENOEXEC;
+    }
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) {
+        pr_err("ELF: unsupported class\n");
+        return -ENOEXEC;
+    }
+    if (ehdr->e_ident[EI_DATA] != ELFDATA2LSB) {
+        pr_err("ELF: unsupported endianness\n");
+        return -ENOEXEC;
+    }
+    if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
+        pr_err("ELF: unsupported type %u\n", ehdr->e_type);
+        return -ENOEXEC;
+    }
+    if (ehdr->e_machine != EM_RISCV) {
+        pr_err("ELF: unsupported machine %u\n", ehdr->e_machine);
+        return -ENOEXEC;
+    }
+    if (ehdr->e_ehsize != sizeof(Elf64_Ehdr)) {
+        pr_err("ELF: unexpected ehdr size\n");
+        return -ENOEXEC;
+    }
+    if (ehdr->e_phnum == 0 || ehdr->e_phoff == 0) {
+        pr_err("ELF: missing program headers\n");
         return -ENOEXEC;
     }
 
@@ -28,6 +57,10 @@ static int elf_check_ehdr(const Elf64_Ehdr *ehdr, size_t size) {
         return -ENOEXEC;
     }
 
+    if (ehdr->e_phnum > (SIZE_MAX - ehdr->e_phoff) / ehdr->e_phentsize) {
+        pr_err("ELF: program header size overflow\n");
+        return -ENOEXEC;
+    }
     size_t ph_end = ehdr->e_phoff +
                     (size_t)ehdr->e_phnum * ehdr->e_phentsize;
     if (ph_end > size) {
@@ -42,6 +75,10 @@ static int elf_check_phdr(const Elf64_Phdr *ph, size_t size,
                           bool check_align) {
     if (ph->p_type == PT_INTERP) {
         pr_warn("ELF: PT_INTERP not supported\n");
+        return -ENOEXEC;
+    }
+    if (ph->p_type == PT_DYNAMIC) {
+        pr_warn("ELF: PT_DYNAMIC ignored (no dynamic loader)\n");
         return -ENOEXEC;
     }
     if (ph->p_type != PT_LOAD) {
@@ -84,6 +121,7 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
     vaddr_t base = 0;
     vaddr_t phdr_addr = 0;
     bool base_set = false;
+    bool entry_ok = false;
 
     ret = elf_check_ehdr(ehdr, size);
     if (ret < 0) {
@@ -111,6 +149,9 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
 
         vaddr_t seg_start = phdr[i].p_vaddr;
         vaddr_t seg_end = seg_start + phdr[i].p_memsz;
+        if (ehdr->e_entry >= seg_start && ehdr->e_entry < seg_end) {
+            entry_ok = true;
+        }
         vaddr_t page_start = ALIGN_DOWN(seg_start, CONFIG_PAGE_SIZE);
         vaddr_t page_end = ALIGN_UP(seg_end, CONFIG_PAGE_SIZE);
 
@@ -162,6 +203,11 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
         }
     }
 
+    if (!entry_ok) {
+        pr_err("ELF: entry outside load segments\n");
+        return -ENOEXEC;
+    }
+
     *entry_out = ehdr->e_entry;
     if (aux_out) {
         aux_out->phent = ehdr->e_phentsize;
@@ -199,6 +245,7 @@ int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
     vaddr_t base = 0;
     vaddr_t phdr_addr = 0;
     bool base_set = false;
+    bool entry_ok = false;
 
     if (!mm || !vn || !entry_out) {
         return -EINVAL;
@@ -247,6 +294,9 @@ int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
 
         vaddr_t seg_start = ph->p_vaddr;
         vaddr_t seg_end = seg_start + ph->p_memsz;
+        if (ehdr.e_entry >= seg_start && ehdr.e_entry < seg_end) {
+            entry_ok = true;
+        }
         vaddr_t page_start = ALIGN_DOWN(seg_start, CONFIG_PAGE_SIZE);
         vaddr_t page_end = ALIGN_UP(seg_end, CONFIG_PAGE_SIZE);
         off_t file_off = (off_t)ALIGN_DOWN(ph->p_offset, CONFIG_PAGE_SIZE);
@@ -262,13 +312,22 @@ int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
             vma_flags |= VM_EXEC;
         }
 
+        vaddr_t file_end = seg_start + ph->p_filesz;
+        if (file_end > page_end) {
+            file_end = page_end;
+        }
         ret = mm_add_vma_file(mm, page_start, page_end, vma_flags, vn,
-                              file_off, seg_start,
-                              seg_start + ph->p_filesz);
+                              file_off, seg_start, file_end);
         if (ret < 0) {
             kfree(phdrs);
             return ret;
         }
+    }
+
+    if (!entry_ok) {
+        pr_err("ELF: entry outside load segments\n");
+        kfree(phdrs);
+        return -ENOEXEC;
     }
 
     *entry_out = ehdr.e_entry;
