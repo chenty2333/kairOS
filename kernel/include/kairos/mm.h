@@ -90,6 +90,8 @@ struct vm_area {
     struct rb_node rb_node;
     struct vnode *vnode;
     off_t offset;
+    vaddr_t file_start;
+    vaddr_t file_end;
 };
 
 struct mm_struct {
@@ -107,6 +109,9 @@ struct mm_struct *mm_clone(struct mm_struct *src);
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags);
 int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
                uint32_t flags, struct vnode *vn, off_t offset);
+int mm_add_vma_file(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                    uint32_t flags, struct vnode *vn, off_t offset,
+                    vaddr_t file_start, vaddr_t file_end);
 int mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot,
             uint32_t flags, struct vnode *vn, off_t offset, bool fixed,
             vaddr_t *out);

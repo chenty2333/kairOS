@@ -102,25 +102,34 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
     mutex_lock(&mm->lock);
 
     struct vm_area *acc = NULL;
-    for (;;) {
-        struct vm_area *hit = find_vma_intersection(mm, start, end);
-        if (!hit) {
-            break;
-        }
+    if (!vn) {
+        for (;;) {
+            struct vm_area *hit = find_vma_intersection(mm, start, end);
+            if (!hit) {
+                break;
+            }
+            if (hit->vnode) {
+                mutex_unlock(&mm->lock);
+                return -EEXIST;
+            }
 
-        start = (start < hit->start) ? start : hit->start;
-        end = (end > hit->end) ? end : hit->end;
-        flags |= hit->flags;
+            start = (start < hit->start) ? start : hit->start;
+            end = (end > hit->end) ? end : hit->end;
+            flags |= hit->flags;
 
-        if (!acc) {
-            acc = hit;
-            remove_vma(mm, hit);
-        } else {
-            remove_vma(mm, hit);
-            if (hit->vnode)
-                vnode_put(hit->vnode);
-            kfree(hit);
+            if (!acc) {
+                acc = hit;
+                remove_vma(mm, hit);
+            } else {
+                remove_vma(mm, hit);
+                if (hit->vnode)
+                    vnode_put(hit->vnode);
+                kfree(hit);
+            }
         }
+    } else if (find_vma_intersection(mm, start, end)) {
+        mutex_unlock(&mm->lock);
+        return -EEXIST;
     }
 
     if (!acc) {
@@ -142,12 +151,72 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
         vnode_get(vn);
     acc->vnode = vn;
     acc->offset = offset;
+    if (vn) {
+        vaddr_t vend = end;
+        if (vn->size > (size_t)offset) {
+            size_t avail = vn->size - (size_t)offset;
+            if (avail < (size_t)(end - start))
+                vend = start + avail;
+        } else {
+            vend = start;
+        }
+        acc->file_start = start;
+        acc->file_end = vend;
+    } else {
+        acc->file_start = 0;
+        acc->file_end = 0;
+    }
 
     insert_vma(mm, acc);
     mutex_unlock(&mm->lock);
     return 0;
 }
 
+int mm_add_vma_file(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                    uint32_t flags, struct vnode *vn, off_t offset,
+                    vaddr_t file_start, vaddr_t file_end) {
+    if (!mm || !vn) {
+        return -EINVAL;
+    }
+
+    start = ALIGN_DOWN(start, CONFIG_PAGE_SIZE);
+    end = ALIGN_UP(end, CONFIG_PAGE_SIZE);
+    if (start >= end) {
+        return -EINVAL;
+    }
+
+    if (file_start < start) {
+        file_start = start;
+    }
+    if (file_end > end) {
+        file_end = end;
+    }
+
+    mutex_lock(&mm->lock);
+    if (find_vma_intersection(mm, start, end)) {
+        mutex_unlock(&mm->lock);
+        return -EEXIST;
+    }
+
+    struct vm_area *vma = kzalloc(sizeof(*vma));
+    if (!vma) {
+        mutex_unlock(&mm->lock);
+        return -ENOMEM;
+    }
+    INIT_LIST_HEAD(&vma->list);
+    vma->start = start;
+    vma->end = end;
+    vma->flags = flags;
+    vma->vnode = vn;
+    vma->offset = offset;
+    vma->file_start = file_start;
+    vma->file_end = file_end;
+    vnode_get(vn);
+
+    insert_vma(mm, vma);
+    mutex_unlock(&mm->lock);
+    return 0;
+}
 void mm_destroy(struct mm_struct *mm) {
     if (!mm) return;
     mutex_lock(&mm->lock);
@@ -266,19 +335,32 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
     if (!pa) { mutex_unlock(&mm->lock); return -ENOMEM; }
     void *kva = phys_to_virt(pa);
     memset(kva, 0, CONFIG_PAGE_SIZE);
-    if (vma->vnode && vma->vnode->ops && vma->vnode->ops->read) {
-        off_t file_off = vma->offset + (off_t)(va - vma->start);
-        size_t to_read = CONFIG_PAGE_SIZE;
-        if (file_off < (off_t)vma->vnode->size) {
-            size_t avail = (size_t)vma->vnode->size - (size_t)file_off;
-            if (avail < to_read)
-                to_read = avail;
-            ssize_t rd = vma->vnode->ops->read(vma->vnode, kva, to_read,
-                                               file_off);
+    if (vma->vnode && vma->vnode->ops && vma->vnode->ops->read &&
+        vma->file_end > vma->file_start) {
+        vaddr_t page_start = va;
+        vaddr_t page_end = va + CONFIG_PAGE_SIZE;
+        vaddr_t read_start =
+            (page_start > vma->file_start) ? page_start : vma->file_start;
+        vaddr_t read_end =
+            (page_end < vma->file_end) ? page_end : vma->file_end;
+        if (read_start < read_end) {
+            off_t file_off =
+                vma->offset + (off_t)(read_start - vma->start);
+            size_t to_read = (size_t)(read_end - read_start);
+            ssize_t rd = vma->vnode->ops->read(
+                vma->vnode,
+                (uint8_t *)kva + (read_start - page_start),
+                to_read,
+                file_off);
             if (rd < 0) {
                 pmm_free_page(pa);
                 mutex_unlock(&mm->lock);
                 return (int)rd;
+            }
+            if ((size_t)rd != to_read) {
+                pmm_free_page(pa);
+                mutex_unlock(&mm->lock);
+                return -EIO;
             }
         }
     }
@@ -377,8 +459,21 @@ int mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot,
     }
     mutex_unlock(&mm->lock);
 
-    if (mm_add_vma(mm, start, start + len, prot | flags, vn, offset) < 0)
+    if (vn) {
+        vaddr_t file_end = start;
+        if (vn->size > (size_t)offset) {
+            size_t avail = vn->size - (size_t)offset;
+            if (avail > len)
+                avail = len;
+            file_end = start + avail;
+        }
+        if (mm_add_vma_file(mm, start, start + len, prot | flags, vn, offset,
+                            start, file_end) < 0) {
+            return -ENOMEM;
+        }
+    } else if (mm_add_vma(mm, start, start + len, prot | flags, NULL, 0) < 0) {
         return -ENOMEM;
+    }
     *out = start;
     return 0;
 }

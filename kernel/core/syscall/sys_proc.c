@@ -25,15 +25,20 @@ int64_t sys_exec(uint64_t path, uint64_t argv, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) {
         return -EFAULT;
-    return (int64_t)proc_exec(kpath, (char *const *)argv);
+    }
+    return (int64_t)proc_exec(kpath, (char *const *)argv, NULL);
 }
 
 int64_t sys_execve(uint64_t path, uint64_t argv, uint64_t envp, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
-    (void)envp; (void)a3; (void)a4; (void)a5;
-    return sys_exec(path, argv, 0, 0, 0, 0);
+    (void)a3; (void)a4; (void)a5;
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) {
+        return -EFAULT;
+    }
+    return (int64_t)proc_exec(kpath, (char *const *)argv, (char *const *)envp);
 }
 
 int64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,

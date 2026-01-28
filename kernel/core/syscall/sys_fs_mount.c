@@ -6,6 +6,7 @@
 #include <kairos/dentry.h>
 #include <kairos/namei.h>
 #include <kairos/process.h>
+#include <kairos/printk.h>
 #include <kairos/syscall.h>
 #include <kairos/string.h>
 #include <kairos/uaccess.h>
@@ -98,13 +99,16 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     path_init(&oldp);
     int ret = sysfs_resolve_at(AT_FDCWD, new_root, &newp,
                                NAMEI_FOLLOW | NAMEI_DIRECTORY);
-    if (ret < 0)
+    if (ret < 0) {
+        pr_warn("pivot_root: resolve new_root failed (ret=%d)\n", ret);
         return ret;
+    }
     ret = sysfs_resolve_at(AT_FDCWD, put_old, &oldp,
                            NAMEI_FOLLOW | NAMEI_DIRECTORY);
     if (ret < 0) {
         if (newp.dentry)
             dentry_put(newp.dentry);
+        pr_warn("pivot_root: resolve put_old failed (ret=%d)\n", ret);
         return ret;
     }
 
@@ -115,6 +119,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
             dentry_put(newp.dentry);
         if (oldp.dentry)
             dentry_put(oldp.dentry);
+        pr_warn("pivot_root: new_root/put_old not dir\n");
         return -ENOTDIR;
     }
 
@@ -122,6 +127,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     if (!old_root) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: no mount namespace root\n");
         return -EINVAL;
     }
 
@@ -131,23 +137,27 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     if (!new_root_mnt || !new_root_mnt->root_dentry) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: new_root mount invalid\n");
         return -EINVAL;
     }
     if (!newp.dentry->mounted &&
         newp.dentry != new_root_mnt->root_dentry) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: new_root not mount root\n");
         return -EINVAL;
     }
     if (new_root_mnt != oldp.dentry->mnt) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: new_root and put_old not same mount\n");
         return -EXDEV;
     }
 
     if (oldp.dentry->mounted || oldp.dentry->flags & DENTRY_MOUNTPOINT) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: put_old busy\n");
         return -EBUSY;
     }
 
@@ -165,6 +175,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     if (!p->mnt_ns) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: mount namespace missing\n");
         return -EINVAL;
     }
 
@@ -173,6 +184,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
                           relpath, sizeof(relpath)) < 0) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: put_old not under new_root\n");
         return -EINVAL;
     }
 
@@ -186,6 +198,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     new_root_mnt->mountpoint_dentry = NULL;
 
     old_root->parent = new_root_mnt;
+    dentry_get(oldp.dentry);
     old_root->mountpoint_dentry = oldp.dentry;
     oldp.dentry->mounted = old_root;
     oldp.dentry->flags |= DENTRY_MOUNTPOINT;
@@ -195,6 +208,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     if (ret < 0) {
         dentry_put(newp.dentry);
         dentry_put(oldp.dentry);
+        pr_warn("pivot_root: set root failed (ret=%d)\n", ret);
         return ret;
     }
     if (p->cwd_dentry)

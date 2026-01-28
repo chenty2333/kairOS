@@ -118,8 +118,13 @@ int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
     mode_t umode = (flags & O_CREAT) ? sysfs_apply_umask((mode_t)mode)
                                      : (mode_t)mode;
     ret = vfs_open_at_path(basep, kpath, (int)flags, umode, &f);
-    if (ret < 0)
+    if (ret < 0) {
+        if (strcmp(kpath, "/bin/busybox") == 0 ||
+            strcmp(kpath, "/oldroot/bin/busybox") == 0) {
+            pr_warn("openat: %s failed (ret=%d)\n", kpath, ret);
+        }
         return ret;
+    }
 
     int fd_out = fd_alloc(proc_current(), f);
     if (fd_out < 0) {

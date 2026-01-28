@@ -83,7 +83,7 @@ void proc_set_current(struct process *p);
 struct process *proc_idle_init(void);
 struct process *proc_start_init(void);
 void proc_yield(void);
-int proc_exec(const char *path, char *const argv[]);
+int proc_exec(const char *path, char *const argv[], char *const envp[]);
 void proc_wakeup(struct process *p);
 void proc_sleep(void *channel);
 void proc_wakeup_all(void *channel);

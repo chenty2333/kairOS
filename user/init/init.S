@@ -52,6 +52,7 @@
     .equ SYS_umount2, 39
     .equ SYS_chroot, 51
     .equ SYS_pivot_root, 155
+    .equ SYS_execve, 221
 
     .equ MS_BIND, 0x1000
     .equ MS_SHARED, 0x100000
@@ -882,8 +883,8 @@ pivot_root_test:
     li a7, SYS_mkdirat
     ecall
 
-    /* bind mount /newroot to /newroot */
-    la a0, path_newroot
+    /* bind mount / to /newroot */
+    la a0, path_root
     la a1, path_newroot
     li a2, 0
     li a3, MS_BIND
@@ -926,6 +927,81 @@ pivot_fail:
     ecall
 
 exit_now:
+    /* sanity check: open /bin/busybox */
+    li a0, AT_FDCWD
+    la a1, path_sh
+    li a2, O_RDONLY
+    li a3, 0
+    li a7, SYS_openat
+    ecall
+    blt a0, zero, open_busybox_fail
+    mv t0, a0
+    mv a0, t0
+    li a7, SYS_close
+    ecall
+    li a0, 1
+    la a1, msg_open_busybox_ok
+    li a2, 22
+    li a7, SYS_write
+    ecall
+    j open_old_busybox
+open_busybox_fail:
+    li a0, 1
+    la a1, msg_open_busybox_fail
+    li a2, 24
+    li a7, SYS_write
+    ecall
+open_old_busybox:
+    /* sanity check: open /oldroot/bin/busybox */
+    li a0, AT_FDCWD
+    la a1, path_old_sh
+    li a2, O_RDONLY
+    li a3, 0
+    li a7, SYS_openat
+    ecall
+    blt a0, zero, open_old_busybox_fail
+    mv t0, a0
+    mv a0, t0
+    li a7, SYS_close
+    ecall
+    li a0, 1
+    la a1, msg_open_old_busybox_ok
+    li a2, 30
+    li a7, SYS_write
+    ecall
+    j exec_busybox
+open_old_busybox_fail:
+    li a0, 1
+    la a1, msg_open_old_busybox_fail
+    li a2, 32
+    li a7, SYS_write
+    ecall
+
+exec_busybox:
+    /* execve("/bin/busybox", ["sh", NULL], NULL) */
+    la a0, path_sh
+    la a1, argv_sh
+    li a2, 0
+    li a7, SYS_execve
+    ecall
+    /* if exec failed, log and try oldroot */
+    li a0, 1
+    la a1, msg_exec_fail
+    li a2, 26
+    li a7, SYS_write
+    ecall
+    /* if pivot_root succeeded, try /oldroot/bin/busybox */
+    la a0, path_old_sh
+    la a1, argv_old_sh
+    li a2, 0
+    li a7, SYS_execve
+    ecall
+    li a0, 1
+    la a1, msg_exec_old_fail
+    li a2, 34
+    li a7, SYS_write
+    ecall
+
     /* exit(42) */
     li a0, 42
     li a7, SYS_exit
@@ -1032,6 +1108,33 @@ msg_pivot_ok:
     .asciz "pivot_root: ok\n"
 msg_pivot_fail:
     .asciz "pivot_root: fail\n"
+msg_exec_fail:
+    .asciz "exec: /bin/busybox failed\n"
+msg_exec_old_fail:
+    .asciz "exec: /oldroot/bin/busybox failed\n"
+msg_open_busybox_ok:
+    .asciz "open: /bin/busybox ok\n"
+msg_open_busybox_fail:
+    .asciz "open: /bin/busybox fail\n"
+msg_open_old_busybox_ok:
+    .asciz "open: /oldroot/bin/busybox ok\n"
+msg_open_old_busybox_fail:
+    .asciz "open: /oldroot/bin/busybox fail\n"
+
+path_sh:
+    .asciz "/bin/busybox"
+    .align 3
+argv_sh:
+    .dword arg_sh
+    .dword 0
+path_old_sh:
+    .asciz "/oldroot/bin/busybox"
+    .align 3
+argv_old_sh:
+    .dword arg_sh
+    .dword 0
+arg_sh:
+    .asciz "sh"
 
 path_chroot:
     .asciz "/chroot"
