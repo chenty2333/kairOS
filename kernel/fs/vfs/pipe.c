@@ -229,6 +229,8 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     vn->ops = &pipe_ops;
     vn->fs_data = p;
     vn->refcount = 2; /* One for reader, one for writer */
+    vn->parent = NULL;
+    vn->name[0] = '\0';
     mutex_init(&vn->lock, "pipe_vnode");
     poll_wait_head_init(&vn->pollers);
     

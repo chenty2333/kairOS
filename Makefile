@@ -154,6 +154,8 @@ CORE_SRCS := \
     kernel/fs/vfs/vfs.c \
     kernel/fs/vfs/pipe.c \
     kernel/fs/vfs/epoll.c \
+    kernel/fs/vfs/dentry.c \
+    kernel/fs/vfs/namei.c \
     kernel/fs/devfs/devfs.c \
     kernel/fs/ext2/ext2.c \
     kernel/core/dev/device.c \

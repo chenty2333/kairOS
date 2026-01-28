@@ -75,20 +75,21 @@ static void handle_exception(struct trap_frame *tf) {
     }
 
     if (cause >= EXC_INST_PAGE_FAULT && cause <= EXC_STORE_PAGE_FAULT) {
+        struct process *cur = proc_current();
+        bool user_addr = tf->stval <= USER_SPACE_END;
+        if (cur && cur->mm && user_addr) {
+            uint32_t f = (cause == EXC_STORE_PAGE_FAULT)  ? PTE_WRITE
+                         : (cause == EXC_INST_PAGE_FAULT) ? PTE_EXEC
+                                                          : 0;
+            if (mm_handle_fault(cur->mm, tf->stval, f) == 0)
+                return;
+        }
         if (!from_user) {
             unsigned long fix = search_exception_table(tf->sepc);
             if (fix) {
                 tf->sepc = fix;
                 return;
             }
-        }
-        struct process *cur = proc_current();
-        if (cur && cur->mm) {
-            uint32_t f = (cause == EXC_STORE_PAGE_FAULT)  ? PTE_WRITE
-                         : (cause == EXC_INST_PAGE_FAULT) ? PTE_EXEC
-                                                          : 0;
-            if (mm_handle_fault(cur->mm, tf->stval, f) == 0)
-                return;
         }
         if (from_user) {
             signal_send(cur->pid, SIGSEGV);

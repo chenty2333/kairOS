@@ -9,6 +9,7 @@
 #include <kairos/sync.h>
 #include <kairos/config.h>
 #include <kairos/string.h>
+#include <kairos/vfs.h>
 
 /* --- Internal Helpers --- */
 
@@ -116,6 +117,8 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
             remove_vma(mm, hit);
         } else {
             remove_vma(mm, hit);
+            if (hit->vnode)
+                vnode_put(hit->vnode);
             kfree(hit);
         }
     }
@@ -132,6 +135,11 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
     acc->start = start;
     acc->end = end;
     acc->flags = flags;
+    struct vnode *old_vn = acc->vnode;
+    if (old_vn && old_vn != vn)
+        vnode_put(old_vn);
+    if (vn && vn != old_vn)
+        vnode_get(vn);
     acc->vnode = vn;
     acc->offset = offset;
 
@@ -147,6 +155,8 @@ void mm_destroy(struct mm_struct *mm) {
     struct vm_area *vma, *tmp;
     list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
         unmap_range(mm->pgdir, vma->start, vma->end);
+        if (vma->vnode)
+            vnode_put(vma->vnode);
         kfree(vma);
     }
     arch_mmu_destroy_table(mm->pgdir);
@@ -168,6 +178,8 @@ struct mm_struct *mm_clone(struct mm_struct *src) {
         if (!dv) goto fail;
         *dv = *sv;
         INIT_LIST_HEAD(&dv->list);
+        if (dv->vnode)
+            vnode_get(dv->vnode);
         insert_vma(dst, dv);
 
         for (vaddr_t va = sv->start; va < sv->end; va += CONFIG_PAGE_SIZE) {
@@ -176,7 +188,7 @@ struct mm_struct *mm_clone(struct mm_struct *src) {
             paddr_t pa = ALIGN_DOWN(spa, CONFIG_PAGE_SIZE);
 
             uint64_t f = PTE_USER | PTE_READ | ((dv->flags & VM_EXEC) ? PTE_EXEC : 0);
-            bool cow = (dv->flags & VM_WRITE) != 0;
+            bool cow = (dv->flags & VM_WRITE) && !(dv->flags & VM_SHARED);
             if (cow)
                 f |= PTE_COW;
             else
@@ -252,7 +264,24 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
 
     paddr_t pa = pmm_alloc_page();
     if (!pa) { mutex_unlock(&mm->lock); return -ENOMEM; }
-    memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
+    void *kva = phys_to_virt(pa);
+    memset(kva, 0, CONFIG_PAGE_SIZE);
+    if (vma->vnode && vma->vnode->ops && vma->vnode->ops->read) {
+        off_t file_off = vma->offset + (off_t)(va - vma->start);
+        size_t to_read = CONFIG_PAGE_SIZE;
+        if (file_off < (off_t)vma->vnode->size) {
+            size_t avail = (size_t)vma->vnode->size - (size_t)file_off;
+            if (avail < to_read)
+                to_read = avail;
+            ssize_t rd = vma->vnode->ops->read(vma->vnode, kva, to_read,
+                                               file_off);
+            if (rd < 0) {
+                pmm_free_page(pa);
+                mutex_unlock(&mm->lock);
+                return (int)rd;
+            }
+        }
+    }
 
     uint64_t f = PTE_USER | PTE_READ | ((vma->flags & VM_WRITE) ? PTE_WRITE : 0) | ((vma->flags & VM_EXEC) ? PTE_EXEC : 0);
     int ret = arch_mmu_map(mm->pgdir, va, pa, f);
@@ -370,6 +399,8 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
             unmap_range(mm->pgdir, vma->start, vma->end);
 
             remove_vma(mm, vma);
+            if (vma->vnode)
+                vnode_put(vma->vnode);
             kfree(vma);
 
         } else if (vma->start < addr && vma->end > end) {
@@ -381,6 +412,8 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
             unmap_range(mm->pgdir, addr, end);
 
             *nv = *vma; nv->start = end; nv->offset += (end - vma->start);
+            if (nv->vnode)
+                vnode_get(nv->vnode);
 
             vma->end = addr;
 
@@ -515,6 +548,38 @@ int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
         vma->start = end;
         insert_vma(mm, vma);
         insert_vma(mm, mid);
+    }
+
+    uint64_t flag_mask = PTE_READ | PTE_WRITE | PTE_EXEC | PTE_USER | PTE_COW;
+    uint64_t low_mask = (1UL << 10) - 1;
+    for (vaddr_t va = addr; va < end; va += CONFIG_PAGE_SIZE) {
+        struct vm_area *cur = find_vma(mm, va);
+        if (!cur)
+            break;
+        uint64_t pte = arch_mmu_get_pte(mm->pgdir, va);
+        if (!(pte & PTE_VALID))
+            continue;
+
+        uint64_t low = pte & low_mask;
+        uint64_t high = pte & ~low_mask;
+        uint64_t new_low = (low & ~flag_mask) | PTE_USER;
+
+        if (cur->flags & VM_READ)
+            new_low |= PTE_READ;
+        if (cur->flags & VM_EXEC)
+            new_low |= PTE_EXEC;
+        if (cur->flags & VM_WRITE) {
+            if (low & PTE_COW)
+                new_low |= PTE_COW;
+            else
+                new_low |= PTE_WRITE;
+        }
+
+        uint64_t new_pte = high | new_low;
+        if (new_pte != pte) {
+            arch_mmu_set_pte(mm->pgdir, va, new_pte);
+            arch_mmu_flush_tlb_page(va);
+        }
     }
 
     mutex_unlock(&mm->lock);

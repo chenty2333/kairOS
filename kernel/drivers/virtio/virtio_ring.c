@@ -28,7 +28,7 @@ void virtqueue_kick(struct virtqueue *vq) {
 }
 
 void *virtqueue_get_buf(struct virtqueue *vq, uint32_t *len) {
-    if (vq->last_used_idx == vq->used->idx) {
+    if (vq->last_used_idx == virtqueue_used_idx(vq)) {
         return NULL;
     }
 

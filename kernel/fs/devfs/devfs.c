@@ -7,6 +7,7 @@
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
+#include <kairos/process.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
 #include <kairos/sync.h>
@@ -80,6 +81,8 @@ static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->fs_data = node;
     vn->mount = mnt;
     vn->refcount = 1;
+    vn->parent = NULL;
+    vn->name[0] = '\0';
     mutex_init(&vn->lock, "devfs_vnode");
     poll_wait_head_init(&vn->pollers);
 }
@@ -218,16 +221,39 @@ static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
     if (!node)
         return -EINVAL;
     if (node->dev_type == DEVFS_BLOCK) {
-        if (cmd != BLKGETSIZE64)
-            return -ENOTTY;
         if (!arg)
             return -EFAULT;
         if (!node->blk)
             return -ENODEV;
-        uint64_t size = node->blk->sector_count * node->blk->sector_size;
-        if (copy_to_user((void *)arg, &size, sizeof(size)) < 0)
-            return -EFAULT;
-        return 0;
+        switch (cmd) {
+        case BLKGETSIZE64: {
+            uint64_t size = node->blk->sector_count * node->blk->sector_size;
+            if (copy_to_user((void *)arg, &size, sizeof(size)) < 0)
+                return -EFAULT;
+            return 0;
+        }
+        case BLKGETSIZE: {
+            uint64_t sectors =
+                (node->blk->sector_count * node->blk->sector_size) / 512;
+            if (copy_to_user((void *)arg, &sectors, sizeof(sectors)) < 0)
+                return -EFAULT;
+            return 0;
+        }
+        case BLKROGET: {
+            int ro = 0;
+            if (copy_to_user((void *)arg, &ro, sizeof(ro)) < 0)
+                return -EFAULT;
+            return 0;
+        }
+        case BLKSSZGET: {
+            uint32_t sz = node->blk->sector_size;
+            if (copy_to_user((void *)arg, &sz, sizeof(sz)) < 0)
+                return -EFAULT;
+            return 0;
+        }
+        default:
+            return -ENOTTY;
+        }
     }
     if (node->dev_type != DEVFS_CONSOLE)
         return -ENOTTY;
@@ -249,6 +275,36 @@ static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             return -EFAULT;
         return 0;
     }
+    case TCSETSW:
+    case TCSETSF: {
+        if (!arg)
+            return -EFAULT;
+        struct termios t;
+        if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TIOCGPGRP: {
+        if (!arg)
+            return -EFAULT;
+        pid_t pgrp = 0;
+        struct process *p = proc_current();
+        if (p)
+            pgrp = p->pid;
+        if (copy_to_user((void *)arg, &pgrp, sizeof(pgrp)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TIOCSPGRP: {
+        if (!arg)
+            return -EFAULT;
+        pid_t pgrp;
+        if (copy_from_user(&pgrp, (void *)arg, sizeof(pgrp)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TIOCSCTTY:
+        return 0;
     case TIOCGWINSZ: {
         if (!arg)
             return -EFAULT;
@@ -262,6 +318,14 @@ static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             return -EFAULT;
         if (copy_from_user(&devfs_console_winsize, (void *)arg,
                            sizeof(devfs_console_winsize)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case FIONREAD: {
+        if (!arg)
+            return -EFAULT;
+        int avail = 0;
+        if (copy_to_user((void *)arg, &avail, sizeof(avail)) < 0)
             return -EFAULT;
         return 0;
     }

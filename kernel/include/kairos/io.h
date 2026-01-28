@@ -10,13 +10,13 @@
 
 #include <kairos/types.h>
 
-/* 
+/*
  * Memory barriers for RISC-V
- * fence i, o: Ordering between all memory reads (i) and all memory writes (o)
+ * Use full RW fences for device/descriptor visibility.
  */
-#define mb()  __asm__ __volatile__ ("fence i, o" ::: "memory")
-#define rmb() __asm__ __volatile__ ("fence i, i" ::: "memory")
-#define wmb() __asm__ __volatile__ ("fence o, o" ::: "memory")
+#define mb()  __asm__ __volatile__ ("fence rw, rw" ::: "memory")
+#define rmb() __asm__ __volatile__ ("fence r, r" ::: "memory")
+#define wmb() __asm__ __volatile__ ("fence w, w" ::: "memory")
 
 /* 8-bit access */
 static inline uint8_t readb(const volatile void *addr) {

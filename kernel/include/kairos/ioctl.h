@@ -32,9 +32,18 @@ struct winsize {
 
 #define TCGETS 0x5401
 #define TCSETS 0x5402
+#define TCSETSW 0x5403
+#define TCSETSF 0x5404
+#define TIOCSCTTY 0x540E
+#define TIOCGPGRP 0x540F
+#define TIOCSPGRP 0x5410
 #define TIOCGWINSZ 0x5413
 #define TIOCSWINSZ 0x5414
 #define FIONBIO 0x5421
+#define FIONREAD 0x541B
+#define BLKGETSIZE 0x1260
+#define BLKROGET 0x125e
+#define BLKSSZGET 0x1268
 #define BLKGETSIZE64 0x80081272
 
 #endif

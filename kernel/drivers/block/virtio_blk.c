@@ -43,7 +43,6 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf, size
     struct virtio_blk_dev *vb = dev->private;
     struct virtio_blk_req req;
     uint8_t status = 0xFF;
-
     mutex_lock(&vb->lock);
 
     req.type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
@@ -70,14 +69,8 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf, size
     virtqueue_kick(vb->vq);
 
     // Wait for completion
-    while (vb->vq->last_used_idx == vb->vq->used->idx) {
-        struct process *curr = proc_current();
-        wait_queue_add(&vb->io_wait, curr);
-        curr->state = PROC_SLEEPING;
-        mutex_unlock(&vb->lock);
-        schedule();
-        mutex_lock(&vb->lock);
-    }
+    while (vb->vq->last_used_idx == virtqueue_used_idx(vb->vq))
+        arch_cpu_relax();
     
     // Consume the used buffer
     virtqueue_get_buf(vb->vq, NULL);

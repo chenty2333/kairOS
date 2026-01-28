@@ -41,6 +41,7 @@
 #define CONFIG_PATH_MAX 256
 #define CONFIG_NAME_MAX 64
 #define CONFIG_SYMLINK_MAX 8 /* Max symlink depth */
+#define CONFIG_DCACHE_MAX 4096
 
 /*
  * Network Configuration

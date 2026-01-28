@@ -14,6 +14,9 @@
 #include <kairos/types.h>
 #include <kairos/wait.h>
 
+struct vnode;
+struct dentry;
+
 enum proc_state {
     PROC_UNUSED,
     PROC_EMBRYO,
@@ -51,6 +54,8 @@ struct process {
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
     struct mutex files_lock;
     char cwd[CONFIG_PATH_MAX];
+    struct vnode *cwd_vnode;
+    struct dentry *cwd_dentry;
     uint64_t tid_address;
     struct rlimit rlimits[RLIM_NLIMITS];
 

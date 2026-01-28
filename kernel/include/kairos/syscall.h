@@ -13,64 +13,10 @@ struct timespec;
 struct pollfd;
 typedef uint64_t sigset_t;
 
-/* Linux riscv64 syscall numbers (from asm-generic/unistd.h) */
-#define LINUX_NR_getcwd 17
-#define LINUX_NR_epoll_create1 20
-#define LINUX_NR_epoll_ctl 21
-#define LINUX_NR_epoll_pwait 22
-#define LINUX_NR_dup 23
-#define LINUX_NR_dup3 24
-#define LINUX_NR_fcntl 25
-#define LINUX_NR_ioctl 29
-#define LINUX_NR_openat 56
-#define LINUX_NR_close 57
-#define LINUX_NR_pipe2 59
-#define LINUX_NR_getdents64 61
-#define LINUX_NR_lseek 62
-#define LINUX_NR_read 63
-#define LINUX_NR_write 64
-#define LINUX_NR_mkdirat 34
-#define LINUX_NR_unlinkat 35
-#define LINUX_NR_symlinkat 36
-#define LINUX_NR_renameat 38
-#define LINUX_NR_faccessat 48
-#define LINUX_NR_chdir 49
-#define LINUX_NR_fchdir 50
-#define LINUX_NR_readlinkat 78
-#define LINUX_NR_newfstatat 79
-#define LINUX_NR_fstat 80
-#define LINUX_NR_exit 93
-#define LINUX_NR_exit_group 94
-#define LINUX_NR_set_tid_address 96
-#define LINUX_NR_futex 98
-#define LINUX_NR_nanosleep 101
-#define LINUX_NR_clock_gettime 113
-#define LINUX_NR_clock_nanosleep 115
-#define LINUX_NR_ppoll 73
-#define LINUX_NR_pselect6 72
-#define LINUX_NR_kill 129
-#define LINUX_NR_tgkill 131
-#define LINUX_NR_rt_sigaction 134
-#define LINUX_NR_rt_sigprocmask 135
-#define LINUX_NR_rt_sigreturn 139
-#define LINUX_NR_setgid 144
-#define LINUX_NR_setuid 146
-#define LINUX_NR_uname 160
-#define LINUX_NR_umask 166
-#define LINUX_NR_gettimeofday 169
-#define LINUX_NR_getpid 172
-#define LINUX_NR_getppid 173
-#define LINUX_NR_getuid 174
-#define LINUX_NR_getgid 176
-#define LINUX_NR_gettid 178
-#define LINUX_NR_brk 214
-#define LINUX_NR_munmap 215
-#define LINUX_NR_clone 220
-#define LINUX_NR_execve 221
-#define LINUX_NR_mmap 222
-#define LINUX_NR_mprotect 226
-#define LINUX_NR_wait4 260
-#define LINUX_NR_prlimit64 261
+/* Linux riscv64 syscall numbers (subset from asm-generic/unistd.h) */
+#define X(nr, name, handler) enum { LINUX_NR_##name = nr };
+#include <kairos/linux_syscalls.def>
+#undef X
 
 #define AT_FDCWD (-100)
 #define O_CLOEXEC 02000000

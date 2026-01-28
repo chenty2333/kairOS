@@ -6,6 +6,7 @@
 #define _KAIROS_VIRTIO_H
 
 #include <kairos/device.h>
+#include <kairos/io.h>
 #include <kairos/types.h>
 #include <kairos/list.h>
 
@@ -52,6 +53,11 @@ struct virtqueue {
     void *priv;
     struct list_head list;
 };
+
+static inline uint16_t virtqueue_used_idx(struct virtqueue *vq) {
+    rmb();
+    return *(volatile uint16_t *)&vq->used->idx;
+}
 
 /* VirtIO Device Configuration Operations */
 struct virtio_device;

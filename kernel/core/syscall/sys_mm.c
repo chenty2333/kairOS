@@ -4,6 +4,7 @@
 
 #include <kairos/mm.h>
 #include <kairos/process.h>
+#include <kairos/vfs.h>
 
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
@@ -37,7 +38,6 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    (void)fd;
 
     bool fixed = (flags & MAP_FIXED) != 0;
     bool anon = (flags & MAP_ANONYMOUS) != 0;
@@ -46,14 +46,33 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
 
     if (!priv && !shared)
         return -EINVAL;
-    if (!anon)
-        return -ENOSYS;
-    if (off != 0)
-        return -ENOSYS;
+    if (priv && shared)
+        return -EINVAL;
+
+    struct vnode *vn = NULL;
+    off_t offset = (off_t)off;
+    if (!anon) {
+        if ((offset & (CONFIG_PAGE_SIZE - 1)) != 0)
+            return -EINVAL;
+        struct file *f = fd_get(p, (int)fd);
+        if (!f)
+            return -EBADF;
+        if (!f->vnode || f->vnode->type != VNODE_FILE)
+            return -ENODEV;
+        vn = f->vnode;
+    } else if (off != 0) {
+        return -EINVAL;
+    }
 
     uint32_t vm_flags = prot_to_vm(prot);
+    uint32_t map_flags = 0;
+    if (shared)
+        map_flags |= VM_SHARED;
+    if (flags & MAP_STACK)
+        map_flags |= VM_STACK;
     vaddr_t start = fixed ? (vaddr_t)addr : 0;
-    vaddr_t res = mm_mmap(p->mm, start, (size_t)len, vm_flags, 0, NULL, 0);
+    vaddr_t res = mm_mmap(p->mm, start, (size_t)len, vm_flags, map_flags, vn,
+                          offset);
     return (int64_t)res;
 }
 

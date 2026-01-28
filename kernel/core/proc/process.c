@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/dentry.h>
 #include <kairos/futex.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
@@ -97,6 +98,8 @@ static struct process *proc_alloc(void) {
     memset(p->files, 0, sizeof(p->files));
     mutex_init(&p->files_lock, "files_lock");
     strcpy(p->cwd, "/");
+    p->cwd_vnode = NULL;
+    p->cwd_dentry = NULL;
     p->tid_address = 0;
     for (int i = 0; i < RLIM_NLIMITS; i++) {
         p->rlimits[i].rlim_cur = RLIM_INFINITY;
@@ -131,6 +134,12 @@ static void proc_adopt_child(struct process *parent, struct process *child) {
     list_add(&child->sibling, &parent->children);
     spin_unlock(&proc_table_lock);
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
+    child->cwd_vnode = parent->cwd_vnode;
+    if (child->cwd_vnode)
+        vnode_get(child->cwd_vnode);
+    child->cwd_dentry = parent->cwd_dentry;
+    if (child->cwd_dentry)
+        dentry_get(child->cwd_dentry);
 }
 
 struct process *proc_alloc_internal(void) { return proc_alloc(); }
@@ -144,6 +153,14 @@ void proc_free_internal(struct process *p) {
 static void proc_free(struct process *p) {
     if (!p) return;
     if (p->mm) mm_destroy(p->mm);
+    if (p->cwd_vnode) {
+        vnode_put(p->cwd_vnode);
+        p->cwd_vnode = NULL;
+    }
+    if (p->cwd_dentry) {
+        dentry_put(p->cwd_dentry);
+        p->cwd_dentry = NULL;
+    }
     if (!list_empty(&p->sibling)) {
         spin_lock(&proc_table_lock);
         if (!list_empty(&p->sibling))
@@ -213,6 +230,12 @@ struct process *proc_fork(void) {
 
     if (!(child->mm = mm_clone(parent->mm))) { proc_free(child); return NULL; }
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
+    child->cwd_vnode = parent->cwd_vnode;
+    if (child->cwd_vnode)
+        vnode_get(child->cwd_vnode);
+    child->cwd_dentry = parent->cwd_dentry;
+    if (child->cwd_dentry)
+        dentry_get(child->cwd_dentry);
     child->syscall_abi = parent->syscall_abi;
     mutex_lock(&parent->files_lock);
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
@@ -341,26 +364,26 @@ static int init_thread(void *arg __attribute__((unused))) {
     const char *init_paths[] = {"/init", "/sbin/init", "/bin/init"};
     struct process *child = NULL;
 
-    for (size_t i = 0; i < ARRAY_SIZE(init_paths); i++) {
-        child = proc_spawn_from_vfs(init_paths[i], parent);
+#ifdef ARCH_riscv64
+    if (user_init_elf_size > 0) {
+        child = proc_create("init", user_init_elf, user_init_elf_size);
         if (child) {
-            pr_info("init: started %s (pid %d)\n", init_paths[i], child->pid);
+            proc_adopt_child(parent, child);
+            pr_info("init: started embedded init (pid %d)\n", child->pid);
             sched_enqueue(child);
-            break;
         }
     }
+#endif
 
     if (!child) {
-#ifdef ARCH_riscv64
-        if (user_init_elf_size > 0) {
-            child = proc_create("init", user_init_elf, user_init_elf_size);
+        for (size_t i = 0; i < ARRAY_SIZE(init_paths); i++) {
+            child = proc_spawn_from_vfs(init_paths[i], parent);
             if (child) {
-                proc_adopt_child(parent, child);
-                pr_info("init: started embedded init (pid %d)\n", child->pid);
+                pr_info("init: started %s (pid %d)\n", init_paths[i], child->pid);
                 sched_enqueue(child);
+                break;
             }
         }
-#endif
     }
 
     if (!child) {

@@ -179,6 +179,8 @@ int epoll_create_file(struct file **out) {
     vn->ops = &epoll_ops;
     vn->fs_data = ep;
     vn->refcount = 1;
+    vn->parent = NULL;
+    vn->name[0] = '\0';
     mutex_init(&vn->lock, "epoll_vnode");
     poll_wait_head_init(&vn->pollers);
 

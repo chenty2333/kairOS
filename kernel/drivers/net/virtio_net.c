@@ -68,6 +68,15 @@ static struct virtqueue *virtio_net_alloc_vq(struct virtio_device *vdev,
     return vq;
 }
 
+static void virtio_net_free_vq(struct virtqueue *vq) {
+    if (!vq)
+        return;
+    kfree(vq->desc);
+    kfree(vq->avail);
+    kfree(vq->used);
+    kfree(vq);
+}
+
 static int virtio_net_post_rx(struct virtio_net_dev *vn) {
     struct virtq_desc desc;
     desc.addr = dma_map_single(&vn->rx_buf, sizeof(vn->rx_buf), DMA_FROM_DEVICE);
@@ -84,13 +93,13 @@ static void virtio_net_intr(struct virtio_device *vdev) {
     struct virtio_net_dev *vn = vdev->priv;
 
     /* TX completion */
-    while (vn->tx_vq->last_used_idx != vn->tx_vq->used->idx) {
+    while (vn->tx_vq->last_used_idx != virtqueue_used_idx(vn->tx_vq)) {
         virtqueue_get_buf(vn->tx_vq, NULL);
         wait_queue_wakeup_all(&vn->tx_wait);
     }
 
     /* RX completion: consume one buffer and repost it. */
-    while (vn->rx_vq->last_used_idx != vn->rx_vq->used->idx) {
+    while (vn->rx_vq->last_used_idx != virtqueue_used_idx(vn->rx_vq)) {
         uint32_t len = 0;
         virtqueue_get_buf(vn->rx_vq, &len);
         wait_queue_wakeup_all(&vn->rx_wait);
@@ -125,7 +134,7 @@ static int virtio_net_xmit(struct netdev *dev, const void *data, size_t len) {
     virtqueue_add_buf(vn->tx_vq, descs, 2, vn);
     virtqueue_kick(vn->tx_vq);
 
-    while (vn->tx_vq->last_used_idx == vn->tx_vq->used->idx) {
+    while (vn->tx_vq->last_used_idx == virtqueue_used_idx(vn->tx_vq)) {
         struct process *curr = proc_current();
         wait_queue_add(&vn->tx_wait, curr);
         curr->state = PROC_SLEEPING;
@@ -145,6 +154,7 @@ static const struct netdev_ops virtio_net_ops = {
 };
 
 static int virtio_net_probe(struct virtio_device *vdev) {
+    int ret = -ENOMEM;
     struct virtio_net_dev *vn = kzalloc(sizeof(*vn));
     if (!vn)
         return -ENOMEM;
@@ -162,13 +172,22 @@ static int virtio_net_probe(struct virtio_device *vdev) {
 
     vn->rx_vq = virtio_net_alloc_vq(vdev, 0);
     vn->tx_vq = virtio_net_alloc_vq(vdev, 1);
-    if (!vn->rx_vq || !vn->tx_vq)
-        return -ENOMEM;
+    if (!vn->rx_vq || !vn->tx_vq) {
+        vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FAILED);
+        ret = -ENOMEM;
+        goto err;
+    }
 
-    if (vdev->ops->setup_vq(vdev, 0, vn->rx_vq) < 0)
-        return -ENODEV;
-    if (vdev->ops->setup_vq(vdev, 1, vn->tx_vq) < 0)
-        return -ENODEV;
+    if (vdev->ops->setup_vq(vdev, 0, vn->rx_vq) < 0) {
+        vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FAILED);
+        ret = -ENODEV;
+        goto err;
+    }
+    if (vdev->ops->setup_vq(vdev, 1, vn->tx_vq) < 0) {
+        vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FAILED);
+        ret = -ENODEV;
+        goto err;
+    }
 
     vdev->ops->finalize_features(vdev, 0);
     vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FEATURES_OK);
@@ -189,6 +208,15 @@ static int virtio_net_probe(struct virtio_device *vdev) {
     virtio_net_post_rx(vn);
     pr_info("virtio-net: registered %s\n", vn->netdev.name);
     return 0;
+
+err:
+    if (vn->tx_vq)
+        virtio_net_free_vq(vn->tx_vq);
+    if (vn->rx_vq)
+        virtio_net_free_vq(vn->rx_vq);
+    kfree(vn);
+    vdev->priv = NULL;
+    return ret;
 }
 
 struct virtio_driver virtio_net_driver = {
@@ -196,4 +224,3 @@ struct virtio_driver virtio_net_driver = {
     .device_id = 1,
     .probe = virtio_net_probe,
 };
-

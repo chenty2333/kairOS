@@ -172,6 +172,8 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
         return 0;
 
     vaddr_t uaddr = (vaddr_t)uaddr_u64;
+    if ((uaddr & (sizeof(uint32_t) - 1)) != 0)
+        return -EINVAL;
     struct futex_bucket *bucket = futex_bucket_for(uaddr);
 
     LIST_HEAD(wake_list);

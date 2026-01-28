@@ -17,6 +17,10 @@
     .equ PAGE_SIZE, 4096
     .equ AT_FDCWD, -100
     .equ SIGCHLD, 17
+    .equ SIGUSR1, 10
+    .equ RLIMIT_NOFILE, 7
+    .equ PROT_READ, 0x1
+    .equ MAP_PRIVATE, 0x02
 
     .equ SYS_openat, 56
     .equ SYS_close, 57
@@ -32,6 +36,17 @@
     .equ SYS_brk, 214
     .equ SYS_clone, 220
     .equ SYS_wait4, 260
+    .equ SYS_getcwd, 17
+    .equ SYS_chdir, 49
+    .equ SYS_unlinkat, 35
+    .equ SYS_symlinkat, 36
+    .equ SYS_readlinkat, 78
+    .equ SYS_gettimeofday, 169
+    .equ SYS_prlimit64, 261
+    .equ SYS_tgkill, 131
+    .equ SYS_getpid, 172
+    .equ SYS_mmap, 222
+    .equ SYS_munmap, 215
 
 _start:
     /* fd = openat(AT_FDCWD, "/dev/console", O_RDWR, 0) */
@@ -424,6 +439,245 @@ fork_fail:
     ecall
 
 after_fork:
+    /* chdir/getcwd test */
+    la a0, path_root
+    li a7, SYS_chdir
+    ecall
+    blt a0, zero, chdir_fail
+    la a0, cwd_buf
+    li a1, 64
+    li a7, SYS_getcwd
+    ecall
+    blt a0, zero, chdir_fail
+    li a0, 1
+    la a1, msg_chdir_ok
+    li a2, 10
+    li a7, SYS_write
+    ecall
+    j gettimeofday_test
+
+chdir_fail:
+    li a0, 1
+    la a1, msg_chdir_fail
+    li a2, 12
+    li a7, SYS_write
+    ecall
+
+gettimeofday_test:
+    la a0, tv_buf
+    li a1, 0
+    li a7, SYS_gettimeofday
+    ecall
+    blt a0, zero, gettimeofday_fail
+    li a0, 1
+    la a1, msg_gettimeofday_ok
+    li a2, 17
+    li a7, SYS_write
+    ecall
+    j prlimit_test
+
+gettimeofday_fail:
+    li a0, 1
+    la a1, msg_gettimeofday_fail
+    li a2, 19
+    li a7, SYS_write
+    ecall
+
+prlimit_test:
+    li a0, 0
+    li a1, RLIMIT_NOFILE
+    li a2, 0
+    la a3, rlimit_buf
+    li a7, SYS_prlimit64
+    ecall
+    blt a0, zero, prlimit_fail
+    li a0, 1
+    la a1, msg_prlimit_ok
+    li a2, 12
+    li a7, SYS_write
+    ecall
+    j tgkill_test
+
+prlimit_fail:
+    li a0, 1
+    la a1, msg_prlimit_fail
+    li a2, 14
+    li a7, SYS_write
+    ecall
+
+tgkill_test:
+    li a7, SYS_getpid
+    ecall
+    mv t0, a0
+    mv a0, t0
+    mv a1, t0
+    li a2, SIGUSR1
+    li a7, SYS_tgkill
+    ecall
+    blt a0, zero, tgkill_fail
+    li a0, 1
+    la a1, msg_tgkill_ok
+    li a2, 11
+    li a7, SYS_write
+    ecall
+    j symlink_test
+
+tgkill_fail:
+    li a0, 1
+    la a1, msg_tgkill_fail
+    li a2, 13
+    li a7, SYS_write
+    ecall
+
+symlink_test:
+    li a0, AT_FDCWD
+    la a1, path_tmpfile
+    li a2, 0
+    li a7, SYS_unlinkat
+    ecall
+    li a0, AT_FDCWD
+    la a1, path_tmplink
+    li a2, 0
+    li a7, SYS_unlinkat
+    ecall
+
+    li a0, AT_FDCWD
+    la a1, path_tmpfile
+    li a2, 0100 | 01000 | 1
+    li a3, 0644
+    li a7, SYS_openat
+    ecall
+    blt a0, zero, symlink_open_fail
+    mv s1, a0
+    mv a0, s1
+    la a1, msg_mmap_data
+    li a2, 8
+    li a7, SYS_write
+    ecall
+    mv a0, s1
+    li a7, SYS_close
+    ecall
+
+    la a0, path_tmpfile
+    li a1, AT_FDCWD
+    la a2, path_tmplink
+    li a7, SYS_symlinkat
+    ecall
+    blt a0, zero, symlink_link_check
+    j symlink_link_ok
+
+symlink_link_check:
+    li t0, -17
+    beq a0, t0, symlink_link_ok
+    j symlink_link_fail
+
+symlink_link_ok:
+
+    li a0, AT_FDCWD
+    la a1, path_tmplink
+    la a2, buf
+    li a3, 64
+    li a7, SYS_readlinkat
+    ecall
+    blt a0, zero, symlink_read_fail
+    mv t1, a0
+
+    li a0, 1
+    la a1, msg_readlink
+    li a2, 10
+    li a7, SYS_write
+    ecall
+    li a0, 1
+    la a1, buf
+    mv a2, t1
+    li a7, SYS_write
+    ecall
+    li a0, 1
+    la a1, msg_newline
+    li a2, 1
+    li a7, SYS_write
+    ecall
+    j mmap_test
+
+symlink_open_fail:
+    li a0, 1
+    la a1, msg_symlink_open_fail
+    li a2, 20
+    li a7, SYS_write
+    ecall
+    j mmap_test
+
+symlink_link_fail:
+    li a0, 1
+    la a1, msg_symlink_link_fail
+    li a2, 20
+    li a7, SYS_write
+    ecall
+    j mmap_test
+
+symlink_read_fail:
+    li a0, 1
+    la a1, msg_symlink_read_fail
+    li a2, 24
+    li a7, SYS_write
+    ecall
+
+mmap_test:
+    li a0, AT_FDCWD
+    la a1, path_tmpfile
+    li a2, 0
+    li a3, 0
+    li a7, SYS_openat
+    ecall
+    blt a0, zero, mmap_fail
+    mv s2, a0
+
+    li a0, 0
+    li a1, PAGE_SIZE
+    li a2, PROT_READ
+    li a3, MAP_PRIVATE
+    mv a4, s2
+    li a5, 0
+    li a7, SYS_mmap
+    ecall
+    beqz a0, mmap_fail_close
+    mv s3, a0
+
+    li a0, 1
+    mv a1, s3
+    li a2, 8
+    li a7, SYS_write
+    ecall
+
+    mv a0, s3
+    li a1, PAGE_SIZE
+    li a7, SYS_munmap
+    ecall
+
+    mv a0, s2
+    li a7, SYS_close
+    ecall
+
+    li a0, 1
+    la a1, msg_mmap_ok
+    li a2, 9
+    li a7, SYS_write
+    ecall
+    j exit_now
+
+mmap_fail_close:
+    mv a0, s2
+    li a7, SYS_close
+    ecall
+
+mmap_fail:
+    li a0, 1
+    la a1, msg_mmap_fail
+    li a2, 11
+    li a7, SYS_write
+    ecall
+
+exit_now:
     /* exit(42) */
     li a0, 42
     li a7, SYS_exit
@@ -472,6 +726,44 @@ msg_parent:
     .asciz "parent: wait done\n"
 msg_fork_fail:
     .asciz "fork failed\n"
+path_root:
+    .asciz "/"
+path_tmpfile:
+    .asciz "/tmpfile"
+path_tmplink:
+    .asciz "/tmplink"
+msg_chdir_ok:
+    .asciz "chdir: ok\n"
+msg_chdir_fail:
+    .asciz "chdir: fail\n"
+msg_gettimeofday_ok:
+    .asciz "gettimeofday: ok\n"
+msg_gettimeofday_fail:
+    .asciz "gettimeofday: fail\n"
+msg_prlimit_ok:
+    .asciz "prlimit: ok\n"
+msg_prlimit_fail:
+    .asciz "prlimit: fail\n"
+msg_tgkill_ok:
+    .asciz "tgkill: ok\n"
+msg_tgkill_fail:
+    .asciz "tgkill: fail\n"
+msg_symlink_open_fail:
+    .asciz "symlink: open fail\n"
+msg_symlink_link_fail:
+    .asciz "symlink: link fail\n"
+msg_symlink_read_fail:
+    .asciz "symlink: readlink fail\n"
+msg_readlink:
+    .asciz "readlink: "
+msg_newline:
+    .asciz "\n"
+msg_mmap_ok:
+    .asciz "mmap: ok\n"
+msg_mmap_fail:
+    .asciz "mmap: fail\n"
+msg_mmap_data:
+    .asciz "mmap ok\n"
 
     .section .bss
     .align 4
@@ -486,3 +778,9 @@ epoll_out:
     .align 8
 buf:
     .space 64
+cwd_buf:
+    .space 64
+tv_buf:
+    .space 16
+rlimit_buf:
+    .space 16

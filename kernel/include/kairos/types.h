@@ -74,9 +74,11 @@ struct rlimit {
 #define EPIPE 32
 #define ENOSYS 38
 #define ENOTEMPTY 39
+#define ELOOP 40
 #define ERANGE 34
 #define ENAMETOOLONG 36
 #define ETIMEDOUT 110
+#define ESTALE 116
 
 #undef NULL
 #define NULL ((void *)0)
