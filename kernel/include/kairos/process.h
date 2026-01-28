@@ -16,6 +16,7 @@
 
 struct vnode;
 struct dentry;
+struct mount_ns;
 
 enum proc_state {
     PROC_UNUSED,
@@ -56,6 +57,7 @@ struct process {
     char cwd[CONFIG_PATH_MAX];
     struct vnode *cwd_vnode;
     struct dentry *cwd_dentry;
+    struct mount_ns *mnt_ns;
     uint64_t tid_address;
     struct rlimit rlimits[RLIM_NLIMITS];
 

@@ -25,6 +25,7 @@ struct dentry {
     struct mount *mounted;
     uint32_t flags;
     uint32_t refcount;
+    uint64_t neg_expire;
     char name[CONFIG_NAME_MAX];
     struct list_head children;
     struct list_head child;

@@ -16,5 +16,7 @@
 int vfs_namei_at(const struct path *base, const char *path,
                  struct path *out, int flags);
 int vfs_namei(const char *path, struct path *out, int flags);
+int vfs_namei_locked(const struct path *base, const char *path,
+                     struct path *out, int flags);
 
 #endif

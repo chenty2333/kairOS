@@ -28,6 +28,14 @@ typedef uint64_t sigset_t;
 #define W_OK 2
 #define R_OK 4
 
+/* mount flags (subset) */
+#define MS_BIND 0x1000
+#define MS_REC 0x4000
+#define MS_PRIVATE 0x40000
+#define MS_SLAVE 0x80000
+#define MS_SHARED 0x100000
+#define MS_UNBINDABLE 0x20000
+
 #define SYS_exit 1
 #define SYS_fork 2
 #define SYS_exec 3
@@ -36,6 +44,15 @@ typedef uint64_t sigset_t;
 #define SYS_getppid 6
 #define SYS_yield 7
 #define SYS_clone 8
+
+int64_t sys_chroot(uint64_t path, uint64_t a1, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5);
+int64_t sys_pivot_root(uint64_t new_root, uint64_t put_old, uint64_t a2,
+                       uint64_t a3, uint64_t a4, uint64_t a5);
+int64_t sys_mount(uint64_t source, uint64_t target, uint64_t fstype,
+                  uint64_t flags, uint64_t data, uint64_t a5);
+int64_t sys_umount2(uint64_t target, uint64_t flags, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5);
 
 #define SYS_open 10
 #define SYS_close 11

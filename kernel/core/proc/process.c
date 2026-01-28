@@ -100,6 +100,7 @@ static struct process *proc_alloc(void) {
     strcpy(p->cwd, "/");
     p->cwd_vnode = NULL;
     p->cwd_dentry = NULL;
+    p->mnt_ns = vfs_mount_ns_get();
     p->tid_address = 0;
     for (int i = 0; i < RLIM_NLIMITS; i++) {
         p->rlimits[i].rlim_cur = RLIM_INFINITY;
@@ -140,6 +141,9 @@ static void proc_adopt_child(struct process *parent, struct process *child) {
     child->cwd_dentry = parent->cwd_dentry;
     if (child->cwd_dentry)
         dentry_get(child->cwd_dentry);
+    child->mnt_ns = parent->mnt_ns;
+    if (child->mnt_ns)
+        vfs_mount_ns_get_from(child->mnt_ns);
 }
 
 struct process *proc_alloc_internal(void) { return proc_alloc(); }
@@ -160,6 +164,10 @@ static void proc_free(struct process *p) {
     if (p->cwd_dentry) {
         dentry_put(p->cwd_dentry);
         p->cwd_dentry = NULL;
+    }
+    if (p->mnt_ns) {
+        vfs_mount_ns_put(p->mnt_ns);
+        p->mnt_ns = NULL;
     }
     if (!list_empty(&p->sibling)) {
         spin_lock(&proc_table_lock);

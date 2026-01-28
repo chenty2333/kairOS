@@ -100,6 +100,13 @@ struct file {
 #define F_GETFL 3
 #define F_SETFL 4
 
+enum mount_prop {
+    MOUNT_PRIVATE = 0,
+    MOUNT_SHARED = 1,
+    MOUNT_SLAVE = 2,
+    MOUNT_UNBINDABLE = 3,
+};
+
 struct mount {
     char *mountpoint;
     struct vfs_ops *ops;
@@ -107,11 +114,32 @@ struct mount {
     struct dentry *root_dentry;
     struct mount *parent;
     struct dentry *mountpoint_dentry;
+    uint32_t refcount;
+    uint32_t mflags;
     struct blkdev *dev;
     void *fs_data;
     uint32_t flags;
+    enum mount_prop prop;
+    struct mount_group *group;
+    struct list_head group_node;
+    struct mount *master;
+    struct list_head slaves;
+    struct list_head slave_node;
     struct list_head list;
 };
+
+struct mount_ns {
+    struct mount *root;
+    struct dentry *root_dentry;
+    uint32_t refcount;
+};
+
+struct mount_group {
+    struct list_head members;
+    uint32_t id;
+};
+
+#define MOUNT_F_BIND 0x1
 
 struct vfs_ops {
     const char *name;
@@ -155,6 +183,8 @@ struct vnode *vfs_lookup_parent_from_dir(struct vnode *dir, const char *path,
 struct mount *vfs_mount_for_path(const char *path);
 int vfs_build_path(struct vnode *vn, char *out, size_t len);
 int vfs_build_path_dentry(struct dentry *d, char *out, size_t len);
+int vfs_build_relpath(struct dentry *root, struct dentry *target,
+                      char *out, size_t len);
 int vfs_open(const char *path, int flags, mode_t mode, struct file **fp);
 int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struct file **fp);
 int vfs_open_at_dir(struct vnode *dir, const char *path, int flags, mode_t mode,
@@ -165,6 +195,20 @@ void vfs_file_free(struct file *file);
 void vfs_dump_mounts(void);
 struct mount *vfs_root_mount(void);
 struct dentry *vfs_root_dentry(void);
+void vfs_mount_hold(struct mount *mnt);
+void vfs_mount_put(struct mount *mnt);
+void vfs_mount_global_lock(void);
+void vfs_mount_global_unlock(void);
+struct mount_ns *vfs_mount_ns_get(void);
+struct mount_ns *vfs_mount_ns_get_from(struct mount_ns *ns);
+void vfs_mount_ns_put(struct mount_ns *ns);
+struct mount_ns *vfs_mount_ns_clone(struct mount_ns *ns);
+int vfs_mount_ns_set_root(struct mount_ns *ns, struct dentry *root);
+int vfs_mount_set_shared(struct mount *mnt);
+void vfs_mount_set_private(struct mount *mnt);
+int vfs_mount_set_slave(struct mount *mnt);
+int vfs_bind_mount(struct dentry *source, struct dentry *target,
+                   uint32_t flags, bool propagate);
 ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
 int vfs_poll(struct file *file, uint32_t events);

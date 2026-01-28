@@ -47,6 +47,14 @@
     .equ SYS_getpid, 172
     .equ SYS_mmap, 222
     .equ SYS_munmap, 215
+    .equ SYS_mkdirat, 34
+    .equ SYS_mount, 40
+    .equ SYS_umount2, 39
+    .equ SYS_chroot, 51
+    .equ SYS_pivot_root, 155
+
+    .equ MS_BIND, 0x1000
+    .equ O_RDONLY, 0
 
 _start:
     /* fd = openat(AT_FDCWD, "/dev/console", O_RDWR, 0) */
@@ -246,7 +254,7 @@ epoll_fail_close:
 epoll_fail:
     li a0, 1
     la a1, msg_epoll_fail
-    li a2, 12
+    li a2, 11
     li a7, SYS_write
     ecall
 
@@ -333,7 +341,7 @@ fcntl_fail:
 sigpipe_fail:
     li a0, 1
     la a1, msg_sigpipe_fail
-    li a2, 14
+    li a2, 13
     li a7, SYS_write
     ecall
     mv a0, t2
@@ -501,7 +509,7 @@ prlimit_test:
 prlimit_fail:
     li a0, 1
     la a1, msg_prlimit_fail
-    li a2, 14
+    li a2, 13
     li a7, SYS_write
     ecall
 
@@ -520,14 +528,92 @@ tgkill_test:
     li a2, 11
     li a7, SYS_write
     ecall
-    j symlink_test
+    j chroot_test
 
 tgkill_fail:
     li a0, 1
     la a1, msg_tgkill_fail
+    li a2, 15
+    li a7, SYS_write
+    ecall
+    j chroot_test
+
+chroot_test:
+    /* mkdir /chroot and /chroot/dir */
+    li a0, AT_FDCWD
+    la a1, path_chroot
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
+    li a0, AT_FDCWD
+    la a1, path_chroot_dir
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
+
+    /* fork for chroot test */
+    li a0, SIGCHLD
+    li a1, 0
+    li a2, 0
+    li a3, 0
+    li a4, 0
+    li a7, SYS_clone
+    ecall
+    blt a0, zero, chroot_fail
+    beqz a0, chroot_child
+
+    /* parent wait */
+    li a0, -1
+    la a1, status
+    li a2, 0
+    li a3, 0
+    li a7, SYS_wait4
+    ecall
+    j symlink_test
+
+chroot_child:
+    la a0, path_chroot
+    li a7, SYS_chroot
+    ecall
+    blt a0, zero, chroot_fail_child
+
+    la a0, cwd_buf
+    li a1, 64
+    li a7, SYS_getcwd
+    ecall
+    blt a0, zero, chroot_fail_child
+    la t0, cwd_buf
+    lbu t1, 0(t0)
+    lbu t2, 1(t0)
+    li t3, '/'
+    bne t1, t3, chroot_fail_child
+    bnez t2, chroot_fail_child
+    li a0, 1
+    la a1, msg_chroot_ok
+    li a2, 11
+    li a7, SYS_write
+    ecall
+    li a0, 0
+    li a7, SYS_exit
+    ecall
+
+chroot_fail_child:
+    li a0, 1
+    la a1, msg_chroot_fail
     li a2, 13
     li a7, SYS_write
     ecall
+    li a0, 1
+    li a7, SYS_exit
+    ecall
+
+chroot_fail:
+    li a0, 1
+    la a1, msg_chroot_fail
+    li a2, 13
+    li a7, SYS_write
+    ecall
+    j symlink_test
 
 symlink_test:
     li a0, AT_FDCWD
@@ -663,7 +749,7 @@ mmap_test:
     li a2, 9
     li a7, SYS_write
     ecall
-    j exit_now
+    j pivot_root_test
 
 mmap_fail_close:
     mv a0, s2
@@ -674,6 +760,63 @@ mmap_fail:
     li a0, 1
     la a1, msg_mmap_fail
     li a2, 11
+    li a7, SYS_write
+    ecall
+    j pivot_root_test
+
+pivot_root_test:
+    /* mkdir /newroot and /newroot/oldroot */
+    li a0, AT_FDCWD
+    la a1, path_newroot
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
+    li a0, AT_FDCWD
+    la a1, path_oldroot
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
+
+    /* bind mount /newroot to /newroot */
+    la a0, path_newroot
+    la a1, path_newroot
+    li a2, 0
+    li a3, MS_BIND
+    li a4, 0
+    li a7, SYS_mount
+    ecall
+    blt a0, zero, pivot_fail
+
+    la a0, path_newroot
+    la a1, path_oldroot
+    li a7, SYS_pivot_root
+    ecall
+    blt a0, zero, pivot_fail
+
+    /* open /oldroot */
+    li a0, AT_FDCWD
+    la a1, path_oldroot_short
+    li a2, O_RDONLY
+    li a3, 0
+    li a7, SYS_openat
+    ecall
+    blt a0, zero, pivot_fail
+    mv t0, a0
+    mv a0, t0
+    li a7, SYS_close
+    ecall
+
+    li a0, 1
+    la a1, msg_pivot_ok
+    li a2, 15
+    li a7, SYS_write
+    ecall
+    j exit_now
+
+pivot_fail:
+    li a0, 1
+    la a1, msg_pivot_fail
+    li a2, 17
     li a7, SYS_write
     ecall
 
@@ -748,6 +891,10 @@ msg_tgkill_ok:
     .asciz "tgkill: ok\n"
 msg_tgkill_fail:
     .asciz "tgkill: fail\n"
+msg_chroot_ok:
+    .asciz "chroot: ok\n"
+msg_chroot_fail:
+    .asciz "chroot: fail\n"
 msg_symlink_open_fail:
     .asciz "symlink: open fail\n"
 msg_symlink_link_fail:
@@ -764,6 +911,21 @@ msg_mmap_fail:
     .asciz "mmap: fail\n"
 msg_mmap_data:
     .asciz "mmap ok\n"
+msg_pivot_ok:
+    .asciz "pivot_root: ok\n"
+msg_pivot_fail:
+    .asciz "pivot_root: fail\n"
+
+path_chroot:
+    .asciz "/chroot"
+path_chroot_dir:
+    .asciz "/chroot/dir"
+path_newroot:
+    .asciz "/newroot"
+path_oldroot:
+    .asciz "/newroot/oldroot"
+path_oldroot_short:
+    .asciz "/oldroot"
 
     .section .bss
     .align 4

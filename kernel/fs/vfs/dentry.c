@@ -3,6 +3,7 @@
  */
 
 #include <kairos/dentry.h>
+#include <kairos/arch.h>
 #include <kairos/mm.h>
 #include <kairos/string.h>
 #include <kairos/vfs.h>
@@ -126,6 +127,19 @@ struct dentry *dentry_lookup(struct dentry *parent, const char *name,
     list_for_each_entry(d, &dentry_hash[idx], hash) {
         if (d->parent == parent && d->mnt == mnt &&
             strcmp(d->name, name) == 0) {
+            if ((d->flags & DENTRY_NEGATIVE) && d->neg_expire) {
+                uint64_t now = arch_timer_ticks();
+                if (now >= d->neg_expire) {
+                    list_del(&d->hash);
+                    list_del(&d->lru);
+                    d->hashed = false;
+                    if (dcache_count > 0)
+                        dcache_count--;
+                    mutex_unlock(&dcache_lock);
+                    dentry_put(d);
+                    return NULL;
+                }
+            }
             dentry_get(d);
             if (d->hashed) {
                 list_del(&d->lru);
@@ -202,6 +216,7 @@ void dentry_add(struct dentry *d, struct vnode *vn) {
     mutex_lock(&d->lock);
     d->vnode = vn;
     d->flags &= ~DENTRY_NEGATIVE;
+    d->neg_expire = 0;
     mutex_unlock(&d->lock);
     if (vn)
         vnode_get(vn);
@@ -214,6 +229,13 @@ void dentry_add_negative(struct dentry *d) {
     mutex_lock(&d->lock);
     d->vnode = NULL;
     d->flags |= DENTRY_NEGATIVE;
+    if (CONFIG_DCACHE_NEG_TTL_SEC) {
+        uint64_t delta =
+            arch_timer_ns_to_ticks(CONFIG_DCACHE_NEG_TTL_SEC * 1000000000ULL);
+        d->neg_expire = arch_timer_ticks() + delta;
+    } else {
+        d->neg_expire = 0;
+    }
     mutex_unlock(&d->lock);
     dentry_hash_insert(d);
 }

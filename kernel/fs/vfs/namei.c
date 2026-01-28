@@ -24,8 +24,8 @@ static ssize_t namei_readlink_target(struct vnode *vn, char *buf, size_t bufsz) 
     return ret;
 }
 
-static int namei_walk(const struct path *base, const char *path,
-                      struct path *out, int flags, int depth);
+static int namei_walk_locked(const struct path *base, const char *path,
+                             struct path *out, int flags, int depth);
 
 static int namei_get_start(const struct path *base, const char *path,
                            struct dentry **start, struct mount **mnt) {
@@ -65,7 +65,9 @@ static int namei_get_start(const struct path *base, const char *path,
     if (p && p->cwd[0]) {
         struct path resolved;
         path_init(&resolved);
-        int ret = vfs_namei(p->cwd, &resolved, NAMEI_FOLLOW | NAMEI_DIRECTORY);
+        int ret =
+            vfs_namei_locked(NULL, p->cwd,
+                             &resolved, NAMEI_FOLLOW | NAMEI_DIRECTORY);
         if (ret == 0 && resolved.dentry) {
             if (!p->cwd_dentry) {
                 p->cwd_dentry = resolved.dentry;
@@ -134,11 +136,12 @@ static int namei_follow_symlink(struct dentry *d, const char *remain,
     }
     newpath[n] = '\0';
 
-    return namei_walk(&base, newpath, out, flags | NAMEI_FOLLOW, depth + 1);
+    return namei_walk_locked(&base, newpath, out, flags | NAMEI_FOLLOW,
+                             depth + 1);
 }
 
-static int namei_walk(const struct path *base, const char *path,
-                      struct path *out, int flags, int depth) {
+static int namei_walk_locked(const struct path *base, const char *path,
+                             struct path *out, int flags, int depth) {
     if (!path || !out)
         return -EINVAL;
     if (depth > CONFIG_SYMLINK_MAX)
@@ -187,6 +190,11 @@ static int namei_walk(const struct path *base, const char *path,
             continue;
         }
         if (strcmp(comp, "..") == 0) {
+            struct dentry *ns_root = vfs_root_dentry();
+            if (ns_root && cur == ns_root) {
+                p = end;
+                continue;
+            }
             if (cur == mnt->root_dentry) {
                 if (mnt->parent && mnt->mountpoint_dentry) {
                     struct dentry *mp = mnt->mountpoint_dentry;
@@ -324,11 +332,24 @@ int vfs_namei_at(const struct path *base, const char *path,
     path_init(out);
     if (!path[0])
         return -EINVAL;
-    return namei_walk(base, path, out, flags, 0);
+    vfs_mount_global_lock();
+    int ret = namei_walk_locked(base, path, out, flags, 0);
+    vfs_mount_global_unlock();
+    return ret;
 }
 
 int vfs_namei(const char *path, struct path *out, int flags) {
     struct path base;
     path_init(&base);
     return vfs_namei_at(&base, path, out, flags);
+}
+
+int vfs_namei_locked(const struct path *base, const char *path,
+                     struct path *out, int flags) {
+    if (!path || !out)
+        return -EINVAL;
+    path_init(out);
+    if (!path[0])
+        return -EINVAL;
+    return namei_walk_locked(base, path, out, flags, 0);
 }

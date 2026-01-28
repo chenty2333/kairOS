@@ -21,12 +21,202 @@ static LIST_HEAD(mount_list);
 static LIST_HEAD(fs_type_list);
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 static struct mount *root_mount = NULL;
+static struct mutex mount_mutex;
+static struct mount_ns init_mnt_ns;
+static uint32_t next_group_id = 1;
+
+static struct mount_group *mount_group_alloc(void) {
+    struct mount_group *grp = kzalloc(sizeof(*grp));
+    if (!grp)
+        return NULL;
+    INIT_LIST_HEAD(&grp->members);
+    grp->id = __atomic_add_fetch(&next_group_id, 1, __ATOMIC_RELAXED);
+    return grp;
+}
+
+static void mount_group_add(struct mount_group *grp, struct mount *mnt) {
+    if (!grp || !mnt)
+        return;
+    mnt->group = grp;
+    list_add_tail(&mnt->group_node, &grp->members);
+}
+
+static void mount_group_remove(struct mount *mnt) {
+    if (!mnt || !mnt->group)
+        return;
+    list_del(&mnt->group_node);
+    struct mount_group *grp = mnt->group;
+    mnt->group = NULL;
+    if (list_empty(&grp->members))
+        kfree(grp);
+}
+
+static void mount_set_private(struct mount *mnt) {
+    if (!mnt)
+        return;
+    if (mnt->group)
+        mount_group_remove(mnt);
+    if (mnt->master) {
+        list_del(&mnt->slave_node);
+        mnt->master = NULL;
+    }
+    mnt->prop = MOUNT_PRIVATE;
+}
+
+static int mount_set_shared(struct mount *mnt) {
+    if (!mnt)
+        return -EINVAL;
+    if (!mnt->group) {
+        struct mount_group *grp = mount_group_alloc();
+        if (!grp)
+            return -ENOMEM;
+        mount_group_add(grp, mnt);
+    }
+    if (mnt->master) {
+        list_del(&mnt->slave_node);
+        mnt->master = NULL;
+    }
+    mnt->prop = MOUNT_SHARED;
+    return 0;
+}
+
+static int mount_set_slave(struct mount *mnt) {
+    if (!mnt)
+        return -EINVAL;
+    if (mnt->group) {
+        struct mount_group *grp = mnt->group;
+        struct mount *master = NULL;
+        list_for_each_entry(master, &grp->members, group_node) {
+            if (master != mnt)
+                break;
+        }
+        mount_group_remove(mnt);
+        if (master && master != mnt) {
+            if (mnt->master && !list_empty(&mnt->slave_node))
+                list_del(&mnt->slave_node);
+            mnt->master = master;
+            if (list_empty(&mnt->slave_node))
+                list_add_tail(&mnt->slave_node, &master->slaves);
+        } else if (mnt->master) {
+            if (!list_empty(&mnt->slave_node))
+                list_del(&mnt->slave_node);
+            mnt->master = NULL;
+        }
+    }
+    mnt->prop = MOUNT_SLAVE;
+    return 0;
+}
+
+static void mount_inherit_propagation(struct mount *mnt, struct mount *src) {
+    if (!mnt || !src)
+        return;
+    mnt->prop = src->prop;
+    if (src->prop == MOUNT_SHARED && src->group)
+        mount_group_add(src->group, mnt);
+    if (src->prop == MOUNT_SLAVE && src->master) {
+        mnt->master = src->master;
+        list_add_tail(&mnt->slave_node, &src->master->slaves);
+    }
+}
 
 static struct kmem_cache *vnode_cache;
 static struct kmem_cache *file_cache;
 
 int vfs_normalize_path(const char *cwd, const char *input, char *output);
 
+int vfs_build_relpath(struct dentry *root, struct dentry *target,
+                      char *out, size_t len) {
+    if (!root || !target || !out || len == 0)
+        return -EINVAL;
+    if (root->mnt != target->mnt)
+        return -EXDEV;
+    if (root == target) {
+        if (len < 2)
+            return -ENAMETOOLONG;
+        out[0] = '.';
+        out[1] = '\0';
+        return 0;
+    }
+    char tmp[CONFIG_PATH_MAX];
+    size_t pos = sizeof(tmp) - 1;
+    tmp[pos] = '\0';
+    struct dentry *cur = target;
+    while (cur && cur != root) {
+        size_t nlen = strlen(cur->name);
+        if (nlen + 1 > pos)
+            return -ENAMETOOLONG;
+        pos -= nlen;
+        memcpy(&tmp[pos], cur->name, nlen);
+        if (pos == 0)
+            return -ENAMETOOLONG;
+        tmp[--pos] = '/';
+        cur = cur->parent;
+    }
+    if (cur != root)
+        return -ENOENT;
+    if (pos < sizeof(tmp) - 1 && tmp[pos] == '/')
+        pos++;
+    size_t plen = strlen(&tmp[pos]);
+    if (plen + 1 > len)
+        return -ENAMETOOLONG;
+    memcpy(out, &tmp[pos], plen + 1);
+    return 0;
+}
+
+static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
+                             uint32_t flags, bool propagate);
+
+static int vfs_propagate_bind(struct dentry *source, struct dentry *target,
+                              uint32_t flags) {
+    if (!target || !target->mnt)
+        return -EINVAL;
+    struct mount *parent = target->mnt;
+    if (!parent->group)
+        return 0;
+
+    char rel[CONFIG_PATH_MAX];
+    int ret = vfs_build_relpath(parent->root_dentry, target, rel, sizeof(rel));
+    if (ret < 0)
+        return ret;
+
+    struct mount *peer, *peer_next;
+    list_for_each_entry_safe(peer, peer_next, &parent->group->members,
+                             group_node) {
+        struct mount *cur = peer;
+        if (cur != parent) {
+            struct path base;
+            path_init(&base);
+            base.dentry = cur->root_dentry;
+            base.mnt = cur;
+            struct path resolved;
+            path_init(&resolved);
+            ret = vfs_namei_locked(&base, rel, &resolved,
+                                   NAMEI_FOLLOW | NAMEI_DIRECTORY);
+            if (ret >= 0 && resolved.dentry && resolved.dentry->vnode) {
+                vfs_mount_bind_at(source, resolved.dentry, flags, false);
+            }
+            if (resolved.dentry)
+                dentry_put(resolved.dentry);
+        }
+        struct mount *slave, *slave_next;
+        list_for_each_entry_safe(slave, slave_next, &cur->slaves, slave_node) {
+            struct path base;
+            path_init(&base);
+            base.dentry = slave->root_dentry;
+            base.mnt = slave;
+            struct path resolved;
+            path_init(&resolved);
+            ret = vfs_namei_locked(&base, rel, &resolved,
+                                   NAMEI_FOLLOW | NAMEI_DIRECTORY);
+            if (ret >= 0 && resolved.dentry && resolved.dentry->vnode) {
+                vfs_mount_bind_at(source, resolved.dentry, flags, false);
+            }
+            if (resolved.dentry)
+                dentry_put(resolved.dentry);
+        }
+    }
+    return 0;
+}
 void vnode_set_parent(struct vnode *vn, struct vnode *parent,
                       const char *name) {
     if (!vn)
@@ -148,6 +338,9 @@ void vfs_init(void) {
     vnode_cache = kmem_cache_create("vnode", sizeof(struct vnode), NULL);
     file_cache = kmem_cache_create("file", sizeof(struct file), NULL);
     dentry_init();
+    mutex_init(&mount_mutex, "mount");
+    memset(&init_mnt_ns, 0, sizeof(init_mnt_ns));
+    init_mnt_ns.refcount = 1;
     pr_info("VFS: initialized (caches ready)\n");
 }
 
@@ -177,13 +370,102 @@ void vfs_dump_mounts(void) {
 }
 
 struct mount *vfs_root_mount(void) {
+    struct process *p = proc_current();
+    if (p && p->mnt_ns && p->mnt_ns->root)
+        return p->mnt_ns->root;
     return root_mount;
 }
 
 struct dentry *vfs_root_dentry(void) {
-    if (!root_mount)
+    struct process *p = proc_current();
+    if (p && p->mnt_ns && p->mnt_ns->root_dentry)
+        return p->mnt_ns->root_dentry;
+    struct mount *mnt = vfs_root_mount();
+    if (!mnt)
         return NULL;
-    return root_mount->root_dentry;
+    return mnt->root_dentry;
+}
+
+void vfs_mount_hold(struct mount *mnt) {
+    if (!mnt)
+        return;
+    __atomic_add_fetch(&mnt->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void vfs_mount_put(struct mount *mnt) {
+    if (!mnt)
+        return;
+    __atomic_sub_fetch(&mnt->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void vfs_mount_global_lock(void) {
+    mutex_lock(&mount_mutex);
+}
+
+void vfs_mount_global_unlock(void) {
+    mutex_unlock(&mount_mutex);
+}
+
+int vfs_mount_set_shared(struct mount *mnt) {
+    return mount_set_shared(mnt);
+}
+
+void vfs_mount_set_private(struct mount *mnt) {
+    mount_set_private(mnt);
+}
+
+int vfs_mount_set_slave(struct mount *mnt) {
+    return mount_set_slave(mnt);
+}
+
+struct mount_ns *vfs_mount_ns_get(void) {
+    return vfs_mount_ns_get_from(&init_mnt_ns);
+}
+
+struct mount_ns *vfs_mount_ns_get_from(struct mount_ns *ns) {
+    if (!ns)
+        return NULL;
+    __atomic_add_fetch(&ns->refcount, 1, __ATOMIC_RELAXED);
+    return ns;
+}
+
+void vfs_mount_ns_put(struct mount_ns *ns) {
+    if (!ns)
+        return;
+    if (ns == &init_mnt_ns) {
+        __atomic_sub_fetch(&ns->refcount, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    if (__atomic_sub_fetch(&ns->refcount, 1, __ATOMIC_RELAXED) == 0) {
+        if (ns->root_dentry)
+            dentry_put(ns->root_dentry);
+        kfree(ns);
+    }
+}
+
+struct mount_ns *vfs_mount_ns_clone(struct mount_ns *ns) {
+    if (!ns)
+        return NULL;
+    struct mount_ns *copy = kzalloc(sizeof(*copy));
+    if (!copy)
+        return NULL;
+    copy->root = ns->root;
+    copy->root_dentry = ns->root_dentry;
+    if (copy->root_dentry)
+        dentry_get(copy->root_dentry);
+    copy->refcount = 1;
+    return copy;
+}
+
+int vfs_mount_ns_set_root(struct mount_ns *ns, struct dentry *root) {
+    if (!ns || !root)
+        return -EINVAL;
+    if (ns->root_dentry)
+        dentry_put(ns->root_dentry);
+    ns->root_dentry = root;
+    ns->root = root->mnt;
+    dentry_get(ns->root_dentry);
+    return 0;
 }
 
 int vfs_register_fs(struct fs_type *fs) {
@@ -207,6 +489,7 @@ static struct fs_type *find_fs_type(const char *name) {
 static struct mount *find_mount(const char *path) {
     struct mount *mnt, *best = NULL;
     size_t best_len = 0;
+    vfs_mount_global_lock();
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
         size_t len = strlen(mnt->mountpoint);
@@ -219,6 +502,7 @@ static struct mount *find_mount(const char *path) {
         }
     }
     spin_unlock(&vfs_lock);
+    vfs_mount_global_unlock();
     return best;
 }
 
@@ -232,13 +516,18 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     struct mount *mnt = NULL;
     struct blkdev *dev = NULL;
     int ret = -ENOMEM;
+    vfs_mount_global_lock();
     spin_lock(&vfs_lock);
     fs = find_fs_type(fstype);
     spin_unlock(&vfs_lock);
-    if (!fs)
+    if (!fs) {
+        vfs_mount_global_unlock();
         return -ENODEV;
-    if (src && !(dev = blkdev_get(src)))
+    }
+    if (src && !(dev = blkdev_get(src))) {
+        vfs_mount_global_unlock();
         return -ENODEV;
+    }
     if (!(mnt = kzalloc(sizeof(*mnt))) ||
         !(mnt->mountpoint = kmalloc(strlen(tgt) + 1)))
         goto err;
@@ -246,6 +535,7 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     mnt->ops = fs->ops;
     mnt->dev = dev;
     mnt->flags = flags;
+    mnt->refcount = 1;
     if ((ret = mnt->ops->mount(mnt)) < 0)
         goto err;
     if (mnt->root) {
@@ -264,10 +554,18 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     }
     mnt->parent = NULL;
     mnt->mountpoint_dentry = NULL;
+    mnt->mflags = 0;
+    mnt->group = NULL;
+    INIT_LIST_HEAD(&mnt->group_node);
+    mnt->master = NULL;
+    INIT_LIST_HEAD(&mnt->slaves);
+    INIT_LIST_HEAD(&mnt->slave_node);
+    mnt->prop = MOUNT_PRIVATE;
     if (strcmp(tgt, "/") != 0) {
         struct path mp;
         path_init(&mp);
-        ret = vfs_namei(tgt, &mp, NAMEI_FOLLOW | NAMEI_DIRECTORY);
+        ret = vfs_namei_locked(NULL, tgt, &mp,
+                               NAMEI_FOLLOW | NAMEI_DIRECTORY);
         if (ret < 0)
             goto err;
         if (!mp.dentry || !mp.dentry->vnode ||
@@ -292,6 +590,11 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     if (strcmp(tgt, "/") == 0)
         root_mount = mnt;
     spin_unlock(&vfs_lock);
+    if (strcmp(tgt, "/") == 0) {
+        init_mnt_ns.root = mnt;
+        init_mnt_ns.root_dentry = mnt->root_dentry;
+    }
+    vfs_mount_global_unlock();
     return 0;
 err:
     if (mnt && mnt->mountpoint_dentry) {
@@ -300,6 +603,7 @@ err:
         dentry_put(mnt->mountpoint_dentry);
         mnt->mountpoint_dentry = NULL;
     }
+    vfs_mount_global_unlock();
     if (mnt) {
         kfree(mnt->mountpoint);
         kfree(mnt);
@@ -309,8 +613,76 @@ err:
     return ret;
 }
 
+static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
+                             uint32_t flags, bool propagate) {
+    if (!source || !target || !source->vnode || !target->vnode)
+        return -EINVAL;
+    if (target->vnode->type != VNODE_DIR)
+        return -ENOTDIR;
+    if (target->mounted)
+        return -EBUSY;
+
+    struct mount *src_mnt = source->mnt;
+    if (!src_mnt || !src_mnt->ops)
+        return -EINVAL;
+
+    struct mount *mnt = kzalloc(sizeof(*mnt));
+    if (!mnt)
+        return -ENOMEM;
+    mnt->mountpoint = kmalloc(1);
+    if (!mnt->mountpoint) {
+        kfree(mnt);
+        return -ENOMEM;
+    }
+    mnt->mountpoint[0] = '\0';
+    mnt->ops = src_mnt->ops;
+    mnt->root = source->vnode;
+    vnode_get(source->vnode);
+    struct dentry *rootd = dentry_alloc(NULL, "");
+    if (!rootd) {
+        vnode_put(mnt->root);
+        kfree(mnt->mountpoint);
+        kfree(mnt);
+        return -ENOMEM;
+    }
+    rootd->mnt = mnt;
+    dentry_add(rootd, source->vnode);
+    mnt->root_dentry = rootd;
+    mnt->dev = src_mnt->dev;
+    mnt->fs_data = src_mnt->fs_data;
+    mnt->prop = MOUNT_PRIVATE;
+    mnt->mflags = MOUNT_F_BIND;
+    mnt->refcount = 1;
+    mnt->parent = target->mnt;
+    mnt->mountpoint_dentry = target;
+    dentry_get(target);
+    INIT_LIST_HEAD(&mnt->list);
+    INIT_LIST_HEAD(&mnt->group_node);
+    INIT_LIST_HEAD(&mnt->slaves);
+    INIT_LIST_HEAD(&mnt->slave_node);
+    mount_inherit_propagation(mnt, target->mnt);
+
+    target->flags |= DENTRY_MOUNTPOINT;
+    target->mounted = mnt;
+
+    spin_lock(&vfs_lock);
+    list_add_tail(&mnt->list, &mount_list);
+    spin_unlock(&vfs_lock);
+
+    if (propagate)
+        vfs_propagate_bind(source, target, flags);
+
+    return 0;
+}
+
+int vfs_bind_mount(struct dentry *source, struct dentry *target,
+                   uint32_t flags, bool propagate) {
+    return vfs_mount_bind_at(source, target, flags, propagate);
+}
+
 int vfs_umount(const char *tgt) {
     struct mount *mnt;
+    vfs_mount_global_lock();
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
         if (strcmp(mnt->mountpoint, tgt) == 0) {
@@ -318,7 +690,11 @@ int vfs_umount(const char *tgt) {
             if (mnt == root_mount)
                 root_mount = NULL;
             spin_unlock(&vfs_lock);
-            if (mnt->ops->unmount)
+            if (mnt == init_mnt_ns.root) {
+                init_mnt_ns.root = NULL;
+                init_mnt_ns.root_dentry = NULL;
+            }
+            if (mnt->ops->unmount && !(mnt->mflags & MOUNT_F_BIND))
                 mnt->ops->unmount(mnt);
             if (mnt->root_dentry) {
                 dentry_drop(mnt->root_dentry);
@@ -334,14 +710,22 @@ int vfs_umount(const char *tgt) {
                 vnode_put(mnt->root);
                 mnt->root = NULL;
             }
-            if (mnt->dev)
+            if (mnt->group)
+                mount_group_remove(mnt);
+            if (mnt->master) {
+                list_del(&mnt->slave_node);
+                mnt->master = NULL;
+            }
+            if (mnt->dev && !(mnt->mflags & MOUNT_F_BIND))
                 blkdev_put(mnt->dev);
             kfree(mnt->mountpoint);
             kfree(mnt);
+            vfs_mount_global_unlock();
             return 0;
         }
     }
     spin_unlock(&vfs_lock);
+    vfs_mount_global_unlock();
     return -ENOENT;
 }
 
@@ -606,7 +990,16 @@ int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
 
     struct dentry *cur = d;
     struct mount *mnt = d->mnt;
+    struct dentry *ns_root = vfs_root_dentry();
     while (cur) {
+        if (ns_root && cur == ns_root) {
+            if (pos == sizeof(tmp) - 1) {
+                if (pos == 0)
+                    return -ENAMETOOLONG;
+                tmp[--pos] = '/';
+            }
+            break;
+        }
         if (cur == mnt->root_dentry) {
             if (!mnt->parent || !mnt->mountpoint_dentry) {
                 if (pos == sizeof(tmp) - 1) {
