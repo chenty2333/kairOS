@@ -12,6 +12,7 @@
 #include <kairos/types.h>
 
 struct dentry;
+struct path;
 
 enum vnode_type {
     VNODE_FILE,
@@ -90,6 +91,7 @@ struct file {
 #define O_RDONLY 0
 #define O_WRONLY 1
 #define O_RDWR 2
+#define O_ACCMODE 3
 #define O_CREAT 0100
 #define O_EXCL 0200
 #define O_TRUNC 01000
@@ -97,6 +99,9 @@ struct file {
 #define O_NONBLOCK 04000
 #define O_NOFOLLOW 0400000
 #define O_DIRECTORY 0200000
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 02000000
+#endif
 #define F_GETFL 3
 #define F_SETFL 4
 
@@ -173,13 +178,6 @@ void vfs_init(void);
 int vfs_mount(const char *src, const char *tgt, const char *type,
               uint32_t flags);
 int vfs_umount(const char *tgt);
-struct vnode *vfs_lookup(const char *path);
-struct vnode *vfs_lookup_at(const char *cwd, const char *path);
-struct vnode *vfs_lookup_from_dir(struct vnode *dir, const char *path);
-struct vnode *vfs_lookup_from_dir_nofollow(struct vnode *dir, const char *path);
-struct vnode *vfs_lookup_parent(const char *path, char *name);
-struct vnode *vfs_lookup_parent_from_dir(struct vnode *dir, const char *path,
-                                         char *name);
 struct mount *vfs_mount_for_path(const char *path);
 int vfs_build_path(struct vnode *vn, char *out, size_t len);
 int vfs_build_path_dentry(struct dentry *d, char *out, size_t len);
@@ -187,8 +185,8 @@ int vfs_build_relpath(struct dentry *root, struct dentry *target,
                       char *out, size_t len);
 int vfs_open(const char *path, int flags, mode_t mode, struct file **fp);
 int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struct file **fp);
-int vfs_open_at_dir(struct vnode *dir, const char *path, int flags, mode_t mode,
-                    struct file **fp);
+int vfs_open_at_path(const struct path *base, const char *path, int flags,
+                     mode_t mode, struct file **fp);
 int vfs_close(struct file *file);
 struct file *vfs_file_alloc(void);
 void vfs_file_free(struct file *file);
@@ -226,21 +224,11 @@ int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);
 int vfs_fstat(struct file *file, struct stat *st);
 int vfs_mkdir(const char *path, mode_t mode);
-int vfs_mkdir_at_dir(struct vnode *dir, const char *path, mode_t mode);
 int vfs_rmdir(const char *path);
-int vfs_rmdir_at_dir(struct vnode *dir, const char *path);
 int vfs_unlink(const char *path);
-int vfs_unlink_at_dir(struct vnode *dir, const char *path);
 int vfs_rename(const char *old, const char *new);
-int vfs_rename_at_dir(struct vnode *odir, const char *oldpath,
-                      struct vnode *ndir, const char *newpath);
 int vfs_symlink(const char *target, const char *linkpath);
-int vfs_symlink_at_dir(struct vnode *dir, const char *target,
-                       const char *linkpath);
 ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz);
-ssize_t vfs_readlink_at_dir(struct vnode *dir, const char *path, char *buf,
-                            size_t bufsz);
-int vfs_normalize_path(const char *cwd, const char *input, char *output);
 void vnode_get(struct vnode *vn);
 void vnode_put(struct vnode *vn);
 void vnode_set_parent(struct vnode *vn, struct vnode *parent, const char *name);

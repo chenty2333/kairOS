@@ -28,7 +28,7 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
 
 static int copy_timespec_from_user(uint64_t ptr, struct timespec *out) {
     if (!ptr || !out)
-        return 0;
+        return -EFAULT;
     if (copy_from_user(out, (const void *)ptr, sizeof(*out)) < 0)
         return -EFAULT;
     if (out->tv_sec < 0 || out->tv_nsec < 0 || out->tv_nsec >= (int64_t)NS_PER_SEC)
@@ -40,7 +40,7 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!tp_ptr)
-        return -EINVAL;
+        return -EFAULT;
     if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
         return -EINVAL;
 
@@ -61,8 +61,6 @@ int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
     int rc = copy_timespec_from_user(req_ptr, &req);
     if (rc < 0)
         return rc;
-    if (rc == 0)
-        return -EINVAL;
 
     uint64_t ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
     uint64_t delta = ns_to_sched_ticks(ns);
@@ -113,7 +111,7 @@ int64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     if (!buf_ptr)
-        return -EINVAL;
+        return -EFAULT;
     struct linux_utsname uts;
     memset(&uts, 0, sizeof(uts));
     strcpy(uts.sysname, "Kairos");

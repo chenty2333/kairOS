@@ -7,6 +7,7 @@
 #include <kairos/dentry.h>
 #include <kairos/futex.h>
 #include <kairos/mm.h>
+#include <kairos/namei.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -100,6 +101,14 @@ static struct process *proc_alloc(void) {
     strcpy(p->cwd, "/");
     p->cwd_vnode = NULL;
     p->cwd_dentry = NULL;
+    struct dentry *root = vfs_root_dentry();
+    if (root) {
+        p->cwd_dentry = root;
+        dentry_get(root);
+        p->cwd_vnode = root->vnode;
+        if (p->cwd_vnode)
+            vnode_get(p->cwd_vnode);
+    }
     p->mnt_ns = vfs_mount_ns_get();
     p->tid_address = 0;
     for (int i = 0; i < RLIM_NLIMITS; i++) {
@@ -294,25 +303,39 @@ noreturn void proc_exit(int status) {
 
 int proc_exec(const char *path, char *const argv[]) {
     struct vnode *vn;
+    struct path resolved;
     struct mm_struct *old_mm, *new_mm;
     vaddr_t entry, sp;
     void *elf_data;
     size_t size;
 
-    vn = vfs_lookup(path);
-    if (!vn) return -ENOENT;
-    if (vn->type != VNODE_FILE) { vnode_put(vn); return -EACCES; }
+    path_init(&resolved);
+    int ret = vfs_namei(path, &resolved, NAMEI_FOLLOW);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    vn = resolved.dentry->vnode;
+    if (vn->type != VNODE_FILE) {
+        dentry_put(resolved.dentry);
+        return -EACCES;
+    }
 
     size = vn->size;
-    if (size > 2 * 1024 * 1024) { vnode_put(vn); return -E2BIG; }
+    if (size > 2 * 1024 * 1024) { dentry_put(resolved.dentry); return -E2BIG; }
     elf_data = kmalloc(size);
-    if (!elf_data) { vnode_put(vn); return -ENOMEM; }
+    if (!elf_data) { dentry_put(resolved.dentry); return -ENOMEM; }
 
     struct file tmp_file = {.vnode = vn, .offset = 0};
     if (vfs_read(&tmp_file, elf_data, size) < (ssize_t)size) {
-        kfree(elf_data); vnode_put(vn); return -EIO;
+        kfree(elf_data);
+        dentry_put(resolved.dentry);
+        return -EIO;
     }
-    vnode_put(vn);
+    dentry_put(resolved.dentry);
 
     if (!(new_mm = mm_create())) { kfree(elf_data); return -ENOMEM; }
     extern int elf_load(struct mm_struct *mm, const void *elf, size_t size, vaddr_t *entry_out);
@@ -320,7 +343,9 @@ int proc_exec(const char *path, char *const argv[]) {
 
     if (elf_load(new_mm, elf_data, size, &entry) < 0 ||
         elf_setup_stack(new_mm, argv, NULL, &sp) < 0) {
-        mm_destroy(new_mm); kfree(elf_data); return -ENOEXEC;
+        mm_destroy(new_mm);
+        kfree(elf_data);
+        return -ENOEXEC;
     }
     kfree(elf_data);
 
@@ -338,23 +363,32 @@ int proc_exec(const char *path, char *const argv[]) {
 }
 
 static struct process *proc_spawn_from_vfs(const char *path, struct process *parent) {
-    struct vnode *vn = vfs_lookup(path);
-    if (!vn) return NULL;
-    if (vn->type != VNODE_FILE) { vnode_put(vn); return NULL; }
+    struct path resolved;
+    path_init(&resolved);
+    int ret = vfs_namei(path, &resolved, NAMEI_FOLLOW);
+    if (ret < 0)
+        return NULL;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return NULL;
+    }
+    struct vnode *vn = resolved.dentry->vnode;
+    if (vn->type != VNODE_FILE) { dentry_put(resolved.dentry); return NULL; }
 
     size_t size = vn->size;
-    if (size == 0 || size > 2 * 1024 * 1024) { vnode_put(vn); return NULL; }
+    if (size == 0 || size > 2 * 1024 * 1024) { dentry_put(resolved.dentry); return NULL; }
 
     void *elf_data = kmalloc(size);
-    if (!elf_data) { vnode_put(vn); return NULL; }
+    if (!elf_data) { dentry_put(resolved.dentry); return NULL; }
 
     struct file tmp_file = {.vnode = vn, .offset = 0};
     if (vfs_read(&tmp_file, elf_data, size) < (ssize_t)size) {
         kfree(elf_data);
-        vnode_put(vn);
+        dentry_put(resolved.dentry);
         return NULL;
     }
-    vnode_put(vn);
+    dentry_put(resolved.dentry);
 
     const char *name = strrchr(path, '/');
     struct process *p = proc_create(name ? name + 1 : path, elf_data, size);

@@ -62,25 +62,6 @@ static int namei_get_start(const struct path *base, const char *path,
         return 0;
     }
 
-    if (p && p->cwd[0]) {
-        struct path resolved;
-        path_init(&resolved);
-        int ret =
-            vfs_namei_locked(NULL, p->cwd,
-                             &resolved, NAMEI_FOLLOW | NAMEI_DIRECTORY);
-        if (ret == 0 && resolved.dentry) {
-            if (!p->cwd_dentry) {
-                p->cwd_dentry = resolved.dentry;
-                dentry_get(p->cwd_dentry);
-            }
-            *start = resolved.dentry;
-            *mnt = resolved.dentry->mnt;
-            return 0;
-        }
-        if (resolved.dentry)
-            dentry_put(resolved.dentry);
-    }
-
     struct dentry *root = vfs_root_dentry();
     if (!root)
         return -ENOENT;

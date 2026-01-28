@@ -54,6 +54,8 @@
     .equ SYS_pivot_root, 155
 
     .equ MS_BIND, 0x1000
+    .equ MS_SHARED, 0x100000
+    .equ MS_PRIVATE, 0x40000
     .equ O_RDONLY, 0
 
 _start:
@@ -569,7 +571,7 @@ chroot_test:
     li a3, 0
     li a7, SYS_wait4
     ecall
-    j symlink_test
+    j mount_test
 
 chroot_child:
     la a0, path_chroot
@@ -611,6 +613,109 @@ chroot_fail:
     li a0, 1
     la a1, msg_chroot_fail
     li a2, 13
+    li a7, SYS_write
+    ecall
+    j mount_test
+
+mount_test:
+    /* mkdir /mnt and /mnt_bind */
+    li a0, AT_FDCWD
+    la a1, path_mnt
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
+    blt a0, zero, 1f
+    j 2f
+1:
+    li t0, -17
+    bne a0, t0, mount_fail
+2:
+    li a0, AT_FDCWD
+    la a1, path_mnt_bind
+    li a2, 0755
+    li a7, SYS_mkdirat
+    ecall
+    blt a0, zero, 3f
+    j 4f
+3:
+    li t0, -17
+    bne a0, t0, mount_fail
+4:
+    /* bind mount /mnt to /mnt_bind */
+    la a0, path_mnt
+    la a1, path_mnt_bind
+    li a2, 0
+    li a3, MS_BIND
+    li a4, 0
+    li a7, SYS_mount
+    ecall
+    blt a0, zero, mount_bind_fail
+    /* mark shared then private */
+    li a0, 0
+    la a1, path_mnt_bind
+    li a2, 0
+    li a3, MS_SHARED
+    li a4, 0
+    li a7, SYS_mount
+    ecall
+    blt a0, zero, mount_shared_fail
+    li a0, 0
+    la a1, path_mnt_bind
+    li a2, 0
+    li a3, MS_PRIVATE
+    li a4, 0
+    li a7, SYS_mount
+    ecall
+    blt a0, zero, mount_private_fail
+    /* umount2 /mnt_bind */
+    la a0, path_mnt_bind
+    li a1, 0
+    li a7, SYS_umount2
+    ecall
+    blt a0, zero, mount_umount_fail
+    li a0, 1
+    la a1, msg_mount_ok
+    li a2, 10
+    li a7, SYS_write
+    ecall
+    j symlink_test
+
+mount_fail:
+    li a0, 1
+    la a1, msg_mount_fail
+    li a2, 12
+    li a7, SYS_write
+    ecall
+    j symlink_test
+
+mount_bind_fail:
+    li a0, 1
+    la a1, msg_mount_bind_fail
+    li a2, 17
+    li a7, SYS_write
+    ecall
+    j symlink_test
+
+mount_shared_fail:
+    li a0, 1
+    la a1, msg_mount_shared_fail
+    li a2, 19
+    li a7, SYS_write
+    ecall
+    j symlink_test
+
+mount_private_fail:
+    li a0, 1
+    la a1, msg_mount_private_fail
+    li a2, 20
+    li a7, SYS_write
+    ecall
+    j symlink_test
+
+mount_umount_fail:
+    li a0, 1
+    la a1, msg_mount_umount_fail
+    li a2, 19
     li a7, SYS_write
     ecall
     j symlink_test
@@ -895,6 +1000,18 @@ msg_chroot_ok:
     .asciz "chroot: ok\n"
 msg_chroot_fail:
     .asciz "chroot: fail\n"
+msg_mount_ok:
+    .asciz "mount: ok\n"
+msg_mount_fail:
+    .asciz "mount: fail\n"
+msg_mount_bind_fail:
+    .asciz "mount: bind fail\n"
+msg_mount_shared_fail:
+    .asciz "mount: shared fail\n"
+msg_mount_private_fail:
+    .asciz "mount: private fail\n"
+msg_mount_umount_fail:
+    .asciz "mount: umount fail\n"
 msg_symlink_open_fail:
     .asciz "symlink: open fail\n"
 msg_symlink_link_fail:
@@ -920,6 +1037,10 @@ path_chroot:
     .asciz "/chroot"
 path_chroot_dir:
     .asciz "/chroot/dir"
+path_mnt:
+    .asciz "/mnt"
+path_mnt_bind:
+    .asciz "/mnt_bind"
 path_newroot:
     .asciz "/newroot"
 path_oldroot:

@@ -122,8 +122,6 @@ static void mount_inherit_propagation(struct mount *mnt, struct mount *src) {
 static struct kmem_cache *vnode_cache;
 static struct kmem_cache *file_cache;
 
-int vfs_normalize_path(const char *cwd, const char *input, char *output);
-
 int vfs_build_relpath(struct dentry *root, struct dentry *target,
                       char *out, size_t len) {
     if (!root || !target || !out || len == 0)
@@ -264,74 +262,6 @@ static ssize_t vfs_readlink_target(struct vnode *vn, char *buf, size_t bufsz,
     if (require_full && (size_t)ret != need)
         return -EIO;
     return ret;
-}
-
-int vfs_normalize_path(const char *cwd, const char *input, char *output) {
-    struct path_comp {
-        char *s;
-        size_t len;
-    };
-    char temp[CONFIG_PATH_MAX];
-    struct path_comp stack[32];
-    int top = 0;
-    if (!output || !input)
-        return -EINVAL;
-
-    if (input[0] == '/') {
-        if (strlen(input) >= CONFIG_PATH_MAX)
-            return -ENAMETOOLONG;
-        strcpy(temp, input);
-    } else {
-        if (!cwd || cwd[0] != '/')
-            return -EINVAL;
-        if (strlen(cwd) + strlen(input) + 2 >= CONFIG_PATH_MAX)
-            return -ENAMETOOLONG;
-        strcpy(temp, cwd);
-        if (temp[strlen(temp) - 1] != '/')
-            strcat(temp, "/");
-        strcat(temp, input);
-    }
-
-    char *p = temp;
-    while (*p) {
-        while (*p == '/')
-            p++;
-        if (!*p)
-            break;
-        char *start = p;
-        while (*p && *p != '/')
-            p++;
-        size_t len = (size_t)(p - start);
-        char saved = *p;
-        *p = '\0';
-        if (strcmp(start, ".") == 0)
-            ;
-        else if (strcmp(start, "..") == 0) {
-            if (top > 0)
-                top--;
-        } else {
-            if (top < 32) {
-                stack[top].s = start;
-                stack[top].len = len;
-                top++;
-            }
-            else
-                return -ENAMETOOLONG;
-        }
-        *p = saved;
-    }
-
-    char *out = output;
-    *out++ = '/';
-    for (int i = 0; i < top; i++) {
-        size_t len = stack[i].len;
-        memcpy(out, stack[i].s, len);
-        out += len;
-        if (i < top - 1)
-            *out++ = '/';
-    }
-    *out = '\0';
-    return 0;
 }
 
 void vfs_init(void) {
@@ -629,12 +559,24 @@ static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
     struct mount *mnt = kzalloc(sizeof(*mnt));
     if (!mnt)
         return -ENOMEM;
-    mnt->mountpoint = kmalloc(1);
-    if (!mnt->mountpoint) {
-        kfree(mnt);
-        return -ENOMEM;
+    char target_path[CONFIG_PATH_MAX];
+    int tplen = vfs_build_path_dentry(target, target_path,
+                                      sizeof(target_path));
+    if (tplen < 0) {
+        mnt->mountpoint = kmalloc(1);
+        if (!mnt->mountpoint) {
+            kfree(mnt);
+            return -ENOMEM;
+        }
+        mnt->mountpoint[0] = '\0';
+    } else {
+        mnt->mountpoint = kmalloc((size_t)tplen + 1);
+        if (!mnt->mountpoint) {
+            kfree(mnt);
+            return -ENOMEM;
+        }
+        memcpy(mnt->mountpoint, target_path, (size_t)tplen + 1);
     }
-    mnt->mountpoint[0] = '\0';
     mnt->ops = src_mnt->ops;
     mnt->root = source->vnode;
     vnode_get(source->vnode);
@@ -727,195 +669,6 @@ int vfs_umount(const char *tgt) {
     spin_unlock(&vfs_lock);
     vfs_mount_global_unlock();
     return -ENOENT;
-}
-
-static struct vnode *vfs_lookup_at_internal(const char *cwd, const char *path,
-                                            bool follow_final, int depth) {
-    char norm[CONFIG_PATH_MAX], comp[CONFIG_NAME_MAX];
-    struct vnode *vn, *dir;
-    if (!path || depth > CONFIG_SYMLINK_MAX)
-        return NULL;
-    if (vfs_normalize_path(cwd ? cwd : "/", path, norm) < 0)
-        return NULL;
-    struct mount *mnt = find_mount(norm);
-    if (!mnt || !(dir = mnt->root))
-        return NULL;
-    vnode_get(dir);
-    const char *p = norm + strlen(mnt->mountpoint);
-    if (strlen(mnt->mountpoint) > 1 && *p == '/')
-        p++;
-    while (*p) {
-        while (*p == '/')
-            p++;
-        if (!*p)
-            break;
-        const char *end = p;
-        while (*end && *end != '/')
-            end++;
-        size_t len = end - p;
-        if (len >= CONFIG_NAME_MAX) {
-            vnode_put(dir);
-            return NULL;
-        }
-        memcpy(comp, p, len);
-        comp[len] = '\0';
-        if (!mnt->ops->lookup || !(vn = mnt->ops->lookup(dir, comp))) {
-            vnode_put(dir);
-            return NULL;
-        }
-        vnode_set_parent(vn, dir, comp);
-        vnode_put(dir);
-
-        const char *remain = end;
-        while (*remain == '/')
-            remain++;
-        bool last = (*remain == '\0');
-
-        if (vn->type == VNODE_SYMLINK && (follow_final || !last)) {
-            char target[CONFIG_PATH_MAX];
-            ssize_t tlen = vfs_readlink_target(vn, target, sizeof(target), true);
-            vnode_put(vn);
-            if (tlen < 0)
-                return NULL;
-            target[tlen] = '\0';
-
-            char newpath[CONFIG_PATH_MAX];
-            size_t n = 0;
-            if (target[0] == '/') {
-                if ((size_t)tlen >= sizeof(newpath))
-                    return NULL;
-                memcpy(newpath, target, (size_t)tlen);
-                n = (size_t)tlen;
-            } else {
-                size_t base_len = (p > norm) ? (size_t)(p - norm) - 1 : 0;
-                if (base_len == 0) {
-                    newpath[n++] = '/';
-                } else {
-                    if (base_len >= sizeof(newpath))
-                        return NULL;
-                    memcpy(newpath, norm, base_len);
-                    n = base_len;
-                }
-                if (n == 0 || newpath[n - 1] != '/')
-                    newpath[n++] = '/';
-                if (n + (size_t)tlen >= sizeof(newpath))
-                    return NULL;
-                memcpy(newpath + n, target, (size_t)tlen);
-                n += (size_t)tlen;
-            }
-
-            if (*remain) {
-                if (n == 0 || newpath[n - 1] != '/')
-                    newpath[n++] = '/';
-                size_t rlen = strlen(remain);
-                if (n + rlen >= sizeof(newpath))
-                    return NULL;
-                memcpy(newpath + n, remain, rlen);
-                n += rlen;
-            }
-            newpath[n] = '\0';
-            return vfs_lookup_at_internal("/", newpath, follow_final, depth + 1);
-        }
-
-        dir = vn;
-        p = end;
-    }
-    return dir;
-}
-
-struct vnode *vfs_lookup_at(const char *cwd, const char *path) {
-    return vfs_lookup_at_internal(cwd, path, true, 0);
-}
-
-static struct vnode *vfs_lookup_from_dir_internal(struct vnode *start,
-                                                  const char *path,
-                                                  bool follow_final,
-                                                  int depth) {
-    (void)depth;
-    if (!start || !path)
-        return NULL;
-
-    char full[CONFIG_PATH_MAX];
-    if (path[0] == '/') {
-        size_t plen = strlen(path);
-        if (plen + 1 > sizeof(full))
-            return NULL;
-        memcpy(full, path, plen + 1);
-    } else {
-        int ret = vfs_build_path(start, full, sizeof(full));
-        if (ret < 0)
-            return NULL;
-        size_t blen = strlen(full);
-        size_t plen = strlen(path);
-        if (blen + plen + 2 > sizeof(full))
-            return NULL;
-        if (blen == 0 || full[blen - 1] != '/')
-            full[blen++] = '/';
-        memcpy(full + blen, path, plen + 1);
-    }
-
-    int nflags = follow_final ? NAMEI_FOLLOW : NAMEI_NOFOLLOW;
-    struct path resolved;
-    path_init(&resolved);
-    if (vfs_namei(full, &resolved, nflags) < 0)
-        return NULL;
-    if (!resolved.dentry || !resolved.dentry->vnode) {
-        if (resolved.dentry)
-            dentry_put(resolved.dentry);
-        return NULL;
-    }
-    struct vnode *vn = resolved.dentry->vnode;
-    vnode_get(vn);
-    dentry_put(resolved.dentry);
-    return vn;
-}
-
-struct vnode *vfs_lookup_from_dir(struct vnode *dir, const char *path) {
-    return vfs_lookup_from_dir_internal(dir, path, true, 0);
-}
-
-struct vnode *vfs_lookup_from_dir_nofollow(struct vnode *dir,
-                                           const char *path) {
-    return vfs_lookup_from_dir_internal(dir, path, false, 0);
-}
-
-static struct vnode *vfs_lookup_legacy(const char *path) {
-    struct process *cur = proc_current();
-    (void)cur;
-    (void)path;
-    return NULL;
-}
-
-struct vnode *vfs_lookup(const char *path) {
-    struct path resolved;
-    path_init(&resolved);
-    int ret = vfs_namei(path, &resolved, NAMEI_FOLLOW);
-    if (ret == 0 && resolved.dentry && resolved.dentry->vnode) {
-        struct vnode *vn = resolved.dentry->vnode;
-        vnode_get(vn);
-        dentry_put(resolved.dentry);
-        return vn;
-    }
-    if (resolved.dentry)
-        dentry_put(resolved.dentry);
-    return vfs_lookup_legacy(path);
-}
-
-struct vnode *vfs_lookup_parent(const char *path, char *name) {
-    if (!path || !name || path[0] != '/')
-        return NULL;
-    const char *last = strrchr(path, '/');
-    if (!last)
-        return NULL;
-    strncpy(name, last + 1, CONFIG_NAME_MAX - 1);
-    name[CONFIG_NAME_MAX - 1] = '\0';
-    if (last == path)
-        return vfs_lookup("/");
-    char parent[CONFIG_PATH_MAX];
-    size_t len = last - path;
-    memcpy(parent, path, len);
-    parent[len] = '\0';
-    return vfs_lookup(parent);
 }
 
 int vfs_build_path(struct vnode *vn, char *out, size_t len) {
@@ -1035,82 +788,21 @@ int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
     return (int)plen;
 }
 
-struct vnode *vfs_lookup_parent_from_dir(struct vnode *dir, const char *path,
-                                         char *name) {
-    if (!dir || !path || !name)
-        return NULL;
-    if (path[0] == '/')
-        return vfs_lookup_parent(path, name);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return NULL;
-    size_t blen = strlen(full);
-    size_t plen = strlen(path);
-    if (blen + plen + 2 > sizeof(full))
-        return NULL;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, path, plen + 1);
-
-    struct path resolved;
-    path_init(&resolved);
-    ret = vfs_namei(full, &resolved, NAMEI_CREATE);
-    if (ret < 0)
-        return NULL;
-    if (!resolved.dentry || !resolved.dentry->parent ||
-        !resolved.dentry->parent->vnode) {
-        if (resolved.dentry)
-            dentry_put(resolved.dentry);
-        return NULL;
-    }
-    strncpy(name, resolved.dentry->name, CONFIG_NAME_MAX - 1);
-    name[CONFIG_NAME_MAX - 1] = '\0';
-    struct vnode *parent = resolved.dentry->parent->vnode;
-    vnode_get(parent);
-    dentry_put(resolved.dentry);
-    return parent;
-}
-
-int vfs_open_at_dir(struct vnode *dir, const char *path, int flags, mode_t mode,
-                    struct file **fp) {
-    if (!dir || !path || !fp)
-        return -EINVAL;
-    if (path[0] == '/')
-        return vfs_open_at("/", path, flags, mode, fp);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return ret;
-    size_t blen = strlen(full);
-    size_t plen = strlen(path);
-    if (blen + plen + 2 > sizeof(full))
-        return -ENAMETOOLONG;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, path, plen + 1);
-    return vfs_open_at("/", full, flags, mode, fp);
-}
-
-int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode,
-                struct file **fp) {
+int vfs_open_at_path(const struct path *base, const char *path, int flags,
+                     mode_t mode, struct file **fp) {
     if (!path || !fp)
+        return -EINVAL;
+    uint32_t allowed = O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND |
+                       O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC;
+    if (flags & ~allowed)
+        return -EINVAL;
+    int accmode = flags & O_ACCMODE;
+    if (accmode != O_RDONLY && accmode != O_WRONLY && accmode != O_RDWR)
         return -EINVAL;
     if ((flags & O_DIRECTORY) && (flags & O_CREAT))
         return -EINVAL;
-    char full[CONFIG_PATH_MAX];
-    const char *usepath = path;
-    if (path[0] != '/' && cwd && cwd[0]) {
-        size_t blen = strlen(cwd);
-        size_t plen = strlen(path);
-        if (blen + plen + 2 > sizeof(full))
-            return -ENAMETOOLONG;
-        memcpy(full, cwd, blen);
-        if (blen == 0 || full[blen - 1] != '/')
-            full[blen++] = '/';
-        memcpy(full + blen, path, plen + 1);
-        usepath = full;
-    }
+    if ((flags & O_TRUNC) && accmode == O_RDONLY)
+        return -EACCES;
 
     int nflags = NAMEI_FOLLOW;
     if (flags & O_DIRECTORY)
@@ -1126,12 +818,11 @@ int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode,
 
     struct path resolved;
     path_init(&resolved);
-    int ret = vfs_namei(usepath, &resolved, nflags);
+    int ret = vfs_namei_at(base, path, &resolved, nflags);
     if (ret < 0)
         return ret;
-    if (!resolved.dentry) {
+    if (!resolved.dentry)
         return -ENOENT;
-    }
 
     struct vnode *vn = NULL;
     if (resolved.dentry->flags & DENTRY_NEGATIVE) {
@@ -1144,7 +835,7 @@ int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode,
             !resolved.mnt || !resolved.mnt->ops ||
             !resolved.mnt->ops->create) {
             dentry_put(resolved.dentry);
-            return -ENOSYS;
+            return -EOPNOTSUPP;
         }
         ret = resolved.mnt->ops->create(resolved.dentry->parent->vnode,
                                         resolved.dentry->name, mode);
@@ -1186,10 +877,10 @@ int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode,
     file->vnode = vn;
     file->dentry = resolved.dentry;
     dentry_get(file->dentry);
-    file->flags = flags;
+    file->flags = (uint32_t)(flags & (O_ACCMODE | O_APPEND | O_NONBLOCK));
     if (vfs_build_path_dentry(resolved.dentry, file->path,
                               sizeof(file->path)) < 0) {
-        strncpy(file->path, usepath, sizeof(file->path) - 1);
+        strncpy(file->path, path, sizeof(file->path) - 1);
         file->path[sizeof(file->path) - 1] = '\0';
     }
     if ((flags & O_TRUNC) && vn->ops->truncate)
@@ -1199,9 +890,33 @@ int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode,
     return 0;
 }
 
+int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode,
+                struct file **fp) {
+    if (!path || !fp)
+        return -EINVAL;
+    if (path[0] == '/' || !cwd || !cwd[0])
+        return vfs_open_at_path(NULL, path, flags, mode, fp);
+    struct path base;
+    path_init(&base);
+    int ret = vfs_namei(cwd, &base, NAMEI_FOLLOW | NAMEI_DIRECTORY);
+    if (ret < 0)
+        return ret;
+    ret = vfs_open_at_path(&base, path, flags, mode, fp);
+    if (base.dentry)
+        dentry_put(base.dentry);
+    return ret;
+}
+
 int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
     struct process *cur = proc_current();
-    return vfs_open_at(cur ? cur->cwd : "/", path, flags, mode, fp);
+    if (cur && cur->cwd_dentry) {
+        struct path base;
+        path_init(&base);
+        base.dentry = cur->cwd_dentry;
+        base.mnt = cur->cwd_dentry->mnt;
+        return vfs_open_at_path(&base, path, flags, mode, fp);
+    }
+    return vfs_open_at_path(NULL, path, flags, mode, fp);
 }
 
 int vfs_close(struct file *file) {
@@ -1229,6 +944,8 @@ int vfs_close(struct file *file) {
 ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     if (!file)
         return -EINVAL;
+    if (file->vnode->type == VNODE_DIR)
+        return -EISDIR;
     if (file->vnode->type == VNODE_PIPE) {
         extern ssize_t pipe_read_file(struct file *file, void *buf, size_t len);
         return pipe_read_file(file, buf, len);
@@ -1246,6 +963,8 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
 ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     if (!file)
         return -EINVAL;
+    if (file->vnode->type == VNODE_DIR)
+        return -EISDIR;
     if (file->vnode->type == VNODE_PIPE) {
         extern ssize_t pipe_write_file(struct file *file, const void *buf, size_t len);
         return pipe_write_file(file, buf, len);
@@ -1340,9 +1059,17 @@ void vfs_poll_wake(struct vnode *vn, uint32_t events) {
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {
     mutex_lock(&file->lock);
-    off_t next = (whence == SEEK_SET)   ? offset
-                 : (whence == SEEK_CUR) ? file->offset + offset
-                                        : file->vnode->size + offset;
+    off_t next;
+    if (whence == SEEK_SET)
+        next = offset;
+    else if (whence == SEEK_CUR)
+        next = file->offset + offset;
+    else if (whence == SEEK_END)
+        next = file->vnode->size + offset;
+    else {
+        mutex_unlock(&file->lock);
+        return -EINVAL;
+    }
     if (next < 0) {
         mutex_unlock(&file->lock);
         return -EINVAL;
@@ -1353,11 +1080,20 @@ off_t vfs_seek(struct file *file, off_t offset, int whence) {
 }
 
 int vfs_stat(const char *path, struct stat *st) {
-    struct vnode *vn = vfs_lookup(path);
-    if (!vn)
+    if (!path || !st)
+        return -EINVAL;
+    struct path resolved;
+    path_init(&resolved);
+    int ret = vfs_namei(path, &resolved, NAMEI_FOLLOW);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
         return -ENOENT;
-    int ret = vfs_fstat(&(struct file){.vnode = vn}, st);
-    vnode_put(vn);
+    }
+    ret = vfs_fstat(&(struct file){.vnode = resolved.dentry->vnode}, st);
+    dentry_put(resolved.dentry);
     return ret;
 }
 
@@ -1408,25 +1144,6 @@ int vfs_mkdir(const char *path, mode_t mode) {
     return ret;
 }
 
-int vfs_mkdir_at_dir(struct vnode *dir, const char *path, mode_t mode) {
-    if (!dir || !path)
-        return -EINVAL;
-    if (path[0] == '/')
-        return vfs_mkdir(path, mode);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return ret;
-    size_t blen = strlen(full);
-    size_t plen = strlen(path);
-    if (blen + plen + 2 > sizeof(full))
-        return -ENAMETOOLONG;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, path, plen + 1);
-    return vfs_mkdir(full, mode);
-}
-
 int vfs_rmdir(const char *path) {
     if (!path)
         return -EINVAL;
@@ -1452,25 +1169,6 @@ int vfs_rmdir(const char *path) {
         dentry_drop(resolved.dentry);
     dentry_put(resolved.dentry);
     return ret;
-}
-
-int vfs_rmdir_at_dir(struct vnode *dir, const char *path) {
-    if (!dir || !path)
-        return -EINVAL;
-    if (path[0] == '/')
-        return vfs_rmdir(path);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return ret;
-    size_t blen = strlen(full);
-    size_t plen = strlen(path);
-    if (blen + plen + 2 > sizeof(full))
-        return -ENAMETOOLONG;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, path, plen + 1);
-    return vfs_rmdir(full);
 }
 
 int vfs_readdir(struct file *file, struct dirent *ent) {
@@ -1507,25 +1205,6 @@ int vfs_unlink(const char *path) {
         dentry_drop(resolved.dentry);
     dentry_put(resolved.dentry);
     return ret;
-}
-
-int vfs_unlink_at_dir(struct vnode *dir, const char *path) {
-    if (!dir || !path)
-        return -EINVAL;
-    if (path[0] == '/')
-        return vfs_unlink(path);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return ret;
-    size_t blen = strlen(full);
-    size_t plen = strlen(path);
-    if (blen + plen + 2 > sizeof(full))
-        return -ENAMETOOLONG;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, path, plen + 1);
-    return vfs_unlink(full);
 }
 
 int vfs_rename(const char *old, const char *new) {
@@ -1571,37 +1250,6 @@ int vfs_rename(const char *old, const char *new) {
     return ret;
 }
 
-int vfs_rename_at_dir(struct vnode *odir, const char *oldpath,
-                      struct vnode *ndir, const char *newpath) {
-    if (!odir || !ndir || !oldpath || !newpath)
-        return -EINVAL;
-    if (oldpath[0] == '/' || newpath[0] == '/')
-        return vfs_rename(oldpath, newpath);
-    char oldfull[CONFIG_PATH_MAX];
-    char newfull[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(odir, oldfull, sizeof(oldfull));
-    if (ret < 0)
-        return ret;
-    ret = vfs_build_path(ndir, newfull, sizeof(newfull));
-    if (ret < 0)
-        return ret;
-    size_t oblen = strlen(oldfull);
-    size_t nblen = strlen(newfull);
-    size_t olen = strlen(oldpath);
-    size_t nlen = strlen(newpath);
-    if (oblen + olen + 2 > sizeof(oldfull))
-        return -ENAMETOOLONG;
-    if (nblen + nlen + 2 > sizeof(newfull))
-        return -ENAMETOOLONG;
-    if (oblen == 0 || oldfull[oblen - 1] != '/')
-        oldfull[oblen++] = '/';
-    memcpy(oldfull + oblen, oldpath, olen + 1);
-    if (nblen == 0 || newfull[nblen - 1] != '/')
-        newfull[nblen++] = '/';
-    memcpy(newfull + nblen, newpath, nlen + 1);
-    return vfs_rename(oldfull, newfull);
-}
-
 int vfs_symlink(const char *target, const char *linkpath) {
     if (!target || !linkpath)
         return -EINVAL;
@@ -1637,26 +1285,6 @@ int vfs_symlink(const char *target, const char *linkpath) {
     return ret;
 }
 
-int vfs_symlink_at_dir(struct vnode *dir, const char *target,
-                       const char *linkpath) {
-    if (!dir || !target || !linkpath)
-        return -EINVAL;
-    if (linkpath[0] == '/')
-        return vfs_symlink(target, linkpath);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return ret;
-    size_t blen = strlen(full);
-    size_t plen = strlen(linkpath);
-    if (blen + plen + 2 > sizeof(full))
-        return -ENAMETOOLONG;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, linkpath, plen + 1);
-    return vfs_symlink(target, full);
-}
-
 ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz) {
     if (!path || !buf || bufsz == 0)
         return -EINVAL;
@@ -1677,26 +1305,6 @@ ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz) {
     ssize_t rl = vfs_readlink_target(resolved.dentry->vnode, buf, bufsz, false);
     dentry_put(resolved.dentry);
     return rl;
-}
-
-ssize_t vfs_readlink_at_dir(struct vnode *dir, const char *path, char *buf,
-                            size_t bufsz) {
-    if (!dir || !path || !buf || bufsz == 0)
-        return -EINVAL;
-    if (path[0] == '/')
-        return vfs_readlink(path, buf, bufsz);
-    char full[CONFIG_PATH_MAX];
-    int ret = vfs_build_path(dir, full, sizeof(full));
-    if (ret < 0)
-        return ret;
-    size_t blen = strlen(full);
-    size_t plen = strlen(path);
-    if (blen + plen + 2 > sizeof(full))
-        return -ENAMETOOLONG;
-    if (blen == 0 || full[blen - 1] != '/')
-        full[blen++] = '/';
-    memcpy(full + blen, path, plen + 1);
-    return vfs_readlink(full, buf, bufsz);
 }
 
 void vnode_get(struct vnode *vn) {

@@ -3,6 +3,7 @@
  */
 
 #include <kairos/sync.h>
+#include <kairos/arch.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/printk.h>
@@ -61,8 +62,21 @@ void mutex_lock(struct mutex *m) {
 
 int mutex_lock_interruptible(struct mutex *m) {
     struct process *curr = proc_current();
-    if (m->holder == curr) {
+    if (curr && m->holder == curr) {
         panic("mutex_lock: recursive deadlock on mutex '%s'", m->name ? m->name : "unnamed");
+    }
+
+    if (!curr) {
+        spin_lock(&m->lock);
+        while (m->locked) {
+            spin_unlock(&m->lock);
+            arch_cpu_relax();
+            spin_lock(&m->lock);
+        }
+        m->locked = true;
+        m->holder = NULL;
+        spin_unlock(&m->lock);
+        return 0;
     }
 
     spin_lock(&m->lock);
@@ -123,7 +137,18 @@ void sem_wait(struct semaphore *s) {
 
 int sem_wait_interruptible(struct semaphore *s) {
     struct process *curr = proc_current();
-    
+    if (!curr) {
+        spin_lock(&s->lock);
+        while (s->count <= 0) {
+            spin_unlock(&s->lock);
+            arch_cpu_relax();
+            spin_lock(&s->lock);
+        }
+        s->count--;
+        spin_unlock(&s->lock);
+        return 0;
+    }
+
     spin_lock(&s->lock);
     while (s->count <= 0) {
         if (curr->mm && curr->sig_pending) {

@@ -32,6 +32,7 @@ echo "This is another test file" | sudo tee "$MOUNT_POINT/test2.txt" >/dev/null
 sudo mkdir -p "$MOUNT_POINT/home"
 sudo mkdir -p "$MOUNT_POINT/etc"
 sudo mkdir -p "$MOUNT_POINT/bin"
+sudo mkdir -p "$MOUNT_POINT/dev"
 
 # Create some files in subdirectories
 echo "root:x:0:0:root:/root:/bin/sh" | sudo tee "$MOUNT_POINT/etc/passwd" >/dev/null

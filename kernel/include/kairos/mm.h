@@ -107,9 +107,9 @@ struct mm_struct *mm_clone(struct mm_struct *src);
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags);
 int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
                uint32_t flags, struct vnode *vn, off_t offset);
-vaddr_t mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len,
-                uint32_t prot, uint32_t flags, struct vnode *vn,
-                off_t offset);
+int mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot,
+            uint32_t flags, struct vnode *vn, off_t offset, bool fixed,
+            vaddr_t *out);
 int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len);
 int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
                 uint32_t prot);

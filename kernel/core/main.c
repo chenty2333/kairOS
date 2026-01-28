@@ -132,8 +132,18 @@ void kernel_main(unsigned long hartid, void *dtb) {
     devfs_init();
     ext2_init();
 
-    vfs_mount(NULL, "/dev", "devfs", 0);
-    if (vfs_mount("vda", "/", "ext2", 0) == 0) pr_info("ext2 root: mounted\n");
+    int ret = vfs_mount("vda", "/", "ext2", 0);
+    if (ret == 0) {
+        pr_info("ext2 root: mounted\n");
+        int mkret = vfs_mkdir("/dev", 0755);
+        if (mkret < 0 && mkret != -EEXIST)
+            pr_warn("devfs: failed to create /dev (ret=%d)\n", mkret);
+        ret = vfs_mount(NULL, "/dev", "devfs", 0);
+        if (ret < 0)
+            pr_warn("devfs: mount failed (ret=%d)\n", ret);
+    } else {
+        pr_warn("ext2 root: mount failed (ret=%d)\n", ret);
+    }
 
     smp_init();
 

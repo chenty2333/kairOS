@@ -11,6 +11,7 @@
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
 #define EPOLL_CTL_MOD 3
+#define EPOLL_CLOEXEC 02000000
 
 /* epoll event bits (aligned with poll bits for now) */
 #define EPOLLIN 0x0001

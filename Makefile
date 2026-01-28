@@ -137,8 +137,14 @@ CORE_SRCS := \
     kernel/core/sync/futex.c \
     kernel/core/syscall/abi_linux.c \
     kernel/core/syscall/sys_dev.c \
-    kernel/core/syscall/sys_fs.c \
+    kernel/core/syscall/sys_fs_helpers.c \
+    kernel/core/syscall/sys_fs_path.c \
+    kernel/core/syscall/sys_fs_mount.c \
+    kernel/core/syscall/sys_fs_stat.c \
+    kernel/core/syscall/sys_fs_io.c \
+    kernel/core/syscall/sys_fs_fd.c \
     kernel/core/syscall/sys_mm.c \
+    kernel/core/syscall/sys_epoll.c \
     kernel/core/syscall/sys_poll.c \
     kernel/core/syscall/sys_proc.c \
     kernel/core/syscall/sys_sync.c \

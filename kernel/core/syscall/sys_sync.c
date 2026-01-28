@@ -40,7 +40,7 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_pt
     case FUTEX_WAKE:
         return futex_wake(uaddr, (int)val);
     default:
-        return -ENOSYS;
+        return -EINVAL;
     }
 }
 

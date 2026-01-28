@@ -18,7 +18,7 @@ int64_t sys_fork(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     struct process *p = proc_fork();
-    return p ? (int64_t)p->pid : -1;
+    return p ? (int64_t)p->pid : -ENOMEM;
 }
 
 int64_t sys_exec(uint64_t path, uint64_t argv, uint64_t a2, uint64_t a3,
@@ -134,9 +134,9 @@ int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
     /* Minimal clone: accept fork-like usage where only the low signal bits
      * are set, otherwise return ENOSYS so callers can fall back. */
     if (flags & ~0xFF)
-        return -ENOSYS;
+        return -EINVAL;
     struct process *p = proc_fork();
-    return p ? (int64_t)p->pid : -1;
+    return p ? (int64_t)p->pid : -ENOMEM;
 }
 
 int64_t sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2,
@@ -151,8 +151,12 @@ int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && (pid_t)pid != p->pid)
+    if (pid != 0 && (pid_t)pid != p->pid) {
+        struct process *target = proc_find((pid_t)pid);
+        if (!target)
+            return -ESRCH;
         return -EPERM;
+    }
     if (resource >= RLIM_NLIMITS)
         return -EINVAL;
 

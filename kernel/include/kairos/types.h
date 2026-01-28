@@ -77,6 +77,8 @@ struct rlimit {
 #define ELOOP 40
 #define ERANGE 34
 #define ENAMETOOLONG 36
+#define EOPNOTSUPP 95
+#define ENOTSUP EOPNOTSUPP
 #define ETIMEDOUT 110
 #define ESTALE 116
 

@@ -345,31 +345,42 @@ vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk) {
     return newbrk;
 }
 
-vaddr_t mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot, uint32_t flags, struct vnode *vn, off_t offset) {
-    if (!len) return 0;
+int mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot,
+            uint32_t flags, struct vnode *vn, off_t offset, bool fixed,
+            vaddr_t *out) {
+    if (!mm || !out || !len)
+        return -EINVAL;
     len = ALIGN_UP(len, CONFIG_PAGE_SIZE);
 
     mutex_lock(&mm->lock);
-    if (!addr) {
-        addr = ALIGN_UP(mm->brk, CONFIG_PAGE_SIZE);
-        while (addr + len < mm->start_stack) {
-            struct vm_area *c = find_vma_intersection(mm, addr, addr + len);
-            if (!c) break;
-            addr = ALIGN_UP(c->end, CONFIG_PAGE_SIZE);
+    vaddr_t start;
+    if (fixed) {
+        start = addr;
+        if (find_vma_intersection(mm, start, start + len)) {
+            mutex_unlock(&mm->lock);
+            return -EEXIST;
         }
     } else {
-        addr = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
-        if (find_vma_intersection(mm, addr, addr + len)) {
-            mutex_unlock(&mm->lock); return 0;
+        start = addr ? ALIGN_DOWN(addr, CONFIG_PAGE_SIZE)
+                     : ALIGN_UP(mm->brk, CONFIG_PAGE_SIZE);
+        while (start + len < mm->start_stack) {
+            struct vm_area *c = find_vma_intersection(mm, start, start + len);
+            if (!c)
+                break;
+            start = ALIGN_UP(c->end, CONFIG_PAGE_SIZE);
         }
     }
 
-    if (addr + len >= mm->start_stack) { mutex_unlock(&mm->lock); return 0; }
+    if (start + len >= mm->start_stack) {
+        mutex_unlock(&mm->lock);
+        return -ENOMEM;
+    }
     mutex_unlock(&mm->lock);
 
-    if (mm_add_vma(mm, addr, addr + len, prot | flags, vn, offset) < 0)
-        return 0;
-    return addr;
+    if (mm_add_vma(mm, start, start + len, prot | flags, vn, offset) < 0)
+        return -ENOMEM;
+    *out = start;
+    return 0;
 }
 
 int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {

@@ -2,6 +2,7 @@
  * kernel/core/syscall/sys_mm.c - Memory-related syscalls
  */
 
+#include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
 #include <kairos/vfs.h>
@@ -9,12 +10,14 @@
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
 #define PROT_EXEC 0x4
+#define PROT_MASK (PROT_READ | PROT_WRITE | PROT_EXEC)
 
 #define MAP_SHARED 0x01
 #define MAP_PRIVATE 0x02
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
 #define MAP_STACK 0x20000
+#define MAP_MASK (MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_STACK)
 
 static uint32_t prot_to_vm(uint64_t prot) {
     uint32_t vm = 0;
@@ -38,6 +41,12 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
+    if (!len)
+        return -EINVAL;
+    if (prot & ~PROT_MASK)
+        return -EINVAL;
+    if (flags & ~MAP_MASK)
+        return -EINVAL;
 
     bool fixed = (flags & MAP_FIXED) != 0;
     bool anon = (flags & MAP_ANONYMOUS) != 0;
@@ -47,6 +56,8 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (!priv && !shared)
         return -EINVAL;
     if (priv && shared)
+        return -EINVAL;
+    if (fixed && (addr & (CONFIG_PAGE_SIZE - 1)))
         return -EINVAL;
 
     struct vnode *vn = NULL;
@@ -71,8 +82,16 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (flags & MAP_STACK)
         map_flags |= VM_STACK;
     vaddr_t start = fixed ? (vaddr_t)addr : 0;
-    vaddr_t res = mm_mmap(p->mm, start, (size_t)len, vm_flags, map_flags, vn,
-                          offset);
+    if (fixed) {
+        int uret = mm_munmap(p->mm, start, (size_t)len);
+        if (uret < 0)
+            return (int64_t)uret;
+    }
+    vaddr_t res = 0;
+    int ret = mm_mmap(p->mm, start, (size_t)len, vm_flags, map_flags, vn,
+                      offset, fixed, &res);
+    if (ret < 0)
+        return (int64_t)ret;
     return (int64_t)res;
 }
 
@@ -90,6 +109,8 @@ int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a3,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     if (!p)
+        return -EINVAL;
+    if (prot & ~PROT_MASK)
         return -EINVAL;
     return (int64_t)mm_mprotect(p->mm, (vaddr_t)addr, (size_t)len,
                                 prot_to_vm(prot));

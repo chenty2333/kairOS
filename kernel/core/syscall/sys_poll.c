@@ -1,11 +1,9 @@
 /**
- * kernel/core/syscall/sys_poll.c - Poll/epoll/select syscalls
+ * kernel/core/syscall/sys_poll.c - Poll/select syscalls
  */
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
-#include <kairos/epoll.h>
-#include <kairos/epoll_internal.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
@@ -122,10 +120,12 @@ int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
     (void)a3; (void)a4; (void)a5;
     if (nfds == 0)
         return 0;
-    if (nfds > 1024)
+    if (!fds_ptr)
+        return -EFAULT;
+    if (nfds > SIZE_MAX / sizeof(struct pollfd))
         return -EINVAL;
 
-    size_t bytes = nfds * sizeof(struct pollfd);
+    size_t bytes = (size_t)nfds * sizeof(struct pollfd);
     struct pollfd *kfds = kmalloc(bytes);
     if (!kfds)
         return -ENOMEM;
@@ -134,7 +134,13 @@ int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
         return -EFAULT;
     }
 
-    int ready = poll_wait_kernel(kfds, (size_t)nfds, (int)timeout_ms);
+    int64_t tmo = (int64_t)timeout_ms;
+    if (tmo < -1)
+        tmo = -1;
+    const int64_t tmo_max = 0x7fffffffLL;
+    if (tmo > tmo_max)
+        tmo = tmo_max;
+    int ready = poll_wait_kernel(kfds, (size_t)nfds, (int)tmo);
     if (ready < 0) {
         kfree(kfds);
         return ready;
@@ -215,7 +221,7 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
         struct timeval tv;
         if (copy_from_user(&tv, (void *)timeout_ptr, sizeof(tv)) < 0)
             return -EFAULT;
-        if (tv.tv_sec < 0 || tv.tv_usec < 0)
+        if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
             return -EINVAL;
         timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
     }
@@ -255,61 +261,4 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
         timeout_ms = rc;
     }
     return do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
-}
-
-int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
-                          uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    if (flags != 0)
-        return -EINVAL;
-
-    struct file *file = NULL;
-    int ret = epoll_create_file(&file);
-    if (ret < 0)
-        return ret;
-
-    int fd = fd_alloc(proc_current(), file);
-    if (fd < 0) {
-        vfs_close(file);
-        return fd;
-    }
-    return fd;
-}
-
-int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
-                      uint64_t event_ptr, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
-    struct epoll_event ev = {0};
-
-    if (op != EPOLL_CTL_DEL) {
-        if (!event_ptr)
-            return -EFAULT;
-        if (copy_from_user(&ev, (void *)event_ptr, sizeof(ev)) < 0)
-            return -EFAULT;
-    }
-
-    return epoll_ctl_fd((int)epfd, (int)op, (int)fd,
-                        (op == EPOLL_CTL_DEL) ? NULL : &ev);
-}
-
-int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
-                       uint64_t timeout_ms, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
-    if (!events_ptr || maxevents == 0 || maxevents > 1024)
-        return -EINVAL;
-
-    struct epoll_event *out = kzalloc(maxevents * sizeof(*out));
-    if (!out)
-        return -ENOMEM;
-
-    int ready = epoll_wait_events((int)epfd, out, (size_t)maxevents,
-                                  (int)timeout_ms);
-    int64_t ret = ready;
-    if (ready > 0 &&
-        copy_to_user((void *)events_ptr, out,
-                     (size_t)ready * sizeof(*out)) < 0)
-        ret = -EFAULT;
-
-    kfree(out);
-    return ret;
 }
