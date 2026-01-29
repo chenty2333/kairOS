@@ -5,6 +5,7 @@
 #include <kairos/types.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
+#include <kairos/boot.h>
 #include <kairos/spinlock.h>
 #include <kairos/config.h>
 #include <kairos/arch.h>
@@ -32,6 +33,16 @@ static struct pcp_area {
 static bool pcp_enabled = true;
 
 extern char _kernel_start[], _kernel_end[];
+
+static void pmm_init_common(void) {
+    spin_init(&buddy_lock);
+    for (int i = 0; i < MAX_ORDER; i++)
+        INIT_LIST_HEAD(&free_lists[i]);
+    for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
+        INIT_LIST_HEAD(&pcp_areas[i].list);
+        pcp_areas[i].count = 0;
+    }
+}
 
 /* --- Conversions --- */
 
@@ -316,20 +327,16 @@ static void buddy_init_zone(size_t start_pfn, size_t end_pfn) {
 }
 
 void pmm_init(paddr_t start, paddr_t end) {
-    spin_init(&buddy_lock);
-    for (int i = 0; i < MAX_ORDER; i++) INIT_LIST_HEAD(&free_lists[i]);
-    for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
-        INIT_LIST_HEAD(&pcp_areas[i].list);
-        pcp_areas[i].count = 0;
-    }
+    pmm_init_common();
 
     mem_start = ALIGN_UP(start, PAGE_SIZE);
     mem_end = ALIGN_DOWN(end, PAGE_SIZE);
     total_pages = MIN((mem_end - mem_start) >> PAGE_SHIFT, MAX_PAGES);
     mem_end = mem_start + (total_pages << PAGE_SHIFT);
 
-    size_t array_pages = ALIGN_UP(total_pages * sizeof(struct page), PAGE_SIZE) >> PAGE_SHIFT;
-    page_array = (struct page *)mem_start;
+    size_t array_pages =
+        ALIGN_UP(total_pages * sizeof(struct page), PAGE_SIZE) >> PAGE_SHIFT;
+    page_array = (struct page *)phys_to_virt(mem_start);
 
     for (size_t i = 0; i < total_pages; i++) {
         page_array[i].flags = (i < array_pages) ? PG_RESERVED : 0;
@@ -337,7 +344,9 @@ void pmm_init(paddr_t start, paddr_t end) {
         INIT_LIST_HEAD(&page_array[i].list);
     }
 
-    paddr_t ks = (paddr_t)_kernel_start, ke = ALIGN_UP((paddr_t)_kernel_end, PAGE_SIZE);
+    paddr_t ks = virt_to_phys(_kernel_start);
+    paddr_t ke = virt_to_phys(_kernel_end);
+    ke = ALIGN_UP(ke, PAGE_SIZE);
     if (ks >= mem_start && ks < mem_end) {
         for (size_t i = (ks - mem_start) >> PAGE_SHIFT; i < (ke - mem_start) >> PAGE_SHIFT && i < total_pages; i++)
             page_array[i].flags |= PG_RESERVED | PG_KERNEL;
@@ -350,4 +359,111 @@ void pmm_init(paddr_t start, paddr_t end) {
     if (kernel_end_pfn < total_pages) buddy_init_zone(MAX(kernel_end_pfn, array_pages), total_pages);
 
     pr_info("PMM: Buddy init, %lu MB, %lu free\n", (total_pages * PAGE_SIZE) >> 20, pmm_num_free_pages());
+}
+
+void pmm_init_from_memmap(const struct boot_info *bi) {
+    if (!bi || bi->memmap_count == 0) {
+        panic("pmm: no boot memmap");
+    }
+
+    pmm_init_common();
+
+    paddr_t min = 0;
+    paddr_t max = 0;
+    bool first = true;
+    for (uint32_t i = 0; i < bi->memmap_count; i++) {
+        const struct boot_memmap_entry *e = &bi->memmap[i];
+        if (e->type != BOOT_MEM_USABLE)
+            continue;
+        if (first) {
+            min = e->base;
+            max = e->base + e->length;
+            first = false;
+        } else {
+            if (e->base < min)
+                min = e->base;
+            if (e->base + e->length > max)
+                max = e->base + e->length;
+        }
+    }
+    if (first) {
+        panic("pmm: no usable memory");
+    }
+
+    mem_start = ALIGN_UP(min, PAGE_SIZE);
+    mem_end = ALIGN_DOWN(max, PAGE_SIZE);
+    total_pages = MIN((mem_end - mem_start) >> PAGE_SHIFT, MAX_PAGES);
+    mem_end = mem_start + (total_pages << PAGE_SHIFT);
+
+    size_t array_pages =
+        ALIGN_UP(total_pages * sizeof(struct page), PAGE_SIZE) >> PAGE_SHIFT;
+    page_array = (struct page *)phys_to_virt(mem_start);
+
+    for (size_t i = 0; i < total_pages; i++) {
+        page_array[i].flags = PG_RESERVED;
+        page_array[i].refcount = 0;
+        INIT_LIST_HEAD(&page_array[i].list);
+    }
+
+    /* Mark usable pages from memmap */
+    for (uint32_t i = 0; i < bi->memmap_count; i++) {
+        const struct boot_memmap_entry *e = &bi->memmap[i];
+        if (e->type != BOOT_MEM_USABLE)
+            continue;
+
+        paddr_t start = MAX(e->base, mem_start);
+        paddr_t end = MIN(e->base + e->length, mem_end);
+        if (end <= start)
+            continue;
+
+        start = ALIGN_UP(start, PAGE_SIZE);
+        end = ALIGN_DOWN(end, PAGE_SIZE);
+        if (end <= start)
+            continue;
+
+        size_t pfn_start = (start - mem_start) >> PAGE_SHIFT;
+        size_t pfn_end = (end - mem_start) >> PAGE_SHIFT;
+        if (pfn_start >= total_pages)
+            continue;
+        if (pfn_end > total_pages)
+            pfn_end = total_pages;
+
+        for (size_t pfn = pfn_start; pfn < pfn_end; pfn++) {
+            page_array[pfn].flags = 0;
+        }
+    }
+
+    /* Reserve page array itself */
+    for (size_t i = 0; i < array_pages && i < total_pages; i++) {
+        page_array[i].flags |= PG_RESERVED;
+    }
+
+    /* Reserve kernel image */
+    paddr_t ks = virt_to_phys(_kernel_start);
+    paddr_t ke = ALIGN_UP(virt_to_phys(_kernel_end), PAGE_SIZE);
+    if (ks >= mem_start && ks < mem_end) {
+        size_t s = (ks - mem_start) >> PAGE_SHIFT;
+        size_t e = (ke - mem_start) >> PAGE_SHIFT;
+        if (e > total_pages)
+            e = total_pages;
+        for (size_t pfn = s; pfn < e; pfn++) {
+            page_array[pfn].flags |= PG_RESERVED | PG_KERNEL;
+        }
+    }
+
+    num_free_pages = 0;
+    size_t run_start = (size_t)-1;
+    for (size_t pfn = 0; pfn <= total_pages; pfn++) {
+        bool free = (pfn < total_pages) && !(page_array[pfn].flags & PG_RESERVED);
+        if (free) {
+            if (run_start == (size_t)-1)
+                run_start = pfn;
+        } else if (run_start != (size_t)-1) {
+            buddy_init_zone(run_start, pfn);
+            run_start = (size_t)-1;
+        }
+    }
+
+    pr_info("PMM: memmap init, %lu MB, %lu free\n",
+            (total_pages * PAGE_SIZE) >> 20, pmm_num_free_pages());
 }

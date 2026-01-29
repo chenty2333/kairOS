@@ -28,6 +28,7 @@ struct blkdev_ops {
 typedef void (*blkdev_iter_fn_t)(struct blkdev *dev, void *arg);
 
 int blkdev_register(struct blkdev *dev);
+void blkdev_unregister(struct blkdev *dev);
 struct blkdev *blkdev_get(const char *name);
 void blkdev_put(struct blkdev *dev);
 int blkdev_for_each(blkdev_iter_fn_t fn, void *arg);

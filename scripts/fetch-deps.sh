@@ -64,6 +64,18 @@ fetch_fatfs() {
     echo "License: BSD-1-Clause (FatFs license)"
 }
 
+fetch_busybox() {
+    echo "=== Fetching BusyBox ==="
+    if [ -d "$DEPS_DIR/busybox" ]; then
+        echo "BusyBox already exists, skipping"
+        return
+    fi
+    git clone https://git.busybox.net/busybox \
+        --branch=1_36_1 --depth=1 "$DEPS_DIR/busybox"
+    echo "BusyBox downloaded to $DEPS_DIR/busybox"
+    echo "License: GPL-2.0"
+}
+
 fetch_musl() {
     echo "=== Fetching musl libc ==="
     if [ -d "$DEPS_DIR/musl" ]; then
@@ -94,6 +106,7 @@ show_help() {
     echo "  tinyusb  - TinyUSB stack (MIT license)"
     echo "  fatfs    - FatFs FAT32 library (BSD license)"
     echo "  musl     - musl C library (MIT license)"
+    echo "  busybox  - BusyBox userland (GPL-2.0)"
     echo "  header   - Just the Limine protocol header"
     echo ""
     echo "All dependencies will be placed in ./third_party/"
@@ -107,6 +120,7 @@ case "${1:-help}" in
         fetch_tinyusb
         fetch_fatfs
         fetch_musl
+        fetch_busybox
         echo ""
         echo "=== All dependencies fetched ==="
         ;;
@@ -125,6 +139,9 @@ case "${1:-help}" in
         ;;
     musl)
         fetch_musl
+        ;;
+    busybox)
+        fetch_busybox
         ;;
     header)
         fetch_limine_header

@@ -26,6 +26,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
 static char log_buf[LOG_BUF_LEN];
 static unsigned long log_head = 0;
+static unsigned long log_read_pos = 0;
 
 /* 
  * Global formatting buffer for large messages.
@@ -103,6 +104,62 @@ int printk(const char *fmt, ...)
     va_end(args);
 
     return ret;
+}
+
+ssize_t klog_read(char *buf, size_t len, bool clear)
+{
+    spin_lock_irqsave(&log_lock);
+    unsigned long avail = log_head - log_read_pos;
+    if (avail > LOG_BUF_LEN) {
+        avail = LOG_BUF_LEN;
+        log_read_pos = log_head - LOG_BUF_LEN;
+    }
+    size_t to_copy = (len < avail) ? len : avail;
+    unsigned long start = log_read_pos & LOG_BUF_MASK;
+    for (size_t i = 0; i < to_copy; i++) {
+        buf[i] = log_buf[(start + i) & LOG_BUF_MASK];
+    }
+    if (clear || to_copy > 0) {
+        log_read_pos += to_copy;
+    }
+    spin_unlock_irqrestore(&log_lock);
+    return (ssize_t)to_copy;
+}
+
+ssize_t klog_read_all(char *buf, size_t len)
+{
+    spin_lock_irqsave(&log_lock);
+    unsigned long avail = (log_head > LOG_BUF_LEN) ? LOG_BUF_LEN : log_head;
+    size_t to_copy = (len < avail) ? len : avail;
+    unsigned long start = (log_head - avail) & LOG_BUF_MASK;
+    for (size_t i = 0; i < to_copy; i++) {
+        buf[i] = log_buf[(start + i) & LOG_BUF_MASK];
+    }
+    spin_unlock_irqrestore(&log_lock);
+    return (ssize_t)to_copy;
+}
+
+void klog_clear(void)
+{
+    spin_lock_irqsave(&log_lock);
+    log_read_pos = log_head;
+    spin_unlock_irqrestore(&log_lock);
+}
+
+size_t klog_size_unread(void)
+{
+    spin_lock_irqsave(&log_lock);
+    unsigned long avail = log_head - log_read_pos;
+    if (avail > LOG_BUF_LEN) {
+        avail = LOG_BUF_LEN;
+    }
+    spin_unlock_irqrestore(&log_lock);
+    return avail;
+}
+
+size_t klog_size_buffer(void)
+{
+    return LOG_BUF_LEN;
 }
 
 static volatile int panic_in_progress = 0;

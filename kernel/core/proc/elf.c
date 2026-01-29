@@ -34,10 +34,25 @@ static int elf_check_ehdr(const Elf64_Ehdr *ehdr, size_t size) {
         pr_err("ELF: unsupported type %u\n", ehdr->e_type);
         return -ENOEXEC;
     }
+#if defined(ARCH_riscv64)
     if (ehdr->e_machine != EM_RISCV) {
         pr_err("ELF: unsupported machine %u\n", ehdr->e_machine);
         return -ENOEXEC;
     }
+#elif defined(ARCH_x86_64)
+    if (ehdr->e_machine != EM_X86_64) {
+        pr_err("ELF: unsupported machine %u\n", ehdr->e_machine);
+        return -ENOEXEC;
+    }
+#elif defined(ARCH_aarch64)
+    if (ehdr->e_machine != EM_AARCH64) {
+        pr_err("ELF: unsupported machine %u\n", ehdr->e_machine);
+        return -ENOEXEC;
+    }
+#else
+    pr_err("ELF: unsupported architecture\n");
+    return -ENOEXEC;
+#endif
     if (ehdr->e_ehsize != sizeof(Elf64_Ehdr)) {
         pr_err("ELF: unexpected ehdr size\n");
         return -ENOEXEC;

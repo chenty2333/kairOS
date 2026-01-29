@@ -124,70 +124,41 @@ int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len,
                    uint64_t flags, uint64_t new_addr, uint64_t a5) {
     (void)a5;
     struct process *p = proc_current();
-    if (!p)
+    if (!p) {
         return -EINVAL;
-    if (!old_len || !new_len)
+    }
+    if (!old_len || !new_len) {
         return -EINVAL;
-    if (old_addr & (CONFIG_PAGE_SIZE - 1))
+    }
+    if (old_addr & (CONFIG_PAGE_SIZE - 1)) {
         return -EINVAL;
-    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED))
+    }
+    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) {
         return -EINVAL;
-    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
+    }
+    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE)) {
         return -EINVAL;
-
-    if (new_len <= old_len) {
-        if (new_len < old_len) {
-            vaddr_t tail = (vaddr_t)(old_addr + new_len);
-            size_t shrink = (size_t)(old_len - new_len);
-            mm_munmap(p->mm, tail, shrink);
-        }
-        return (int64_t)old_addr;
+    }
+    if ((flags & MREMAP_FIXED) && (new_addr & (CONFIG_PAGE_SIZE - 1))) {
+        return -EINVAL;
     }
 
-    if (!(flags & MREMAP_MAYMOVE))
-        return -ENOMEM;
-
-    vaddr_t target = 0;
-    bool fixed = (flags & MREMAP_FIXED) != 0;
-    if (fixed) {
-        if (new_addr & (CONFIG_PAGE_SIZE - 1))
-            return -EINVAL;
+    /* For MREMAP_FIXED, check old/new don't overlap */
+    if (flags & MREMAP_FIXED) {
         vaddr_t old_end = (vaddr_t)(old_addr + old_len);
         vaddr_t new_end = (vaddr_t)(new_addr + new_len);
-        if (!(new_end <= old_addr || new_addr >= old_end))
+        if (!(new_end <= old_addr || new_addr >= old_end)) {
             return -EINVAL;
-        mm_munmap(p->mm, (vaddr_t)new_addr, (size_t)new_len);
-        target = (vaddr_t)new_addr;
-    }
-
-    vaddr_t res = 0;
-    int ret = mm_mmap(p->mm, target, (size_t)new_len,
-                      VM_READ | VM_WRITE, 0, NULL, 0, fixed, &res);
-    if (ret < 0)
-        return (int64_t)ret;
-
-    size_t copy_len = (size_t)old_len;
-    uint8_t *buf = kmalloc(CONFIG_PAGE_SIZE);
-    if (!buf) {
-        mm_munmap(p->mm, res, (size_t)new_len);
-        return -ENOMEM;
-    }
-
-    size_t off = 0;
-    while (off < copy_len) {
-        size_t chunk = copy_len - off;
-        if (chunk > CONFIG_PAGE_SIZE)
-            chunk = CONFIG_PAGE_SIZE;
-        if (copy_from_user(buf, (void *)(old_addr + off), chunk) < 0 ||
-            copy_to_user((void *)(res + off), buf, chunk) < 0) {
-            kfree(buf);
-            mm_munmap(p->mm, res, (size_t)new_len);
-            return -EFAULT;
         }
-        off += chunk;
+        mm_munmap(p->mm, (vaddr_t)new_addr, (size_t)new_len);
     }
 
-    kfree(buf);
-    mm_munmap(p->mm, (vaddr_t)old_addr, (size_t)old_len);
-    return (int64_t)res;
+    vaddr_t result = 0;
+    int ret = mm_mremap(p->mm, (vaddr_t)old_addr, (size_t)old_len,
+                        (size_t)new_len, (uint32_t)flags,
+                        (vaddr_t)new_addr, &result);
+    if (ret < 0) {
+        return (int64_t)ret;
+    }
+    return (int64_t)result;
 }

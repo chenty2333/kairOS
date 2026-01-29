@@ -25,6 +25,15 @@ int fw_register_desc(struct fw_device_desc *desc) {
     return 0;
 }
 
+int fw_unregister_desc(struct fw_device_desc *desc) {
+    if (!desc)
+        return -EINVAL;
+    spin_lock(&fw_lock);
+    list_del(&desc->list);
+    spin_unlock(&fw_lock);
+    return 0;
+}
+
 int fw_for_each_desc(int (*fn)(struct fw_device_desc *desc, void *arg),
                      void *arg) {
     if (!fn)

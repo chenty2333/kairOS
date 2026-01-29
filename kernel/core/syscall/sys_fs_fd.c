@@ -6,6 +6,7 @@
 #include <kairos/process.h>
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
+#include <kairos/pipe.h>
 #include <kairos/vfs.h>
 
 /* Linux fcntl commands we need for busybox/ash */
@@ -43,7 +44,6 @@ int64_t sys_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags, uint64_t a3,
 static int pipe_create_fds(uint64_t fd_array, uint32_t flags) {
     struct file *rf = NULL, *wf = NULL;
     int fds[2] = {-1, -1}, ret = 0;
-    extern int pipe_create(struct file **read_pipe, struct file **write_pipe);
 
     if ((ret = pipe_create(&rf, &wf)) < 0)
         return ret;
@@ -157,4 +157,43 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     default:
         return -EINVAL;
     }
+}
+
+int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
+                      uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if ((int64_t)length < 0)
+        return -EINVAL;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f || !f->vnode)
+        return -EBADF;
+    if (f->vnode->type == VNODE_DIR)
+        return -EISDIR;
+    if (!f->vnode->ops || !f->vnode->ops->truncate)
+        return -EINVAL;
+    mutex_lock(&f->vnode->lock);
+    int ret = f->vnode->ops->truncate(f->vnode, (off_t)length);
+    if (ret == 0)
+        f->vnode->size = (uint64_t)length;
+    mutex_unlock(&f->vnode->lock);
+    return ret;
+}
+
+int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f || !f->vnode)
+        return -EBADF;
+    mutex_lock(&f->vnode->lock);
+    if (owner != (uint64_t)-1)
+        f->vnode->uid = (uid_t)owner;
+    if (group != (uint64_t)-1)
+        f->vnode->gid = (gid_t)group;
+    mutex_unlock(&f->vnode->lock);
+    if (f->vnode->mount && f->vnode->mount->ops &&
+        f->vnode->mount->ops->chown) {
+        f->vnode->mount->ops->chown(f->vnode, f->vnode->uid, f->vnode->gid);
+    }
+    return 0;
 }

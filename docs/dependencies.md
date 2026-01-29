@@ -10,6 +10,7 @@ Kairos uses external libraries to handle common protocols and formats.
 | **TinyUSB** | 0.20.0 | MIT | USB Host (XHCI) & HID |
 | **FatFs** | R0.16 | BSD-1-Clause | FAT32 FS Support |
 | **musl** | 1.2.5 | MIT | User-space C Library |
+| **BusyBox** | 1.36.1 | GPL-2.0 | User-space utilities & shell |
 
 ## 2. Management
 - **Fetch**: Run `./scripts/fetch-deps.sh all` to download sources.
@@ -20,3 +21,8 @@ Kairos uses external libraries to handle common protocols and formats.
 - **Limine**: Integrated for all supported architectures.
 - **musl**: Ported via arch-specific syscall implementation.
 - **Others**: Integrated via HAL/VFS layer implementations (`sys_arch.c`, `diskio.c`, etc.).
+
+## 4. Build Tools
+- **xorriso**: ISO creation (`make iso`).
+- **dosfstools**: UEFI FAT boot image (`make uefi`).
+- **edk2** (RISC-V firmware): UEFI boot under QEMU (`make ARCH=riscv64 run`).

@@ -141,6 +141,8 @@ int64_t sys_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_writev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_readv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_preadv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_pwritev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_open(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_openat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -154,6 +156,8 @@ int64_t sys_dup(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_dup2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_dup3(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pipe(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fsync(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fdatasync(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_mmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_munmap(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_mprotect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -165,17 +169,25 @@ int64_t sys_clock_nanosleep(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                             uint64_t);
 int64_t sys_gettimeofday(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_times(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getitimer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_setitimer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getrusage(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sysinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_syslog(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_uname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_setdomainname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                          uint64_t);
 int64_t sys_getppid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_wait4(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_waitid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_clone(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_brk(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_exit_group(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_prlimit64(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                       uint64_t);
+int64_t sys_execveat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
 int64_t sys_futex(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -183,18 +195,76 @@ int64_t sys_pipe2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sem_init(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sem_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sem_post(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_set_robust_list(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
+int64_t sys_get_robust_list(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
 int64_t sys_getcwd(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_getuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_getgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_geteuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_getegid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_getgroups(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getpriority(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
+int64_t sys_getresuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
+int64_t sys_getresgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
 int64_t sys_setuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_setgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_setpriority(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
+int64_t sys_setreuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
+int64_t sys_setregid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
+int64_t sys_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_socketpair(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
+int64_t sys_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_listen(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_accept(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_connect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_getsockname(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
+int64_t sys_getpeername(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
+int64_t sys_sendto(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_recvfrom(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
+int64_t sys_setsockopt(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
+int64_t sys_getsockopt(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
+int64_t sys_shutdown(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
+int64_t sys_setresuid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
+int64_t sys_setresgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
+int64_t sys_setpgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                    uint64_t);
+int64_t sys_getpgid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                    uint64_t);
+int64_t sys_getsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                   uint64_t);
+int64_t sys_setsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                   uint64_t);
 int64_t sys_getrlimit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_setrlimit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sched_getaffinity(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                               uint64_t);
+int64_t sys_sched_setparam(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                           uint64_t);
+int64_t sys_sched_setscheduler(uint64_t, uint64_t, uint64_t, uint64_t,
+                               uint64_t, uint64_t);
+int64_t sys_sched_getscheduler(uint64_t, uint64_t, uint64_t, uint64_t,
+                               uint64_t, uint64_t);
+int64_t sys_sched_getparam(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                           uint64_t);
+int64_t sys_sched_yield(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
 int64_t sys_chdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fchdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fchmodat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -208,17 +278,37 @@ int64_t sys_renameat2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t
 int64_t sys_readlinkat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                        uint64_t);
 int64_t sys_symlinkat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_linkat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_faccessat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_faccessat2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
 int64_t sys_umask(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_unlink(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_mkdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_rmdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_access(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_truncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                     uint64_t);
+int64_t sys_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
+int64_t sys_sync(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_acct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fchown(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_kill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_tkill(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sigaction(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sigprocmask(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sigreturn(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_sigaltstack(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
+int64_t sys_rt_sigpending(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                          uint64_t);
+int64_t sys_rt_sigsuspend(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                          uint64_t);
+int64_t sys_rt_sigtimedwait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
+int64_t sys_rt_sigqueueinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
 int64_t sys_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_select(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_ppoll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

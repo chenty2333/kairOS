@@ -49,6 +49,15 @@ int vprintk(const char *fmt, va_list args);
 #endif
 
 /*
+ * Kernel log buffer access (for syslog)
+ */
+ssize_t klog_read(char *buf, size_t len, bool clear);
+ssize_t klog_read_all(char *buf, size_t len);
+void klog_clear(void);
+size_t klog_size_unread(void);
+size_t klog_size_buffer(void);
+
+/*
  * Panic - unrecoverable error
  */
 noreturn void panic(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

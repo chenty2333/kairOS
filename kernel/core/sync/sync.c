@@ -87,12 +87,10 @@ int mutex_lock_interruptible(struct mutex *m) {
             return -EINTR;
         }
 
-        wait_queue_add(&m->wq, curr);
-        curr->state = PROC_SLEEPING;
-        curr->wait_channel = m;
-        
         spin_unlock(&m->lock);
-        schedule();
+        int rc = proc_sleep_on(&m->wq, m, true);
+        if (rc < 0)
+            return rc;
         spin_lock(&m->lock);
     }
     
@@ -156,12 +154,10 @@ int sem_wait_interruptible(struct semaphore *s) {
             return -EINTR;
         }
 
-        wait_queue_add(&s->wq, curr);
-        curr->state = PROC_SLEEPING;
-        curr->wait_channel = s;
-        
         spin_unlock(&s->lock);
-        schedule();
+        int rc = proc_sleep_on(&s->wq, s, true);
+        if (rc < 0)
+            return rc;
         spin_lock(&s->lock);
     }
     s->count--;

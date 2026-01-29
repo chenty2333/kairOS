@@ -33,6 +33,7 @@ void sched_dequeue(struct process *p);
 void schedule(void);
 void sched_tick(void);
 int sched_setnice(struct process *p, int nice);
+int sched_getnice(struct process *p);
 
 struct percpu_data {
     int cpu_id;

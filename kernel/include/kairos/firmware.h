@@ -21,6 +21,7 @@ struct fw_device_desc {
 
 void fw_init(void);
 int fw_register_desc(struct fw_device_desc *desc);
+int fw_unregister_desc(struct fw_device_desc *desc);
 int fw_for_each_desc(int (*fn)(struct fw_device_desc *desc, void *arg),
                      void *arg);
 

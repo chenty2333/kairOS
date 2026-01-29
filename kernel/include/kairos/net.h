@@ -25,7 +25,7 @@ struct netdev {
 
 void net_init(void);
 int netdev_register(struct netdev *dev);
+int netdev_unregister(struct netdev *dev);
 struct netdev *netdev_first(void);
 
 #endif
-

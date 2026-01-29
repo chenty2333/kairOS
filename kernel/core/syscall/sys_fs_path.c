@@ -2,6 +2,7 @@
  * kernel/core/syscall/sys_fs_path.c - Path-related syscalls
  */
 
+#include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
 #include <kairos/namei.h>
@@ -9,8 +10,18 @@
 #include <kairos/printk.h>
 #include <kairos/syscall.h>
 #include <kairos/string.h>
+#include <kairos/time.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
+
+#define NS_PER_SEC 1000000000ULL
+#define UTIME_NOW  ((int64_t)0x3fffffff)
+#define UTIME_OMIT ((int64_t)0x3ffffffe)
+
+static time_t current_time_sec(void)
+{
+    return time_now_sec();
+}
 
 #include "sys_fs_helpers.h"
 
@@ -45,7 +56,7 @@ int64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
     struct path resolved;
     path_init(&resolved);
@@ -111,7 +122,7 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
@@ -128,7 +139,11 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     struct vnode *vn = resolved.dentry->vnode;
     mutex_lock(&vn->lock);
     vn->mode = (vn->mode & S_IFMT) | ((mode_t)mode & 07777);
+    vn->ctime = current_time_sec();
     mutex_unlock(&vn->lock);
+    if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->chmod) {
+        resolved.mnt->ops->chmod(vn, vn->mode);
+    }
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -141,7 +156,7 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
@@ -157,36 +172,80 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
     }
     struct vnode *vn = resolved.dentry->vnode;
     mutex_lock(&vn->lock);
-    if (owner != (uint64_t)-1)
+    if (owner != (uint64_t)-1) {
         vn->uid = (uid_t)owner;
-    if (group != (uint64_t)-1)
+    }
+    if (group != (uint64_t)-1) {
         vn->gid = (gid_t)group;
+    }
+    vn->ctime = current_time_sec();
     mutex_unlock(&vn->lock);
+    if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->chown) {
+        resolved.mnt->ops->chown(vn, vn->uid, vn->gid);
+    }
     dentry_put(resolved.dentry);
     return 0;
 }
 
 int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
                       uint64_t flags, uint64_t a4, uint64_t a5) {
-    (void)times_ptr; (void)a4; (void)a5;
-    if (flags & ~AT_SYMLINK_NOFOLLOW)
+    (void)a4; (void)a5;
+    if (flags & ~AT_SYMLINK_NOFOLLOW) {
         return -EINVAL;
-    if (!path_ptr)
+    }
+    if (!path_ptr) {
         return -EFAULT;
+    }
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0) {
         return -EFAULT;
+    }
 
     int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
     struct path resolved;
     path_init(&resolved);
     int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
-    if (ret < 0)
+    if (ret < 0) {
         return ret;
+    }
     if (!resolved.dentry || !resolved.dentry->vnode) {
-        if (resolved.dentry)
+        if (resolved.dentry) {
             dentry_put(resolved.dentry);
+        }
         return -ENOENT;
+    }
+
+    struct vnode *vn = resolved.dentry->vnode;
+    time_t now = current_time_sec();
+    struct timespec ts[2];
+    if (times_ptr) {
+        if (copy_from_user(ts, (const void *)times_ptr, sizeof(ts)) < 0) {
+            dentry_put(resolved.dentry);
+            return -EFAULT;
+        }
+    } else {
+        ts[0].tv_sec = now;
+        ts[0].tv_nsec = 0;
+        ts[1].tv_sec = now;
+        ts[1].tv_nsec = 0;
+    }
+
+    mutex_lock(&vn->lock);
+    if (ts[0].tv_nsec == UTIME_NOW) {
+        vn->atime = now;
+    } else if (ts[0].tv_nsec != UTIME_OMIT) {
+        vn->atime = ts[0].tv_sec;
+    }
+    if (ts[1].tv_nsec == UTIME_NOW) {
+        vn->mtime = now;
+    } else if (ts[1].tv_nsec != UTIME_OMIT) {
+        vn->mtime = ts[1].tv_sec;
+    }
+    vn->ctime = now;
+    mutex_unlock(&vn->lock);
+
+    if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->utimes) {
+        resolved.mnt->ops->utimes(vn, &ts[0], &ts[1]);
     }
     dentry_put(resolved.dentry);
     return 0;
@@ -197,7 +256,7 @@ int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
     (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     struct file *f;
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
     struct path base;
     path_init(&base);
@@ -240,7 +299,7 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     int nflags = NAMEI_FOLLOW;
@@ -290,6 +349,14 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     return 0;
 }
 
+int64_t sys_faccessat2(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
+                       uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW))
+        return -EINVAL;
+    return sys_faccessat(dirfd, path_ptr, mode, flags, 0, 0);
+}
+
 int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
                      uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
@@ -297,7 +364,7 @@ int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     int nflags = (flags & AT_REMOVEDIR) ? NAMEI_DIRECTORY : 0;
@@ -342,7 +409,7 @@ int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                     uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     mode_t umode = sysfs_apply_umask((mode_t)mode);
@@ -380,31 +447,83 @@ int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
 
 int64_t sys_mknodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                     uint64_t dev, uint64_t a4, uint64_t a5) {
-    (void)dev; (void)a4; (void)a5;
-    if (!path_ptr)
+    (void)a4; (void)a5;
+    if (!path_ptr) {
         return -EFAULT;
+    }
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0) {
         return -EFAULT;
+    }
 
     mode_t type = (mode_t)mode & S_IFMT;
-    if (type && type != S_IFREG)
-        return -EOPNOTSUPP;
-
-    struct path base;
-    path_init(&base);
-    struct path *basep = NULL;
-    int ret = sysfs_get_base_path((int64_t)dirfd, kpath, &base, &basep);
-    if (ret < 0)
-        return ret;
+    if (!type) {
+        type = S_IFREG;
+    }
 
     mode_t umode = sysfs_apply_umask((mode_t)mode);
-    struct file *f = NULL;
-    ret = vfs_open_at_path(basep, kpath, O_CREAT | O_EXCL | O_WRONLY, umode, &f);
-    if (ret < 0)
+
+    switch (type) {
+    case S_IFREG: {
+        /* Regular file: use existing O_CREAT|O_EXCL path */
+        struct path base;
+        path_init(&base);
+        struct path *basep = NULL;
+        int ret = sysfs_get_base_path((int64_t)dirfd, kpath, &base, &basep);
+        if (ret < 0) {
+            return ret;
+        }
+        struct file *f = NULL;
+        ret = vfs_open_at_path(basep, kpath, O_CREAT | O_EXCL | O_WRONLY,
+                               umode, &f);
+        if (ret < 0) {
+            return ret;
+        }
+        vfs_close(f);
+        return 0;
+    }
+    case S_IFCHR:
+    case S_IFBLK:
+    case S_IFIFO: {
+        /* Character/block device or FIFO: use vfs_ops->mknod */
+        struct path resolved;
+        path_init(&resolved);
+        int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved,
+                                   NAMEI_CREATE);
+        if (ret < 0) {
+            return ret;
+        }
+        if (!resolved.dentry) {
+            return -ENOENT;
+        }
+        if (!(resolved.dentry->flags & DENTRY_NEGATIVE)) {
+            dentry_put(resolved.dentry);
+            return -EEXIST;
+        }
+        if (!resolved.dentry->parent || !resolved.dentry->parent->vnode ||
+            !resolved.mnt || !resolved.mnt->ops ||
+            !resolved.mnt->ops->mknod) {
+            dentry_put(resolved.dentry);
+            return -EOPNOTSUPP;
+        }
+        ret = resolved.mnt->ops->mknod(resolved.dentry->parent->vnode,
+                                       resolved.dentry->name, umode,
+                                       (dev_t)dev);
+        if (ret == 0) {
+            struct vnode *vn =
+                resolved.mnt->ops->lookup(resolved.dentry->parent->vnode,
+                                          resolved.dentry->name);
+            if (vn) {
+                dentry_add(resolved.dentry, vn);
+                vnode_put(vn);
+            }
+        }
+        dentry_put(resolved.dentry);
         return ret;
-    vfs_close(f);
-    return 0;
+    }
+    default:
+        return -EINVAL;
+    }
 }
 
 int64_t sys_renameat(uint64_t olddirfd, uint64_t oldpath_ptr,
@@ -413,9 +532,9 @@ int64_t sys_renameat(uint64_t olddirfd, uint64_t oldpath_ptr,
     (void)a4; (void)a5;
     char oldpath[CONFIG_PATH_MAX];
     char newpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(oldpath, (const char *)oldpath_ptr, sizeof(oldpath)) < 0)
+    if (sysfs_copy_path(oldpath_ptr, oldpath, sizeof(oldpath)) < 0)
         return -EFAULT;
-    if (strncpy_from_user(newpath, (const char *)newpath_ptr, sizeof(newpath)) < 0)
+    if (sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath)) < 0)
         return -EFAULT;
 
     struct path oldp, newp;
@@ -484,7 +603,7 @@ int64_t sys_readlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t buf_ptr,
     if (bufsz == 0)
         return -EINVAL;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     char kbuf[CONFIG_PATH_MAX];
@@ -513,9 +632,9 @@ int64_t sys_symlinkat(uint64_t target_ptr, uint64_t dirfd, uint64_t linkpath_ptr
     (void)a3; (void)a4; (void)a5;
     char target[CONFIG_PATH_MAX];
     char linkpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(target, (const char *)target_ptr, sizeof(target)) < 0)
+    if (sysfs_copy_path(target_ptr, target, sizeof(target)) < 0)
         return -EFAULT;
-    if (strncpy_from_user(linkpath, (const char *)linkpath_ptr, sizeof(linkpath)) < 0)
+    if (sysfs_copy_path(linkpath_ptr, linkpath, sizeof(linkpath)) < 0)
         return -EFAULT;
     struct path resolved;
     path_init(&resolved);
@@ -548,6 +667,47 @@ int64_t sys_symlinkat(uint64_t target_ptr, uint64_t dirfd, uint64_t linkpath_ptr
     return (int64_t)ret;
 }
 
+int64_t sys_truncate(uint64_t path_ptr, uint64_t length, uint64_t a2,
+                     uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if ((int64_t)length < 0)
+        return -EINVAL;
+    if (!path_ptr)
+        return -EFAULT;
+    char kpath[CONFIG_PATH_MAX];
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    struct path resolved;
+    path_init(&resolved);
+    int ret = sysfs_resolve_at(AT_FDCWD, kpath, &resolved, NAMEI_FOLLOW);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+
+    struct vnode *vn = resolved.dentry->vnode;
+    if (vn->type == VNODE_DIR) {
+        dentry_put(resolved.dentry);
+        return -EISDIR;
+    }
+    if (!vn->ops || !vn->ops->truncate) {
+        dentry_put(resolved.dentry);
+        return -EINVAL;
+    }
+
+    mutex_lock(&vn->lock);
+    ret = vn->ops->truncate(vn, (off_t)length);
+    if (ret == 0)
+        vn->size = (uint64_t)length;
+    mutex_unlock(&vn->lock);
+    dentry_put(resolved.dentry);
+    return ret;
+}
+
 int64_t sys_unlink(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -571,4 +731,98 @@ int64_t sys_access(uint64_t path_ptr, uint64_t mode, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     return sys_faccessat((uint64_t)(int64_t)AT_FDCWD, path_ptr, mode, 0, 0, 0);
+}
+
+int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
+                   uint64_t newdirfd, uint64_t newpath_ptr,
+                   uint64_t flags, uint64_t a5) {
+    (void)a5;
+    /* AT_EMPTY_PATH (0x1000) is the only supported flag besides
+     * AT_SYMLINK_FOLLOW (0x400) */
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | 0x400)) {
+        return -EINVAL;
+    }
+
+    char oldpath[CONFIG_PATH_MAX];
+    char newpath[CONFIG_PATH_MAX];
+    if (sysfs_copy_path(oldpath_ptr, oldpath, sizeof(oldpath)) < 0) {
+        return -EFAULT;
+    }
+    if (sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath)) < 0) {
+        return -EFAULT;
+    }
+
+    /* Resolve old path (target of the link) */
+    int nflags = (flags & 0x400) ? NAMEI_FOLLOW : 0; /* AT_SYMLINK_FOLLOW */
+    struct path oldp;
+    path_init(&oldp);
+    int ret = sysfs_resolve_at((int64_t)olddirfd, oldpath, &oldp, nflags);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!oldp.dentry || !oldp.dentry->vnode) {
+        if (oldp.dentry) {
+            dentry_put(oldp.dentry);
+        }
+        return -ENOENT;
+    }
+
+    struct vnode *target = oldp.dentry->vnode;
+
+    /* Cannot hardlink directories */
+    if (target->type == VNODE_DIR) {
+        dentry_put(oldp.dentry);
+        return -EPERM;
+    }
+
+    /* Resolve new path (where the link will be created) */
+    struct path newp;
+    path_init(&newp);
+    ret = sysfs_resolve_at((int64_t)newdirfd, newpath, &newp, NAMEI_CREATE);
+    if (ret < 0) {
+        dentry_put(oldp.dentry);
+        return ret;
+    }
+    if (!newp.dentry) {
+        dentry_put(oldp.dentry);
+        return -ENOENT;
+    }
+    if (!(newp.dentry->flags & DENTRY_NEGATIVE)) {
+        dentry_put(oldp.dentry);
+        dentry_put(newp.dentry);
+        return -EEXIST;
+    }
+
+    /* Must be on same mount */
+    if (!oldp.mnt || !newp.mnt || oldp.mnt != newp.mnt) {
+        dentry_put(oldp.dentry);
+        dentry_put(newp.dentry);
+        return -EXDEV;
+    }
+
+    /* Filesystem must support link */
+    if (!newp.mnt->ops || !newp.mnt->ops->link) {
+        dentry_put(oldp.dentry);
+        dentry_put(newp.dentry);
+        return -EOPNOTSUPP;
+    }
+
+    ret = newp.mnt->ops->link(newp.dentry->parent->vnode,
+                              newp.dentry->name, target);
+    if (ret == 0) {
+        target->nlink++;
+        target->ctime = current_time_sec();
+        /* Re-lookup and attach the new dentry */
+        struct vnode *vn =
+            newp.mnt->ops->lookup(newp.dentry->parent->vnode,
+                                  newp.dentry->name);
+        if (vn) {
+            dentry_add(newp.dentry, vn);
+            vnode_put(vn);
+        }
+    }
+
+    dentry_put(oldp.dentry);
+    dentry_put(newp.dentry);
+    return ret;
 }

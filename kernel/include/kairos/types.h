@@ -24,10 +24,46 @@ struct timespec {
     int64_t tv_nsec;
 };
 
+struct rusage {
+    struct timeval ru_utime;
+    struct timeval ru_stime;
+    uint64_t ru_maxrss;
+    uint64_t ru_ixrss;
+    uint64_t ru_idrss;
+    uint64_t ru_isrss;
+    uint64_t ru_minflt;
+    uint64_t ru_majflt;
+    uint64_t ru_nswap;
+    uint64_t ru_inblock;
+    uint64_t ru_oublock;
+    uint64_t ru_msgsnd;
+    uint64_t ru_msgrcv;
+    uint64_t ru_nsignals;
+    uint64_t ru_nvcsw;
+    uint64_t ru_nivcsw;
+};
+
+struct itimerval {
+    struct timeval it_interval;
+    struct timeval it_value;
+};
+
+struct sched_param {
+    int sched_priority;
+};
+
 struct rlimit {
     uint64_t rlim_cur;
     uint64_t rlim_max;
 };
+
+#define PRIO_PROCESS 0
+
+#define ITIMER_REAL 0
+
+#define SCHED_OTHER 0
+#define SCHED_FIFO 1
+#define SCHED_RR 2
 
 #define RLIMIT_STACK 3
 #define RLIMIT_NOFILE 7
@@ -40,6 +76,9 @@ struct rlimit {
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
+
+#define WNOHANG 1
+#define WEXITED 4
 
 /* Error codes */
 #define EPERM 1
@@ -72,6 +111,9 @@ struct rlimit {
 #define EROFS 30
 #define EMLINK 31
 #define EPIPE 32
+#define EPROTONOSUPPORT 93
+#define EAFNOSUPPORT 97
+#define ENOTSOCK 88
 #define ENOSYS 38
 #define ENOTEMPTY 39
 #define ELOOP 40
@@ -79,6 +121,13 @@ struct rlimit {
 #define ENAMETOOLONG 36
 #define EOPNOTSUPP 95
 #define ENOTSUP EOPNOTSUPP
+#define EADDRINUSE 98
+#define ENOTCONN 107
+#define EISCONN 106
+#define ECONNREFUSED 111
+#define ECONNRESET 104
+#define ECONNABORTED 103
+#define EMSGSIZE 90
 #define ETIMEDOUT 110
 #define ESTALE 116
 

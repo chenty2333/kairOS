@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/boot.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
@@ -62,7 +63,7 @@ static paddr_t pt_alloc(void) {
         pr_err("pt_alloc: pmm returned invalid address %p\n", (void *)pa);
         return 0;
     }
-    memset((void *)pa, 0, PAGE_SIZE);
+    memset(phys_to_virt(pa), 0, PAGE_SIZE);
     return pa;
 }
 
@@ -71,7 +72,7 @@ static void destroy_pt(paddr_t table, int level) {
         return;
     }
 
-    uint64_t *pt = (uint64_t *)table;
+    uint64_t *pt = (uint64_t *)phys_to_virt(table);
     if (level > 0) {
         for (size_t i = 0; i < PTES_PER_PAGE; i++) {
             uint64_t pte = pt[i];
@@ -90,8 +91,8 @@ static paddr_t copy_pt(paddr_t src, int level) {
         return 0;
     }
 
-    uint64_t *src_pt = (uint64_t *)src;
-    uint64_t *dst_pt = (uint64_t *)dst;
+    uint64_t *src_pt = (uint64_t *)phys_to_virt(src);
+    uint64_t *dst_pt = (uint64_t *)phys_to_virt(dst);
     memcpy(dst_pt, src_pt, PAGE_SIZE);
 
     for (size_t i = 0; i < PTES_PER_PAGE; i++) {
@@ -122,7 +123,7 @@ static paddr_t copy_pt(paddr_t src, int level) {
 }
 
 static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
-    uint64_t *pt = (uint64_t *)table;
+    uint64_t *pt = (uint64_t *)phys_to_virt(table);
     for (int i = LEVELS - 1; i > 0; i--) {
         size_t idx = va_to_vpn(va, i);
         if (!(pt[idx] & PTE_V)) {
@@ -135,7 +136,7 @@ static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
             }
             pt[idx] = pa_to_pte(next) | PTE_V;
         }
-        pt = pte_to_pa(pt[idx]);
+        pt = (uint64_t *)phys_to_virt((paddr_t)pte_to_pa(pt[idx]));
     }
     return &pt[va_to_vpn(va, 0)];
 }
@@ -175,32 +176,40 @@ static int map_region(paddr_t root, vaddr_t va, paddr_t pa, size_t sz,
 
 /* --- Public Interface --- */
 
-void arch_mmu_init(paddr_t mem_base, size_t mem_size) {
+void arch_mmu_init(const struct boot_info *bi) {
+    if (!bi) {
+        panic("mmu: missing boot info");
+    }
     if (!(kernel_pgdir = pt_alloc())) {
         panic("mmu: init failed");
     }
 
-    /* 1. Map whole RAM as RW first (Identity Mapping) */
-    map_region(kernel_pgdir, mem_base, mem_base, mem_size,
-               PTE_READ | PTE_WRITE);
+    /* 1. Map HHDM for all usable memory regions */
+    for (uint32_t i = 0; i < bi->memmap_count; i++) {
+        const struct boot_memmap_entry *e = &bi->memmap[i];
+        if (e->type != BOOT_MEM_USABLE)
+            continue;
+        map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
+                   e->length, PTE_READ | PTE_WRITE);
+    }
 
-    /* 2. Overwrite kernel text/data with RWX permissions */
-    map_region(kernel_pgdir, (vaddr_t)_kernel_start, (paddr_t)_kernel_start,
-               ALIGN_UP((paddr_t)_kernel_end, PAGE_SIZE) -
-                   (paddr_t)_kernel_start,
+    /* 2. Map kernel high half */
+    paddr_t kphys = bi->kernel_phys_base;
+    vaddr_t kvirt = bi->kernel_virt_base;
+    size_t ksize = ALIGN_UP((paddr_t)_kernel_end - (paddr_t)_kernel_start,
+                            PAGE_SIZE);
+    map_region(kernel_pgdir, kvirt, kphys, ksize,
                PTE_READ | PTE_WRITE | PTE_EXEC);
 
-    /* 3. Map PLIC MMIO (Standard for RISC-V virt machine) */
-    map_region(kernel_pgdir, 0x0c000000UL, 0x0c000000UL, 4 << 20, /* 4MB */
+    /* 3. Identity-map common MMIO for early drivers */
+    map_region(kernel_pgdir, 0x0c000000UL, 0x0c000000UL, 4 << 20,
                PTE_READ | PTE_WRITE);
-
-    /* 4. Map UART/Device MMIO (Common for QEMU virt) */
-    map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 1 << 20, /* 1MB */
+    map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 1 << 20,
                PTE_READ | PTE_WRITE);
 
     arch_mmu_switch(kernel_pgdir);
-    pr_info("MMU: Sv39 paging enabled (base=%p, size=%lu MB)\n",
-            (void *)mem_base, mem_size >> 20);
+    pr_info("MMU: Sv39 paging enabled (HHDM=%p)\n",
+            (void *)bi->hhdm_offset);
 }
 
 paddr_t arch_mmu_create_table(void) {
@@ -294,10 +303,29 @@ paddr_t arch_mmu_get_kernel_pgdir(void) {
 /* --- KVM Helpers --- */
 
 void *phys_to_virt(paddr_t addr) {
+    const struct boot_info *bi = boot_info_get();
+    if (bi && bi->hhdm_offset) {
+        return (void *)(addr + bi->hhdm_offset);
+    }
     return (void *)addr;
 }
 
 paddr_t virt_to_phys(void *addr) {
+    const struct boot_info *bi = boot_info_get();
+    if (!bi) {
+        return (paddr_t)addr;
+    }
+    uint64_t va = (uint64_t)addr;
+    if (bi->hhdm_offset &&
+        va >= bi->hhdm_offset &&
+        va < bi->hhdm_offset + bi->phys_mem_max) {
+        return (paddr_t)(va - bi->hhdm_offset);
+    }
+    if (bi->kernel_virt_base &&
+        va >= bi->kernel_virt_base &&
+        va < bi->kernel_virt_base + ((uint64_t)_kernel_end - (uint64_t)_kernel_start)) {
+        return (paddr_t)(va - bi->kernel_virt_base + bi->kernel_phys_base);
+    }
     return (paddr_t)addr;
 }
 

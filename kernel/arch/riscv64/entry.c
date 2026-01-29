@@ -3,7 +3,9 @@
  */
 
 #include <asm/arch.h>
+#include <boot/limine.h>
 #include <kairos/arch.h>
+#include <kairos/boot.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
@@ -112,7 +114,9 @@ void arch_send_ipi(int cpu, int type) {
     struct percpu_data *data = sched_cpu_data(cpu);
     if (data)
         __sync_fetch_and_or(&data->ipi_pending_mask, (1 << type));
-    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND, 1UL << cpu, 0, 0);
+    const struct boot_info *bi = boot_info_get();
+    uint64_t hartid = bi ? bi->cpus[cpu].hw_id : (uint64_t)cpu;
+    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND, 1UL << hartid, 0, 0);
 }
 
 void arch_send_ipi_all(int type) {
@@ -125,7 +129,9 @@ void arch_send_ipi_all(int type) {
         struct percpu_data *data = sched_cpu_data(i);
         if (data) {
             __sync_fetch_and_or(&data->ipi_pending_mask, (1 << type));
-            mask |= (1UL << i);
+            const struct boot_info *bi = boot_info_get();
+            uint64_t hartid = bi ? bi->cpus[i].hw_id : (uint64_t)i;
+            mask |= (1UL << hartid);
         }
     }
     
@@ -134,23 +140,10 @@ void arch_send_ipi_all(int type) {
     }
 }
 
-static int num_cpus = 1;
-int arch_cpu_count(void) {
-    return num_cpus;
-}
-
-int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque) {
-    struct sbi_ret ret =
-        sbi_call(SBI_EXT_HSM, SBI_HSM_HART_START, cpu, start_addr, opaque);
-    if (ret.error == 0) {
-        num_cpus++;
-        return 0;
-    }
-    return (int)ret.error;
-}
-
 int arch_cpu_status(int cpu) {
-    return (int)sbi_call(SBI_EXT_HSM, SBI_HSM_HART_STATUS, cpu, 0, 0).value;
+    const struct boot_info *bi = boot_info_get();
+    uint64_t hartid = bi ? bi->cpus[cpu].hw_id : (uint64_t)cpu;
+    return (int)sbi_call(SBI_EXT_HSM, SBI_HSM_HART_STATUS, hartid, 0, 0).value;
 }
 
 void arch_mmu_flush_tlb_all(void) {

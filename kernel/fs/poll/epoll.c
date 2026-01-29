@@ -1,5 +1,5 @@
 /**
- * kernel/fs/vfs/epoll.c - epoll implementation
+ * kernel/fs/poll/epoll.c - epoll implementation
  */
 
 #include <kairos/epoll_internal.h>

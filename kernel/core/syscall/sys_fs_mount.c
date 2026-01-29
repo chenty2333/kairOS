@@ -24,7 +24,7 @@ int64_t sys_chroot(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
         return -EFAULT;
 
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     struct path resolved;
@@ -87,11 +87,9 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
 
     char new_root[CONFIG_PATH_MAX];
     char put_old[CONFIG_PATH_MAX];
-    if (strncpy_from_user(new_root, (const char *)new_root_ptr,
-                          sizeof(new_root)) < 0)
+    if (sysfs_copy_path(new_root_ptr, new_root, sizeof(new_root)) < 0)
         return -EFAULT;
-    if (strncpy_from_user(put_old, (const char *)put_old_ptr,
-                          sizeof(put_old)) < 0)
+    if (sysfs_copy_path(put_old_ptr, put_old, sizeof(put_old)) < 0)
         return -EFAULT;
 
     struct path newp, oldp;
@@ -245,7 +243,7 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
         return -EFAULT;
     if (flags != 0)
         return -EINVAL;
-    if (strncpy_from_user(kpath, (const char *)target_ptr, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(target_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
     struct path tpath;
     path_init(&tpath);
@@ -293,13 +291,13 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
 
     if (!target_ptr)
         return -EFAULT;
-    if (strncpy_from_user(target, (const char *)target_ptr, sizeof(target)) < 0)
+    if (sysfs_copy_path(target_ptr, target, sizeof(target)) < 0)
         return -EFAULT;
     if (source_ptr &&
-        strncpy_from_user(source, (const char *)source_ptr, sizeof(source)) < 0)
+        sysfs_copy_path(source_ptr, source, sizeof(source)) < 0)
         return -EFAULT;
     if (fstype_ptr &&
-        strncpy_from_user(fstype, (const char *)fstype_ptr, sizeof(fstype)) < 0)
+        sysfs_copy_path(fstype_ptr, fstype, sizeof(fstype)) < 0)
         return -EFAULT;
 
     struct path tpath;

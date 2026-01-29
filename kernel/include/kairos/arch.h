@@ -55,7 +55,8 @@ static inline void arch_context_set_user_sp(struct arch_context *ctx,
 #endif
 
 /* Memory Management (MMU) */
-void arch_mmu_init(paddr_t mem_base, size_t mem_size);
+struct boot_info;
+void arch_mmu_init(const struct boot_info *bi);
 paddr_t arch_mmu_create_table(void);
 void arch_mmu_destroy_table(paddr_t table);
 int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);

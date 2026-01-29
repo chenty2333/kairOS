@@ -32,6 +32,8 @@ static const size_t kmalloc_sizes[] = {32,  64,  96,   128, 192,
                                        256, 512, 1024, 2048};
 #define NUM_KMALLOC_CACHES ARRAY_SIZE(kmalloc_sizes)
 static struct kmem_cache *kmalloc_caches[NUM_KMALLOC_CACHES];
+static uint8_t kmalloc_bootstrap[4096 * 2];
+static size_t kmalloc_bootstrap_off;
 
 /* --- Internal Core --- */
 
@@ -55,6 +57,15 @@ static int cache_grow(struct kmem_cache *c) {
     }
     c->num_free += CONFIG_PAGE_SIZE / c->obj_size;
     return 0;
+}
+
+static void *kmalloc_bootstrap_alloc(size_t size) {
+    size = ALIGN_UP(size, sizeof(void *));
+    if (kmalloc_bootstrap_off + size > sizeof(kmalloc_bootstrap))
+        return NULL;
+    void *ptr = &kmalloc_bootstrap[kmalloc_bootstrap_off];
+    kmalloc_bootstrap_off += size;
+    return ptr;
 }
 
 struct kmem_cache *kmem_cache_create(const char *name, size_t size,
@@ -157,7 +168,7 @@ void kfree(void *ptr) {
 void kmalloc_init(void) {
     for (size_t i = 0; i < NUM_KMALLOC_CACHES; i++) {
         /* We use a specialized create boot logic to avoid recursion */
-        kmalloc_caches[i] = kmalloc(sizeof(struct kmem_cache));
+        kmalloc_caches[i] = kmalloc_bootstrap_alloc(sizeof(struct kmem_cache));
         memset(kmalloc_caches[i], 0, sizeof(struct kmem_cache));
         kmalloc_caches[i]->obj_size = kmalloc_sizes[i];
         spin_init(&kmalloc_caches[i]->lock);

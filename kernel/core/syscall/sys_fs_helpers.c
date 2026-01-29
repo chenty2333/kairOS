@@ -3,6 +3,7 @@
  */
 
 #include <kairos/dentry.h>
+#include <kairos/config.h>
 #include <kairos/namei.h>
 #include <kairos/process.h>
 #include <kairos/syscall.h>
@@ -32,6 +33,18 @@ struct vnode *sysfs_proc_cwd_vnode(struct process *p) {
         vnode_get(p->cwd_vnode);
     }
     return p->cwd_vnode;
+}
+
+int sysfs_copy_path(uint64_t uptr, char *kbuf, size_t klen) {
+    if (!uptr || !kbuf || klen == 0)
+        return -EFAULT;
+    long len = strncpy_from_user(kbuf, (const char *)uptr, klen);
+    if (len < 0)
+        return -EFAULT;
+    if ((size_t)len >= klen - 1)
+        return -EFAULT;
+    kbuf[klen - 1] = '\0';
+    return 0;
 }
 
 int sysfs_get_base_path(int64_t dirfd, const char *path, struct path *base,
@@ -80,6 +93,15 @@ int sysfs_resolve_at(int64_t dirfd, const char *path, struct path *out,
     if (ret < 0)
         return ret;
     return vfs_namei_at(basep, path, out, flags);
+}
+
+int sysfs_resolve_at_user(int64_t dirfd, uint64_t upath, struct path *out,
+                          int flags) {
+    char kpath[CONFIG_PATH_MAX];
+    int ret = sysfs_copy_path(upath, kpath, sizeof(kpath));
+    if (ret < 0)
+        return ret;
+    return sysfs_resolve_at(dirfd, kpath, out, flags);
 }
 
 ssize_t sysfs_readlink_from_vnode(struct vnode *vn, char *buf, size_t bufsz) {

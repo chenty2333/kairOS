@@ -10,6 +10,7 @@
 #include <kairos/mm.h>
 #include <kairos/rbtree.h>
 #include <kairos/spinlock.h>
+#include <kairos/signal.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/wait.h>
@@ -35,6 +36,7 @@ enum syscall_abi {
 
 struct process {
     pid_t pid, ppid;
+    pid_t pgid, sid;
     char name[16];
     uid_t uid;
     gid_t gid;
@@ -42,6 +44,7 @@ struct process {
     enum syscall_abi syscall_abi;
     enum proc_state state;
     int exit_code;
+    spinlock_t lock;
 
     /* Scheduling */
     uint64_t vruntime, last_run_time;
@@ -61,13 +64,18 @@ struct process {
     struct mount_ns *mnt_ns;
     uint64_t tid_address;
     uint64_t tid_set_address;
+    uint64_t robust_list;
+    uint64_t robust_len;
     struct rlimit rlimits[RLIM_NLIMITS];
+    struct itimerval itimer_real;
+    stack_t sigaltstack;
 
     /* Signals & Waiting */
     uint64_t sig_pending, sig_blocked;
     struct sigaction *sigactions;
     void *wait_channel;
     struct wait_queue exit_wait;
+    struct wait_queue vfork_wait;
     struct wait_queue_entry wait_entry;
     struct list_head children, sibling;
     struct process *parent;
@@ -92,6 +100,9 @@ pid_t proc_wait(pid_t pid, int *status, int options);
 struct process *proc_find(pid_t pid);
 struct process *proc_current(void);
 void proc_set_current(struct process *p);
+void proc_lock(struct process *p);
+void proc_unlock(struct process *p);
+int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible);
 struct process *proc_idle_init(void);
 struct process *proc_start_init(void);
 void proc_yield(void);
@@ -108,6 +119,8 @@ vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk);
 void run_fork_test(void);
 void run_user_test(void);
 void run_crash_test(void);
+void run_sync_test(void);
+void run_vfork_test(void);
 
 struct process *kthread_create(int (*fn)(void *), void *arg, const char *name);
 #define current proc_current()

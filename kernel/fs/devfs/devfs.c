@@ -75,6 +75,9 @@ static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->mode = mode;
     vn->uid = vn->gid = vn->size = 0;
     vn->ino = node->ino;
+    vn->nlink = 1;
+    vn->atime = vn->mtime = vn->ctime = 0;
+    vn->rdev = 0;
     vn->ops = ops;
     vn->fs_data = node;
     vn->mount = mnt;

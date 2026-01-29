@@ -11,19 +11,28 @@
 #include <kairos/signal.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
+#include <kairos/ringbuf.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 /* Simple console input buffer with minimal line discipline. */
 #define CONSOLE_BUF_SIZE 128
-static char console_buf[CONSOLE_BUF_SIZE];
-static unsigned int console_head;
-static unsigned int console_tail;
-static spinlock_t console_lock = SPINLOCK_INIT;
-static struct vnode *console_vnode;
 
-static struct winsize console_winsize = {.ws_row = 24, .ws_col = 80};
-static struct termios console_termios = {
+struct console_state {
+    spinlock_t lock;
+    struct ringbuf in_rb;
+    char in_storage[CONSOLE_BUF_SIZE];
+    char canon_buf[CONSOLE_BUF_SIZE];
+    uint32_t canon_len;
+    struct vnode *vnode;
+    struct winsize winsize;
+    struct termios termios;
+};
+
+static struct console_state console_state = {
+    .lock = SPINLOCK_INIT,
+    .winsize = {.ws_row = 24, .ws_col = 80},
+    .termios = {
     .c_iflag = ICRNL,
     .c_oflag = OPOST | ONLCR,
     .c_lflag = ISIG | ICANON | ECHO,
@@ -36,96 +45,79 @@ static struct termios console_termios = {
         [VTIME] = 0,
         [VMIN] = 1,
     },
+    },
 };
-static char console_canon_buf[CONSOLE_BUF_SIZE];
-static unsigned int console_canon_len;
+
+static void console_state_init_once(void) {
+    static bool initialized;
+    if (initialized)
+        return;
+    ringbuf_init(&console_state.in_rb, console_state.in_storage,
+                 CONSOLE_BUF_SIZE);
+    console_state.canon_len = 0;
+    initialized = true;
+}
 
 void console_attach_vnode(struct vnode *vn) {
-    console_vnode = vn;
-}
-
-static inline bool console_buf_empty(void) {
-    return console_head == console_tail;
-}
-
-static inline bool console_buf_full(void) {
-    return ((console_head + 1) % CONSOLE_BUF_SIZE) == console_tail;
-}
-
-static size_t console_buf_len(void) {
-    if (console_head >= console_tail)
-        return console_head - console_tail;
-    return CONSOLE_BUF_SIZE - console_tail + console_head;
-}
-
-static void console_buf_put(char c) {
-    if (console_buf_full()) {
-        console_tail = (console_tail + 1) % CONSOLE_BUF_SIZE;
-    }
-    console_buf[console_head] = c;
-    console_head = (console_head + 1) % CONSOLE_BUF_SIZE;
-}
-
-static bool console_buf_get(char *out) {
-    if (console_buf_empty())
-        return false;
-    *out = console_buf[console_tail];
-    console_tail = (console_tail + 1) % CONSOLE_BUF_SIZE;
-    return true;
+    console_state_init_once();
+    spin_lock(&console_state.lock);
+    console_state.vnode = vn;
+    spin_unlock(&console_state.lock);
 }
 
 static void console_echo_char(char c) {
-    if (!(console_termios.c_lflag & ECHO))
+    if (!(console_state.termios.c_lflag & ECHO))
         return;
-    if ((console_termios.c_oflag & OPOST) &&
-        (console_termios.c_oflag & ONLCR) && c == '\n') {
+    if ((console_state.termios.c_oflag & OPOST) &&
+        (console_state.termios.c_oflag & ONLCR) && c == '\n') {
         arch_early_putchar('\r');
     }
     arch_early_putchar(c);
 }
 
 static void console_canon_commit(void) {
-    for (unsigned int i = 0; i < console_canon_len; i++) {
-        console_buf_put(console_canon_buf[i]);
+    for (uint32_t i = 0; i < console_state.canon_len; i++) {
+        ringbuf_push(&console_state.in_rb, console_state.canon_buf[i], true);
     }
-    console_canon_len = 0;
+    console_state.canon_len = 0;
 }
 
 static void console_flush_input(void) {
-    console_head = console_tail = 0;
-    console_canon_len = 0;
+    console_state.in_rb.head = 0;
+    console_state.in_rb.tail = 0;
+    console_state.canon_len = 0;
 }
 
 static void console_handle_input_char(char c, bool *pushed) {
-    if (console_termios.c_iflag & ICRNL) {
+    if (console_state.termios.c_iflag & ICRNL) {
         if (c == '\r')
             c = '\n';
-    } else if (console_termios.c_iflag & INLCR) {
+    } else if (console_state.termios.c_iflag & INLCR) {
         if (c == '\n')
             c = '\r';
-    } else if (console_termios.c_iflag & IGNCR) {
+    } else if (console_state.termios.c_iflag & IGNCR) {
         if (c == '\r')
             return;
     }
 
-    if (console_termios.c_lflag & ICANON) {
-        char erase = console_termios.c_cc[VERASE]
-                         ? (char)console_termios.c_cc[VERASE]
+    if (console_state.termios.c_lflag & ICANON) {
+        char erase = console_state.termios.c_cc[VERASE]
+                         ? (char)console_state.termios.c_cc[VERASE]
                          : (char)0x7f;
-        char kill = console_termios.c_cc[VKILL]
-                        ? (char)console_termios.c_cc[VKILL]
+        char kill = console_state.termios.c_cc[VKILL]
+                        ? (char)console_state.termios.c_cc[VKILL]
                         : (char)0x15;
-        char intr = console_termios.c_cc[VINTR]
-                        ? (char)console_termios.c_cc[VINTR]
+        char intr = console_state.termios.c_cc[VINTR]
+                        ? (char)console_state.termios.c_cc[VINTR]
                         : (char)0x03;
-        char quit = console_termios.c_cc[VQUIT]
-                        ? (char)console_termios.c_cc[VQUIT]
+        char quit = console_state.termios.c_cc[VQUIT]
+                        ? (char)console_state.termios.c_cc[VQUIT]
                         : (char)0x1c;
 
-        if ((console_termios.c_lflag & ISIG) &&
+        if ((console_state.termios.c_lflag & ISIG) &&
             (c == intr || c == quit)) {
-            console_canon_len = 0;
-            if (console_termios.c_lflag & ECHO) {
+            console_state.canon_len = 0;
+            if (console_state.termios.c_lflag & ECHO) {
                 arch_early_putchar('^');
                 arch_early_putchar(c == intr ? 'C' : '\\');
                 console_echo_char('\n');
@@ -137,9 +129,9 @@ static void console_handle_input_char(char c, bool *pushed) {
         }
 
         if (c == erase || c == '\b') {
-            if (console_canon_len > 0) {
-                console_canon_len--;
-                if (console_termios.c_lflag & ECHO) {
+            if (console_state.canon_len > 0) {
+                console_state.canon_len--;
+                if (console_state.termios.c_lflag & ECHO) {
                     arch_early_putchar('\b');
                     arch_early_putchar(' ');
                     arch_early_putchar('\b');
@@ -149,21 +141,21 @@ static void console_handle_input_char(char c, bool *pushed) {
         }
 
         if (c == kill) {
-            if (console_termios.c_lflag & ECHO) {
-                while (console_canon_len > 0) {
+            if (console_state.termios.c_lflag & ECHO) {
+                while (console_state.canon_len > 0) {
                     arch_early_putchar('\b');
                     arch_early_putchar(' ');
                     arch_early_putchar('\b');
-                    console_canon_len--;
+                    console_state.canon_len--;
                 }
             } else {
-                console_canon_len = 0;
+                console_state.canon_len = 0;
             }
             return;
         }
 
-        if (console_canon_len < CONSOLE_BUF_SIZE) {
-            console_canon_buf[console_canon_len++] = c;
+        if (console_state.canon_len < CONSOLE_BUF_SIZE) {
+            console_state.canon_buf[console_state.canon_len++] = c;
         }
         console_echo_char(c);
         if (c == '\n') {
@@ -174,29 +166,32 @@ static void console_handle_input_char(char c, bool *pushed) {
         return;
     }
 
-    console_buf_put(c);
+    ringbuf_push(&console_state.in_rb, c, true);
     console_echo_char(c);
     if (pushed)
         *pushed = true;
 }
 
 static bool console_try_fill(void) {
+    console_state_init_once();
     int ch = arch_early_getchar_nb();
     if (ch < 0)
         return false;
     bool was_empty;
     bool pushed = false;
-    spin_lock(&console_lock);
-    was_empty = console_buf_empty();
+    spin_lock(&console_state.lock);
+    was_empty = ringbuf_empty(&console_state.in_rb);
     console_handle_input_char((char)ch, &pushed);
-    spin_unlock(&console_lock);
-    if (pushed && was_empty && console_vnode)
-        vfs_poll_wake(console_vnode, POLLIN);
+    struct vnode *vn = console_state.vnode;
+    spin_unlock(&console_state.lock);
+    if (pushed && was_empty && vn)
+        vfs_poll_wake(vn, POLLIN);
     return true;
 }
 
 void console_poll_input(void) {
-    if (!console_vnode)
+    console_state_init_once();
+    if (!console_state.vnode)
         return;
     while (console_try_fill()) {
     }
@@ -209,15 +204,16 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
     if (len == 0)
         return 0;
 
+    console_state_init_once();
     char ch;
     for (;;) {
-        spin_lock(&console_lock);
-        if (console_buf_get(&ch)) {
-            spin_unlock(&console_lock);
+        spin_lock(&console_state.lock);
+        if (ringbuf_pop(&console_state.in_rb, &ch)) {
+            spin_unlock(&console_state.lock);
             ((char *)buf)[0] = ch;
             return 1;
         }
-        spin_unlock(&console_lock);
+        spin_unlock(&console_state.lock);
 
         if (console_try_fill())
             continue;
@@ -243,28 +239,30 @@ ssize_t console_write(struct vnode *vn, const void *buf, size_t len,
                       off_t off __attribute__((unused))) {
     if (!vn || !buf)
         return -EINVAL;
+    console_state_init_once();
     const char *p = buf;
     for (size_t i = 0; i < len; i++) {
-        if ((console_termios.c_oflag & OPOST) &&
-            (console_termios.c_oflag & ONLCR) && p[i] == '\n') {
+        if ((console_state.termios.c_oflag & OPOST) &&
+            (console_state.termios.c_oflag & ONLCR) && p[i] == '\n') {
             arch_early_putchar('\r');
         }
         arch_early_putchar(p[i]);
     }
-    if (console_vnode)
-        vfs_poll_wake(console_vnode, POLLIN | POLLOUT);
+    if (console_state.vnode)
+        vfs_poll_wake(console_state.vnode, POLLIN | POLLOUT);
     return (ssize_t)len;
 }
 
 int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
     if (!vn)
         return -EINVAL;
+    console_state_init_once();
     switch (cmd) {
     case TCGETS: {
         if (!arg)
             return -EFAULT;
-        if (copy_to_user((void *)arg, &console_termios,
-                         sizeof(console_termios)) < 0)
+        if (copy_to_user((void *)arg, &console_state.termios,
+                         sizeof(console_state.termios)) < 0)
             return -EFAULT;
         return 0;
     }
@@ -277,21 +275,22 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
             return -EFAULT;
         bool wake = false;
-        spin_lock(&console_lock);
-        bool was_empty = console_buf_empty();
-        if ((console_termios.c_lflag & ICANON) &&
-            !(t.c_lflag & ICANON) && console_canon_len > 0) {
+        spin_lock(&console_state.lock);
+        bool was_empty = ringbuf_empty(&console_state.in_rb);
+        if ((console_state.termios.c_lflag & ICANON) &&
+            !(t.c_lflag & ICANON) && console_state.canon_len > 0) {
             console_canon_commit();
-            wake = was_empty && !console_buf_empty();
+            wake = was_empty && !ringbuf_empty(&console_state.in_rb);
         }
         if (cmd == TCSETSF) {
             console_flush_input();
             wake = false;
         }
-        console_termios = t;
-        spin_unlock(&console_lock);
-        if (wake && console_vnode)
-            vfs_poll_wake(console_vnode, POLLIN);
+        console_state.termios = t;
+        struct vnode *wake_vn = console_state.vnode;
+        spin_unlock(&console_state.lock);
+        if (wake && wake_vn)
+            vfs_poll_wake(wake_vn, POLLIN);
         return 0;
     }
     case TIOCGPGRP: {
@@ -318,16 +317,16 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
     case TIOCGWINSZ: {
         if (!arg)
             return -EFAULT;
-        if (copy_to_user((void *)arg, &console_winsize,
-                         sizeof(console_winsize)) < 0)
+        if (copy_to_user((void *)arg, &console_state.winsize,
+                         sizeof(console_state.winsize)) < 0)
             return -EFAULT;
         return 0;
     }
     case TIOCSWINSZ: {
         if (!arg)
             return -EFAULT;
-        if (copy_from_user(&console_winsize, (void *)arg,
-                           sizeof(console_winsize)) < 0)
+        if (copy_from_user(&console_state.winsize, (void *)arg,
+                           sizeof(console_state.winsize)) < 0)
             return -EFAULT;
         return 0;
     }
@@ -335,9 +334,9 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if (!arg)
             return -EFAULT;
         int avail = 0;
-        spin_lock(&console_lock);
-        avail = (int)console_buf_len();
-        spin_unlock(&console_lock);
+        spin_lock(&console_state.lock);
+        avail = (int)ringbuf_len(&console_state.in_rb);
+        spin_unlock(&console_state.lock);
         if (copy_to_user((void *)arg, &avail, sizeof(avail)) < 0)
             return -EFAULT;
         return 0;
@@ -351,11 +350,12 @@ int console_poll(struct vnode *vn, uint32_t events) {
     if (!vn)
         return POLLNVAL;
     uint32_t revents = 0;
+    console_state_init_once();
     console_try_fill();
-    spin_lock(&console_lock);
-    if (!console_buf_empty())
+    spin_lock(&console_state.lock);
+    if (!ringbuf_empty(&console_state.in_rb))
         revents |= POLLIN;
-    spin_unlock(&console_lock);
+    spin_unlock(&console_state.lock);
     revents |= POLLOUT;
     return (int)(revents & events);
 }

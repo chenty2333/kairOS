@@ -34,11 +34,12 @@ void mm_destroy(struct mm_struct *mm) {
     if (--mm->refcount > 0) { mutex_unlock(&mm->lock); return; }
     struct vm_area *vma, *tmp;
     list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
-        mm_unmap_range(mm->pgdir, vma->start, vma->end);
+        mm_unmap_range_noflush(mm->pgdir, vma->start, vma->end);
         if (vma->vnode)
             vnode_put(vma->vnode);
         kfree(vma);
     }
+    arch_mmu_flush_tlb_all();
     arch_mmu_destroy_table(mm->pgdir);
     mutex_unlock(&mm->lock);
     kfree(mm);

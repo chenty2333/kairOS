@@ -10,6 +10,9 @@
 #include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/uaccess.h>
+#include <kairos/time.h>
+
+#include "sys_time_helpers.h"
 
 #define NS_PER_SEC 1000000000ULL
 
@@ -51,15 +54,7 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
     return ticks ? ticks : 1;
 }
 
-static int copy_timespec_from_user(uint64_t ptr, struct timespec *out) {
-    if (!ptr || !out)
-        return -EFAULT;
-    if (copy_from_user(out, (const void *)ptr, sizeof(*out)) < 0)
-        return -EFAULT;
-    if (out->tv_sec < 0 || out->tv_nsec < 0 || out->tv_nsec >= (int64_t)NS_PER_SEC)
-        return -EINVAL;
-    return 1;
-}
+static char uts_domainname[65] = "kairos";
 
 int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -69,7 +64,7 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
         return -EINVAL;
 
-    uint64_t ns = arch_timer_ticks_to_ns(arch_timer_ticks());
+    uint64_t ns = time_now_ns();
     struct timespec ts = {
         .tv_sec = (time_t)(ns / NS_PER_SEC),
         .tv_nsec = (int64_t)(ns % NS_PER_SEC),
@@ -85,7 +80,7 @@ int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
         return -EINVAL;
     struct timespec ts;
-    int rc = copy_timespec_from_user(tp_ptr, &ts);
+    int rc = sys_copy_timespec(tp_ptr, &ts, false);
     if (rc < 0)
         return rc;
     /* No RTC or time-setting support yet. */
@@ -96,7 +91,7 @@ int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
                       uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)rem_ptr; (void)a2; (void)a3; (void)a4; (void)a5;
     struct timespec req;
-    int rc = copy_timespec_from_user(req_ptr, &req);
+    int rc = sys_copy_timespec(req_ptr, &req, false);
     if (rc < 0)
         return rc;
 
@@ -109,11 +104,9 @@ int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
         struct poll_sleep sleep = {0};
         INIT_LIST_HEAD(&sleep.node);
         poll_sleep_arm(&sleep, curr, deadline);
-        curr->state = PROC_SLEEPING;
-        curr->wait_channel = NULL;
-        schedule();
+        int sleep_rc = proc_sleep_on(NULL, NULL, true);
         poll_sleep_cancel(&sleep);
-        if (curr->sig_pending)
+        if (sleep_rc == -EINTR)
             return -EINTR;
     }
     return 0;
@@ -133,7 +126,7 @@ int64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (tv_ptr) {
-        uint64_t ns = arch_timer_ticks_to_ns(arch_timer_ticks());
+        uint64_t ns = time_now_ns();
         struct timeval tv = {
             .tv_sec = (time_t)(ns / NS_PER_SEC),
             .tv_usec = (suseconds_t)((ns % NS_PER_SEC) / 1000),
@@ -161,6 +154,65 @@ int64_t sys_times(uint64_t tms_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
     return (int64_t)arch_timer_ticks();
 }
 
+int64_t sys_getitimer(uint64_t which, uint64_t value_ptr, uint64_t a2,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (which != ITIMER_REAL)
+        return -EINVAL;
+    if (!value_ptr)
+        return -EFAULT;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (copy_to_user((void *)value_ptr, &p->itimer_real,
+                     sizeof(p->itimer_real)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int64_t sys_setitimer(uint64_t which, uint64_t new_ptr, uint64_t old_ptr,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (which != ITIMER_REAL)
+        return -EINVAL;
+    if (!new_ptr)
+        return -EFAULT;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (old_ptr) {
+        if (copy_to_user((void *)old_ptr, &p->itimer_real,
+                         sizeof(p->itimer_real)) < 0)
+            return -EFAULT;
+    }
+    struct itimerval val;
+    if (copy_from_user(&val, (void *)new_ptr, sizeof(val)) < 0)
+        return -EFAULT;
+    p->itimer_real = val;
+    return 0;
+}
+
+int64_t sys_getrusage(uint64_t who, uint64_t rusage_ptr, uint64_t a2,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)who; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!rusage_ptr)
+        return -EFAULT;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    struct rusage ru;
+    memset(&ru, 0, sizeof(ru));
+    ru.ru_utime.tv_sec = (time_t)(p->utime / CONFIG_HZ);
+    ru.ru_utime.tv_usec =
+        (suseconds_t)((p->utime % CONFIG_HZ) * 1000000ULL / CONFIG_HZ);
+    ru.ru_stime.tv_sec = (time_t)(p->stime / CONFIG_HZ);
+    ru.ru_stime.tv_usec =
+        (suseconds_t)((p->stime % CONFIG_HZ) * 1000000ULL / CONFIG_HZ);
+    if (copy_to_user((void *)rusage_ptr, &ru, sizeof(ru)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 int64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                     uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -169,7 +221,7 @@ int64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
 
     struct linux_sysinfo info;
     memset(&info, 0, sizeof(info));
-    uint64_t ns = arch_timer_ticks_to_ns(arch_timer_ticks());
+    uint64_t ns = time_now_ns();
     info.uptime = (int64_t)(ns / NS_PER_SEC);
 
     size_t total_pages = pmm_total_pages();
@@ -195,7 +247,26 @@ int64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
     strcpy(uts.release, "0.1.0");
     strcpy(uts.version, "kairos");
     strcpy(uts.machine, "riscv64");
+    strncpy(uts.domainname, uts_domainname, sizeof(uts.domainname) - 1);
     if (copy_to_user((void *)buf_ptr, &uts, sizeof(uts)) < 0)
         return -EFAULT;
+    return 0;
+}
+
+int64_t sys_setdomainname(uint64_t name_ptr, uint64_t len, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (len > sizeof(uts_domainname) - 1)
+        return -EINVAL;
+    if (len > 0 && !name_ptr)
+        return -EFAULT;
+    char tmp[65];
+    memset(tmp, 0, sizeof(tmp));
+    if (len > 0) {
+        if (copy_from_user(tmp, (const void *)name_ptr, (size_t)len) < 0)
+            return -EFAULT;
+    }
+    memset(uts_domainname, 0, sizeof(uts_domainname));
+    memcpy(uts_domainname, tmp, (size_t)len);
     return 0;
 }

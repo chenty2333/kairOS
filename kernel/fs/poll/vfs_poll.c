@@ -1,18 +1,16 @@
 /**
- * kernel/fs/vfs/poll.c - VFS poll helpers
+ * kernel/fs/poll/vfs_poll.c - VFS poll helpers
  */
 
 #include <kairos/poll.h>
-#include <kairos/pollwait.h>
+#include <kairos/pipe.h>
 #include <kairos/vfs.h>
 
 int vfs_poll_vnode(struct vnode *vn, uint32_t events) {
     if (!vn)
         return POLLNVAL;
-    if (vn->type == VNODE_PIPE) {
-        extern int pipe_poll_vnode(struct vnode *vn, uint32_t events);
+    if (vn->type == VNODE_PIPE)
         return pipe_poll_vnode(vn, events);
-    }
     if (vn->ops->poll)
         return vn->ops->poll(vn, events);
     return events & (POLLIN | POLLOUT);
@@ -21,10 +19,8 @@ int vfs_poll_vnode(struct vnode *vn, uint32_t events) {
 int vfs_poll(struct file *file, uint32_t events) {
     if (!file || !file->vnode)
         return POLLNVAL;
-    if (file->vnode->type == VNODE_PIPE) {
-        extern int pipe_poll_file(struct file *file, uint32_t events);
+    if (file->vnode->type == VNODE_PIPE)
         return pipe_poll_file(file, events);
-    }
     return vfs_poll_vnode(file->vnode, events);
 }
 
@@ -33,9 +29,6 @@ void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
     if (!file || !file->vnode || !waiter)
         return;
     if (file->vnode->type == VNODE_PIPE) {
-        extern void pipe_poll_register_file(struct file *file,
-                                            struct poll_waiter *waiter,
-                                            uint32_t events);
         pipe_poll_register_file(file, waiter, events);
         return;
     }
@@ -60,9 +53,6 @@ void vfs_poll_watch(struct vnode *vn, struct poll_watch *watch,
     if (!vn || !watch)
         return;
     if (vn->type == VNODE_PIPE) {
-        extern void pipe_poll_watch_vnode(struct vnode *vn,
-                                          struct poll_watch *watch,
-                                          uint32_t events);
         pipe_poll_watch_vnode(vn, watch, events);
         return;
     }
@@ -78,7 +68,6 @@ void vfs_poll_wake(struct vnode *vn, uint32_t events) {
     if (!vn)
         return;
     if (vn->type == VNODE_PIPE) {
-        extern void pipe_poll_wake_vnode(struct vnode *vn, uint32_t events);
         pipe_poll_wake_vnode(vn, events);
         return;
     }

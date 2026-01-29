@@ -9,6 +9,7 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
+#include <kairos/sync.h>
 #include <kairos/types.h>
 
 /* User program addresses */
@@ -114,6 +115,24 @@ void run_fork_test(void) {
 
     if (p) sched_enqueue(p);
 
+}
+
+void run_sync_test(void) {
+    pr_info("\n=== Sync Test ===\n");
+
+    struct mutex m;
+    mutex_init(&m, "sync_test_mutex");
+    mutex_lock(&m);
+    mutex_unlock(&m);
+
+    struct semaphore s;
+    sem_init(&s, 1, "sync_test_sem");
+    sem_wait(&s);
+    sem_post(&s);
+}
+
+void run_vfork_test(void) {
+    pr_info("\n=== Vfork Test (smoke) ===\n");
 }
 
 

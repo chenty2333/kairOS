@@ -6,11 +6,23 @@
 #include <kairos/list.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
+#include <kairos/spinlock.h>
 #include <kairos/string.h>
 
 static LIST_HEAD(bus_list);
 static LIST_HEAD(device_list);
 static LIST_HEAD(driver_list);
+static spinlock_t device_model_lock = SPINLOCK_INIT;
+
+static int bus_match_probe(struct device *dev, struct driver *drv);
+
+static void device_try_bind(struct device *dev) {
+    struct driver *drv;
+    list_for_each_entry(drv, &driver_list, list) {
+        if (!dev->driver && bus_match_probe(dev, drv))
+            break;
+    }
+}
 
 /* Simple linear match and probe */
 static int bus_match_probe(struct device *dev, struct driver *drv) {
@@ -37,53 +49,78 @@ static int bus_match_probe(struct device *dev, struct driver *drv) {
 
 int bus_register(struct bus_type *bus) {
     if (!bus || !bus->name) return -EINVAL;
+    spin_lock(&device_model_lock);
     list_add_tail(&bus->list, &bus_list);
+    spin_unlock(&device_model_lock);
     return 0;
 }
 
 void bus_unregister(struct bus_type *bus) {
-    if (bus) list_del(&bus->list);
+    if (!bus)
+        return;
+    spin_lock(&device_model_lock);
+    list_del(&bus->list);
+    spin_unlock(&device_model_lock);
 }
 
 int device_register(struct device *dev) {
     if (!dev) return -EINVAL;
     
+    spin_lock(&device_model_lock);
     list_add_tail(&dev->list, &device_list);
     
     /* Try to attach to an existing driver */
-    struct driver *drv;
-    list_for_each_entry(drv, &driver_list, list) {
-        if (!dev->driver && bus_match_probe(dev, drv)) break;
-    }
+    device_try_bind(dev);
+    spin_unlock(&device_model_lock);
     
     return 0;
 }
 
 void device_unregister(struct device *dev) {
     if (!dev) return;
+    spin_lock(&device_model_lock);
     if (dev->driver && dev->driver->remove) {
         dev->driver->remove(dev);
     }
     list_del(&dev->list);
+    dev->driver = NULL;
+    spin_unlock(&device_model_lock);
 }
 
 int driver_register(struct driver *drv) {
     if (!drv || !drv->probe) return -EINVAL;
     
+    spin_lock(&device_model_lock);
     list_add_tail(&drv->list, &driver_list);
     
     /* Try to attach to existing devices */
     struct device *dev;
     list_for_each_entry(dev, &device_list, list) {
-        if (!dev->driver) bus_match_probe(dev, drv);
+        if (!dev->driver)
+            bus_match_probe(dev, drv);
     }
+    spin_unlock(&device_model_lock);
     
     return 0;
 }
 
 void driver_unregister(struct driver *drv) {
-    if (drv) list_del(&drv->list);
-    /* TODO: Detach from devices */
+    if (!drv)
+        return;
+    spin_lock(&device_model_lock);
+    struct device *dev;
+    list_for_each_entry(dev, &device_list, list) {
+        if (dev->driver == drv) {
+            if (drv->remove) {
+                spin_unlock(&device_model_lock);
+                drv->remove(dev);
+                spin_lock(&device_model_lock);
+            }
+            dev->driver = NULL;
+        }
+    }
+    list_del(&drv->list);
+    spin_unlock(&device_model_lock);
 }
 
 const struct resource *device_get_resource(struct device *dev, uint64_t type,

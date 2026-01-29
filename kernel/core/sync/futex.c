@@ -138,21 +138,19 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
             return (rc < 0) ? rc : -EAGAIN;
         }
 
-        curr->state = PROC_SLEEPING;
-        curr->wait_channel = (void *)uaddr;
         mutex_unlock(&waiter.bucket->lock);
 
         struct poll_sleep sleep = {0};
         INIT_LIST_HEAD(&sleep.node);
         if (deadline)
             poll_sleep_arm(&sleep, curr, deadline);
-        schedule();
+        int sleep_rc = proc_sleep_on(NULL, (void *)uaddr, true);
         poll_sleep_cancel(&sleep);
 
         if (waiter.woken)
             return 0;
 
-        if (curr->sig_pending) {
+        if (sleep_rc == -EINTR) {
             futex_waiter_remove(&waiter);
             return -EINTR;
         }

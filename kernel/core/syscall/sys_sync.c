@@ -4,23 +4,15 @@
 
 #include <kairos/config.h>
 #include <kairos/futex.h>
+#include <kairos/mm.h>
+#include <kairos/printk.h>
 #include <kairos/uaccess.h>
+
+#include "sys_time_helpers.h"
 
 extern int do_sem_init(int count);
 extern int do_sem_wait(int sem_id);
 extern int do_sem_post(int sem_id);
-
-#define NS_PER_SEC 1000000000ULL
-
-static int copy_timespec_from_user(uint64_t ptr, struct timespec *out) {
-    if (!ptr || !out)
-        return 0;
-    if (copy_from_user(out, (const void *)ptr, sizeof(*out)) < 0)
-        return -EFAULT;
-    if (out->tv_sec < 0 || out->tv_nsec < 0 || out->tv_nsec >= (int64_t)NS_PER_SEC)
-        return -EINVAL;
-    return 1;
-}
 
 int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_ptr,
                   uint64_t uaddr2, uint64_t val3) {
@@ -30,7 +22,7 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_pt
     case FUTEX_WAIT: {
         struct timespec ts;
         struct timespec *tsp = NULL;
-        int rc = copy_timespec_from_user(timeout_ptr, &ts);
+        int rc = sys_copy_timespec(timeout_ptr, &ts, true);
         if (rc < 0)
             return rc;
         if (rc > 0)
@@ -62,30 +54,62 @@ int64_t sys_sem_post(uint64_t sem_id, uint64_t a1, uint64_t a2, uint64_t a3,
     return (int64_t)do_sem_post((int)sem_id);
 }
 
+static int64_t syslog_read_helper(uint64_t bufp, uint64_t len, bool all,
+                                   bool clear)
+{
+    if (!bufp || !len) {
+        return -EINVAL;
+    }
+    char *kbuf = kmalloc((size_t)len);
+    if (!kbuf) {
+        return -ENOMEM;
+    }
+    ssize_t n;
+    if (all) {
+        n = klog_read_all(kbuf, (size_t)len);
+    } else {
+        n = klog_read(kbuf, (size_t)len, clear);
+    }
+    if (n > 0 && copy_to_user((void *)bufp, kbuf, (size_t)n) < 0) {
+        kfree(kbuf);
+        return -EFAULT;
+    }
+    kfree(kbuf);
+    return n;
+}
+
 int64_t sys_syslog(uint64_t type, uint64_t bufp, uint64_t len, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if ((int64_t)len < 0)
+    if ((int64_t)len < 0) {
         return -EINVAL;
+    }
 
     switch ((int)type) {
     case 2: /* SYSLOG_ACTION_READ */
+        return syslog_read_helper(bufp, len, false, false);
     case 3: /* SYSLOG_ACTION_READ_ALL */
+        return syslog_read_helper(bufp, len, true, false);
     case 4: /* SYSLOG_ACTION_READ_CLEAR */
-        if (bufp && len) {
-            /* No kernel log buffer yet; return empty data. */
-            if (copy_to_user((void *)bufp, "", 0) < 0)
-                return -EFAULT;
-        }
-        return 0;
+        return syslog_read_helper(bufp, len, false, true);
     case 5: /* SYSLOG_ACTION_CLEAR */
+        klog_clear();
+        return 0;
     case 6: /* SYSLOG_ACTION_CONSOLE_OFF */
     case 7: /* SYSLOG_ACTION_CONSOLE_ON */
     case 8: /* SYSLOG_ACTION_CONSOLE_LEVEL */
-    case 9: /* SYSLOG_ACTION_SIZE_UNREAD */
-    case 10: /* SYSLOG_ACTION_SIZE_BUFFER */
         return 0;
+    case 9: /* SYSLOG_ACTION_SIZE_UNREAD */
+        return (int64_t)klog_size_unread();
+    case 10: /* SYSLOG_ACTION_SIZE_BUFFER */
+        return (int64_t)klog_size_buffer();
     default:
         return -EINVAL;
     }
+}
+
+int64_t sys_sync(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                 uint64_t a4, uint64_t a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    return 0;
 }

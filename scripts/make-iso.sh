@@ -43,12 +43,15 @@ echo "=== Creating ISO for $ARCH ==="
 rm -rf "$ISO_DIR"
 mkdir -p "$ISO_DIR/boot/limine"
 mkdir -p "$ISO_DIR/EFI/BOOT"
+mkdir -p "$ISO_DIR/EFI/limine"
 
 # Copy kernel
 cp "$KERNEL" "$ISO_DIR/boot/"
+cp "$KERNEL" "$ISO_DIR/kairos.elf"
 
 # Copy Limine files
-cp limine.cfg "$ISO_DIR/boot/limine/"
+cp limine.cfg "$ISO_DIR/boot/limine/limine.conf"
+cp limine.cfg "$ISO_DIR/EFI/limine/limine.conf"
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_DIR/boot/limine/"
 cp "$LIMINE_DIR/limine-bios-cd.bin" "$ISO_DIR/boot/limine/"
 cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_DIR/boot/limine/"
@@ -84,5 +87,9 @@ echo "=== ISO created: $ISO_FILE ==="
 echo ""
 echo "To test:"
 echo "  QEMU (BIOS):  qemu-system-$ARCH -cdrom $ISO_FILE -m 256M"
-echo "  QEMU (UEFI):  qemu-system-$ARCH -cdrom $ISO_FILE -m 256M -bios /usr/share/ovmf/OVMF.fd"
+if [ "$ARCH" = "riscv64" ]; then
+    echo "  QEMU (UEFI):  make ARCH=riscv64 run"
+else
+    echo "  QEMU (UEFI):  qemu-system-$ARCH -cdrom $ISO_FILE -m 256M -bios /usr/share/ovmf/OVMF.fd"
+fi
 echo "  Real hardware: Write to USB with 'dd if=$ISO_FILE of=/dev/sdX bs=4M'"

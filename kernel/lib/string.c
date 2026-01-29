@@ -54,6 +54,17 @@ size_t strlen(const char *s) {
 }
 
 /**
+ * strnlen - Calculate string length with an upper bound
+ */
+size_t strnlen(const char *s, size_t maxlen) {
+    size_t len = 0;
+    while (len < maxlen && s[len]) {
+        len++;
+    }
+    return len;
+}
+
+/**
  * strcmp - Compare two strings
  */
 int strcmp(const char *s1, const char *s2) {
@@ -351,6 +362,21 @@ int memcmp(const void *s1, const void *s2, size_t n) {
         p2++;
     }
     return 0;
+}
+
+/**
+ * memchr - Find first occurrence of a byte in memory
+ */
+void *memchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s;
+    unsigned char uc = (unsigned char)c;
+    while (n--) {
+        if (*p == uc) {
+            return (void *)p;
+        }
+        p++;
+    }
+    return NULL;
 }
 
 /**

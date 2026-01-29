@@ -167,3 +167,120 @@ int64_t sys_readv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
     }
     return (int64_t)total;
 }
+
+static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
+                                uint64_t offset, bool is_write) {
+    if ((int64_t)offset < 0)
+        return -EINVAL;
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > 1024)
+        return -EINVAL;
+
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    if (!f->vnode || f->vnode->type == VNODE_PIPE)
+        return -ESPIPE;
+    if (f->vnode->type == VNODE_DIR)
+        return -EISDIR;
+
+    int accmode = (int)(f->flags & O_ACCMODE);
+    if (!is_write && accmode == O_WRONLY)
+        return -EBADF;
+    if (is_write && accmode == O_RDONLY)
+        return -EBADF;
+
+    if (!is_write && (f->flags & O_NONBLOCK)) {
+        if (!(vfs_poll(f, POLLIN) & POLLIN))
+            return -EAGAIN;
+    }
+
+    if (!f->vnode->ops ||
+        (!is_write && !f->vnode->ops->read) ||
+        (is_write && !f->vnode->ops->write))
+        return -EINVAL;
+
+    uint8_t kbuf[512];
+    size_t total = 0;
+    off_t off = (off_t)offset;
+    for (size_t i = 0; i < iovcnt; i++) {
+        struct iovec iov;
+        if (copy_from_user(&iov, (void *)(iov_ptr + i * sizeof(struct iovec)),
+                           sizeof(iov)) < 0)
+            return total ? (int64_t)total : -EFAULT;
+        if (iov.iov_len == 0)
+            continue;
+        size_t done = 0;
+        while (done < iov.iov_len) {
+            size_t chunk = (iov.iov_len - done > sizeof(kbuf))
+                               ? sizeof(kbuf)
+                               : (size_t)(iov.iov_len - done);
+            if (is_write) {
+                if (copy_from_user(kbuf,
+                                   (const void *)((uint64_t)iov.iov_base + done),
+                                   chunk) < 0)
+                    return total ? (int64_t)total : -EFAULT;
+                mutex_lock(&f->lock);
+                ssize_t n = f->vnode->ops->write(f->vnode, kbuf, chunk, off);
+                mutex_unlock(&f->lock);
+                if (n < 0)
+                    return total ? (int64_t)total : (int64_t)n;
+                if (n == 0)
+                    break;
+                off += n;
+                done += (size_t)n;
+                total += (size_t)n;
+                if ((size_t)n < chunk)
+                    break;
+            } else {
+                mutex_lock(&f->lock);
+                ssize_t n = f->vnode->ops->read(f->vnode, kbuf, chunk, off);
+                mutex_unlock(&f->lock);
+                if (n < 0)
+                    return total ? (int64_t)total : (int64_t)n;
+                if (n == 0)
+                    break;
+                if (copy_to_user((void *)((uint64_t)iov.iov_base + done), kbuf,
+                                 (size_t)n) < 0)
+                    return total ? (int64_t)total : -EFAULT;
+                off += n;
+                done += (size_t)n;
+                total += (size_t)n;
+                if ((size_t)n < chunk)
+                    break;
+            }
+        }
+    }
+    return (int64_t)total;
+}
+
+int64_t sys_preadv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
+                   uint64_t offset, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    return sys_pread_writev(fd, iov_ptr, iovcnt, offset, false);
+}
+
+int64_t sys_pwritev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
+                    uint64_t offset, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    return sys_pread_writev(fd, iov_ptr, iovcnt, offset, true);
+}
+
+int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    return 0;
+}
+
+int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
+                      uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    return 0;
+}

@@ -15,6 +15,7 @@
 
 # Default architecture
 ARCH ?= riscv64
+EMBEDDED_INIT ?= 0
 
 # Build directory
 BUILD_DIR := build/$(ARCH)
@@ -32,6 +33,10 @@ ifeq ($(V),0)
 else
   Q :=
 endif
+
+# Shared architecture sources
+COMMON_ARCH_SRCS := \
+    kernel/arch/common/arch_common.c
 
 # ============================================================
 #                    Toolchain Setup
@@ -87,6 +92,14 @@ CFLAGS += -O2 -g
 CFLAGS += -I kernel/include
 CFLAGS += -I kernel/arch/$(ARCH)/include
 CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
+CFLAGS += -DCONFIG_EMBEDDED_INIT=$(EMBEDDED_INIT)
+
+# lwIP include paths
+LWIP_DIR := third_party/lwip
+CFLAGS += -I kernel/net/lwip_port
+CFLAGS += -I $(LWIP_DIR)/src/include
+# Compat shims for lwIP (provides string.h, stdlib.h, errno.h)
+LWIP_COMPAT_CFLAGS := -I kernel/net/lwip_port/compat
 
 # Architecture-specific flags
 ifeq ($(ARCH),riscv64)
@@ -119,19 +132,38 @@ LDSCRIPT := kernel/arch/$(ARCH)/linker.ld
 
 # Core kernel sources (architecture-independent)
 CORE_SRCS := \
+    kernel/boot/boot.c \
+    kernel/boot/limine.c \
     kernel/core/main.c \
+    kernel/core/init/boot.c \
+    kernel/core/init/mm.c \
+    kernel/core/init/devices.c \
+    kernel/core/init/net.c \
+    kernel/core/init/fs.c \
+    kernel/core/init/user.c \
     kernel/core/mm/buddy.c \
     kernel/core/mm/kmalloc.c \
     kernel/core/mm/vmm.c \
     kernel/core/mm/vma.c \
+    kernel/core/time/time.c \
     kernel/core/dev/firmware.c \
-    kernel/core/proc/process.c \
+    kernel/core/proc/proc_core.c \
+    kernel/core/proc/proc_fork.c \
+    kernel/core/proc/proc_exec.c \
+    kernel/core/proc/proc_wait.c \
+    kernel/core/proc/proc_exit.c \
+    kernel/core/proc/proc_init.c \
     kernel/core/proc/user_test.c \
     kernel/core/proc/elf.c \
     kernel/core/proc/fd.c \
     kernel/core/proc/signal.c \
     kernel/core/sched/sched.c \
     kernel/core/net/net.c \
+    kernel/net/socket.c \
+    kernel/net/af_unix.c \
+    kernel/net/af_inet.c \
+    kernel/net/lwip_netif.c \
+    kernel/net/lwip_port/sys_arch.c \
     kernel/core/sync/sync.c \
     kernel/core/sync/wait.c \
     kernel/core/sync/pollwait.c \
@@ -145,27 +177,42 @@ CORE_SRCS := \
     kernel/core/syscall/sys_fs_io.c \
     kernel/core/syscall/sys_fs_fd.c \
     kernel/core/syscall/sys_mm.c \
+    kernel/core/syscall/sys_socket.c \
     kernel/core/syscall/sys_epoll.c \
     kernel/core/syscall/sys_poll.c \
     kernel/core/syscall/sys_proc.c \
     kernel/core/syscall/sys_sync.c \
     kernel/core/syscall/sys_time.c \
+    kernel/core/syscall/sys_time_helpers.c \
     kernel/core/syscall/syscall.c \
     kernel/lib/printk.c \
     kernel/lib/vsprintf.c \
+    kernel/lib/ringbuf.c \
     kernel/firmware/acpi.c \
     kernel/firmware/fdt.c \
     kernel/lib/rbtree.c \
     kernel/lib/string.c \
-    kernel/fs/bio.c \
-    kernel/fs/vfs/vfs.c \
-    kernel/fs/vfs/pipe.c \
-    kernel/fs/vfs/epoll.c \
-    kernel/fs/vfs/poll.c \
+    kernel/fs/bio/bio.c \
+    kernel/fs/vfs/core.c \
+    kernel/fs/vfs/mount.c \
+    kernel/fs/vfs/file.c \
+    kernel/fs/vfs/path.c \
+    kernel/fs/vfs/vnode.c \
     kernel/fs/vfs/dentry.c \
     kernel/fs/vfs/namei.c \
+    kernel/fs/ipc/pipe.c \
+    kernel/fs/poll/vfs_poll.c \
+    kernel/fs/poll/epoll.c \
     kernel/fs/devfs/devfs.c \
     kernel/fs/ext2/ext2.c \
+    kernel/fs/ext2/super.c \
+    kernel/fs/ext2/inode.c \
+    kernel/fs/ext2/block.c \
+    kernel/fs/ext2/vnode.c \
+    kernel/fs/ext2/dir.c \
+    kernel/fs/fat32/fat32.c \
+    kernel/fs/fat32/fat32_diskio.c \
+    kernel/fs/fat32/fat32_fatfs.c \
     kernel/core/dev/device.c \
     kernel/bus/platform.c \
     kernel/bus/pci.c \
@@ -175,21 +222,53 @@ CORE_SRCS := \
     kernel/drivers/char/console.c \
     kernel/drivers/block/blkdev.c \
     kernel/drivers/block/virtio_blk.c \
-    kernel/drivers/net/virtio_net.c
+    kernel/drivers/net/virtio_net.c \
+    kernel/core/tests/driver_tests.c
 
 # Architecture-specific sources
+ifeq ($(ARCH),riscv64)
 ARCH_SRCS := \
-    kernel/arch/$(ARCH)/boot.S \
-    kernel/arch/$(ARCH)/entry.c \
-    kernel/arch/$(ARCH)/plic.c \
-    kernel/arch/$(ARCH)/mmu.c \
-    kernel/arch/$(ARCH)/trapasm.S \
-    kernel/arch/$(ARCH)/trap.c \
-    kernel/arch/$(ARCH)/timer.c \
-    kernel/arch/$(ARCH)/switch.S \
-    kernel/arch/$(ARCH)/context.c \
-    kernel/arch/$(ARCH)/extable.c \
-    kernel/arch/$(ARCH)/lib/uaccess.S
+    kernel/arch/riscv64/boot.S \
+    kernel/arch/riscv64/entry.c \
+    kernel/arch/riscv64/plic.c \
+    kernel/arch/riscv64/mmu.c \
+    kernel/arch/riscv64/trapasm.S \
+    kernel/arch/riscv64/trap.c \
+    kernel/arch/riscv64/timer.c \
+    kernel/arch/riscv64/switch.S \
+    kernel/arch/riscv64/context.c \
+    kernel/arch/riscv64/extable.c \
+    kernel/arch/riscv64/lib/uaccess.S
+else ifeq ($(ARCH),x86_64)
+ARCH_SRCS := \
+    kernel/arch/x86_64/boot.S \
+    kernel/arch/x86_64/entry.c \
+    kernel/arch/x86_64/mmu.c \
+    kernel/arch/x86_64/trapasm.S \
+    kernel/arch/x86_64/trap.c \
+    kernel/arch/x86_64/timer.c \
+    kernel/arch/x86_64/apic.c \
+    kernel/arch/x86_64/ioapic.c \
+    kernel/arch/x86_64/firmware.c \
+    kernel/arch/x86_64/switch.S \
+    kernel/arch/x86_64/context.c \
+    kernel/arch/x86_64/extable.c \
+    kernel/arch/x86_64/lib/uaccess.S
+else ifeq ($(ARCH),aarch64)
+ARCH_SRCS := \
+    kernel/arch/aarch64/boot.S \
+    kernel/arch/aarch64/entry.c \
+    kernel/arch/aarch64/mmu.c \
+    kernel/arch/aarch64/trapasm.S \
+    kernel/arch/aarch64/trap.c \
+    kernel/arch/aarch64/timer.c \
+    kernel/arch/aarch64/gic.c \
+    kernel/arch/aarch64/firmware.c \
+    kernel/arch/aarch64/switch.S \
+    kernel/arch/aarch64/context.c \
+    kernel/arch/aarch64/extable.c \
+    kernel/arch/aarch64/lib/uaccess.S
+endif
 
 # Future phases will add:
 # - kernel/core/sched/sched.c, cfs.c
@@ -200,19 +279,57 @@ ARCH_SRCS := \
 # - kernel/ipc/pipe.c, signal.c
 # - kernel/fs/*, kernel/drivers/*, kernel/syscall/*
 
+# lwIP sources
+LWIP_SRCS := \
+    $(LWIP_DIR)/src/core/init.c \
+    $(LWIP_DIR)/src/core/def.c \
+    $(LWIP_DIR)/src/core/dns.c \
+    $(LWIP_DIR)/src/core/inet_chksum.c \
+    $(LWIP_DIR)/src/core/ip.c \
+    $(LWIP_DIR)/src/core/mem.c \
+    $(LWIP_DIR)/src/core/memp.c \
+    $(LWIP_DIR)/src/core/netif.c \
+    $(LWIP_DIR)/src/core/pbuf.c \
+    $(LWIP_DIR)/src/core/raw.c \
+    $(LWIP_DIR)/src/core/stats.c \
+    $(LWIP_DIR)/src/core/sys.c \
+    $(LWIP_DIR)/src/core/tcp.c \
+    $(LWIP_DIR)/src/core/tcp_in.c \
+    $(LWIP_DIR)/src/core/tcp_out.c \
+    $(LWIP_DIR)/src/core/timeouts.c \
+    $(LWIP_DIR)/src/core/udp.c \
+    $(LWIP_DIR)/src/core/ipv4/acd.c \
+    $(LWIP_DIR)/src/core/ipv4/autoip.c \
+    $(LWIP_DIR)/src/core/ipv4/dhcp.c \
+    $(LWIP_DIR)/src/core/ipv4/etharp.c \
+    $(LWIP_DIR)/src/core/ipv4/icmp.c \
+    $(LWIP_DIR)/src/core/ipv4/igmp.c \
+    $(LWIP_DIR)/src/core/ipv4/ip4.c \
+    $(LWIP_DIR)/src/core/ipv4/ip4_addr.c \
+    $(LWIP_DIR)/src/core/ipv4/ip4_frag.c \
+    $(LWIP_DIR)/src/api/err.c \
+    $(LWIP_DIR)/src/api/tcpip.c \
+    $(LWIP_DIR)/src/netif/ethernet.c
+
+# lwIP needs relaxed warnings (third-party code)
+LWIP_CFLAGS := $(CFLAGS) $(LWIP_COMPAT_CFLAGS) -Wno-unused-parameter \
+    -Wno-sign-compare -Wno-address -Wno-type-limits
+
 # All sources
-SRCS := $(CORE_SRCS) $(ARCH_SRCS)
+SRCS := $(CORE_SRCS) $(ARCH_SRCS) $(COMMON_ARCH_SRCS) $(LWIP_SRCS)
 
 # Object files
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(filter %.c,$(SRCS)))
 OBJS += $(patsubst %.S,$(BUILD_DIR)/%.o,$(filter %.S,$(SRCS)))
 
-# Embedded user init (riscv64 only)
+# Embedded user init (riscv64 only, optional)
 ifeq ($(ARCH),riscv64)
+ifeq ($(EMBEDDED_INIT),1)
 USER_INIT_BLOB := kernel/core/proc/user_init_blob.h
 $(USER_INIT_BLOB): user/init/init.S user/init/linker.ld scripts/gen-user-init.sh
 	./scripts/gen-user-init.sh $(ARCH)
 $(OBJS): $(USER_INIT_BLOB)
+endif
 endif
 
 # Dependency files
@@ -222,17 +339,37 @@ DEPS := $(OBJS:.o=.d)
 #                    Build Rules
 # ============================================================
 
-.PHONY: all clean run debug iso test
+.PHONY: all clean run debug iso test user busybox rootfs disk
 
 all: $(KERNEL)
+
+user:
+	./scripts/build-musl.sh $(ARCH)
+	$(MAKE) -C user ARCH=$(ARCH)
+
+busybox:
+	./scripts/build-busybox.sh $(ARCH)
+
+rootfs: user busybox
+	ROOTFS_ONLY=1 ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 
 # Link kernel
 $(KERNEL): $(OBJS) $(LDSCRIPT)
 	@echo "  LD      $@"
 	@mkdir -p $(dir $@)
 	$(Q)$(LD) $(LDFLAGS) -T $(LDSCRIPT) -o $@ $(OBJS)
+	@if [ "$(ARCH)" = "riscv64" ]; then \
+		echo "  PATCH   $@"; \
+		python3 scripts/patch-elf-phdrs.py $@; \
+	fi
 	@echo "  OBJCOPY $(KERNEL_BIN)"
 	$(Q)$(OBJCOPY) -O binary $@ $(KERNEL_BIN)
+
+# Compile lwIP C files (relaxed warnings for third-party code)
+$(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c
+	@echo "  CC      $<"
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(LWIP_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Compile C files
 $(BUILD_DIR)/%.o: %.c
@@ -257,24 +394,33 @@ $(BUILD_DIR)/%.o: %.S
 QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4 -nographic
 QEMU_FLAGS += -serial stdio -monitor none
 
-ifeq ($(ARCH),riscv64)
-  QEMU_FLAGS += -bios default -kernel $(KERNEL)
-else ifeq ($(ARCH),x86_64)
-  # For x86_64 with Limine, we'd use ISO boot
-  QEMU_FLAGS += -kernel $(KERNEL)
-else ifeq ($(ARCH),aarch64)
-  QEMU_FLAGS += -cpu $(QEMU_CPU) -kernel $(KERNEL)
+ifeq ($(ARCH),aarch64)
+  QEMU_FLAGS += -cpu $(QEMU_CPU)
 endif
 
 # Add virtio disk
-DISK_IMG := disk.img
+DISK_IMG := $(BUILD_DIR)/disk.img
+QEMU_DISK_FLAGS :=
 ifeq ($(ARCH),riscv64)
   # For RISC-V, explicitly create virtio-blk-device
-  QEMU_FLAGS += -global virtio-mmio.force-legacy=false
-  QEMU_FLAGS += -drive id=hd,file=$(DISK_IMG),format=raw,if=none
-  QEMU_FLAGS += -device virtio-blk-device,drive=hd
+  QEMU_DISK_FLAGS += -global virtio-mmio.force-legacy=false
+  QEMU_DISK_FLAGS += -drive id=hd,file=$(DISK_IMG),format=raw,if=none
+  QEMU_DISK_FLAGS += -device virtio-blk-device,drive=hd
 else
-  QEMU_FLAGS += -drive file=$(DISK_IMG),if=virtio,format=raw
+  QEMU_DISK_FLAGS += -drive file=$(DISK_IMG),if=virtio,format=raw
+endif
+
+# RISC-V UEFI boot (Limine)
+ifeq ($(ARCH),riscv64)
+  UEFI_CODE_SRC ?= /usr/share/edk2/riscv/RISCV_VIRT_CODE.fd
+  UEFI_VARS_SRC ?= /usr/share/edk2/riscv/RISCV_VIRT_VARS.fd
+  UEFI_CODE := $(BUILD_DIR)/uefi-code.fd
+  UEFI_VARS := $(BUILD_DIR)/uefi-vars.fd
+  UEFI_BOOT := $(BUILD_DIR)/boot.img
+  QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly=on
+  QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
+  QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
+  QEMU_BOOT_FLAGS += -device virtio-blk-device,drive=boot,bootindex=0
 endif
 
 # Add network (virtio-net for development)
@@ -290,24 +436,47 @@ else
   QEMU_FLAGS += -device virtio-net-pci,netdev=net0
 endif
 
+QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_DISK_FLAGS)
+ifeq ($(ARCH),riscv64)
+  QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS) $(QEMU_DISK_FLAGS)
+endif
+
 check-disk:
 	@if [ -f "$(DISK_IMG)" ]; then \
 		if debugfs -R "stat /bin/busybox" "$(DISK_IMG)" >/dev/null 2>&1; then \
 			echo "disk: /bin/busybox present"; \
 		else \
-			echo "WARN: disk.img missing /bin/busybox (run: BUSYBOX_BIN=... ./scripts/make-disk.sh)"; \
+			echo "WARN: $(DISK_IMG) missing /bin/busybox (run: make ARCH=$(ARCH) disk)"; \
 		fi; \
 	else \
-		echo "WARN: disk.img not found (run: ./scripts/make-disk.sh)"; \
+		echo "WARN: $(DISK_IMG) not found (run: make ARCH=$(ARCH) disk)"; \
 	fi
 
+ifeq ($(ARCH),x86_64)
+run: iso
+	@$(MAKE) --no-print-directory check-disk
+	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
+
+# Run with e1000 network card (for testing)
+run-e1000: iso
+	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA) -device e1000,netdev=net0
+else ifeq ($(ARCH),riscv64)
+run: $(KERNEL) uefi
+	@$(MAKE) --no-print-directory check-disk
+	$(QEMU) $(QEMU_RUN_FLAGS)
+
+# Run with e1000 network card (for testing)
+run-e1000: $(KERNEL) uefi
+	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+else
 run: $(KERNEL)
 	@$(MAKE) --no-print-directory check-disk
-	$(QEMU) $(QEMU_FLAGS)
+	$(QEMU) $(QEMU_RUN_FLAGS)
 
 # Run with e1000 network card (for testing)
 run-e1000: $(KERNEL)
-	$(QEMU) $(QEMU_FLAGS) -device e1000,netdev=net0
+	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+endif
 
 # Create bootable ISO (x86_64 only for now)
 iso: $(KERNEL)
@@ -317,11 +486,25 @@ iso: $(KERNEL)
 run-iso: iso
 	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
 
+ifeq ($(ARCH),x86_64)
+# Debug with GDB
+debug: iso
+	@echo "Starting QEMU with GDB server on localhost:1234"
+	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
+	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA) -s -S
+else ifeq ($(ARCH),riscv64)
+# Debug with GDB
+debug: $(KERNEL) uefi
+	@echo "Starting QEMU with GDB server on localhost:1234"
+	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
+	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
+else
 # Debug with GDB
 debug: $(KERNEL)
 	@echo "Starting QEMU with GDB server on localhost:1234"
 	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
-	$(QEMU) $(QEMU_FLAGS) -s -S
+	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
+endif
 
 # ============================================================
 #                    Utility Targets
@@ -330,11 +513,14 @@ debug: $(KERNEL)
 clean:
 	rm -rf build/
 
+# Prepare RISC-V UEFI firmware + Limine boot image
+uefi: $(KERNEL)
+	ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
+	ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
+
 # Create a disk image with ext2 filesystem
-disk:
-	@echo "Creating disk image..."
-	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
-	mkfs.ext2 $(DISK_IMG)
+disk: rootfs
+	ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 
 # Disassembly
 disasm: $(KERNEL)
@@ -345,8 +531,16 @@ symbols: $(KERNEL)
 	$(OBJDUMP) -t $(KERNEL) | sort > $(BUILD_DIR)/kairos.sym
 
 # Run tests (in QEMU)
+ifeq ($(ARCH),x86_64)
+test: iso
+	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
+else ifeq ($(ARCH),riscv64)
+test: $(KERNEL) uefi
+	$(QEMU) $(QEMU_RUN_FLAGS)
+else
 test: $(KERNEL)
-	$(QEMU) $(QEMU_FLAGS) -append "test"
+	$(QEMU) $(QEMU_RUN_FLAGS)
+endif
 
 # Show help
 help:
@@ -357,11 +551,16 @@ help:
 	@echo "  run      - Run in QEMU"
 	@echo "  debug    - Run with GDB server"
 	@echo "  clean    - Remove build artifacts"
+	@echo "  user     - Build userland init"
+	@echo "  busybox  - Build busybox for userland"
+	@echo "  rootfs   - Stage root filesystem"
 	@echo "  disk     - Create disk image"
+	@echo "  uefi     - Prepare RISC-V UEFI boot image"
 	@echo "  test     - Run kernel tests"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
+	@echo "  EMBEDDED_INIT - Build embedded init blob (riscv64 only)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""
 	@echo "Examples:"

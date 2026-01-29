@@ -13,6 +13,7 @@
 
 struct dentry;
 struct path;
+struct timespec;
 
 enum vnode_type {
     VNODE_FILE,
@@ -59,8 +60,16 @@ struct stat {
 #define S_IFDIR 0040000
 #define S_IFCHR 0020000
 #define S_IFBLK 0060000
+#define S_IFIFO 0010000
+#define S_IFLNK 0120000
+#define S_IFSOCK 0140000
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)
+#define S_ISBLK(m) (((m) & S_IFMT) == S_IFBLK)
+#define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
+#define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
+#define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
 
 struct vnode {
     enum vnode_type type;
@@ -69,6 +78,9 @@ struct vnode {
     gid_t gid;
     uint64_t size;
     ino_t ino;
+    nlink_t nlink;
+    time_t atime, mtime, ctime;
+    dev_t rdev;
     struct file_ops *ops;
     void *fs_data;
     struct mount *mount;
@@ -159,6 +171,12 @@ struct vfs_ops {
     int (*rmdir)(struct vnode *dir, const char *name);
     int (*rename)(struct vnode *odir, const char *oname, struct vnode *ndir,
                   const char *nname);
+    int (*link)(struct vnode *dir, const char *name, struct vnode *target);
+    int (*mknod)(struct vnode *dir, const char *name, mode_t mode, dev_t dev);
+    int (*chmod)(struct vnode *vn, mode_t mode);
+    int (*chown)(struct vnode *vn, uid_t uid, gid_t gid);
+    int (*utimes)(struct vnode *vn, const struct timespec *atime,
+                  const struct timespec *mtime);
 };
 
 struct file_ops {
@@ -233,6 +251,8 @@ ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz);
 void vnode_get(struct vnode *vn);
 void vnode_put(struct vnode *vn);
 void vnode_set_parent(struct vnode *vn, struct vnode *parent, const char *name);
+ssize_t vfs_readlink_vnode(struct vnode *vn, char *buf, size_t bufsz,
+                           bool require_full);
 
 struct fs_type {
     const char *name;

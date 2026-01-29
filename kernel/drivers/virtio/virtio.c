@@ -39,3 +39,29 @@ int virtio_device_register(struct virtio_device *vdev) {
     INIT_LIST_HEAD(&vdev->vqs);
     return device_register(&vdev->dev);
 }
+
+int virtio_device_init(struct virtio_device *vdev, uint64_t driver_features) {
+    if (!vdev || !vdev->ops)
+        return -EINVAL;
+
+    vdev->ops->set_status(vdev, 0);
+    vdev->ops->set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+
+    vdev->ops->finalize_features(vdev, driver_features);
+    vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FEATURES_OK);
+
+    uint8_t status = vdev->ops->get_status(vdev);
+    if (!(status & VIRTIO_STATUS_FEATURES_OK)) {
+        vdev->ops->set_status(vdev, status | VIRTIO_STATUS_FAILED);
+        return -EIO;
+    }
+
+    vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_DRIVER_OK);
+    return 0;
+}
+
+void virtio_device_set_failed(struct virtio_device *vdev) {
+    if (!vdev || !vdev->ops)
+        return;
+    vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FAILED);
+}

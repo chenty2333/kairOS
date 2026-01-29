@@ -7,8 +7,8 @@
 
 #include <kairos/types.h>
 
-int fdt_parse(void *fdt);
-int fdt_scan_devices(void *fdt);
+int fdt_parse(const void *fdt);
+int fdt_scan_devices(const void *fdt);
 
 int fdt_get_memory(int index, paddr_t *base, size_t *size);
 int fdt_memory_count(void);

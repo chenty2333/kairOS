@@ -11,6 +11,8 @@
 #include <kairos/sync.h>
 #include <kairos/types.h>
 
+struct boot_info;
+
 #define MAX_ORDER 11
 #define PG_RESERVED (1 << 0)
 #define PG_KERNEL (1 << 1)
@@ -23,6 +25,7 @@ struct page {
 };
 
 void pmm_init(paddr_t start, paddr_t end);
+void pmm_init_from_memmap(const struct boot_info *bi);
 paddr_t pmm_alloc_page(void);
 paddr_t pmm_alloc_pages(size_t count);
 void pmm_free_page(paddr_t pa);
@@ -109,6 +112,7 @@ void mm_destroy(struct mm_struct *mm);
 struct mm_struct *mm_clone(struct mm_struct *src);
 struct vm_area *mm_find_vma(struct mm_struct *mm, vaddr_t addr);
 void mm_unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end);
+void mm_unmap_range_noflush(paddr_t pgdir, vaddr_t start, vaddr_t end);
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags);
 int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
                uint32_t flags, struct vnode *vn, off_t offset);
@@ -119,6 +123,9 @@ int mm_mmap(struct mm_struct *mm, vaddr_t addr, size_t len, uint32_t prot,
             uint32_t flags, struct vnode *vn, off_t offset, bool fixed,
             vaddr_t *out);
 int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len);
+int mm_mremap(struct mm_struct *mm, vaddr_t old_addr, size_t old_len,
+              size_t new_len, uint32_t flags, vaddr_t new_addr,
+              vaddr_t *out);
 int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
                 uint32_t prot);
 

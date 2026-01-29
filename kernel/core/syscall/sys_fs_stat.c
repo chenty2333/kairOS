@@ -83,7 +83,7 @@ int64_t sys_stat(uint64_t path, uint64_t st_ptr, uint64_t a2, uint64_t a3,
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
     struct stat st;
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     int ret = vfs_stat(kpath, &st);
@@ -125,7 +125,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
     struct stat st;

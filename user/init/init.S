@@ -1040,12 +1040,65 @@ open_old_busybox:
     li a2, 30
     li a7, SYS_write
     ecall
-    j exec_busybox
+    j install_applets
 open_old_busybox_fail:
     li a0, 1
     la a1, msg_open_old_busybox_fail
     li a2, 32
     li a7, SYS_write
+    ecall
+
+install_applets:
+    /* Create common applet symlinks to /bin/busybox (ignore errors). */
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_sh
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_ls
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_cat
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_echo
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_mkdir
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_rm
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_mv
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_cp
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_touch
+    li a7, SYS_symlinkat
+    ecall
+    la a0, path_sh
+    li a1, AT_FDCWD
+    la a2, path_applet_pwd
+    li a7, SYS_symlinkat
     ecall
 
 exec_busybox:
@@ -1248,6 +1301,26 @@ msg_open_old_busybox_fail:
 
 path_sh:
     .asciz "/bin/busybox"
+path_applet_sh:
+    .asciz "/bin/sh"
+path_applet_ls:
+    .asciz "/bin/ls"
+path_applet_cat:
+    .asciz "/bin/cat"
+path_applet_echo:
+    .asciz "/bin/echo"
+path_applet_mkdir:
+    .asciz "/bin/mkdir"
+path_applet_rm:
+    .asciz "/bin/rm"
+path_applet_mv:
+    .asciz "/bin/mv"
+path_applet_cp:
+    .asciz "/bin/cp"
+path_applet_touch:
+    .asciz "/bin/touch"
+path_applet_pwd:
+    .asciz "/bin/pwd"
     .align 3
 argv_sh:
     .dword arg_sh

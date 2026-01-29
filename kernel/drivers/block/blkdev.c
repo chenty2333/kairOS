@@ -32,6 +32,11 @@ int blkdev_register(struct blkdev *dev)
         return -EINVAL;
     }
 
+    if (dev->sector_size == 0 || dev->sector_count == 0) {
+        pr_err("blkdev: %s invalid geometry\n", dev->name);
+        return -EINVAL;
+    }
+
     if (!dev->ops->read || !dev->ops->write) {
         pr_err("blkdev: %s missing required operations\n", dev->name);
         return -EINVAL;
@@ -50,6 +55,7 @@ int blkdev_register(struct blkdev *dev)
     }
 
     /* Add to list */
+    INIT_LIST_HEAD(&dev->list);
     dev->refcount = 0;
     list_add_tail(&dev->list, &blkdev_list);
 

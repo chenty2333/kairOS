@@ -9,6 +9,8 @@
 #include <kairos/io.h>
 #include <kairos/types.h>
 #include <kairos/list.h>
+#include <kairos/spinlock.h>
+#include <kairos/wait.h>
 
 /* VirtQueue Structures */
 struct virtq_desc {
@@ -50,6 +52,12 @@ struct virtqueue {
     struct virtq_avail *avail;
     struct virtq_used *used;
     uint16_t last_used_idx;
+    uint16_t free_head;
+    uint16_t free_count;
+    uint16_t *free_next;
+    void **cookies;
+    spinlock_t lock;
+    struct wait_queue wq;
     void *priv;
     struct list_head list;
 };
@@ -99,9 +107,16 @@ int virtio_register_driver(struct virtio_driver *vdrv);
 int virtio_device_register(struct virtio_device *vdev);
 
 /* VirtQueue API */
-int virtqueue_add_buf(struct virtqueue *vq, struct virtq_desc *descs, uint32_t count, void *data);
+struct virtqueue *virtqueue_alloc(struct virtio_device *vdev, uint32_t index,
+                                  uint32_t num);
+void virtqueue_free(struct virtqueue *vq);
+int virtqueue_add_buf(struct virtqueue *vq, struct virtq_desc *descs,
+                      uint32_t count, void *cookie);
 void virtqueue_kick(struct virtqueue *vq);
 void *virtqueue_get_buf(struct virtqueue *vq, uint32_t *len);
+
+int virtio_device_init(struct virtio_device *vdev, uint64_t driver_features);
+void virtio_device_set_failed(struct virtio_device *vdev);
 
 /* Status bits */
 #define VIRTIO_STATUS_ACKNOWLEDGE       1

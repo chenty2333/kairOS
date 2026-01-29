@@ -1,5 +1,5 @@
 /**
- * kernel/fs/bio.c - Block I/O (Buffer Cache)
+ * kernel/fs/bio/bio.c - Block I/O (Buffer Cache)
  */
 
 #include <kairos/blkdev.h>

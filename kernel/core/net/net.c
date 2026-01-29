@@ -27,10 +27,29 @@ int netdev_register(struct netdev *dev) {
         net_init();
 
     spin_lock(&netdev_lock);
+    struct netdev *existing;
+    list_for_each_entry(existing, &netdev_list, list) {
+        if (strcmp(existing->name, dev->name) == 0) {
+            spin_unlock(&netdev_lock);
+            pr_warn("net: %s already registered\n", dev->name);
+            return -EEXIST;
+        }
+    }
+    INIT_LIST_HEAD(&dev->list);
     list_add_tail(&dev->list, &netdev_list);
     spin_unlock(&netdev_lock);
 
     pr_info("net: registered %s\n", dev->name);
+    return 0;
+}
+
+int netdev_unregister(struct netdev *dev) {
+    if (!dev || !net_ready)
+        return -EINVAL;
+    spin_lock(&netdev_lock);
+    list_del(&dev->list);
+    spin_unlock(&netdev_lock);
+    pr_info("net: unregistered %s\n", dev->name);
     return 0;
 }
 
@@ -44,4 +63,3 @@ struct netdev *netdev_first(void) {
     spin_unlock(&netdev_lock);
     return dev;
 }
-

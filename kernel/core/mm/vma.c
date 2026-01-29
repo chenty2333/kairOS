@@ -7,7 +7,7 @@
 #include <kairos/string.h>
 #include <kairos/vfs.h>
 
-void mm_unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end) {
+void mm_unmap_range_noflush(paddr_t pgdir, vaddr_t start, vaddr_t end) {
     for (vaddr_t va = start; va < end; va += CONFIG_PAGE_SIZE) {
         paddr_t pa = arch_mmu_translate(pgdir, va);
         if (pa) {
@@ -15,6 +15,10 @@ void mm_unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end) {
             pmm_free_page(pa);
         }
     }
+}
+
+void mm_unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end) {
+    mm_unmap_range_noflush(pgdir, start, end);
     arch_mmu_flush_tlb_all();
 }
 
@@ -267,7 +271,7 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
 
         if (vma->start >= addr && vma->end <= end) {
 
-            mm_unmap_range(mm->pgdir, vma->start, vma->end);
+            mm_unmap_range_noflush(mm->pgdir, vma->start, vma->end);
 
             remove_vma(mm, vma);
             if (vma->vnode)
@@ -280,7 +284,7 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
 
             if (!nv) { mutex_unlock(&mm->lock); return -ENOMEM; }
 
-            mm_unmap_range(mm->pgdir, addr, end);
+            mm_unmap_range_noflush(mm->pgdir, addr, end);
 
             *nv = *vma; nv->start = end; nv->offset += (end - vma->start);
             if (nv->vnode)
@@ -294,13 +298,13 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
 
         } else if (vma->start < addr) {
 
-            mm_unmap_range(mm->pgdir, addr, vma->end);
+            mm_unmap_range_noflush(mm->pgdir, addr, vma->end);
 
             vma->end = addr;
 
         } else {
 
-            mm_unmap_range(mm->pgdir, vma->start, end);
+            mm_unmap_range_noflush(mm->pgdir, vma->start, end);
 
             vma->offset += (end - vma->start);
 
@@ -311,9 +315,116 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
     }
 
     mutex_unlock(&mm->lock);
+    arch_mmu_flush_tlb_all();
 
     return 0;
 
+}
+
+int mm_mremap(struct mm_struct *mm, vaddr_t old_addr, size_t old_len,
+              size_t new_len, uint32_t flags, vaddr_t new_addr, vaddr_t *out)
+{
+    if (!mm || !out || !old_len || !new_len) {
+        return -EINVAL;
+    }
+
+    old_len = ALIGN_UP(old_len, CONFIG_PAGE_SIZE);
+    new_len = ALIGN_UP(new_len, CONFIG_PAGE_SIZE);
+
+    /* Shrink case */
+    if (new_len <= old_len) {
+        if (new_len < old_len) {
+            mm_munmap(mm, old_addr + new_len, old_len - new_len);
+        }
+        *out = old_addr;
+        return 0;
+    }
+
+    /* Try to grow in place */
+    mutex_lock(&mm->lock);
+    struct vm_area *vma = mm_find_vma(mm, old_addr);
+    if (!vma || vma->start != old_addr) {
+        mutex_unlock(&mm->lock);
+        return -EFAULT;
+    }
+
+    vaddr_t old_end = old_addr + old_len;
+    vaddr_t new_end = old_addr + new_len;
+
+    if (!find_vma_intersection(mm, old_end, new_end)) {
+        /* Space is free — grow in place */
+        remove_vma(mm, vma);
+        vma->end = new_end;
+        INIT_LIST_HEAD(&vma->list);
+        memset(&vma->rb_node, 0, sizeof(vma->rb_node));
+        insert_vma(mm, vma);
+        mutex_unlock(&mm->lock);
+        *out = old_addr;
+        return 0;
+    }
+    mutex_unlock(&mm->lock);
+
+    /* Cannot grow in place — need to move */
+    if (!(flags & 1)) { /* MREMAP_MAYMOVE */
+        return -ENOMEM;
+    }
+
+    /* Capture source VMA properties */
+    mutex_lock(&mm->lock);
+    vma = mm_find_vma(mm, old_addr);
+    if (!vma || vma->start != old_addr) {
+        mutex_unlock(&mm->lock);
+        return -EFAULT;
+    }
+    uint32_t vm_flags = vma->flags;
+    struct vnode *vn = vma->vnode;
+    off_t offset = vma->offset;
+    if (vn) {
+        vnode_get(vn);
+    }
+    mutex_unlock(&mm->lock);
+
+    /* Allocate new region */
+    bool fixed = (flags & 2) != 0; /* MREMAP_FIXED */
+    vaddr_t target = fixed ? new_addr : 0;
+    vaddr_t res = 0;
+    int ret = mm_mmap(mm, target, new_len, vm_flags, 0, vn, offset, fixed,
+                      &res);
+    if (vn) {
+        vnode_put(vn);
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Transfer PTEs: remap physical pages from old VA to new VA */
+    for (vaddr_t va = old_addr; va < old_end; va += CONFIG_PAGE_SIZE) {
+        paddr_t pa = arch_mmu_translate(mm->pgdir, va);
+        if (!pa) {
+            continue;
+        }
+        uint64_t pte = arch_mmu_get_pte(mm->pgdir, va);
+        uint64_t pte_flags = pte & ((1UL << 10) - 1);
+        arch_mmu_unmap(mm->pgdir, va);
+        vaddr_t dest = res + (va - old_addr);
+        arch_mmu_map(mm->pgdir, dest, pa, pte_flags);
+    }
+    arch_mmu_flush_tlb_all();
+
+    /* Remove old VMA without freeing physical pages */
+    mutex_lock(&mm->lock);
+    vma = mm_find_vma(mm, old_addr);
+    if (vma && vma->start == old_addr) {
+        remove_vma(mm, vma);
+        if (vma->vnode) {
+            vnode_put(vma->vnode);
+        }
+        kfree(vma);
+    }
+    mutex_unlock(&mm->lock);
+
+    *out = res;
+    return 0;
 }
 
 int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,

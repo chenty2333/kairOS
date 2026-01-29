@@ -1,7 +1,7 @@
 /**
  * kairos/elf.h - ELF binary format definitions
  *
- * Supports ELF64 for RISC-V 64-bit.
+ * Supports ELF64 for supported architectures.
  */
 
 #ifndef _KAIROS_ELF_H
@@ -43,7 +43,9 @@
 #define ET_CORE 4 /* Core file */
 
 /* Machine types */
-#define EM_RISCV 243 /* RISC-V */
+#define EM_RISCV 243    /* RISC-V */
+#define EM_X86_64 62    /* x86-64 */
+#define EM_AARCH64 183  /* AArch64 */
 
 /* Program header types */
 #define PT_NULL 0    /* Unused entry */

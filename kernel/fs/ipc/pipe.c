@@ -1,5 +1,5 @@
 /**
- * kernel/fs/vfs/pipe.c - Pipe Implementation
+ * kernel/fs/ipc/pipe.c - Pipe Implementation
  */
 
 #include <kairos/mm.h>
@@ -11,6 +11,7 @@
 #include <kairos/sync.h>
 #include <kairos/types.h>
 #include <kairos/string.h>
+#include <kairos/pipe.h>
 #include <kairos/vfs.h>
 #include <kairos/wait.h>
 
@@ -226,6 +227,8 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     }
     
     vn->type = VNODE_PIPE;
+    vn->mode = S_IFIFO | 0600;
+    vn->nlink = 1;
     vn->ops = &pipe_ops;
     vn->fs_data = p;
     vn->refcount = 2; /* One for reader, one for writer */

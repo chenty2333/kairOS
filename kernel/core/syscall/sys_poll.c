@@ -92,12 +92,11 @@ static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
             break;
         }
 
-        struct process *curr = proc_current();
         struct poll_sleep sleep = {0};
         INIT_LIST_HEAD(&sleep.node);
         if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        proc_sleep(&sleep);
+            poll_sleep_arm(&sleep, proc_current(), deadline);
+        (void)proc_sleep_on(NULL, &sleep, true);
         poll_sleep_cancel(&sleep);
     } while (1);
 

@@ -8,22 +8,6 @@
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
-static ssize_t namei_readlink_target(struct vnode *vn, char *buf, size_t bufsz) {
-    if (!vn || vn->type != VNODE_SYMLINK || !vn->ops || !vn->ops->read)
-        return -EINVAL;
-    size_t need = (size_t)vn->size;
-    if (need >= bufsz)
-        return -ENAMETOOLONG;
-    if (!need)
-        return 0;
-    ssize_t ret = vn->ops->read(vn, buf, need, 0);
-    if (ret < 0)
-        return ret;
-    if ((size_t)ret != need)
-        return -EIO;
-    return ret;
-}
-
 static int namei_walk_locked(const struct path *base, const char *path,
                              struct path *out, int flags, int depth);
 
@@ -74,7 +58,7 @@ static int namei_get_start(const struct path *base, const char *path,
 static int namei_follow_symlink(struct dentry *d, const char *remain,
                                 struct path *out, int flags, int depth) {
     char target[CONFIG_PATH_MAX];
-    ssize_t tlen = namei_readlink_target(d->vnode, target, sizeof(target));
+    ssize_t tlen = vfs_readlink_vnode(d->vnode, target, sizeof(target), true);
     if (tlen < 0)
         return (int)tlen;
     target[tlen] = '\0';

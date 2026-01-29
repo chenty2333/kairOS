@@ -3,6 +3,7 @@
  */
 
 #include <kairos/config.h>
+#include <kairos/arch.h>
 #include <kairos/virtio.h>
 #include <kairos/blkdev.h>
 #include <kairos/mm.h>
@@ -27,6 +28,16 @@ struct virtio_blk_req {
     uint64_t sector;
 } __packed;
 
+struct virtio_blk_req_ctx {
+    struct virtio_blk_req hdr;
+    uint8_t status;
+    bool done;
+    paddr_t dma_hdr;
+    paddr_t dma_buf;
+    paddr_t dma_status;
+    size_t byte_len;
+};
+
 struct virtio_blk_dev {
     struct virtio_device *vdev;
     struct virtqueue *vq;
@@ -37,54 +48,97 @@ struct virtio_blk_dev {
 
 static void virtio_blk_intr(struct virtio_device *vdev) {
     struct virtio_blk_dev *vb = vdev->priv;
+    if (!vb || !vb->vq)
+        return;
+
+    while (vb->vq->last_used_idx != virtqueue_used_idx(vb->vq)) {
+        struct virtio_blk_req_ctx *ctx = virtqueue_get_buf(vb->vq, NULL);
+        if (ctx)
+            ctx->done = true;
+    }
     wait_queue_wakeup_all(&vb->io_wait);
 }
 
-static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf, size_t count, int write) {
+static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
+                               size_t count, int write) {
     struct virtio_blk_dev *vb = dev->private;
-    struct virtio_blk_req req;
-    uint8_t status = 0xFF;
-    mutex_lock(&vb->lock);
+    if (!vb || !vb->vq || !buf || count == 0)
+        return -EINVAL;
 
-    req.type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
-    req.reserved = 0;
-    req.sector = lba;
+    if (lba + count > dev->sector_count)
+        return -EINVAL;
+
+    struct virtio_blk_req_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.hdr.type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    ctx.hdr.reserved = 0;
+    ctx.hdr.sector = lba;
+    ctx.byte_len = count * dev->sector_size;
 
     struct virtq_desc descs[3];
-    descs[0].addr = dma_map_single(&req, sizeof(req), DMA_TO_DEVICE);
-    descs[0].len = sizeof(req);
+    ctx.dma_hdr = dma_map_single(&ctx.hdr, sizeof(ctx.hdr), DMA_TO_DEVICE);
+    descs[0].addr = ctx.dma_hdr;
+    descs[0].len = sizeof(ctx.hdr);
     descs[0].flags = VIRTQ_DESC_F_NEXT;
-    descs[0].next = 1;
+    descs[0].next = 0;
 
-    descs[1].addr = dma_map_single(buf, count * 512, write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-    descs[1].len = count * 512;
+    ctx.dma_buf = dma_map_single(buf, ctx.byte_len,
+                                 write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+    descs[1].addr = ctx.dma_buf;
+    descs[1].len = (uint32_t)ctx.byte_len;
     descs[1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
-    descs[1].next = 2;
+    descs[1].next = 0;
 
-    descs[2].addr = dma_map_single(&status, 1, DMA_FROM_DEVICE);
+    ctx.dma_status = dma_map_single(&ctx.status, 1, DMA_FROM_DEVICE);
+    descs[2].addr = ctx.dma_status;
     descs[2].len = 1;
     descs[2].flags = VIRTQ_DESC_F_WRITE;
     descs[2].next = 0;
 
-    virtqueue_add_buf(vb->vq, descs, 3, vb);
+    mutex_lock(&vb->lock);
+    int ret = virtqueue_add_buf(vb->vq, descs, 3, &ctx);
+    if (ret < 0) {
+        mutex_unlock(&vb->lock);
+        dma_unmap_single(ctx.dma_hdr, sizeof(ctx.hdr), DMA_TO_DEVICE);
+        dma_unmap_single(ctx.dma_buf, ctx.byte_len,
+                         write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+        dma_unmap_single(ctx.dma_status, 1, DMA_FROM_DEVICE);
+        return ret;
+    }
     virtqueue_kick(vb->vq);
 
-    // Wait for completion
-    while (vb->vq->last_used_idx == virtqueue_used_idx(vb->vq))
-        arch_cpu_relax();
-    
-    // Consume the used buffer
-    virtqueue_get_buf(vb->vq, NULL);
+    if (!proc_current()) {
+        while (!ctx.done)
+            arch_cpu_relax();
+    } else {
+        while (!ctx.done) {
+            struct process *curr = proc_current();
+            wait_queue_add(&vb->io_wait, curr);
+            curr->state = PROC_SLEEPING;
+            curr->wait_channel = &vb->io_wait;
+            mutex_unlock(&vb->lock);
+            schedule();
+            mutex_lock(&vb->lock);
+        }
+    }
 
     mutex_unlock(&vb->lock);
-    return (status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
+
+    dma_unmap_single(ctx.dma_hdr, sizeof(ctx.hdr), DMA_TO_DEVICE);
+    dma_unmap_single(ctx.dma_buf, ctx.byte_len,
+                     write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+    dma_unmap_single(ctx.dma_status, 1, DMA_FROM_DEVICE);
+
+    return (ctx.status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
 }
 
-static int virtio_blk_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
+static int virtio_blk_read(struct blkdev *dev, uint64_t lba, void *buf,
+                           size_t count) {
     return virtio_blk_transfer(dev, lba, buf, count, 0);
 }
 
-static int virtio_blk_write(struct blkdev *dev, uint64_t lba, const void *buf, size_t count) {
+static int virtio_blk_write(struct blkdev *dev, uint64_t lba, const void *buf,
+                            size_t count) {
     return virtio_blk_transfer(dev, lba, (void *)buf, count, 1);
 }
 
@@ -99,7 +153,8 @@ struct virtio_blk_config {
 
 static int virtio_blk_probe(struct virtio_device *vdev) {
     struct virtio_blk_dev *vb = kzalloc(sizeof(*vb));
-    if (!vb) return -ENOMEM;
+    if (!vb)
+        return -ENOMEM;
 
     vb->vdev = vdev;
     vdev->priv = vb;
@@ -108,56 +163,50 @@ static int virtio_blk_probe(struct virtio_device *vdev) {
     mutex_init(&vb->lock, "virtio_blk");
     wait_queue_init(&vb->io_wait);
 
-    /* 1. Reset device */
-    vdev->ops->set_status(vdev, 0);
-    vdev->ops->set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+    vb->vq = virtqueue_alloc(vdev, 0, VIRTQ_SIZE);
+    if (!vb->vq) {
+        kfree(vb);
+        return -ENOMEM;
+    }
+    if (vdev->ops->setup_vq(vdev, 0, vb->vq) < 0) {
+        virtio_device_set_failed(vdev);
+        virtqueue_free(vb->vq);
+        kfree(vb);
+        return -ENODEV;
+    }
 
-    /* 2. Setup VirtQueue */
-    vb->vq = kzalloc(sizeof(struct virtqueue));
-    vb->vq->vdev = vdev;
-    vb->vq->index = 0;
-    vb->vq->num = VIRTQ_SIZE;
-    size_t desc_sz = ALIGN_UP(VIRTQ_SIZE * sizeof(struct virtq_desc),
-                              CONFIG_PAGE_SIZE);
-    size_t avail_sz = ALIGN_UP(sizeof(struct virtq_avail) +
-                                   VIRTQ_SIZE * sizeof(uint16_t),
-                               CONFIG_PAGE_SIZE);
-    size_t used_sz = ALIGN_UP(sizeof(struct virtq_used) +
-                                  VIRTQ_SIZE * sizeof(struct virtq_used_elem),
-                              CONFIG_PAGE_SIZE);
+    if (virtio_device_init(vdev, 0) < 0) {
+        virtqueue_free(vb->vq);
+        kfree(vb);
+        return -EIO;
+    }
 
-    vb->vq->desc = kzalloc(desc_sz);
-    vb->vq->avail = kzalloc(avail_sz);
-    vb->vq->used = kzalloc(used_sz);
-    
-    vdev->ops->setup_vq(vdev, 0, vb->vq);
-
-    /* 3. Finalize features */
-    vdev->ops->finalize_features(vdev, 0); // No special features for now
-    vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_FEATURES_OK);
-    vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_DRIVER_OK);
-
-    /* 4. Get config */
     struct virtio_blk_config config;
     vdev->ops->get_config(vdev, 0, &config, sizeof(config));
 
-    /* 5. Register block device */
     vb->blkdev.sector_count = config.capacity;
     vb->blkdev.sector_size = 512;
     vb->blkdev.ops = &virtio_blk_ops;
     vb->blkdev.private = vb;
-    
-    static int disk_count = 0;
-    snprintf(vb->blkdev.name, sizeof(vb->blkdev.name), "vd%c", 'a' + disk_count++);
 
-    blkdev_register(&vb->blkdev);
-    pr_info("virtio-blk: registered %s, capacity %lu sectors\n", vb->blkdev.name, (unsigned long)config.capacity);
+    static int disk_count = 0;
+    snprintf(vb->blkdev.name, sizeof(vb->blkdev.name), "vd%c",
+             'a' + disk_count++);
+
+    if (blkdev_register(&vb->blkdev) < 0) {
+        virtqueue_free(vb->vq);
+        kfree(vb);
+        return -EIO;
+    }
+
+    pr_info("virtio-blk: registered %s, capacity %lu sectors\n", vb->blkdev.name,
+            (unsigned long)config.capacity);
 
     return 0;
 }
 
 struct virtio_driver virtio_blk_driver = {
     .drv = { .name = "virtio-blk" },
-    .device_id = 2, // Block device
+    .device_id = 2,
     .probe = virtio_blk_probe,
 };

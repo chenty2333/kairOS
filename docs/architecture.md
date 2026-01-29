@@ -23,6 +23,8 @@ Kairos is a monolithic kernel with a strict Hardware Abstraction Layer (HAL).
 
 ### VFS (Virtual File System)
 - **Objects**: `mount` (fs root), `vnode` (file/dir/dev), `file_ops` (read/write/readdir).
+- **Path**: dentry-based namei (component walk), symlink depth limit, negative dentry cache.
+- **Namespaces**: per-process mount namespace root (used by `chroot`/`pivot_root`).
 - **Filesystems**: `ext2` (root), `FAT32` (boot/USB via FatFs), `devfs` (/dev).
 
 ## 3. Hardware Abstraction Layer (HAL)
