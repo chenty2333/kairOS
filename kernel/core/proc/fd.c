@@ -133,6 +133,38 @@ int fd_dup2_flags(struct process *p, int oldfd, int newfd, uint32_t fd_flags) {
     return newfd;
 }
 
+int fd_dup_min_flags(struct process *p, int oldfd, int minfd,
+                     uint32_t fd_flags) {
+    struct file *file;
+    if (!p)
+        return -EINVAL;
+    if (minfd < 0)
+        return -EINVAL;
+    if (minfd >= CONFIG_MAX_FILES_PER_PROC)
+        return -EMFILE;
+
+    mutex_lock(&p->files_lock);
+    file = (oldfd >= 0 && oldfd < CONFIG_MAX_FILES_PER_PROC)
+               ? p->files[oldfd]
+               : NULL;
+    if (!file) {
+        mutex_unlock(&p->files_lock);
+        return -EBADF;
+    }
+
+    for (int fd = minfd; fd < CONFIG_MAX_FILES_PER_PROC; fd++) {
+        if (!p->files[fd]) {
+            p->files[fd] = file;
+            p->fd_flags[fd] = fd_flags;
+            file_get(file);
+            mutex_unlock(&p->files_lock);
+            return fd;
+        }
+    }
+    mutex_unlock(&p->files_lock);
+    return -EMFILE;
+}
+
 /**
  * fd_close_all - Close all file descriptors for a process
  */

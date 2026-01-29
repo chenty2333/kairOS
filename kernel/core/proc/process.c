@@ -315,7 +315,8 @@ void proc_fork_child_setup(void) {
 
 noreturn void proc_exit(int status) {
     struct process *p = proc_current();
-    pr_info("Process %d exiting: %d\n", p->pid, status);
+    int code = status & 0xff;
+    pr_info("Process %d exiting: %d\n", p->pid, code);
 
     if (p->vfork_parent) {
         __atomic_store_n(&p->vfork_done, true, __ATOMIC_RELEASE);
@@ -334,7 +335,8 @@ noreturn void proc_exit(int status) {
     proc_reparent_children(p);
 
     sched_dequeue(p);
-    p->exit_code = status;
+    /* Encode for waitpid/WIFEXITED semantics (like Linux) */
+    p->exit_code = (code << 8);
     p->state = PROC_ZOMBIE;
     
     if (p->parent) {

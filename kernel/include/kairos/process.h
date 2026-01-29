@@ -120,6 +120,8 @@ int fd_close(struct process *p, int fd);
 int fd_dup(struct process *p, int oldfd);
 int fd_dup2(struct process *p, int oldfd, int newfd);
 int fd_dup2_flags(struct process *p, int oldfd, int newfd, uint32_t fd_flags);
+int fd_dup_min_flags(struct process *p, int oldfd, int minfd,
+                     uint32_t fd_flags);
 void fd_close_all(struct process *p);
 void fd_close_cloexec(struct process *p);
 

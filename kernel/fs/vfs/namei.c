@@ -253,7 +253,7 @@ static int namei_walk_locked(const struct path *base, const char *path,
         }
 
         if (d->vnode && d->vnode->type == VNODE_SYMLINK &&
-            ((flags & NAMEI_FOLLOW) || (!last && !(flags & NAMEI_NOFOLLOW)))) {
+            ((flags & NAMEI_FOLLOW) || !last)) {
             dentry_put(cur);
             ret = namei_follow_symlink(d, remain, out, flags, depth);
             dentry_put(d);
@@ -295,12 +295,6 @@ static int namei_walk_locked(const struct path *base, const char *path,
             return -ENOTDIR;
         }
     }
-    if ((flags & NAMEI_NOFOLLOW) && cur->vnode &&
-        cur->vnode->type == VNODE_SYMLINK) {
-        dentry_put(cur);
-        return -ELOOP;
-    }
-
     out->dentry = cur;
     out->mnt = mnt;
     return 0;

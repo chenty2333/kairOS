@@ -8,6 +8,14 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
+/* Linux fcntl commands we need for busybox/ash */
+#define F_DUPFD            0
+#define F_GETFD            1
+#define F_SETFD            2
+#define F_GETFL            3
+#define F_SETFL            4
+#define F_DUPFD_CLOEXEC    1030
+
 int64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
@@ -95,11 +103,44 @@ int64_t sys_pipe2(uint64_t fd_array, uint64_t flags, uint64_t a2, uint64_t a3,
 int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    struct file *f = fd_get(p, (int)fd);
     if (!f)
         return -EBADF;
 
     switch ((int)cmd) {
+    case F_DUPFD:
+        return (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, 0);
+    case F_DUPFD_CLOEXEC:
+        return (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, FD_CLOEXEC);
+    case F_GETFD: {
+        int flags = 0;
+        mutex_lock(&p->files_lock);
+        if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
+            !p->files[(int)fd]) {
+            mutex_unlock(&p->files_lock);
+            return -EBADF;
+        }
+        if (p->fd_flags[(int)fd] & FD_CLOEXEC)
+            flags |= FD_CLOEXEC;
+        mutex_unlock(&p->files_lock);
+        return flags;
+    }
+    case F_SETFD: {
+        if (arg & ~FD_CLOEXEC)
+            return -EINVAL;
+        mutex_lock(&p->files_lock);
+        if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
+            !p->files[(int)fd]) {
+            mutex_unlock(&p->files_lock);
+            return -EBADF;
+        }
+        p->fd_flags[(int)fd] = (uint32_t)arg & FD_CLOEXEC;
+        mutex_unlock(&p->files_lock);
+        return 0;
+    }
     case F_GETFL: {
         mutex_lock(&f->lock);
         int flags = (int)f->flags;
