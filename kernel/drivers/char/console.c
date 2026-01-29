@@ -8,6 +8,7 @@
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
 #include <kairos/process.h>
+#include <kairos/signal.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
@@ -26,6 +27,15 @@ static struct termios console_termios = {
     .c_iflag = ICRNL,
     .c_oflag = OPOST | ONLCR,
     .c_lflag = ISIG | ICANON | ECHO,
+    .c_cc = {
+        [VINTR] = 3,   /* ^C */
+        [VQUIT] = 28,  /* ^\ */
+        [VERASE] = 127,/* DEL */
+        [VKILL] = 21,  /* ^U */
+        [VEOF] = 4,    /* ^D */
+        [VTIME] = 0,
+        [VMIN] = 1,
+    },
 };
 static char console_canon_buf[CONSOLE_BUF_SIZE];
 static unsigned int console_canon_len;
@@ -81,6 +91,11 @@ static void console_canon_commit(void) {
     console_canon_len = 0;
 }
 
+static void console_flush_input(void) {
+    console_head = console_tail = 0;
+    console_canon_len = 0;
+}
+
 static void console_handle_input_char(char c, bool *pushed) {
     if (console_termios.c_iflag & ICRNL) {
         if (c == '\r')
@@ -94,7 +109,34 @@ static void console_handle_input_char(char c, bool *pushed) {
     }
 
     if (console_termios.c_lflag & ICANON) {
-        if (c == '\b' || c == 0x7f) {
+        char erase = console_termios.c_cc[VERASE]
+                         ? (char)console_termios.c_cc[VERASE]
+                         : (char)0x7f;
+        char kill = console_termios.c_cc[VKILL]
+                        ? (char)console_termios.c_cc[VKILL]
+                        : (char)0x15;
+        char intr = console_termios.c_cc[VINTR]
+                        ? (char)console_termios.c_cc[VINTR]
+                        : (char)0x03;
+        char quit = console_termios.c_cc[VQUIT]
+                        ? (char)console_termios.c_cc[VQUIT]
+                        : (char)0x1c;
+
+        if ((console_termios.c_lflag & ISIG) &&
+            (c == intr || c == quit)) {
+            console_canon_len = 0;
+            if (console_termios.c_lflag & ECHO) {
+                arch_early_putchar('^');
+                arch_early_putchar(c == intr ? 'C' : '\\');
+                console_echo_char('\n');
+            }
+            struct process *p = proc_current();
+            if (p)
+                signal_send(p->pid, c == intr ? SIGINT : SIGQUIT);
+            return;
+        }
+
+        if (c == erase || c == '\b') {
             if (console_canon_len > 0) {
                 console_canon_len--;
                 if (console_termios.c_lflag & ECHO) {
@@ -102,6 +144,20 @@ static void console_handle_input_char(char c, bool *pushed) {
                     arch_early_putchar(' ');
                     arch_early_putchar('\b');
                 }
+            }
+            return;
+        }
+
+        if (c == kill) {
+            if (console_termios.c_lflag & ECHO) {
+                while (console_canon_len > 0) {
+                    arch_early_putchar('\b');
+                    arch_early_putchar(' ');
+                    arch_early_putchar('\b');
+                    console_canon_len--;
+                }
+            } else {
+                console_canon_len = 0;
             }
             return;
         }
@@ -227,6 +283,10 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             !(t.c_lflag & ICANON) && console_canon_len > 0) {
             console_canon_commit();
             wake = was_empty && !console_buf_empty();
+        }
+        if (cmd == TCSETSF) {
+            console_flush_input();
+            wake = false;
         }
         console_termios = t;
         spin_unlock(&console_lock);

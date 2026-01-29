@@ -44,6 +44,16 @@ struct winsize {
 #define ECHOE  0000020
 #define ECHOK  0000040
 
+/* termios c_cc indexes (subset) */
+#define VINTR  0
+#define VQUIT  1
+#define VERASE 2
+#define VKILL  3
+#define VEOF   4
+#define VTIME  5
+#define VMIN   6
+#define VSUSP  10
+
 #define TCGETS 0x5401
 #define TCSETS 0x5402
 #define TCSETSW 0x5403

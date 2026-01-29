@@ -669,6 +669,25 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
         p->state = PROC_SLEEPING;
         p->wait_channel = &p->exit_wait;
         wait_queue_add(&p->exit_wait, p);
+
+        /* Avoid missed wakeups: re-check for zombies before sleeping. */
+        bool has_zombie = false;
+        spin_lock(&proc_table_lock);
+        list_for_each_entry_safe(child, tmp, &p->children, sibling) {
+            if (pid > 0 && child->pid != pid)
+                continue;
+            if (child->state == PROC_ZOMBIE) {
+                has_zombie = true;
+                break;
+            }
+        }
+        spin_unlock(&proc_table_lock);
+        if (has_zombie) {
+            wait_queue_remove_entry(&p->wait_entry);
+            p->wait_channel = NULL;
+            p->state = PROC_RUNNING;
+            continue;
+        }
         
         schedule();
     }
