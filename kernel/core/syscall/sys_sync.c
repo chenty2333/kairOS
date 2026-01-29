@@ -61,3 +61,31 @@ int64_t sys_sem_post(uint64_t sem_id, uint64_t a1, uint64_t a2, uint64_t a3,
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return (int64_t)do_sem_post((int)sem_id);
 }
+
+int64_t sys_syslog(uint64_t type, uint64_t bufp, uint64_t len, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if ((int64_t)len < 0)
+        return -EINVAL;
+
+    switch ((int)type) {
+    case 2: /* SYSLOG_ACTION_READ */
+    case 3: /* SYSLOG_ACTION_READ_ALL */
+    case 4: /* SYSLOG_ACTION_READ_CLEAR */
+        if (bufp && len) {
+            /* No kernel log buffer yet; return empty data. */
+            if (copy_to_user((void *)bufp, "", 0) < 0)
+                return -EFAULT;
+        }
+        return 0;
+    case 5: /* SYSLOG_ACTION_CLEAR */
+    case 6: /* SYSLOG_ACTION_CONSOLE_OFF */
+    case 7: /* SYSLOG_ACTION_CONSOLE_ON */
+    case 8: /* SYSLOG_ACTION_CONSOLE_LEVEL */
+    case 9: /* SYSLOG_ACTION_SIZE_UNREAD */
+    case 10: /* SYSLOG_ACTION_SIZE_BUFFER */
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}

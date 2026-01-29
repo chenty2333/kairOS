@@ -378,6 +378,35 @@ int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     return ret;
 }
 
+int64_t sys_mknodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
+                    uint64_t dev, uint64_t a4, uint64_t a5) {
+    (void)dev; (void)a4; (void)a5;
+    if (!path_ptr)
+        return -EFAULT;
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    mode_t type = (mode_t)mode & S_IFMT;
+    if (type && type != S_IFREG)
+        return -EOPNOTSUPP;
+
+    struct path base;
+    path_init(&base);
+    struct path *basep = NULL;
+    int ret = sysfs_get_base_path((int64_t)dirfd, kpath, &base, &basep);
+    if (ret < 0)
+        return ret;
+
+    mode_t umode = sysfs_apply_umask((mode_t)mode);
+    struct file *f = NULL;
+    ret = vfs_open_at_path(basep, kpath, O_CREAT | O_EXCL | O_WRONLY, umode, &f);
+    if (ret < 0)
+        return ret;
+    vfs_close(f);
+    return 0;
+}
+
 int64_t sys_renameat(uint64_t olddirfd, uint64_t oldpath_ptr,
                      uint64_t newdirfd, uint64_t newpath_ptr, uint64_t a4,
                      uint64_t a5) {

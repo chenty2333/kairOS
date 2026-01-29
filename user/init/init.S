@@ -791,7 +791,7 @@ symlink_link_ok:
     li a2, 1
     li a7, SYS_write
     ecall
-    j mmap_test
+    j symlink_cleanup
 
 symlink_open_fail:
     li a0, 1
@@ -799,7 +799,7 @@ symlink_open_fail:
     li a2, 20
     li a7, SYS_write
     ecall
-    j mmap_test
+    j symlink_cleanup
 
 symlink_link_fail:
     li a0, 1
@@ -807,13 +807,20 @@ symlink_link_fail:
     li a2, 20
     li a7, SYS_write
     ecall
-    j mmap_test
+    j symlink_cleanup
 
 symlink_read_fail:
     li a0, 1
     la a1, msg_symlink_read_fail
     li a2, 24
     li a7, SYS_write
+    ecall
+
+symlink_cleanup:
+    li a0, AT_FDCWD
+    la a1, path_tmplink
+    li a2, 0
+    li a7, SYS_unlinkat
     ecall
 
 mmap_test:
