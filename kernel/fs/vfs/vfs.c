@@ -793,7 +793,8 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
     if (!path || !fp)
         return -EINVAL;
     uint32_t allowed = O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND |
-                       O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC;
+                       O_NONBLOCK | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC |
+                       O_LARGEFILE;
     if (flags & ~allowed)
         return -EINVAL;
     int accmode = flags & O_ACCMODE;

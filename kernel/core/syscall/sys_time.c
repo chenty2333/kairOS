@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/pollwait.h>
+#include <kairos/mm.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
@@ -19,6 +20,30 @@ struct linux_utsname {
     char version[65];
     char machine[65];
     char domainname[65];
+};
+
+struct linux_sysinfo {
+    int64_t uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+    char _f[20 - 2 * sizeof(uint64_t) - sizeof(uint32_t)];
+};
+
+struct linux_tms {
+    long tms_utime;
+    long tms_stime;
+    long tms_cutime;
+    long tms_cstime;
 };
 
 static uint64_t ns_to_sched_ticks(uint64_t ns) {
@@ -52,6 +77,19 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     if (copy_to_user((void *)tp_ptr, &ts, sizeof(ts)) < 0)
         return -EFAULT;
     return 0;
+}
+
+int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
+        return -EINVAL;
+    struct timespec ts;
+    int rc = copy_timespec_from_user(tp_ptr, &ts);
+    if (rc < 0)
+        return rc;
+    /* No RTC or time-setting support yet. */
+    return -EPERM;
 }
 
 int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
@@ -104,6 +142,44 @@ int64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
             return -EFAULT;
     }
     (void)tz_ptr;
+    return 0;
+}
+
+int64_t sys_times(uint64_t tms_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (tms_ptr) {
+        struct linux_tms tms = {0};
+        struct process *p = proc_current();
+        if (p) {
+            tms.tms_utime = (long)p->utime;
+            tms.tms_stime = (long)p->stime;
+        }
+        if (copy_to_user((void *)tms_ptr, &tms, sizeof(tms)) < 0)
+            return -EFAULT;
+    }
+    return (int64_t)arch_timer_ticks();
+}
+
+int64_t sys_sysinfo(uint64_t info_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!info_ptr)
+        return -EFAULT;
+
+    struct linux_sysinfo info;
+    memset(&info, 0, sizeof(info));
+    uint64_t ns = arch_timer_ticks_to_ns(arch_timer_ticks());
+    info.uptime = (int64_t)(ns / NS_PER_SEC);
+
+    size_t total_pages = pmm_total_pages();
+    size_t free_pages = pmm_num_free_pages();
+    info.totalram = (uint64_t)total_pages * CONFIG_PAGE_SIZE;
+    info.freeram = (uint64_t)free_pages * CONFIG_PAGE_SIZE;
+    info.mem_unit = 1;
+
+    if (copy_to_user((void *)info_ptr, &info, sizeof(info)) < 0)
+        return -EFAULT;
     return 0;
 }
 

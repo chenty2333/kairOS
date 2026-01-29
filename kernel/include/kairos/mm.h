@@ -31,6 +31,7 @@ void pmm_get_page(paddr_t pa);
 void pmm_put_page(paddr_t pa);
 int pmm_page_refcount(paddr_t pa);
 size_t pmm_num_free_pages(void);
+size_t pmm_total_pages(void);
 struct page *alloc_pages(unsigned int order);
 void free_pages(struct page *page, unsigned int order);
 static inline struct page *alloc_page(void) {

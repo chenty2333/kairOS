@@ -4,9 +4,13 @@
 
 #include <kairos/config.h>
 #include <kairos/process.h>
+#include <kairos/sched.h>
 #include <kairos/signal.h>
 #include <kairos/string.h>
 #include <kairos/uaccess.h>
+
+int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
+                      uint64_t old_ptr, uint64_t a4, uint64_t a5);
 
 int64_t sys_exit(uint64_t status, uint64_t a1, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
@@ -74,6 +78,14 @@ int64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a3,
     return (int64_t)signal_send((pid_t)tid, (int)sig);
 }
 
+int64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
+                  uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if ((int64_t)tid <= 0)
+        return -EINVAL;
+    return (int64_t)signal_send((pid_t)tid, (int)sig);
+}
+
 int64_t sys_getppid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                     uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -95,6 +107,29 @@ int64_t sys_getgid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
     return (int64_t)(p ? p->gid : 0);
 }
 
+int64_t sys_geteuid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5) {
+    return sys_getuid(a0, a1, a2, a3, a4, a5);
+}
+
+int64_t sys_getegid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5) {
+    return sys_getgid(a0, a1, a2, a3, a4, a5);
+}
+
+int64_t sys_getgroups(uint64_t size, uint64_t list_ptr, uint64_t a2,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if ((int64_t)size < 0)
+        return -EINVAL;
+    if (size == 0)
+        return 0;
+    if (!list_ptr)
+        return -EFAULT;
+    /* No supplementary groups supported yet. */
+    return 0;
+}
+
 int64_t sys_setuid(uint64_t uid, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -113,6 +148,42 @@ int64_t sys_setgid(uint64_t gid, uint64_t a1, uint64_t a2, uint64_t a3,
         return -EINVAL;
     p->gid = (gid_t)gid;
     return 0;
+}
+
+int64_t sys_sched_getaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (!mask_ptr)
+        return -EFAULT;
+    if (len < sizeof(unsigned long))
+        return -EINVAL;
+    if (pid != 0) {
+        struct process *target = proc_find((pid_t)pid);
+        if (!target)
+            return -ESRCH;
+    }
+
+    unsigned long mask = 0;
+    int cpus = sched_cpu_count();
+    int max_bits = (int)(sizeof(mask) * 8);
+    for (int i = 0; i < cpus && i < max_bits; i++)
+        mask |= (1UL << i);
+
+    if (copy_to_user((void *)mask_ptr, &mask, sizeof(mask)) < 0)
+        return -EFAULT;
+    return (int64_t)sizeof(mask);
+}
+
+int64_t sys_getrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    return sys_prlimit64(0, resource, 0, rlim_ptr, 0, 0);
+}
+
+int64_t sys_setrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
+                      uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    return sys_prlimit64(0, resource, rlim_ptr, 0, 0, 0);
 }
 
 int64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
@@ -136,20 +207,20 @@ int64_t sys_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
 int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                   uint64_t child_tid, uint64_t tls, uint64_t a5) {
     (void)a5;
+    (void)tls;
 
     /* Linux clone flag subset */
     enum {
         CLONE_VM             = 0x00000100,
         CLONE_VFORK          = 0x00004000,
-        CLONE_SETTLS         = 0x00080000,
         CLONE_PARENT_SETTID  = 0x00100000,
         CLONE_CHILD_CLEARTID = 0x00200000,
         CLONE_CHILD_SETTID   = 0x01000000,
     };
 
     uint64_t kflags = flags & ~0xFFULL;
-    uint64_t supported = CLONE_VM | CLONE_VFORK | CLONE_SETTLS |
-                         CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
+    uint64_t supported = CLONE_VM | CLONE_VFORK | CLONE_PARENT_SETTID |
+                         CLONE_CHILD_CLEARTID |
                          CLONE_CHILD_SETTID;
 
     if (kflags & ~supported)
@@ -160,8 +231,6 @@ int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
         if (!access_ok((void *)(newsp - 1), 1))
             return -EFAULT;
     }
-    if (tls && !(flags & CLONE_SETTLS))
-        return -EINVAL;
 
     struct proc_fork_opts opts = {0};
     if (newsp)
@@ -193,8 +262,17 @@ int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
     }
 
     if (flags & CLONE_VFORK) {
-        while (!__atomic_load_n(&p->vfork_done, __ATOMIC_ACQUIRE))
-            proc_sleep(p);
+        struct process *parent = proc_current();
+        while (!__atomic_load_n(&p->vfork_done, __ATOMIC_ACQUIRE)) {
+            parent->wait_channel = p;
+            parent->state = PROC_SLEEPING;
+            if (__atomic_load_n(&p->vfork_done, __ATOMIC_ACQUIRE)) {
+                parent->wait_channel = NULL;
+                parent->state = PROC_RUNNING;
+                break;
+            }
+            schedule();
+        }
     }
 
     return (int64_t)p->pid;

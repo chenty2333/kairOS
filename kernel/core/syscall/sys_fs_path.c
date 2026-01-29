@@ -103,6 +103,95 @@ int64_t sys_fchdir(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     return 0;
 }
 
+int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
+                     uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (flags & ~AT_SYMLINK_NOFOLLOW)
+        return -EINVAL;
+    if (!path_ptr)
+        return -EFAULT;
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+    struct path resolved;
+    path_init(&resolved);
+    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    struct vnode *vn = resolved.dentry->vnode;
+    mutex_lock(&vn->lock);
+    vn->mode = (vn->mode & S_IFMT) | ((mode_t)mode & 07777);
+    mutex_unlock(&vn->lock);
+    dentry_put(resolved.dentry);
+    return 0;
+}
+
+int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
+                     uint64_t group, uint64_t flags, uint64_t a5) {
+    (void)a5;
+    if (flags & ~AT_SYMLINK_NOFOLLOW)
+        return -EINVAL;
+    if (!path_ptr)
+        return -EFAULT;
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+    struct path resolved;
+    path_init(&resolved);
+    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    struct vnode *vn = resolved.dentry->vnode;
+    mutex_lock(&vn->lock);
+    if (owner != (uint64_t)-1)
+        vn->uid = (uid_t)owner;
+    if (group != (uint64_t)-1)
+        vn->gid = (gid_t)group;
+    mutex_unlock(&vn->lock);
+    dentry_put(resolved.dentry);
+    return 0;
+}
+
+int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
+                      uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)times_ptr; (void)a4; (void)a5;
+    if (flags & ~AT_SYMLINK_NOFOLLOW)
+        return -EINVAL;
+    if (!path_ptr)
+        return -EFAULT;
+    char kpath[CONFIG_PATH_MAX];
+    if (strncpy_from_user(kpath, (const char *)path_ptr, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+    struct path resolved;
+    path_init(&resolved);
+    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    dentry_put(resolved.dentry);
+    return 0;
+}
+
 int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
                    uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
@@ -347,6 +436,15 @@ int64_t sys_renameat(uint64_t olddirfd, uint64_t oldpath_ptr,
     if (newp.dentry)
         dentry_put(newp.dentry);
     return ret;
+}
+
+int64_t sys_renameat2(uint64_t olddirfd, uint64_t oldpath_ptr,
+                      uint64_t newdirfd, uint64_t newpath_ptr, uint64_t flags,
+                      uint64_t a5) {
+    (void)a5;
+    if (flags != 0)
+        return -EINVAL;
+    return sys_renameat(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, 0, 0);
 }
 
 int64_t sys_readlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t buf_ptr,

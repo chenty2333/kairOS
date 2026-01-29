@@ -97,6 +97,7 @@ struct file {
 #define O_TRUNC 01000
 #define O_APPEND 02000
 #define O_NONBLOCK 04000
+#define O_LARGEFILE 0100000
 #define O_NOFOLLOW 0400000
 #define O_DIRECTORY 0200000
 #ifndef O_CLOEXEC

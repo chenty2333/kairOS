@@ -5,6 +5,7 @@
 #include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
+#include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 #define PROT_READ 0x1
@@ -18,6 +19,9 @@
 #define MAP_ANONYMOUS 0x20
 #define MAP_STACK 0x20000
 #define MAP_MASK (MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_STACK)
+
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED 2
 
 static uint32_t prot_to_vm(uint64_t prot) {
     uint32_t vm = 0;
@@ -114,4 +118,76 @@ int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a3,
         return -EINVAL;
     return (int64_t)mm_mprotect(p->mm, (vaddr_t)addr, (size_t)len,
                                 prot_to_vm(prot));
+}
+
+int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len,
+                   uint64_t flags, uint64_t new_addr, uint64_t a5) {
+    (void)a5;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (!old_len || !new_len)
+        return -EINVAL;
+    if (old_addr & (CONFIG_PAGE_SIZE - 1))
+        return -EINVAL;
+    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED))
+        return -EINVAL;
+    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
+        return -EINVAL;
+
+    if (new_len <= old_len) {
+        if (new_len < old_len) {
+            vaddr_t tail = (vaddr_t)(old_addr + new_len);
+            size_t shrink = (size_t)(old_len - new_len);
+            mm_munmap(p->mm, tail, shrink);
+        }
+        return (int64_t)old_addr;
+    }
+
+    if (!(flags & MREMAP_MAYMOVE))
+        return -ENOMEM;
+
+    vaddr_t target = 0;
+    bool fixed = (flags & MREMAP_FIXED) != 0;
+    if (fixed) {
+        if (new_addr & (CONFIG_PAGE_SIZE - 1))
+            return -EINVAL;
+        vaddr_t old_end = (vaddr_t)(old_addr + old_len);
+        vaddr_t new_end = (vaddr_t)(new_addr + new_len);
+        if (!(new_end <= old_addr || new_addr >= old_end))
+            return -EINVAL;
+        mm_munmap(p->mm, (vaddr_t)new_addr, (size_t)new_len);
+        target = (vaddr_t)new_addr;
+    }
+
+    vaddr_t res = 0;
+    int ret = mm_mmap(p->mm, target, (size_t)new_len,
+                      VM_READ | VM_WRITE, 0, NULL, 0, fixed, &res);
+    if (ret < 0)
+        return (int64_t)ret;
+
+    size_t copy_len = (size_t)old_len;
+    uint8_t *buf = kmalloc(CONFIG_PAGE_SIZE);
+    if (!buf) {
+        mm_munmap(p->mm, res, (size_t)new_len);
+        return -ENOMEM;
+    }
+
+    size_t off = 0;
+    while (off < copy_len) {
+        size_t chunk = copy_len - off;
+        if (chunk > CONFIG_PAGE_SIZE)
+            chunk = CONFIG_PAGE_SIZE;
+        if (copy_from_user(buf, (void *)(old_addr + off), chunk) < 0 ||
+            copy_to_user((void *)(res + off), buf, chunk) < 0) {
+            kfree(buf);
+            mm_munmap(p->mm, res, (size_t)new_len);
+            return -EFAULT;
+        }
+        off += chunk;
+    }
+
+    kfree(buf);
+    mm_munmap(p->mm, (vaddr_t)old_addr, (size_t)old_len);
+    return (int64_t)res;
 }
