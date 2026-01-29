@@ -9,15 +9,79 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
+struct efi_guid {
+    uint32_t a;
+    uint16_t b;
+    uint16_t c;
+    uint8_t d[8];
+};
+
+struct efi_configuration_table {
+    struct efi_guid guid;
+    void *table;
+};
+
+struct efi_table_header {
+    uint64_t signature;
+    uint32_t revision;
+    uint32_t header_size;
+    uint32_t crc32;
+    uint32_t reserved;
+};
+
+struct efi_system_table {
+    struct efi_table_header hdr;
+    uint16_t *firmware_vendor;
+    uint32_t firmware_revision;
+    void *con_in_handle;
+    void *con_in;
+    void *con_out_handle;
+    void *con_out;
+    void *std_err_handle;
+    void *std_err;
+    void *runtime_services;
+    void *boot_services;
+    size_t num_tables;
+    struct efi_configuration_table *tables;
+};
+
+static bool efi_guid_equal(const struct efi_guid *a,
+                           const struct efi_guid *b) {
+    return memcmp(a, b, sizeof(*a)) == 0;
+}
+
+static void *efi_find_dtb(void *system_table) {
+    static const struct efi_guid dtb_guid = {
+        0xb1b621d5, 0xf19c, 0x41a5,
+        {0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0}
+    };
+
+    if (!system_table) {
+        return NULL;
+    }
+
+    struct efi_system_table *st = (struct efi_system_table *)system_table;
+    if (!st->tables || st->num_tables == 0) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < st->num_tables; i++) {
+        struct efi_configuration_table *tbl = &st->tables[i];
+        if (efi_guid_equal(&tbl->guid, &dtb_guid)) {
+            return tbl->table;
+        }
+    }
+
+    return NULL;
+}
+
 /* Limine base revision */
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(0);
 
 /* Request markers */
-__attribute__((used, section(".limine_requests")))
+__attribute__((used, section(".limine_requests_start_marker")))
 static volatile uint64_t limine_requests_start[] = LIMINE_REQUESTS_START_MARKER;
-__attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_requests_end[] = LIMINE_REQUESTS_END_MARKER;
 
 /* Requests */
 __attribute__((used, section(".limine_requests")))
@@ -108,6 +172,9 @@ static volatile struct limine_paging_mode_request limine_paging_mode = {
 #endif
 };
 
+__attribute__((used, section(".limine_requests_end_marker")))
+static volatile uint64_t limine_requests_end[] = LIMINE_REQUESTS_END_MARKER;
+
 static struct boot_info boot_info;
 
 static uint32_t limine_memmap_type_to_boot(uint32_t type) {
@@ -174,6 +241,10 @@ static void boot_init_limine(void) {
     if (limine_exec_addr.response) {
         boot_info.kernel_phys_base = limine_exec_addr.response->physical_base;
         boot_info.kernel_virt_base = limine_exec_addr.response->virtual_base;
+    }
+
+    if (!boot_info.dtb && boot_info.efi_system_table) {
+        boot_info.dtb = efi_find_dtb(boot_info.efi_system_table);
     }
 
     if (limine_memmap.response) {

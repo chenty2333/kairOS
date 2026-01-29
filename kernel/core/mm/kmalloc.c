@@ -32,7 +32,7 @@ static const size_t kmalloc_sizes[] = {32,  64,  96,   128, 192,
                                        256, 512, 1024, 2048};
 #define NUM_KMALLOC_CACHES ARRAY_SIZE(kmalloc_sizes)
 static struct kmem_cache *kmalloc_caches[NUM_KMALLOC_CACHES];
-static uint8_t kmalloc_bootstrap[4096 * 2];
+static uint8_t kmalloc_bootstrap[4096 * 16];
 static size_t kmalloc_bootstrap_off;
 
 /* --- Internal Core --- */
@@ -169,6 +169,9 @@ void kmalloc_init(void) {
     for (size_t i = 0; i < NUM_KMALLOC_CACHES; i++) {
         /* We use a specialized create boot logic to avoid recursion */
         kmalloc_caches[i] = kmalloc_bootstrap_alloc(sizeof(struct kmem_cache));
+        if (!kmalloc_caches[i]) {
+            panic("kmalloc: bootstrap buffer too small");
+        }
         memset(kmalloc_caches[i], 0, sizeof(struct kmem_cache));
         kmalloc_caches[i]->obj_size = kmalloc_sizes[i];
         spin_init(&kmalloc_caches[i]->lock);

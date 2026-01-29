@@ -4,10 +4,12 @@
 #   make                    # Build for default architecture (riscv64)
 #   make ARCH=x86_64        # Build for x86_64
 #   make ARCH=aarch64       # Build for AArch64
-#   make run                # Run in QEMU
+#   make run                # Run in QEMU (riscv64 default: builds busybox/rootfs)
 #   make debug              # Run with GDB server
 #   make clean              # Clean build artifacts
 #   make test               # Run kernel tests
+#   make uefi               # Prepare RISC-V UEFI boot image (riscv64 only)
+#   make disk               # Build ext2 disk image with busybox + init
 
 # ============================================================
 #                      Configuration
@@ -461,7 +463,7 @@ run: iso
 run-e1000: iso
 	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA) -device e1000,netdev=net0
 else ifeq ($(ARCH),riscv64)
-run: $(KERNEL) uefi
+run: $(KERNEL) uefi disk
 	@$(MAKE) --no-print-directory check-disk
 	$(QEMU) $(QEMU_RUN_FLAGS)
 

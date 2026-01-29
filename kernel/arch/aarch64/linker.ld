@@ -34,7 +34,9 @@ SECTIONS
     . = ALIGN(4096);
 
     .limine_requests : AT(ADDR(.limine_requests) - KERNEL_VIRT_BASE + KERNEL_PHYS_BASE) {
+        KEEP(*(.limine_requests_start_marker))
         KEEP(*(.limine_requests))
+        KEEP(*(.limine_requests_end_marker))
     }
 
     . = ALIGN(4096);

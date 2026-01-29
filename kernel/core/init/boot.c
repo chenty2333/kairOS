@@ -39,4 +39,10 @@ void init_boot(const struct boot_info *bi) {
     if (!bi) {
         panic("boot: missing boot info");
     }
+
+    pr_info("boot: memmap=%u hhdm=%p kphys=%p kvirt=%p\n",
+            bi->memmap_count,
+            (void *)bi->hhdm_offset,
+            (void *)bi->kernel_phys_base,
+            (void *)bi->kernel_virt_base);
 }

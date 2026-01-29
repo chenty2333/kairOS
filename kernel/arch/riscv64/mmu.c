@@ -180,6 +180,7 @@ void arch_mmu_init(const struct boot_info *bi) {
     if (!bi) {
         panic("mmu: missing boot info");
     }
+    pr_info("MMU: init start (hhdm=%p)\n", (void *)bi->hhdm_offset);
     if (!(kernel_pgdir = pt_alloc())) {
         panic("mmu: init failed");
     }

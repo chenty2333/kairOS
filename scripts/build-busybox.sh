@@ -119,6 +119,9 @@ while IFS= read -r line; do
   fi
 done < "$DEFCONFIG"
 
+# Ensure new Kconfig symbols take defaults without prompting
+make -C "$BUSYBOX_SRC" O="$OUT_DIR" silentoldconfig
+
 echo "Using CC=$CC CROSS_COMPILE=$CROSS_COMPILE"
 make -C "$BUSYBOX_SRC" O="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
   CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
