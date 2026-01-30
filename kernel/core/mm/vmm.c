@@ -28,6 +28,14 @@ struct mm_struct *mm_create(void) {
     return mm;
 }
 
+void mm_get(struct mm_struct *mm) {
+    if (!mm)
+        return;
+    mutex_lock(&mm->lock);
+    mm->refcount++;
+    mutex_unlock(&mm->lock);
+}
+
 void mm_destroy(struct mm_struct *mm) {
     if (!mm) return;
     mutex_lock(&mm->lock);

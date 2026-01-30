@@ -65,9 +65,58 @@ struct winsize {
 #define TIOCSWINSZ 0x5414
 #define FIONBIO 0x5421
 #define FIONREAD 0x541B
+/* Additional TTY ioctls */
+#define TIOCNOTTY  0x5422
+#define TIOCGSID   0x5429
+#define TCFLSH     0x540B
+#define TCSBRK     0x5409
+#define TCSBRKP    0x5425
+
+/* Block device ioctls */
 #define BLKGETSIZE 0x1260
 #define BLKROGET 0x125e
 #define BLKSSZGET 0x1268
 #define BLKGETSIZE64 0x80081272
+
+/* Network ioctls */
+#define SIOCGIFCONF    0x8912
+#define SIOCGIFFLAGS   0x8913
+#define SIOCSIFFLAGS   0x8914
+#define SIOCGIFADDR    0x8915
+#define SIOCSIFADDR    0x8916
+#define SIOCGIFNETMASK 0x891b
+#define SIOCSIFNETMASK 0x891c
+#define SIOCGIFHWADDR  0x8927
+#define SIOCGIFMTU     0x8921
+#define SIOCSIFMTU     0x8922
+#define SIOCADDRT      0x890B
+#define SIOCDELRT      0x890C
+
+/* Network ABI structures */
+#define IFNAMSIZ 16
+
+struct sockaddr_kairos {
+    uint16_t sa_family;
+    char sa_data[14];
+};
+
+struct ifreq {
+    char ifr_name[IFNAMSIZ];
+    union {
+        struct sockaddr_kairos ifr_addr;
+        struct sockaddr_kairos ifr_netmask;
+        struct sockaddr_kairos ifr_hwaddr;
+        short ifr_flags;
+        int ifr_mtu;
+    };
+};
+
+struct ifconf {
+    int ifc_len;
+    union {
+        char *ifc_buf;
+        struct ifreq *ifc_req;
+    };
+};
 
 #endif

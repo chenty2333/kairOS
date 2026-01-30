@@ -155,5 +155,6 @@ int ext2_utimes(struct vnode *vn, const struct timespec *atime,
 
 int ext2_mount(struct mount *mnt);
 int ext2_unmount(struct mount *mnt);
+int ext2_statfs(struct mount *mnt, struct kstatfs *st);
 
 #endif

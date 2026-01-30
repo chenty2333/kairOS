@@ -15,6 +15,20 @@ struct dentry;
 struct path;
 struct timespec;
 
+struct kstatfs {
+    uint64_t f_type;
+    uint64_t f_bsize;
+    uint64_t f_blocks;
+    uint64_t f_bfree;
+    uint64_t f_bavail;
+    uint64_t f_files;
+    uint64_t f_ffree;
+    uint64_t f_fsid[2];
+    uint64_t f_namelen;
+    uint64_t f_frsize;
+    uint64_t f_flags;
+};
+
 enum vnode_type {
     VNODE_FILE,
     VNODE_DIR,
@@ -177,6 +191,7 @@ struct vfs_ops {
     int (*chown)(struct vnode *vn, uid_t uid, gid_t gid);
     int (*utimes)(struct vnode *vn, const struct timespec *atime,
                   const struct timespec *mtime);
+    int (*statfs)(struct mount *mnt, struct kstatfs *st);
 };
 
 struct file_ops {
@@ -242,6 +257,7 @@ off_t vfs_seek(struct file *file, off_t offset, int whence);
 int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);
 int vfs_fstat(struct file *file, struct stat *st);
+int vfs_statfs(struct mount *mnt, struct kstatfs *st);
 int vfs_mkdir(const char *path, mode_t mode);
 int vfs_rmdir(const char *path);
 int vfs_unlink(const char *path);

@@ -55,10 +55,6 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     list_add(&child->sibling, &parent->children);
     spin_unlock(&proc_table_lock);
 
-    if (!(child->mm = mm_clone(parent->mm))) {
-        proc_free(child);
-        return NULL;
-    }
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
     child->cwd_vnode = parent->cwd_vnode;
     if (child->cwd_vnode)
@@ -66,19 +62,65 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->cwd_dentry = parent->cwd_dentry;
     if (child->cwd_dentry)
         dentry_get(child->cwd_dentry);
+    if (child->mnt_ns) {
+        vfs_mount_ns_put(child->mnt_ns);
+        child->mnt_ns = NULL;
+    }
+    child->mnt_ns = parent->mnt_ns;
+    if (child->mnt_ns)
+        vfs_mount_ns_get_from(child->mnt_ns);
     child->syscall_abi = parent->syscall_abi;
-    mutex_lock(&parent->files_lock);
-    for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
-        struct file *f = parent->files[i];
-        if (f) {
-            mutex_lock(&f->lock);
-            f->refcount++;
-            mutex_unlock(&f->lock);
-            child->files[i] = f;
-            child->fd_flags[i] = parent->fd_flags[i];
+
+    uint64_t clone_flags = opts ? opts->clone_flags : 0;
+
+    /* File descriptor table: share or copy */
+    if (clone_flags & 0x00000400 /* CLONE_FILES */) {
+        fdtable_get(parent->fdtable);
+        child->fdtable = parent->fdtable;
+    } else {
+        child->fdtable = fdtable_copy(parent->fdtable);
+        if (!child->fdtable) {
+            proc_free(child);
+            return NULL;
         }
     }
-    mutex_unlock(&parent->files_lock);
+
+    /* Signal handlers: share or copy */
+    if (clone_flags & 0x00000800 /* CLONE_SIGHAND */) {
+        sighand_get(parent->sighand);
+        child->sighand = parent->sighand;
+    } else if (parent->sighand) {
+        child->sighand = sighand_copy(parent->sighand);
+        if (!child->sighand) {
+            proc_free(child);
+            return NULL;
+        }
+    }
+
+    /* Thread group */
+    if (clone_flags & 0x00010000 /* CLONE_THREAD */) {
+        child->tgid = parent->tgid;
+        child->group_leader = parent->group_leader;
+        spin_lock(&proc_table_lock);
+        list_add_tail(&child->thread_group, &parent->group_leader->thread_group);
+        spin_unlock(&proc_table_lock);
+    }
+
+    /* Address space: share or clone */
+    if (clone_flags & 0x00000100 /* CLONE_VM */) {
+        child->mm = parent->mm;
+        mm_get(parent->mm);
+    } else {
+        if (!(child->mm = mm_clone(parent->mm))) {
+            proc_free(child);
+            return NULL;
+        }
+    }
+
+    /* TLS */
+    if ((clone_flags & 0x00080000 /* CLONE_SETTLS */) && opts) {
+        arch_set_tls(child->context, opts->tls);
+    }
 
     struct trap_frame *tf = get_current_trapframe();
     if (tf) {

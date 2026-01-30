@@ -229,6 +229,14 @@ off_t vfs_seek(struct file *file, off_t offset, int whence) {
     return next;
 }
 
+int vfs_statfs(struct mount *mnt, struct kstatfs *st) {
+    if (!mnt || !st)
+        return -EINVAL;
+    if (!mnt->ops || !mnt->ops->statfs)
+        return -ENOSYS;
+    return mnt->ops->statfs(mnt, st);
+}
+
 int vfs_stat(const char *path, struct stat *st) {
     if (!path || !st)
         return -EINVAL;

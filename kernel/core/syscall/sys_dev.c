@@ -8,6 +8,9 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
+/* Network ioctl handler (kernel/net/net_ioctl.c) */
+int net_ioctl(struct file *f, uint64_t cmd, uint64_t arg);
+
 int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
@@ -28,6 +31,11 @@ int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
             f->flags &= ~O_NONBLOCK;
         mutex_unlock(&f->lock);
         return 0;
+    }
+
+    /* Route network ioctls (0x8900-0x89FF) to net_ioctl */
+    if (cmd >= 0x8900 && cmd <= 0x89FF) {
+        return net_ioctl(f, cmd, arg);
     }
 
     return vfs_ioctl(f, cmd, arg);

@@ -12,6 +12,7 @@ BUILD_DIR="build/$ARCH"
 KERNEL="$BUILD_DIR/kairos.elf"
 BOOT_IMG="$BUILD_DIR/boot.img"
 LIMINE_DIR="third_party/limine"
+INITRAMFS="$BUILD_DIR/initramfs.cpio"
 
 case "$ARCH" in
     x86_64) BOOT_EFI="BOOTX64.EFI" ;;
@@ -84,6 +85,12 @@ sudo cp "$KERNEL" "$MNT_DIR/boot/kairos.elf"
 if [ "$ARCH" = "riscv64" ] && [ -f "qemu-virt.dtb" ]; then
     sudo cp qemu-virt.dtb "$MNT_DIR/qemu-virt.dtb"
     sudo cp qemu-virt.dtb "$MNT_DIR/boot/qemu-virt.dtb"
+fi
+if [ -f "$INITRAMFS" ]; then
+    sudo cp "$INITRAMFS" "$MNT_DIR/initramfs.cpio"
+    sudo cp "$INITRAMFS" "$MNT_DIR/boot/initramfs.cpio"
+else
+    echo "WARN: initramfs not found at $INITRAMFS" >&2
 fi
 sync
 sudo umount "$MNT_DIR"

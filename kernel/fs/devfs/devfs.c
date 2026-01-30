@@ -317,11 +317,22 @@ static int devfs_dir_poll(struct vnode *vn __attribute__((unused)),
     return (int)(events & (POLLIN | POLLOUT));
 }
 
+static int devfs_statfs(struct mount *mnt __attribute__((unused)),
+                        struct kstatfs *st) {
+    memset(st, 0, sizeof(*st));
+    st->f_type = 0x1373;
+    st->f_bsize = CONFIG_PAGE_SIZE;
+    st->f_frsize = CONFIG_PAGE_SIZE;
+    st->f_namelen = CONFIG_NAME_MAX;
+    return 0;
+}
+
 static struct vfs_ops devfs_vfs_ops = {
     .name = "devfs",
     .mount = devfs_mount,
     .unmount = devfs_unmount,
     .lookup = devfs_lookup,
+    .statfs = devfs_statfs,
 };
 
 static struct fs_type devfs_type = {

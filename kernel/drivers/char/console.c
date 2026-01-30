@@ -341,6 +341,31 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             return -EFAULT;
         return 0;
     }
+    case TIOCNOTTY:
+        return 0;
+    case TIOCGSID: {
+        if (!arg)
+            return -EFAULT;
+        struct process *sp = proc_current();
+        pid_t sid = sp ? sp->sid : 0;
+        if (copy_to_user((void *)arg, &sid, sizeof(sid)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case TCFLSH: {
+        spin_lock(&console_state.lock);
+        if (arg == 0 || arg == 2) {
+            /* Flush input */
+            console_flush_input();
+        }
+        /* arg == 1 or 2: flush output (no output buffer to flush) */
+        spin_unlock(&console_state.lock);
+        return 0;
+    }
+    case TCSBRK:
+    case TCSBRKP:
+        /* No physical serial line - no-op */
+        return 0;
     default:
         return -ENOTTY;
     }

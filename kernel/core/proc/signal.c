@@ -16,10 +16,47 @@
 
 #define NS_PER_SEC 1000000000ULL
 
+/* sighand helpers */
+
+struct sighand_struct *sighand_alloc(void) {
+    struct sighand_struct *sh = kzalloc(sizeof(*sh));
+    if (!sh)
+        return NULL;
+    spin_init(&sh->lock);
+    sh->refcount = 1;
+    return sh;
+}
+
+struct sighand_struct *sighand_copy(struct sighand_struct *src) {
+    struct sighand_struct *sh = kzalloc(sizeof(*sh));
+    if (!sh)
+        return NULL;
+    spin_init(&sh->lock);
+    sh->refcount = 1;
+    if (src) {
+        spin_lock(&src->lock);
+        memcpy(sh->actions, src->actions, sizeof(sh->actions));
+        spin_unlock(&src->lock);
+    }
+    return sh;
+}
+
+void sighand_get(struct sighand_struct *sh) {
+    if (sh)
+        __atomic_fetch_add(&sh->refcount, 1, __ATOMIC_RELAXED);
+}
+
+void sighand_put(struct sighand_struct *sh) {
+    if (!sh)
+        return;
+    if (__atomic_sub_fetch(&sh->refcount, 1, __ATOMIC_ACQ_REL) == 0)
+        kfree(sh);
+}
+
 void signal_init_process(struct process *p) {
-    p->sigactions = kzalloc(sizeof(struct sigaction) * NSIG);
-    if (!p->sigactions) {
-        pr_warn("signal: sigaction alloc failed for pid %d\n", p->pid);
+    p->sighand = sighand_alloc();
+    if (!p->sighand) {
+        pr_warn("signal: sighand alloc failed for pid %d\n", p->pid);
     }
 }
 
@@ -46,7 +83,7 @@ void signal_deliver_pending(void) {
         if (p->sig_blocked & mask) continue;
 
         int sig = i + 1;
-        struct sigaction action = p->sigactions ? p->sigactions[i] : (struct sigaction){0};
+        struct sigaction action = p->sighand ? p->sighand->actions[i] : (struct sigaction){0};
         void (*handler)(int) = action.sa_handler ? action.sa_handler : SIG_DFL;
 
         if (handler == SIG_IGN || (handler == SIG_DFL && sig == SIGCHLD)) {
@@ -247,15 +284,15 @@ int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
     if (!p) return -EINVAL;
 
     if (old_ptr) {
-        struct sigaction old = p->sigactions ? p->sigactions[sig - 1] : (struct sigaction){0};
+        struct sigaction old = p->sighand ? p->sighand->actions[sig - 1] : (struct sigaction){0};
         if (copy_to_user((void *)old_ptr, &old, sizeof(old)) < 0) return -EFAULT;
     }
 
     if (act_ptr) {
         struct sigaction act;
         if (copy_from_user(&act, (void *)act_ptr, sizeof(act)) < 0) return -EFAULT;
-        if (!p->sigactions) return -ENOMEM;
-        p->sigactions[sig - 1] = act;
+        if (!p->sighand) return -ENOMEM;
+        p->sighand->actions[sig - 1] = act;
     }
 
     return 0;

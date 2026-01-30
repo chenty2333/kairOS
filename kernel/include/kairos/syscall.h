@@ -24,6 +24,7 @@ typedef uint64_t sigset_t;
 #define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_REMOVEDIR 0x200
 #define AT_EACCESS 0x200
+#define AT_EMPTY_PATH 0x1000
 #define F_OK 0
 #define X_OK 1
 #define W_OK 2
@@ -287,6 +288,8 @@ int64_t sys_unlink(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_mkdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_rmdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_access(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_statfs(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_fstatfs(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_truncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                      uint64_t);
 int64_t sys_ftruncate(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,

@@ -108,6 +108,7 @@ struct mm_struct {
 };
 
 struct mm_struct *mm_create(void);
+void mm_get(struct mm_struct *mm);
 void mm_destroy(struct mm_struct *mm);
 struct mm_struct *mm_clone(struct mm_struct *src);
 struct vm_area *mm_find_vma(struct mm_struct *mm, vaddr_t addr);

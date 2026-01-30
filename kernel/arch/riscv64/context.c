@@ -133,6 +133,14 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
     tf->tf_a2 = a2;
 }
 
+void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
+    if (!ctx)
+        return;
+    /* Set tp (x4) in the trap frame; regs[3] = x4 = tp */
+    struct trap_frame *tf = (struct trap_frame *)ctx->sp;
+    tf->regs[3] = tls;
+}
+
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {
     if (!ctx)
         return;

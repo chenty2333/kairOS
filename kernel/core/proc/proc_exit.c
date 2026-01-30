@@ -36,6 +36,7 @@ static void proc_reparent_children(struct process *p) {
 noreturn void proc_exit(int status) {
     struct process *p = proc_current();
     int code = status & 0xff;
+    bool is_thread = (p->group_leader != p);
     pr_info("Process %d exiting: %d\n", p->pid, code);
 
     if (p->vfork_parent) {
@@ -51,8 +52,29 @@ noreturn void proc_exit(int status) {
         p->tid_address = 0;
     }
 
-    fd_close_all(p);
-    proc_reparent_children(p);
+    /* Release shared resources via refcount */
+    if (p->fdtable) {
+        fdtable_put(p->fdtable);
+        p->fdtable = NULL;
+    }
+    if (p->sighand) {
+        sighand_put(p->sighand);
+        p->sighand = NULL;
+    }
+
+    /* Remove from thread group if a non-leader thread */
+    if (is_thread) {
+        spin_lock(&proc_table_lock);
+        if (!list_empty(&p->thread_group)) {
+            list_del(&p->thread_group);
+            INIT_LIST_HEAD(&p->thread_group);
+        }
+        spin_unlock(&proc_table_lock);
+    }
+
+    if (!is_thread) {
+        proc_reparent_children(p);
+    }
 
     sched_dequeue(p);
     /* Encode for waitpid/WIFEXITED semantics (like Linux) */

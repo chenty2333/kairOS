@@ -3,12 +3,17 @@
  */
 
 #include <kairos/config.h>
+#include <kairos/dentry.h>
+#include <kairos/namei.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/signal.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
+#include <kairos/vfs.h>
+
+#include "sys_fs_helpers.h"
 
 int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
                       uint64_t old_ptr, uint64_t a4, uint64_t a5);
@@ -49,7 +54,7 @@ int64_t sys_execve(uint64_t path, uint64_t argv, uint64_t envp, uint64_t a3,
 int64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)proc_current()->pid;
+    return (int64_t)proc_current()->tgid;
 }
 
 int64_t sys_gettid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -74,7 +79,8 @@ int64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a3,
     (void)a3; (void)a4; (void)a5;
     if ((int64_t)tgid <= 0 || (int64_t)tid <= 0)
         return -EINVAL;
-    if (tgid != tid)
+    struct process *target = proc_find((pid_t)tid);
+    if (!target || target->tgid != (pid_t)tgid)
         return -ESRCH;
     return (int64_t)signal_send((pid_t)tid, (int)sig);
 }
@@ -375,34 +381,45 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
 int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                   uint64_t child_tid, uint64_t tls, uint64_t a5) {
     (void)a5;
-    (void)tls;
 
     /* Linux clone flag subset */
     enum {
         CLONE_VM             = 0x00000100,
+        CLONE_FS             = 0x00000200,
+        CLONE_FILES          = 0x00000400,
+        CLONE_SIGHAND        = 0x00000800,
         CLONE_VFORK          = 0x00004000,
+        CLONE_THREAD         = 0x00010000,
+        CLONE_SETTLS         = 0x00080000,
         CLONE_PARENT_SETTID  = 0x00100000,
         CLONE_CHILD_CLEARTID = 0x00200000,
         CLONE_CHILD_SETTID   = 0x01000000,
     };
 
     uint64_t kflags = flags & ~0xFFULL;
-    uint64_t supported = CLONE_VM | CLONE_VFORK | CLONE_PARENT_SETTID |
-                         CLONE_CHILD_CLEARTID |
+    uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+                         CLONE_VFORK | CLONE_THREAD | CLONE_SETTLS |
+                         CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
                          CLONE_CHILD_SETTID;
 
     if (kflags & ~supported)
         return -ENOSYS;
-    if ((flags & CLONE_VM) && !(flags & CLONE_VFORK))
-        return -ENOSYS;
+    /* CLONE_THREAD requires CLONE_SIGHAND which requires CLONE_VM */
+    if ((flags & CLONE_THREAD) && !(flags & CLONE_SIGHAND))
+        return -EINVAL;
+    if ((flags & CLONE_SIGHAND) && !(flags & CLONE_VM))
+        return -EINVAL;
     if (newsp) {
         if (!access_ok((void *)(newsp - 1), 1))
             return -EFAULT;
     }
 
     struct proc_fork_opts opts = {0};
+    opts.clone_flags = kflags;
     if (newsp)
         opts.child_stack = newsp;
+    if (flags & CLONE_SETTLS)
+        opts.tls = tls;
     if ((flags & CLONE_CHILD_SETTID) || (flags & CLONE_CHILD_CLEARTID)) {
         if (!child_tid)
             return -EINVAL;
@@ -490,9 +507,42 @@ int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
 int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
                      uint64_t envp, uint64_t flags, uint64_t a5) {
     (void)a5;
-    if (flags != 0 || (int64_t)dirfd != AT_FDCWD)
-        return -ENOSYS;
-    return sys_execve(path, argv, envp, 0, 0, 0);
+    uint64_t supported_flags = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+    if (flags & ~supported_flags)
+        return -EINVAL;
+
+    char kpath[CONFIG_PATH_MAX];
+
+    if (flags & AT_EMPTY_PATH) {
+        /* Execute the file referred to by dirfd directly */
+        struct file *f = fd_get(proc_current(), (int)dirfd);
+        if (!f)
+            return -EBADF;
+        strncpy(kpath, f->path, sizeof(kpath) - 1);
+        kpath[sizeof(kpath) - 1] = '\0';
+    } else {
+        if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
+            return -EFAULT;
+
+        /* Resolve relative to dirfd if not absolute and not AT_FDCWD */
+        if (kpath[0] != '/' && (int64_t)dirfd != AT_FDCWD) {
+            struct file *df = fd_get(proc_current(), (int)dirfd);
+            if (!df)
+                return -EBADF;
+            /* Build full path from dirfd path + relative path */
+            char full[CONFIG_PATH_MAX];
+            int dlen = (int)strlen(df->path);
+            if (dlen > 0 && df->path[dlen - 1] == '/') {
+                snprintf(full, sizeof(full), "%s%s", df->path, kpath);
+            } else {
+                snprintf(full, sizeof(full), "%s/%s", df->path, kpath);
+            }
+            strncpy(kpath, full, sizeof(kpath) - 1);
+            kpath[sizeof(kpath) - 1] = '\0';
+        }
+    }
+
+    return (int64_t)proc_exec(kpath, (char *const *)argv, (char *const *)envp);
 }
 
 int64_t sys_set_robust_list(uint64_t head_ptr, uint64_t len, uint64_t a2,

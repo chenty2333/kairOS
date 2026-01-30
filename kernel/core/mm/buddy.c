@@ -274,9 +274,14 @@ void pmm_put_page(paddr_t pa) {
     struct page *p = phys_to_page(pa);
     if (!p)
         return;
-    if (__atomic_sub_fetch(&p->refcount, 1, __ATOMIC_RELAXED) == 0) {
-        free_pages(p, 0);
+    uint32_t old = __atomic_fetch_sub(&p->refcount, 1, __ATOMIC_RELAXED);
+    if (old == 0) {
+        __atomic_store_n(&p->refcount, 0, __ATOMIC_RELAXED);
+        pr_err("pmm: put on free page %p (pa=%p)\n", p, (void *)pa);
+        return;
     }
+    if (old == 1)
+        free_pages(p, 0);
 }
 
 int pmm_page_refcount(paddr_t pa) {

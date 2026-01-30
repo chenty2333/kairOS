@@ -117,28 +117,34 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         return (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, FD_CLOEXEC);
     case F_GETFD: {
         int flags = 0;
-        mutex_lock(&p->files_lock);
+        struct fdtable *fdt = p->fdtable;
+        if (!fdt)
+            return -EBADF;
+        mutex_lock(&fdt->lock);
         if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
-            !p->files[(int)fd]) {
-            mutex_unlock(&p->files_lock);
+            !fdt->files[(int)fd]) {
+            mutex_unlock(&fdt->lock);
             return -EBADF;
         }
-        if (p->fd_flags[(int)fd] & FD_CLOEXEC)
+        if (fdt->fd_flags[(int)fd] & FD_CLOEXEC)
             flags |= FD_CLOEXEC;
-        mutex_unlock(&p->files_lock);
+        mutex_unlock(&fdt->lock);
         return flags;
     }
     case F_SETFD: {
         if (arg & ~FD_CLOEXEC)
             return -EINVAL;
-        mutex_lock(&p->files_lock);
+        struct fdtable *fdt = p->fdtable;
+        if (!fdt)
+            return -EBADF;
+        mutex_lock(&fdt->lock);
         if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
-            !p->files[(int)fd]) {
-            mutex_unlock(&p->files_lock);
+            !fdt->files[(int)fd]) {
+            mutex_unlock(&fdt->lock);
             return -EBADF;
         }
-        p->fd_flags[(int)fd] = (uint32_t)arg & FD_CLOEXEC;
-        mutex_unlock(&p->files_lock);
+        fdt->fd_flags[(int)fd] = (uint32_t)arg & FD_CLOEXEC;
+        mutex_unlock(&fdt->lock);
         return 0;
     }
     case F_GETFL: {

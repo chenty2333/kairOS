@@ -7,6 +7,7 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
+#include <kairos/initramfs.h>
 
 #include "proc_internal.h"
 
@@ -22,11 +23,13 @@ static int init_thread(void *arg __attribute__((unused))) {
 
 #if CONFIG_EMBEDDED_INIT && defined(ARCH_riscv64)
     if (user_init_elf_size > 0) {
-        child = proc_create("init", user_init_elf, user_init_elf_size);
-        if (child) {
-            proc_adopt_child(parent, child);
-            pr_info("init: started embedded init (pid %d)\n", child->pid);
-            sched_enqueue(child);
+        if (!initramfs_available()) {
+            child = proc_create("init", user_init_elf, user_init_elf_size);
+            if (child) {
+                proc_adopt_child(parent, child);
+                pr_info("init: started embedded init (pid %d)\n", child->pid);
+                sched_enqueue(child);
+            }
         }
     }
 #endif

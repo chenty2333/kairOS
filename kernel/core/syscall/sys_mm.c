@@ -17,8 +17,12 @@
 #define MAP_PRIVATE 0x02
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
+#define MAP_GROWSDOWN 0x0100
+#define MAP_NORESERVE 0x4000
+#define MAP_POPULATE 0x8000
 #define MAP_STACK 0x20000
-#define MAP_MASK (MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_STACK)
+#define MAP_MASK (MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | \
+                  MAP_GROWSDOWN | MAP_NORESERVE | MAP_POPULATE | MAP_STACK)
 
 #define MREMAP_MAYMOVE 1
 #define MREMAP_FIXED 2
@@ -91,11 +95,22 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         if (uret < 0)
             return (int64_t)uret;
     }
+    if (flags & MAP_GROWSDOWN)
+        map_flags |= VM_STACK;
     vaddr_t res = 0;
     int ret = mm_mmap(p->mm, start, (size_t)len, vm_flags, map_flags, vn,
                       offset, fixed, &res);
     if (ret < 0)
         return (int64_t)ret;
+
+    /* MAP_POPULATE: pre-fault all pages in the mapping */
+    if (flags & MAP_POPULATE) {
+        size_t aligned_len = ALIGN_UP(len, CONFIG_PAGE_SIZE);
+        for (size_t off = 0; off < aligned_len; off += CONFIG_PAGE_SIZE) {
+            mm_handle_fault(p->mm, res + off, vm_flags);
+        }
+    }
+
     return (int64_t)res;
 }
 

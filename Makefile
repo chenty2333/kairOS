@@ -162,6 +162,7 @@ CORE_SRCS := \
     kernel/core/sched/sched.c \
     kernel/core/net/net.c \
     kernel/net/socket.c \
+    kernel/net/net_ioctl.c \
     kernel/net/af_unix.c \
     kernel/net/af_inet.c \
     kernel/net/lwip_netif.c \
@@ -206,6 +207,8 @@ CORE_SRCS := \
     kernel/fs/poll/vfs_poll.c \
     kernel/fs/poll/epoll.c \
     kernel/fs/devfs/devfs.c \
+    kernel/fs/initramfs/initramfs.c \
+    kernel/fs/procfs/procfs.c \
     kernel/fs/ext2/ext2.c \
     kernel/fs/ext2/super.c \
     kernel/fs/ext2/inode.c \
@@ -341,19 +344,85 @@ DEPS := $(OBJS:.o=.d)
 #                    Build Rules
 # ============================================================
 
-.PHONY: all clean run debug iso test user busybox rootfs disk
+STAMP_DIR := $(BUILD_DIR)/stamps
+BUSYBOX_STAMP := $(STAMP_DIR)/busybox.stamp
+ROOTFS_BASE_STAMP := $(STAMP_DIR)/rootfs-base.stamp
+ROOTFS_BUSYBOX_STAMP := $(STAMP_DIR)/rootfs-busybox.stamp
+ROOTFS_INIT_STAMP := $(STAMP_DIR)/rootfs-init.stamp
+ROOTFS_STAMP := $(STAMP_DIR)/rootfs.stamp
+DISK_STAMP := $(STAMP_DIR)/disk.stamp
+INITRAMFS_STAMP := $(STAMP_DIR)/initramfs.stamp
+COMPILER_RT_STAMP := $(STAMP_DIR)/compiler-rt.stamp
+USER_INIT := $(BUILD_DIR)/user/init
+USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
+
+.PHONY: all clean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk check-tools
 
 all: $(KERNEL)
 
-user:
+user: $(USER_INIT)
+
+ifeq ($(USE_GCC),0)
+USER_TOOLCHAIN_DEPS := $(COMPILER_RT_STAMP)
+else
+USER_TOOLCHAIN_DEPS :=
+endif
+
+compiler-rt: $(COMPILER_RT_STAMP)
+
+$(COMPILER_RT_STAMP): scripts/build-compiler-rt.sh
+	@mkdir -p $(STAMP_DIR)
+	ARCH=$(ARCH) ./scripts/build-compiler-rt.sh $(ARCH)
+	@touch $@
+
+$(USER_INIT): $(USER_TOOLCHAIN_DEPS) user/init/main.c user/Makefile scripts/build-musl.sh
 	./scripts/build-musl.sh $(ARCH)
-	$(MAKE) -C user ARCH=$(ARCH)
+	$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC)
 
-busybox:
+initramfs: $(INITRAMFS_STAMP)
+
+$(USER_INITRAMFS): $(USER_TOOLCHAIN_DEPS) user/initramfs/init.c user/Makefile scripts/build-musl.sh
+	./scripts/build-musl.sh $(ARCH)
+	$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) initramfs
+
+$(INITRAMFS_STAMP): $(USER_INITRAMFS) scripts/make-initramfs.sh
+	@mkdir -p $(STAMP_DIR)
+	ARCH=$(ARCH) ./scripts/make-initramfs.sh $(ARCH)
+	@touch $@
+
+busybox: $(BUSYBOX_STAMP)
+
+$(BUSYBOX_STAMP): tools/busybox/kairos_defconfig scripts/build-busybox.sh
+	@mkdir -p $(STAMP_DIR)
 	./scripts/build-busybox.sh $(ARCH)
+	@touch $@
 
-rootfs: user busybox
-	ROOTFS_ONLY=1 ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+rootfs-base: $(ROOTFS_BASE_STAMP)
+
+$(ROOTFS_BASE_STAMP): scripts/make-disk.sh
+	@mkdir -p $(STAMP_DIR)
+	ROOTFS_ONLY=1 ROOTFS_STAGE=base ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	@touch $@
+
+rootfs-busybox: $(ROOTFS_BUSYBOX_STAMP)
+
+$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) scripts/make-disk.sh
+	@mkdir -p $(STAMP_DIR)
+	ROOTFS_ONLY=1 ROOTFS_STAGE=busybox ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	@touch $@
+
+rootfs-init: $(ROOTFS_INIT_STAMP)
+
+$(ROOTFS_INIT_STAMP): $(USER_INIT) scripts/make-disk.sh
+	@mkdir -p $(STAMP_DIR)
+	ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	@touch $@
+
+rootfs: $(ROOTFS_STAMP)
+
+$(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAMP)
+	@mkdir -p $(STAMP_DIR)
+	@touch $@
 
 # Link kernel
 $(KERNEL): $(OBJS) $(LDSCRIPT)
@@ -395,6 +464,7 @@ $(BUILD_DIR)/%.o: %.S
 # Common QEMU flags
 QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4 -nographic
 QEMU_FLAGS += -serial stdio -monitor none
+QEMU_FLAGS += $(QEMU_EXTRA)
 
 ifeq ($(ARCH),aarch64)
   QEMU_FLAGS += -cpu $(QEMU_CPU)
@@ -423,6 +493,11 @@ ifeq ($(ARCH),riscv64)
   QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
   QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
   QEMU_BOOT_FLAGS += -device virtio-blk-device,drive=boot,bootindex=0
+  QEMU_MEDIA_FLAGS := $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS)
+else ifeq ($(ARCH),x86_64)
+  QEMU_MEDIA_FLAGS := -cdrom $(BUILD_DIR)/kairos.iso
+else
+  QEMU_MEDIA_FLAGS :=
 endif
 
 # Add network (virtio-net for development)
@@ -438,10 +513,7 @@ else
   QEMU_FLAGS += -device virtio-net-pci,netdev=net0
 endif
 
-QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_DISK_FLAGS)
-ifeq ($(ARCH),riscv64)
-  QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS) $(QEMU_DISK_FLAGS)
-endif
+QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_MEDIA_FLAGS) $(QEMU_DISK_FLAGS)
 
 check-disk:
 	@if [ -f "$(DISK_IMG)" ]; then \
@@ -454,34 +526,56 @@ check-disk:
 		echo "WARN: $(DISK_IMG) not found (run: make ARCH=$(ARCH) disk)"; \
 	fi
 
+check-tools:
+	@command -v $(QEMU) >/dev/null 2>&1 || { \
+		echo "Error: $(QEMU) not found"; exit 1; }
+	@command -v mke2fs >/dev/null 2>&1 || { \
+		echo "Error: mke2fs not found (install e2fsprogs)"; exit 1; }
+	@command -v python3 >/dev/null 2>&1 || { \
+		echo "Error: python3 not found"; exit 1; }
 ifeq ($(ARCH),x86_64)
-run: iso
-	@$(MAKE) --no-print-directory check-disk
-	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
+	@command -v xorriso >/dev/null 2>&1 || { \
+		echo "Error: xorriso not found (needed for ISO)"; exit 1; }
+endif
+ifeq ($(ARCH),riscv64)
+	@command -v mkfs.fat >/dev/null 2>&1 || command -v mkfs.vfat >/dev/null 2>&1 || { \
+		echo "Error: mkfs.fat not found (install dosfstools)"; exit 1; }
+	@if [ ! -f "$(UEFI_CODE_SRC)" ] || [ ! -f "$(UEFI_VARS_SRC)" ]; then \
+		echo "Error: RISC-V UEFI firmware not found:"; \
+		echo "  $(UEFI_CODE_SRC)"; \
+		echo "  $(UEFI_VARS_SRC)"; \
+		exit 1; \
+	fi
+endif
 
-# Run with e1000 network card (for testing)
-run-e1000: iso
-	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA) -device e1000,netdev=net0
-else ifeq ($(ARCH),riscv64)
-run: $(KERNEL) uefi disk
+ifeq ($(ARCH),x86_64)
+run: check-tools iso disk
 	@$(MAKE) --no-print-directory check-disk
 	$(QEMU) $(QEMU_RUN_FLAGS)
 
 # Run with e1000 network card (for testing)
-run-e1000: $(KERNEL) uefi
+run-e1000: check-tools iso disk
+	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+else ifeq ($(ARCH),riscv64)
+run: check-tools $(KERNEL) uefi disk
+	@$(MAKE) --no-print-directory check-disk
+	$(QEMU) $(QEMU_RUN_FLAGS)
+
+# Run with e1000 network card (for testing)
+run-e1000: check-tools $(KERNEL) uefi disk
 	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
 else
-run: $(KERNEL)
+run: check-tools $(KERNEL) disk
 	@$(MAKE) --no-print-directory check-disk
 	$(QEMU) $(QEMU_RUN_FLAGS)
 
 # Run with e1000 network card (for testing)
-run-e1000: $(KERNEL)
+run-e1000: check-tools $(KERNEL) disk
 	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
 endif
 
 # Create bootable ISO (x86_64 only for now)
-iso: $(KERNEL)
+iso: $(KERNEL) initramfs
 	./scripts/make-iso.sh $(ARCH)
 
 # Run from ISO
@@ -490,19 +584,19 @@ run-iso: iso
 
 ifeq ($(ARCH),x86_64)
 # Debug with GDB
-debug: iso
+debug: check-tools iso disk
 	@echo "Starting QEMU with GDB server on localhost:1234"
 	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
-	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA) -s -S
+	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
 else ifeq ($(ARCH),riscv64)
 # Debug with GDB
-debug: $(KERNEL) uefi
+debug: check-tools $(KERNEL) uefi disk
 	@echo "Starting QEMU with GDB server on localhost:1234"
 	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
 	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
 else
 # Debug with GDB
-debug: $(KERNEL)
+debug: check-tools $(KERNEL) disk
 	@echo "Starting QEMU with GDB server on localhost:1234"
 	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
 	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
@@ -516,13 +610,17 @@ clean:
 	rm -rf build/
 
 # Prepare RISC-V UEFI firmware + Limine boot image
-uefi: $(KERNEL)
+uefi: $(KERNEL) initramfs
 	ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
 	ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
 
 # Create a disk image with ext2 filesystem
-disk: rootfs
+disk: $(DISK_STAMP)
+
+$(DISK_STAMP): $(ROOTFS_STAMP) scripts/make-disk.sh
+	@mkdir -p $(STAMP_DIR)
 	ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	@touch $@
 
 # Disassembly
 disasm: $(KERNEL)
@@ -534,13 +632,13 @@ symbols: $(KERNEL)
 
 # Run tests (in QEMU)
 ifeq ($(ARCH),x86_64)
-test: iso
-	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
+test: check-tools iso disk
+	$(QEMU) $(QEMU_RUN_FLAGS)
 else ifeq ($(ARCH),riscv64)
-test: $(KERNEL) uefi
+test: check-tools $(KERNEL) uefi disk
 	$(QEMU) $(QEMU_RUN_FLAGS)
 else
-test: $(KERNEL)
+test: check-tools $(KERNEL) disk
 	$(QEMU) $(QEMU_RUN_FLAGS)
 endif
 
@@ -554,10 +652,16 @@ help:
 	@echo "  debug    - Run with GDB server"
 	@echo "  clean    - Remove build artifacts"
 	@echo "  user     - Build userland init"
+	@echo "  initramfs - Build initramfs image"
+	@echo "  compiler-rt - Build clang compiler-rt builtins"
 	@echo "  busybox  - Build busybox for userland"
-	@echo "  rootfs   - Stage root filesystem"
+	@echo "  rootfs-base    - Stage rootfs base"
+	@echo "  rootfs-busybox - Stage busybox + applets"
+	@echo "  rootfs-init    - Stage init"
+	@echo "  rootfs         - Stage full rootfs"
 	@echo "  disk     - Create disk image"
 	@echo "  uefi     - Prepare RISC-V UEFI boot image"
+	@echo "  check-tools - Verify host toolchain"
 	@echo "  test     - Run kernel tests"
 	@echo ""
 	@echo "Variables:"

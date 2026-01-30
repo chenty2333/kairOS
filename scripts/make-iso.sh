@@ -17,6 +17,7 @@ KERNEL="$BUILD_DIR/kairos.elf"
 ISO_DIR="$BUILD_DIR/iso_root"
 ISO_FILE="$BUILD_DIR/kairos.iso"
 LIMINE_DIR="third_party/limine"
+INITRAMFS="$BUILD_DIR/initramfs.cpio"
 
 # Check prerequisites
 if [ ! -f "$KERNEL" ]; then
@@ -48,6 +49,15 @@ mkdir -p "$ISO_DIR/EFI/limine"
 # Copy kernel
 cp "$KERNEL" "$ISO_DIR/boot/"
 cp "$KERNEL" "$ISO_DIR/kairos.elf"
+
+# Copy initramfs
+if [ -f "$INITRAMFS" ]; then
+    cp "$INITRAMFS" "$ISO_DIR/initramfs.cpio"
+    mkdir -p "$ISO_DIR/boot"
+    cp "$INITRAMFS" "$ISO_DIR/boot/initramfs.cpio"
+else
+    echo "WARN: initramfs not found at $INITRAMFS" >&2
+fi
 
 # Copy Limine files
 cp limine.cfg "$ISO_DIR/boot/limine/limine.conf"

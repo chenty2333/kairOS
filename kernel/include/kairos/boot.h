@@ -9,6 +9,7 @@
 #include <kairos/types.h>
 
 #define BOOT_MEMMAP_MAX 256
+#define BOOT_MODULES_MAX 16
 
 enum boot_mem_type {
     BOOT_MEM_USABLE = 0,
@@ -33,6 +34,13 @@ struct boot_cpu_info {
     void *mp_info;
 };
 
+struct boot_module {
+    const char *path;
+    const char *string;
+    void *addr;
+    uint64_t size;
+};
+
 struct boot_info {
     const char *bootloader_name;
     const char *bootloader_version;
@@ -52,6 +60,9 @@ struct boot_info {
 
     uint32_t memmap_count;
     struct boot_memmap_entry memmap[BOOT_MEMMAP_MAX];
+
+    uint32_t module_count;
+    struct boot_module modules[BOOT_MODULES_MAX];
 
     uint32_t cpu_count;
     uint32_t bsp_cpu_id;
@@ -74,5 +85,6 @@ static inline bool boot_mem_is_ram(uint32_t type) {
 const struct boot_info *boot_info_get(void);
 uint64_t boot_hhdm_offset(void);
 void boot_info_set(const struct boot_info *info);
+const struct boot_module *boot_find_module(const char *name);
 
 #endif /* _KAIROS_BOOT_H */

@@ -19,6 +19,31 @@ struct vnode;
 struct dentry;
 struct mount_ns;
 
+/* Shared file descriptor table */
+struct fdtable {
+    struct file *files[CONFIG_MAX_FILES_PER_PROC];
+    uint32_t fd_flags[CONFIG_MAX_FILES_PER_PROC];
+    struct mutex lock;
+    uint32_t refcount;
+};
+
+struct fdtable *fdtable_alloc(void);
+struct fdtable *fdtable_copy(struct fdtable *src);
+void fdtable_get(struct fdtable *fdt);
+void fdtable_put(struct fdtable *fdt);
+
+/* Shared signal handler table */
+struct sighand_struct {
+    struct sigaction actions[CONFIG_NSIG];
+    uint32_t refcount;
+    spinlock_t lock;
+};
+
+struct sighand_struct *sighand_alloc(void);
+struct sighand_struct *sighand_copy(struct sighand_struct *src);
+void sighand_get(struct sighand_struct *sh);
+void sighand_put(struct sighand_struct *sh);
+
 enum proc_state {
     PROC_UNUSED,
     PROC_EMBRYO,
@@ -55,9 +80,7 @@ struct process {
     bool on_cpu;
 
     struct mm_struct *mm;
-    struct file *files[CONFIG_MAX_FILES_PER_PROC];
-    uint32_t fd_flags[CONFIG_MAX_FILES_PER_PROC];
-    struct mutex files_lock;
+    struct fdtable *fdtable;
     char cwd[CONFIG_PATH_MAX];
     struct vnode *cwd_vnode;
     struct dentry *cwd_dentry;
@@ -70,9 +93,14 @@ struct process {
     struct itimerval itimer_real;
     stack_t sigaltstack;
 
+    /* Thread group */
+    pid_t tgid;
+    struct process *group_leader;
+    struct list_head thread_group;
+
     /* Signals & Waiting */
     uint64_t sig_pending, sig_blocked;
-    struct sigaction *sigactions;
+    struct sighand_struct *sighand;
     void *wait_channel;
     struct wait_queue exit_wait;
     struct wait_queue vfork_wait;
@@ -93,6 +121,8 @@ struct proc_fork_opts {
     uint64_t tid_set_address;
     uint64_t tid_clear_address;
     struct process *vfork_parent;
+    uint64_t clone_flags;
+    uint64_t tls;
 };
 struct process *proc_fork_ex(const struct proc_fork_opts *opts);
 noreturn void proc_exit(int status);

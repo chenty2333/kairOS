@@ -85,6 +85,8 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size,
 void *kmem_cache_alloc(struct kmem_cache *c) {
     bool irq = arch_irq_save();
     int cpu = arch_cpu_id();
+    if (unlikely(cpu < 0 || cpu >= CONFIG_MAX_CPUS))
+        cpu = 0;
 
     if (unlikely(c->pcp[cpu].count == 0)) {
         spin_lock(&c->lock);
@@ -115,6 +117,8 @@ void kmem_cache_free(struct kmem_cache *c, void *obj) {
         return;
     bool irq = arch_irq_save();
     int cpu = arch_cpu_id();
+    if (unlikely(cpu < 0 || cpu >= CONFIG_MAX_CPUS))
+        cpu = 0;
 
     if (unlikely(c->pcp[cpu].count >= KMALLOC_LIMIT)) {
         spin_lock(&c->lock);

@@ -312,6 +312,9 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     struct mount *mnt = NULL;
     struct blkdev *dev = NULL;
     int ret = -ENOMEM;
+    const char *src_use = src;
+    if (src_use && strncmp(src_use, "/dev/", 5) == 0)
+        src_use += 5;
     vfs_mount_global_lock();
     spin_lock(&vfs_lock);
     fs = find_fs_type(fstype);
@@ -320,7 +323,7 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
         vfs_mount_global_unlock();
         return -ENODEV;
     }
-    if (src && !(dev = blkdev_get(src))) {
+    if (src_use && !(dev = blkdev_get(src_use))) {
         vfs_mount_global_unlock();
         return -ENODEV;
     }

@@ -28,8 +28,8 @@ void proc_init(void) {
         proc_table[i].state = PROC_UNUSED;
         INIT_LIST_HEAD(&proc_table[i].children);
         INIT_LIST_HEAD(&proc_table[i].sibling);
+        INIT_LIST_HEAD(&proc_table[i].thread_group);
         wait_queue_entry_init(&proc_table[i].wait_entry, &proc_table[i]);
-        mutex_init(&proc_table[i].files_lock, "files_lock");
         wait_queue_init(&proc_table[i].exit_wait);
         wait_queue_init(&proc_table[i].vfork_wait);
         spin_init(&proc_table[i].lock);
@@ -72,7 +72,9 @@ void proc_setup_stdio(struct process *p) {
     if (!p) {
         return;
     }
-    if (p->files[0] || p->files[1] || p->files[2]) {
+    if (!p->fdtable)
+        return;
+    if (p->fdtable->files[0] || p->fdtable->files[1] || p->fdtable->files[2]) {
         return;
     }
     proc_attach_console(p);
@@ -109,9 +111,11 @@ struct process *proc_alloc(void) {
     p->last_run_time = 0;
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
-    memset(p->files, 0, sizeof(p->files));
-    memset(p->fd_flags, 0, sizeof(p->fd_flags));
-    mutex_init(&p->files_lock, "files_lock");
+    p->fdtable = fdtable_alloc();
+    if (!p->fdtable) {
+        p->state = PROC_UNUSED;
+        return NULL;
+    }
     strcpy(p->cwd, "/");
     p->cwd_vnode = NULL;
     p->cwd_dentry = NULL;
@@ -143,12 +147,18 @@ struct process *proc_alloc(void) {
 
     INIT_LIST_HEAD(&p->children);
     INIT_LIST_HEAD(&p->sibling);
+    INIT_LIST_HEAD(&p->thread_group);
     wait_queue_entry_init(&p->wait_entry, p);
     wait_queue_init(&p->exit_wait);
     wait_queue_init(&p->vfork_wait);
     spin_init(&p->lock);
 
+    p->tgid = p->pid;
+    p->group_leader = p;
+
     if (!(p->context = arch_context_alloc())) {
+        fdtable_put(p->fdtable);
+        p->fdtable = NULL;
         p->state = PROC_UNUSED;
         return NULL;
     }
@@ -194,11 +204,19 @@ void proc_free_internal(struct process *p) {
         arch_context_free(p->context);
         p->context = NULL;
     }
-    if (p && p->sigactions) {
-        kfree(p->sigactions);
-        p->sigactions = NULL;
+    if (p && p->sighand) {
+        sighand_put(p->sighand);
+        p->sighand = NULL;
+    }
+    if (p && p->fdtable) {
+        fdtable_put(p->fdtable);
+        p->fdtable = NULL;
     }
     if (p) {
+        if (!list_empty(&p->thread_group)) {
+            list_del(&p->thread_group);
+            INIT_LIST_HEAD(&p->thread_group);
+        }
         p->state = PROC_UNUSED;
         p->pid = 0;
     }

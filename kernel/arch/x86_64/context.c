@@ -117,6 +117,15 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
     tf->rdx = a2;
 }
 
+void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
+    if (!ctx)
+        return;
+    /* Set FS base via MSR on context restore; store in context for now */
+    /* IA32_FS_BASE MSR = 0xC0000100 */
+    __asm__ __volatile__("wrmsr" :: "c"(0xC0000100),
+                         "a"((uint32_t)tls), "d"((uint32_t)(tls >> 32)));
+}
+
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {
     if (!ctx)
         return;

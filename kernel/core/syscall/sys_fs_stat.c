@@ -14,6 +14,87 @@
 
 #include "sys_fs_helpers.h"
 
+/* Linux ABI statfs layout */
+struct linux_statfs {
+    long f_type;
+    long f_bsize;
+    long f_blocks;
+    long f_bfree;
+    long f_bavail;
+    long f_files;
+    long f_ffree;
+    struct { int val[2]; } f_fsid;
+    long f_namelen;
+    long f_frsize;
+    long f_flags;
+    long f_spare[4];
+};
+
+static void kstatfs_to_linux(const struct kstatfs *kst,
+                             struct linux_statfs *lst) {
+    memset(lst, 0, sizeof(*lst));
+    lst->f_type = (long)kst->f_type;
+    lst->f_bsize = (long)kst->f_bsize;
+    lst->f_blocks = (long)kst->f_blocks;
+    lst->f_bfree = (long)kst->f_bfree;
+    lst->f_bavail = (long)kst->f_bavail;
+    lst->f_files = (long)kst->f_files;
+    lst->f_ffree = (long)kst->f_ffree;
+    lst->f_fsid.val[0] = (int)kst->f_fsid[0];
+    lst->f_fsid.val[1] = (int)kst->f_fsid[1];
+    lst->f_namelen = (long)kst->f_namelen;
+    lst->f_frsize = (long)kst->f_frsize;
+    lst->f_flags = (long)kst->f_flags;
+}
+
+int64_t sys_statfs(uint64_t path, uint64_t buf, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!buf)
+        return -EFAULT;
+    char kpath[CONFIG_PATH_MAX];
+    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    struct mount *mnt = vfs_mount_for_path(kpath);
+    if (!mnt)
+        return -ENOENT;
+
+    struct kstatfs kst;
+    int ret = vfs_statfs(mnt, &kst);
+    if (ret < 0)
+        return ret;
+
+    struct linux_statfs lst;
+    kstatfs_to_linux(&kst, &lst);
+    if (copy_to_user((void *)buf, &lst, sizeof(lst)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int64_t sys_fstatfs(uint64_t fd, uint64_t buf, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!buf)
+        return -EFAULT;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    if (!f->vnode || !f->vnode->mount)
+        return -ENOSYS;
+
+    struct kstatfs kst;
+    int ret = vfs_statfs(f->vnode->mount, &kst);
+    if (ret < 0)
+        return ret;
+
+    struct linux_statfs lst;
+    kstatfs_to_linux(&kst, &lst);
+    if (copy_to_user((void *)buf, &lst, sizeof(lst)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 struct linux_dirent64 {
     uint64_t d_ino;
     int64_t d_off;

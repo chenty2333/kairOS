@@ -65,6 +65,23 @@ int ext2_mount(struct mount *mnt) {
     return 0;
 }
 
+int ext2_statfs(struct mount *mnt, struct kstatfs *st) {
+    struct ext2_mount *e = mnt->fs_data;
+    if (!e)
+        return -EINVAL;
+    memset(st, 0, sizeof(*st));
+    st->f_type = EXT2_SUPER_MAGIC;
+    st->f_bsize = e->block_size;
+    st->f_frsize = e->block_size;
+    st->f_blocks = e->sb->s_blocks_count;
+    st->f_bfree = e->sb->s_free_blocks_count;
+    st->f_bavail = e->sb->s_free_blocks_count - e->sb->s_r_blocks_count;
+    st->f_files = e->sb->s_inodes_count;
+    st->f_ffree = e->sb->s_free_inodes_count;
+    st->f_namelen = EXT2_NAME_LEN;
+    return 0;
+}
+
 int ext2_unmount(struct mount *mnt) {
     struct ext2_mount *e = mnt->fs_data;
     if (e) {

@@ -36,7 +36,7 @@ Kairos is a monolithic kernel with a strict Hardware Abstraction Layer (HAL).
 
 ## 4. Execution Flow
 1. **Traps**: `arch_trap_entry` (asm) -> `trap_dispatch` (C) -> (Syscall/IRQ/Fault) -> Signal/Resched Check -> `arch_trap_return`.
-2. **Boot**: Limine -> `_start` -> `kernel_main` -> (Subsystem Init) -> `/init` (user).
+2. **Boot**: Limine -> `_start` -> `kernel_main` -> (Subsystem Init) -> initramfs `/init` -> pivot_root -> disk `/init`.
 
 ## 5. Syscall Interface
 - **Calling**: RISC-V (`a7`), AArch64 (`x8`), x86_64 (`rax`).

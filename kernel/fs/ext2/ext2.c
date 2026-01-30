@@ -20,6 +20,7 @@ static struct vfs_ops ext2_ops = {
     .chmod = ext2_chmod,
     .chown = ext2_chown,
     .utimes = ext2_utimes,
+    .statfs = ext2_statfs,
     .unlink = ext2_unlink,
     .rmdir = ext2_rmdir,
     .rename = ext2_rename,

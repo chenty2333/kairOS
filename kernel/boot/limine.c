@@ -291,6 +291,23 @@ static void boot_init_limine(void) {
         boot_info.dtb = limine_find_dtb_module();
     }
 
+    if (limine_modules.response && limine_modules.response->module_count) {
+        uint64_t count = limine_modules.response->module_count;
+        if (count > BOOT_MODULES_MAX)
+            count = BOOT_MODULES_MAX;
+        boot_info.module_count = (uint32_t)count;
+        for (uint64_t i = 0; i < count; i++) {
+            struct limine_file *mod = limine_modules.response->modules[i];
+            if (!mod)
+                continue;
+            boot_info.modules[i].path = (const char *)(uintptr_t)mod->path;
+            boot_info.modules[i].string =
+                (const char *)(uintptr_t)mod->string;
+            boot_info.modules[i].addr = (void *)(uintptr_t)mod->address;
+            boot_info.modules[i].size = mod->size;
+        }
+    }
+
     if (limine_memmap.response) {
         uint64_t min = UINT64_MAX;
         uint64_t max = 0;

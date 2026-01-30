@@ -117,6 +117,12 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
     tf->tf_a2 = a2;
 }
 
+void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
+    (void)ctx;
+    /* Set tpidr_el0 directly; restored on context switch */
+    __asm__ __volatile__("msr tpidr_el0, %0" :: "r"(tls));
+}
+
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {
     if (!ctx)
         return;
