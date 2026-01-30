@@ -52,8 +52,14 @@ stage_busybox() {
     # Install a minimal set of BusyBox applet links.
     local applets=(
       sh ls cat echo pwd mkdir rmdir rm mv cp ln touch
-      readlink stat head tail wc grep sed awk cut tr sort uniq tee printf
-      sleep date uname dmesg kill nice id whoami env
+      readlink realpath stat head tail wc grep sed awk cut tr sort uniq tee printf
+      sleep date time uptime uname dmesg kill nice id whoami env
+      basename dirname which true false yes
+      chmod chown chgrp chroot mknod mkfifo mktemp sync mount umount
+      df du free ps pidof pgrep pkill killall
+      xargs find expr test seq
+      dd hexdump od strings
+      comm cmp diff paste fold nl
     )
     for app in "${applets[@]}"; do
       ln -sf /bin/busybox "$ROOTFS_DIR/bin/$app"
