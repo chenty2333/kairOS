@@ -82,8 +82,13 @@ static struct buf *bget(struct blkdev *dev, uint32_t blockno) {
 struct buf *bread(struct blkdev *dev, uint32_t blockno) {
     struct buf *b = bget(dev, blockno);
     if (!(b->flags & B_VALID)) {
-        blkdev_read(dev, (uint64_t)blockno * (4096 / dev->sector_size), b->data,
-                    4096 / dev->sector_size);
+        int ret = blkdev_read(dev,
+                              (uint64_t)blockno * (4096 / dev->sector_size),
+                              b->data, 4096 / dev->sector_size);
+        if (ret < 0) {
+            brelse(b);
+            return NULL;
+        }
         b->flags |= B_VALID;
     }
     return b;

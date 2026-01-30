@@ -205,6 +205,11 @@ static int virtio_net_probe(struct virtio_device *vdev) {
     wait_queue_init(&vn->tx_wait);
     wait_queue_init(&vn->rx_wait);
 
+    if (virtio_device_init(vdev, 0) < 0) {
+        ret = -EIO;
+        goto err;
+    }
+
     vn->rx_vq = virtqueue_alloc(vdev, 0, VIRTQ_SIZE);
     vn->tx_vq = virtqueue_alloc(vdev, 1, VIRTQ_SIZE);
     if (!vn->rx_vq || !vn->tx_vq) {
@@ -224,7 +229,8 @@ static int virtio_net_probe(struct virtio_device *vdev) {
         goto err;
     }
 
-    if (virtio_device_init(vdev, 0) < 0) {
+    if (virtio_device_ready(vdev) < 0) {
+        virtio_device_set_failed(vdev);
         ret = -EIO;
         goto err;
     }

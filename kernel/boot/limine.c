@@ -120,6 +120,15 @@ static volatile struct limine_dtb_request limine_dtb = {
 };
 
 __attribute__((used, section(".limine_requests")))
+static volatile struct limine_module_request limine_modules = {
+    .id = LIMINE_MODULE_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+    .internal_module_count = 0,
+    .internal_modules = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
 static volatile struct limine_rsdp_request limine_rsdp = {
     .id = LIMINE_RSDP_REQUEST_ID,
     .revision = 0,
@@ -176,6 +185,38 @@ __attribute__((used, section(".limine_requests_end_marker")))
 static volatile uint64_t limine_requests_end[] = LIMINE_REQUESTS_END_MARKER;
 
 static struct boot_info boot_info;
+
+static bool limine_path_has_suffix(const char *path, const char *suffix) {
+    if (!path || !suffix) {
+        return false;
+    }
+    size_t plen = strlen(path);
+    size_t slen = strlen(suffix);
+    if (slen == 0 || plen < slen) {
+        return false;
+    }
+    return memcmp(path + plen - slen, suffix, slen) == 0;
+}
+
+static void *limine_find_dtb_module(void) {
+    if (!limine_modules.response || limine_modules.response->module_count == 0) {
+        return NULL;
+    }
+    for (uint64_t i = 0; i < limine_modules.response->module_count; i++) {
+        struct limine_file *mod = limine_modules.response->modules[i];
+        if (!mod) {
+            continue;
+        }
+        if (mod->string && strcmp(mod->string, "dtb") == 0) {
+            return mod->address;
+        }
+        if (limine_path_has_suffix(mod->path, ".dtb") ||
+            limine_path_has_suffix(mod->string, ".dtb")) {
+            return mod->address;
+        }
+    }
+    return NULL;
+}
 
 static uint32_t limine_memmap_type_to_boot(uint32_t type) {
     switch (type) {
@@ -246,6 +287,9 @@ static void boot_init_limine(void) {
     if (!boot_info.dtb && boot_info.efi_system_table) {
         boot_info.dtb = efi_find_dtb(boot_info.efi_system_table);
     }
+    if (!boot_info.dtb) {
+        boot_info.dtb = limine_find_dtb_module();
+    }
 
     if (limine_memmap.response) {
         uint64_t min = UINT64_MAX;
@@ -261,7 +305,7 @@ static void boot_init_limine(void) {
             boot_info.memmap[i].base = entry->base;
             boot_info.memmap[i].length = entry->length;
             boot_info.memmap[i].type = limine_memmap_type_to_boot(entry->type);
-            if (entry->type == LIMINE_MEMMAP_USABLE) {
+            if (boot_mem_is_ram(boot_info.memmap[i].type)) {
                 if (entry->base < min)
                     min = entry->base;
                 if (entry->base + entry->length > max)

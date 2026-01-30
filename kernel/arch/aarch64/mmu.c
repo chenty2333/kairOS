@@ -90,7 +90,7 @@ void arch_mmu_init(const struct boot_info *bi) {
 
     for (uint32_t i = 0; i < bi->memmap_count; i++) {
         const struct boot_memmap_entry *e = &bi->memmap[i];
-        if (e->type != BOOT_MEM_USABLE)
+        if (!boot_mem_is_ram(e->type))
             continue;
         map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
                    e->length, PTE_READ | PTE_WRITE | PTE_GLOBAL);
@@ -220,7 +220,9 @@ void *phys_to_virt(paddr_t addr) {
 paddr_t virt_to_phys(void *addr) {
     const struct boot_info *bi = boot_info_get();
     uint64_t va = (uint64_t)addr;
-    if (bi && bi->hhdm_offset && va >= bi->hhdm_offset) {
+    if (bi && bi->hhdm_offset &&
+        va >= bi->hhdm_offset &&
+        va < bi->hhdm_offset + bi->phys_mem_max) {
         return (paddr_t)(va - bi->hhdm_offset);
     }
     if (bi && bi->kernel_virt_base &&

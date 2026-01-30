@@ -58,6 +58,19 @@ struct boot_info {
     struct boot_cpu_info cpus[CONFIG_MAX_CPUS];
 };
 
+static inline bool boot_mem_is_ram(uint32_t type) {
+    switch (type) {
+        case BOOT_MEM_USABLE:
+        case BOOT_MEM_BOOTLOADER_RECLAIM:
+        case BOOT_MEM_KERNEL_AND_MODULES:
+        case BOOT_MEM_ACPI_RECLAIM:
+        case BOOT_MEM_ACPI_NVS:
+            return true;
+        default:
+            return false;
+    }
+}
+
 const struct boot_info *boot_info_get(void);
 uint64_t boot_hhdm_offset(void);
 void boot_info_set(const struct boot_info *info);

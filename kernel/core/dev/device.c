@@ -14,18 +14,18 @@ static LIST_HEAD(device_list);
 static LIST_HEAD(driver_list);
 static spinlock_t device_model_lock = SPINLOCK_INIT;
 
-static int bus_match_probe(struct device *dev, struct driver *drv);
+static int bus_match_probe_locked(struct device *dev, struct driver *drv);
 
 static void device_try_bind(struct device *dev) {
     struct driver *drv;
     list_for_each_entry(drv, &driver_list, list) {
-        if (!dev->driver && bus_match_probe(dev, drv))
+        if (!dev->driver && bus_match_probe_locked(dev, drv))
             break;
     }
 }
 
 /* Simple linear match and probe */
-static int bus_match_probe(struct device *dev, struct driver *drv) {
+static int bus_match_probe_locked(struct device *dev, struct driver *drv) {
     if (dev->bus != drv->bus) return 0;
     
     /* If bus provides match method, use it; otherwise match by name */
@@ -36,13 +36,14 @@ static int bus_match_probe(struct device *dev, struct driver *drv) {
         if (strcmp(dev->name, drv->name) != 0) return 0;
     }
 
-    /* Match found, try probe */
+    /* Match found; drop the model lock to avoid probe re-entrancy deadlocks. */
     // pr_info("device: probing %s with %s\n", dev->name, drv->name);
     dev->driver = drv;
+    spin_unlock(&device_model_lock);
     int ret = drv->probe(dev);
-    if (ret == 0) {
+    spin_lock(&device_model_lock);
+    if (ret == 0)
         return 1;
-    }
     dev->driver = NULL;
     return 0;
 }
@@ -97,7 +98,7 @@ int driver_register(struct driver *drv) {
     struct device *dev;
     list_for_each_entry(dev, &device_list, list) {
         if (!dev->driver)
-            bus_match_probe(dev, drv);
+            bus_match_probe_locked(dev, drv);
     }
     spin_unlock(&device_model_lock);
     

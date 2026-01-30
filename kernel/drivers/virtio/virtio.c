@@ -55,7 +55,12 @@ int virtio_device_init(struct virtio_device *vdev, uint64_t driver_features) {
         vdev->ops->set_status(vdev, status | VIRTIO_STATUS_FAILED);
         return -EIO;
     }
+    return 0;
+}
 
+int virtio_device_ready(struct virtio_device *vdev) {
+    if (!vdev || !vdev->ops)
+        return -EINVAL;
     vdev->ops->set_status(vdev, vdev->ops->get_status(vdev) | VIRTIO_STATUS_DRIVER_OK);
     return 0;
 }

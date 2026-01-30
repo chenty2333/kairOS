@@ -185,10 +185,10 @@ void arch_mmu_init(const struct boot_info *bi) {
         panic("mmu: init failed");
     }
 
-    /* 1. Map HHDM for all usable memory regions */
+    /* 1. Map HHDM for all RAM-backed memory regions */
     for (uint32_t i = 0; i < bi->memmap_count; i++) {
         const struct boot_memmap_entry *e = &bi->memmap[i];
-        if (e->type != BOOT_MEM_USABLE)
+        if (!boot_mem_is_ram(e->type))
             continue;
         map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
                    e->length, PTE_READ | PTE_WRITE);

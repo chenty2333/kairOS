@@ -109,7 +109,17 @@ fail:
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
     mutex_lock(&mm->lock);
     struct vm_area *vma = mm_find_vma(mm, addr);
-    if (!vma || ((flags & PTE_WRITE) && !(vma->flags & VM_WRITE))) { mutex_unlock(&mm->lock); return -EFAULT; }
+    if (!vma) {
+        mutex_unlock(&mm->lock);
+        pr_err("mm: fault addr=%p no vma\n", (void *)addr);
+        return -EFAULT;
+    }
+    if ((flags & PTE_WRITE) && !(vma->flags & VM_WRITE)) {
+        mutex_unlock(&mm->lock);
+        pr_err("mm: fault addr=%p write denied (vma flags=0x%x)\n",
+               (void *)addr, vma->flags);
+        return -EFAULT;
+    }
 
     vaddr_t va = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
     uint64_t pte = arch_mmu_get_pte(mm->pgdir, va);
@@ -167,11 +177,15 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
                 to_read,
                 file_off);
             if (rd < 0) {
+                pr_err("mm: fault addr=%p vnode read failed off=%ld ret=%ld\n",
+                       (void *)addr, (long)file_off, (long)rd);
                 pmm_free_page(pa);
                 mutex_unlock(&mm->lock);
                 return (int)rd;
             }
             if ((size_t)rd != to_read) {
+                pr_err("mm: fault addr=%p vnode short read off=%ld got=%ld want=%zu\n",
+                       (void *)addr, (long)file_off, (long)rd, to_read);
                 pmm_free_page(pa);
                 mutex_unlock(&mm->lock);
                 return -EIO;

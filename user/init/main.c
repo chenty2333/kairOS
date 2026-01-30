@@ -8,6 +8,9 @@
 static void setup_stdio(void) {
     int fd = open("/dev/console", O_RDWR);
     if (fd < 0) {
+        fd = open("/console", O_RDWR);
+    }
+    if (fd < 0) {
         return;
     }
     dup2(fd, 0);
@@ -23,10 +26,14 @@ static void exec_shell(void) {
         "PATH=/bin:/sbin",
         "TERM=vt100",
         "HOME=/",
+        "PS1=kairos$ ",
         NULL,
     };
     char *const argv_sh[] = {"sh", NULL};
     char *const argv_busybox[] = {"busybox", "sh", NULL};
+
+    const char msg[] = "init: starting shell\n";
+    write(1, msg, sizeof(msg) - 1);
 
     execve("/bin/sh", argv_sh, envp);
     execve("/bin/busybox", argv_busybox, envp);

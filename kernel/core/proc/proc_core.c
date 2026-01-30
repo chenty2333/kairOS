@@ -49,6 +49,10 @@ static void proc_attach_console(struct process *p) {
         return;
     }
     int ret = vfs_open_at("/", "/dev/console", O_RDWR, 0, &f);
+    if ((ret < 0 || !f) &&
+        vfs_open_at("/", "/console", O_RDWR, 0, &f) == 0 && f) {
+        ret = 0;
+    }
     if (ret < 0 || !f) {
         pr_warn("stdio: failed to open /dev/console (ret=%d)\n", ret);
         vfs_dump_mounts();

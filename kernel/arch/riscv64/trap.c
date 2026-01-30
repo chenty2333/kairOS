@@ -60,8 +60,20 @@ static void handle_exception(struct trap_frame *tf) {
     bool from_user = !(tf->sstatus & SSTATUS_SPP);
 
     if (cause == EXC_ECALL_U || cause == EXC_ECALL_S) {
-        tf->tf_a0 = syscall_dispatch(tf->tf_a7, tf->tf_a0, tf->tf_a1, tf->tf_a2,
-                                     tf->tf_a3, tf->tf_a4, tf->tf_a5);
+        uint64_t nr = tf->tf_a7;
+        int64_t ret = syscall_dispatch(nr, tf->tf_a0, tf->tf_a1, tf->tf_a2,
+                                       tf->tf_a3, tf->tf_a4, tf->tf_a5);
+        tf->tf_a0 = ret;
+        if (ret >= 0) {
+            struct process *cur = proc_current();
+            if (!cur || cur->syscall_abi == SYSCALL_ABI_LINUX) {
+                if (nr == LINUX_NR_execve || nr == LINUX_NR_execveat)
+                    return;
+            } else {
+                if (nr == SYS_exec)
+                    return;
+            }
+        }
         tf->sepc += 4;
         return;
     }

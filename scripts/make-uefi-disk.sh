@@ -81,6 +81,10 @@ sudo cp limine.cfg "$MNT_DIR/EFI/BOOT/LIMINE.CFG"
 sudo cp limine.cfg "$MNT_DIR/EFI/limine/limine.conf"
 sudo cp "$KERNEL" "$MNT_DIR/kairos.elf"
 sudo cp "$KERNEL" "$MNT_DIR/boot/kairos.elf"
+if [ "$ARCH" = "riscv64" ] && [ -f "qemu-virt.dtb" ]; then
+    sudo cp qemu-virt.dtb "$MNT_DIR/qemu-virt.dtb"
+    sudo cp qemu-virt.dtb "$MNT_DIR/boot/qemu-virt.dtb"
+fi
 sync
 sudo umount "$MNT_DIR"
 

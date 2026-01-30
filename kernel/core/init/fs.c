@@ -39,5 +39,11 @@ void init_fs(void) {
             pr_warn("devfs: mount failed (ret=%d)\n", ret);
     } else {
         pr_warn("ext2 root: mount failed on any vda..vdz (ret=%d)\n", ret);
+        ret = vfs_mount(NULL, "/", "devfs", 0);
+        if (ret < 0) {
+            pr_warn("devfs: root mount failed (ret=%d)\n", ret);
+        } else {
+            pr_info("devfs: mounted as root (no disk root)\n");
+        }
     }
 }

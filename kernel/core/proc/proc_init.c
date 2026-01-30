@@ -18,6 +18,7 @@ static int init_thread(void *arg __attribute__((unused))) {
     struct process *parent = proc_current();
     const char *init_paths[] = {"/init", "/sbin/init", "/bin/init"};
     struct process *child = NULL;
+    pr_info("init: init thread running\n");
 
 #if CONFIG_EMBEDDED_INIT && defined(ARCH_riscv64)
     if (user_init_elf_size > 0) {
@@ -38,6 +39,7 @@ static int init_thread(void *arg __attribute__((unused))) {
                 sched_enqueue(child);
                 break;
             }
+            pr_warn("init: failed to spawn %s\n", init_paths[i]);
         }
     }
 

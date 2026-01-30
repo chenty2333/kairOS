@@ -44,10 +44,10 @@ struct virtio_blk_dev {
     struct mutex lock;
     struct wait_queue io_wait;
     struct blkdev blkdev;
+    bool irq_seen;
 };
 
-static void virtio_blk_intr(struct virtio_device *vdev) {
-    struct virtio_blk_dev *vb = vdev->priv;
+static void virtio_blk_handle_used(struct virtio_blk_dev *vb) {
     if (!vb || !vb->vq)
         return;
 
@@ -57,6 +57,14 @@ static void virtio_blk_intr(struct virtio_device *vdev) {
             ctx->done = true;
     }
     wait_queue_wakeup_all(&vb->io_wait);
+}
+
+static void virtio_blk_intr(struct virtio_device *vdev) {
+    struct virtio_blk_dev *vb = vdev->priv;
+    if (!vb || !vb->vq)
+        return;
+    vb->irq_seen = true;
+    virtio_blk_handle_used(vb);
 }
 
 static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
@@ -107,12 +115,17 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
     }
     virtqueue_kick(vb->vq);
 
-    if (!proc_current()) {
-        while (!ctx.done)
+    struct process *curr = proc_current();
+    bool can_sleep = arch_irq_enabled() &&
+                     curr && curr != arch_get_percpu()->idle_proc &&
+                     vb->irq_seen;
+    if (!can_sleep) {
+        while (!ctx.done) {
+            virtio_blk_handle_used(vb);
             arch_cpu_relax();
+        }
     } else {
         while (!ctx.done) {
-            struct process *curr = proc_current();
             wait_queue_add(&vb->io_wait, curr);
             curr->state = PROC_SLEEPING;
             curr->wait_channel = &vb->io_wait;
@@ -162,9 +175,16 @@ static int virtio_blk_probe(struct virtio_device *vdev) {
 
     mutex_init(&vb->lock, "virtio_blk");
     wait_queue_init(&vb->io_wait);
+    vb->irq_seen = false;
+
+    if (virtio_device_init(vdev, 0) < 0) {
+        kfree(vb);
+        return -EIO;
+    }
 
     vb->vq = virtqueue_alloc(vdev, 0, VIRTQ_SIZE);
     if (!vb->vq) {
+        virtio_device_set_failed(vdev);
         kfree(vb);
         return -ENOMEM;
     }
@@ -175,7 +195,8 @@ static int virtio_blk_probe(struct virtio_device *vdev) {
         return -ENODEV;
     }
 
-    if (virtio_device_init(vdev, 0) < 0) {
+    if (virtio_device_ready(vdev) < 0) {
+        virtio_device_set_failed(vdev);
         virtqueue_free(vb->vq);
         kfree(vb);
         return -EIO;

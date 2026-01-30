@@ -116,6 +116,7 @@ void virtqueue_kick(struct virtqueue *vq);
 void *virtqueue_get_buf(struct virtqueue *vq, uint32_t *len);
 
 int virtio_device_init(struct virtio_device *vdev, uint64_t driver_features);
+int virtio_device_ready(struct virtio_device *vdev);
 void virtio_device_set_failed(struct virtio_device *vdev);
 
 /* Status bits */
