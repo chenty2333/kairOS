@@ -234,16 +234,64 @@ static struct process *pid_to_proc(pid_t pid) {
     return NULL;
 }
 
+static void procfs_calc_vsz_rss(const struct process *p, uint64_t *vsz_bytes,
+                                uint64_t *rss_pages) {
+    if (!p || !p->mm) {
+        *vsz_bytes = 0;
+        *rss_pages = 0;
+        return;
+    }
+
+    uint64_t total = 0;
+    mutex_lock(&p->mm->lock);
+    struct vm_area *vma;
+    list_for_each_entry(vma, &p->mm->vma_list, list) {
+        if (vma->end > vma->start)
+            total += (uint64_t)(vma->end - vma->start);
+    }
+    mutex_unlock(&p->mm->lock);
+
+    *vsz_bytes = total;
+    *rss_pages = (total + CONFIG_PAGE_SIZE - 1) / CONFIG_PAGE_SIZE;
+}
+
 static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz) {
     struct process *p = pid_to_proc(pid);
     if (!p)
         return -ENOENT;
-    return snprintf(buf, bufsz,
-                    "%d (%s) %s %d %d %d 0 0 0 0 0 %lu %lu 0 0 0 %d %lu\n",
-                    p->pid, p->name, proc_state_char(p->state),
-                    p->ppid, p->pgid, p->sid,
-                    (unsigned long)p->utime, (unsigned long)p->stime,
-                    p->nice, (unsigned long)p->vruntime);
+
+    uint64_t vsz_bytes = 0;
+    uint64_t rss_pages = 0;
+    procfs_calc_vsz_rss(p, &vsz_bytes, &rss_pages);
+
+    int priority = 20 + p->nice;
+    int num_threads = 1;
+
+    return snprintf(
+        buf, bufsz,
+        "%d (%s) %s "     /* pid, comm, state */
+        "%d %d %d "       /* ppid, pgrp, session */
+        "0 0 "            /* tty_nr, tpgid */
+        "0 "              /* flags */
+        "0 0 0 0 "        /* minflt, cminflt, majflt, cmajflt */
+        "%lu %lu "        /* utime, stime */
+        "0 0 "            /* cutime, cstime */
+        "%d %d "          /* priority, nice */
+        "%d 0 "           /* num_threads, itrealvalue */
+        "%lu "            /* start_time */
+        "%llu "           /* vsize */
+        "%lu "            /* rss */
+        "0 0 0 0 0 0 0 0 "/* rsslim..kstkeip */
+        "0 0 0 0 "        /* signal..sigcatch */
+        "0 0 0 "          /* wchan, nswap, cnswap */
+        "0 "              /* exit_signal */
+        "0 0 0 0 "        /* processor, rt_priority, policy, delayacct */
+        "0 0 0 0 0 0 0 "  /* guest_time..env_end */
+        "0\n",            /* exit_code */
+        p->pid, p->name, proc_state_char(p->state), p->ppid, p->pgid, p->sid,
+        (unsigned long)p->utime, (unsigned long)p->stime, priority, p->nice,
+        num_threads, (unsigned long)p->start_time,
+        (unsigned long long)vsz_bytes, (unsigned long)rss_pages);
 }
 
 static int gen_pid_status(pid_t pid, char *buf, size_t bufsz) {

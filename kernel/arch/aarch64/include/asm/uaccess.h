@@ -23,14 +23,7 @@ static inline bool access_ok(const void *addr, size_t size) {
     if (!p || !p->mm)
         return false;
 
-    for (unsigned long va = start; va <= end;
-         va = ALIGN_DOWN(va, CONFIG_PAGE_SIZE) + CONFIG_PAGE_SIZE) {
-        uint64_t pte = arch_mmu_get_pte(p->mm->pgdir, (vaddr_t)va);
-        if (!(pte & PTE_VALID) || !(pte & PTE_USER))
-            return false;
-        if (va + CONFIG_PAGE_SIZE < va)
-            break;
-    }
+    /* Do not require PTEs to be present; demand paging will fault them in. */
     return true;
 }
 

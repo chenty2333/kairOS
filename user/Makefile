@@ -35,7 +35,7 @@ ifeq ($(ARCH),riscv64)
 CFLAGS += -march=rv64gc -mabi=lp64
 endif
 CFLAGS += -Wall -Wextra
-LDFLAGS := -no-pie --sysroot=$(SYSROOT)
+LDFLAGS := --sysroot=$(SYSROOT)
 LDFLAGS += -L$(SYSROOT)/lib
 ifeq ($(ARCH),riscv64)
 LDFLAGS += -march=rv64gc -mabi=lp64

@@ -154,6 +154,9 @@ struct page *alloc_pages(unsigned int order) {
                     pcp_disable("invalid buddy page", cpu);
                     break;
                 }
+                /* Pages staged in the PCP cache are free: refcount must be 0. */
+                p->refcount = 0;
+                p->flags = 0;
                 list_add(&p->list, &pcp->list);
                 pcp->count++;
             }
