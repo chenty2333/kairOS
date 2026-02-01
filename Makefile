@@ -47,6 +47,9 @@ COMMON_ARCH_SRCS := \
 # Use clang for cross-compilation (set USE_GCC=1 to use GCC)
 USE_GCC ?= 0
 
+# Optional subsystems (set to 0 to disable)
+CONFIG_DRM_LITE ?= 1
+
 ifeq ($(ARCH),riscv64)
   CROSS_COMPILE ?= riscv64-unknown-elf-
   CLANG_TARGET := riscv64-unknown-elf
@@ -95,6 +98,7 @@ CFLAGS += -I kernel/include
 CFLAGS += -I kernel/arch/$(ARCH)/include
 CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 CFLAGS += -DCONFIG_EMBEDDED_INIT=$(EMBEDDED_INIT)
+CFLAGS += -DCONFIG_DRM_LITE=$(CONFIG_DRM_LITE)
 
 # lwIP include paths
 LWIP_DIR := third_party/lwip
@@ -229,6 +233,10 @@ CORE_SRCS := \
     kernel/drivers/block/virtio_blk.c \
     kernel/drivers/net/virtio_net.c \
     kernel/core/tests/driver_tests.c
+
+ifneq ($(CONFIG_DRM_LITE),0)
+CORE_SRCS += kernel/drivers/gpu/drm_lite.c
+endif
 
 # Architecture-specific sources
 ifeq ($(ARCH),riscv64)
@@ -462,8 +470,20 @@ $(BUILD_DIR)/%.o: %.S
 # ============================================================
 
 # Common QEMU flags
-QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4 -nographic
+QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4
 QEMU_FLAGS += -serial stdio -monitor none
+
+# Optional graphical output (QEMU_GUI=1)
+ifeq ($(QEMU_GUI),1)
+  QEMU_FLAGS += -display gtk
+ifeq ($(ARCH),riscv64)
+  QEMU_FLAGS += -device ramfb
+else
+  QEMU_FLAGS += -device virtio-gpu-pci
+endif
+else
+  QEMU_FLAGS += -nographic
+endif
 QEMU_FLAGS += $(QEMU_EXTRA)
 
 ifeq ($(ARCH),aarch64)

@@ -21,12 +21,15 @@
 #define DEVFS_ZERO 2
 #define DEVFS_CONSOLE 3
 #define DEVFS_BLOCK 4
+#define DEVFS_CUSTOM 5
 
 struct devfs_node {
     char name[CONFIG_NAME_MAX];
     ino_t ino;
     int dev_type;
     struct blkdev *blk;
+    struct file_ops *ops;
+    void *priv;
     struct vnode vn;
     struct devfs_node *next;
 };
@@ -42,6 +45,17 @@ struct devfs_add_ctx {
     struct devfs_mount *dm;
     struct mount *mnt;
 };
+
+struct devfs_custom_reg {
+    char name[CONFIG_NAME_MAX];
+    struct file_ops *ops;
+    void *priv;
+    struct devfs_custom_reg *next;
+};
+
+static struct devfs_mount *devfs_active;
+static struct devfs_custom_reg *devfs_registry;
+static spinlock_t devfs_global_lock = SPINLOCK_INIT;
 
 static struct vnode *devfs_lookup(struct vnode *dir, const char *name);
 static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
@@ -88,6 +102,29 @@ static void devfs_init_vnode(struct vnode *vn, struct mount *mnt,
     poll_wait_head_init(&vn->pollers);
 }
 
+static struct devfs_node *devfs_create_custom(struct devfs_mount *dm,
+                                              struct mount *mnt,
+                                              const char *name,
+                                              struct file_ops *ops,
+                                              void *priv) {
+    struct devfs_node *node = kzalloc(sizeof(*node));
+    if (!node)
+        return NULL;
+
+    strncpy(node->name, name, CONFIG_NAME_MAX - 1);
+    node->ino = dm->next_ino++;
+    node->dev_type = DEVFS_CUSTOM;
+    node->blk = NULL;
+    node->ops = ops;
+    node->priv = priv;
+    node->next = dm->devices;
+    dm->devices = node;
+
+    devfs_init_vnode(&node->vn, mnt, node, VNODE_DEVICE, S_IFCHR | 0666,
+                     &devfs_dev_ops);
+    return node;
+}
+
 static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
                                               struct mount *mnt,
                                               const char *name, int type,
@@ -100,6 +137,8 @@ static struct devfs_node *devfs_create_device(struct devfs_mount *dm,
     node->ino = dm->next_ino++;
     node->dev_type = type;
     node->blk = blk;
+    node->ops = NULL;
+    node->priv = NULL;
     node->next = dm->devices;
     dm->devices = node;
 
@@ -141,6 +180,15 @@ static int devfs_mount(struct mount *mnt) {
 
     struct devfs_add_ctx ctx = {.dm = dm, .mnt = mnt};
     blkdev_for_each(devfs_add_blkdev, &ctx);
+
+    spin_lock(&devfs_global_lock);
+    devfs_active = dm;
+    struct devfs_custom_reg *reg = devfs_registry;
+    while (reg) {
+        devfs_create_custom(dm, mnt, reg->name, reg->ops, reg->priv);
+        reg = reg->next;
+    }
+    spin_unlock(&devfs_global_lock);
 
     mnt->fs_data = dm;
     mnt->root = &dm->root->vn;
@@ -191,6 +239,10 @@ static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
         return 0;
 
     switch (node->dev_type) {
+    case DEVFS_CUSTOM:
+        if (node->ops && node->ops->read)
+            return node->ops->read(vn, buf, len, off);
+        return -ENOSYS;
     case DEVFS_NULL:
         return 0;
     case DEVFS_ZERO:
@@ -209,6 +261,12 @@ static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
     if (!node || !buf)
         return -EINVAL;
 
+    if (node->dev_type == DEVFS_CUSTOM) {
+        if (node->ops && node->ops->write)
+            return node->ops->write(vn, buf, len, off);
+        return -ENOSYS;
+    }
+
     if (node->dev_type == DEVFS_CONSOLE)
         return console_write(vn, buf, len, off);
     return (ssize_t)len;
@@ -222,6 +280,11 @@ static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
     struct devfs_node *node = vn ? (struct devfs_node *)vn->fs_data : NULL;
     if (!node)
         return -EINVAL;
+    if (node->dev_type == DEVFS_CUSTOM) {
+        if (node->ops && node->ops->ioctl)
+            return node->ops->ioctl(vn, cmd, arg);
+        return -ENOSYS;
+    }
     if (node->dev_type == DEVFS_BLOCK) {
         if (!arg)
             return -EFAULT;
@@ -305,6 +368,11 @@ static int devfs_dev_poll(struct vnode *vn, uint32_t events) {
     case DEVFS_BLOCK:
         revents |= POLLIN | POLLOUT;
         break;
+    case DEVFS_CUSTOM:
+        if (node->ops && node->ops->poll)
+            return node->ops->poll(vn, events);
+        revents |= POLLIN | POLLOUT;
+        break;
     default:
         revents |= POLLERR;
         break;
@@ -345,4 +413,67 @@ void devfs_init(void) {
         pr_err("devfs: reg failed\n");
     else
         pr_info("devfs: initialized\n");
+}
+
+static const char *devfs_basename(const char *path) {
+    if (!path)
+        return NULL;
+    const char *last = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/')
+            last = p + 1;
+    }
+    return *last ? last : path;
+}
+
+int devfs_register_node(const char *path, struct file_ops *ops, void *priv) {
+    const char *name = devfs_basename(path);
+    if (!name || !name[0])
+        return -EINVAL;
+
+    spin_lock(&devfs_global_lock);
+    struct devfs_custom_reg *reg = devfs_registry;
+    while (reg) {
+        if (strcmp(reg->name, name) == 0) {
+            reg->ops = ops;
+            reg->priv = priv;
+            break;
+        }
+        reg = reg->next;
+    }
+    if (!reg) {
+        reg = kzalloc(sizeof(*reg));
+        if (!reg) {
+            spin_unlock(&devfs_global_lock);
+            return -ENOMEM;
+        }
+        strncpy(reg->name, name, CONFIG_NAME_MAX - 1);
+        reg->ops = ops;
+        reg->priv = priv;
+        reg->next = devfs_registry;
+        devfs_registry = reg;
+    }
+
+    struct devfs_mount *dm = devfs_active;
+    spin_unlock(&devfs_global_lock);
+
+    if (dm) {
+        spin_lock(&dm->lock);
+        struct devfs_node *node =
+            devfs_create_custom(dm, dm->root->vn.mount, name, ops, priv);
+        spin_unlock(&dm->lock);
+        return node ? 0 : -ENOMEM;
+    }
+
+    return 0;
+}
+
+int devfs_register_dir(const char *path) {
+    (void)path;
+    return 0;
+}
+
+void *devfs_get_priv(struct vnode *vn) {
+    struct devfs_node *node = vn ? (struct devfs_node *)vn->fs_data : NULL;
+    return node ? node->priv : NULL;
 }

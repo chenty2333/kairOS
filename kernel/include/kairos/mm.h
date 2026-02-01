@@ -129,6 +129,9 @@ int mm_mremap(struct mm_struct *mm, vaddr_t old_addr, size_t old_len,
               vaddr_t *out);
 int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
                 uint32_t prot);
+int mm_map_user_pages(struct mm_struct *mm, size_t size, uint32_t prot,
+                      uint32_t flags, paddr_t *pages, size_t page_count,
+                      vaddr_t *out);
 
 void *phys_to_virt(paddr_t addr);
 paddr_t virt_to_phys(void *addr);

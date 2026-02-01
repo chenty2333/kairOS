@@ -113,6 +113,13 @@ static volatile struct limine_memmap_request limine_memmap = {
 };
 
 __attribute__((used, section(".limine_requests")))
+static volatile struct limine_framebuffer_request limine_framebuffer = {
+    .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
 static volatile struct limine_dtb_request limine_dtb = {
     .id = LIMINE_DTB_REQUEST_ID,
     .revision = 0,
@@ -333,6 +340,40 @@ static void boot_init_limine(void) {
         if (min != UINT64_MAX) {
             boot_info.phys_mem_min = min;
             boot_info.phys_mem_max = max;
+        }
+    }
+
+    if (limine_framebuffer.response &&
+        limine_framebuffer.response->framebuffer_count) {
+        uint64_t count = limine_framebuffer.response->framebuffer_count;
+        if (count > BOOT_FRAMEBUFFERS_MAX)
+            count = BOOT_FRAMEBUFFERS_MAX;
+        boot_info.framebuffer_count = (uint32_t)count;
+        for (uint64_t i = 0; i < count; i++) {
+            struct limine_framebuffer *fb =
+                (struct limine_framebuffer *)(uintptr_t)
+                    limine_framebuffer.response->framebuffers[i];
+            if (!fb)
+                continue;
+            uint64_t fb_addr = (uint64_t)(uintptr_t)fb->address;
+            if (boot_info.hhdm_offset &&
+                fb_addr >= boot_info.hhdm_offset) {
+                fb_addr -= boot_info.hhdm_offset;
+            }
+            boot_info.framebuffers[i].phys = fb_addr;
+            boot_info.framebuffers[i].width = (uint32_t)fb->width;
+            boot_info.framebuffers[i].height = (uint32_t)fb->height;
+            boot_info.framebuffers[i].pitch = (uint32_t)fb->pitch;
+            boot_info.framebuffers[i].bpp = (uint32_t)fb->bpp;
+            boot_info.framebuffers[i].memory_model = fb->memory_model;
+            boot_info.framebuffers[i].red_mask_size = fb->red_mask_size;
+            boot_info.framebuffers[i].red_mask_shift = fb->red_mask_shift;
+            boot_info.framebuffers[i].green_mask_size = fb->green_mask_size;
+            boot_info.framebuffers[i].green_mask_shift = fb->green_mask_shift;
+            boot_info.framebuffers[i].blue_mask_size = fb->blue_mask_size;
+            boot_info.framebuffers[i].blue_mask_shift = fb->blue_mask_shift;
+            boot_info.framebuffers[i].size =
+                fb->pitch * fb->height;
         }
     }
 

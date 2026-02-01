@@ -226,9 +226,11 @@ paddr_t virt_to_phys(void *addr) {
         return (paddr_t)(va - bi->hhdm_offset);
     }
     if (bi && bi->kernel_virt_base &&
-        va >= bi->kernel_virt_base &&
-        va < bi->kernel_virt_base + ((uint64_t)_kernel_end - (uint64_t)_kernel_start)) {
-        return (paddr_t)(va - bi->kernel_virt_base + bi->kernel_phys_base);
+        va >= bi->kernel_virt_base) {
+        uint64_t ksize = (uint64_t)_kernel_end - (uint64_t)_kernel_start;
+        if (va <= bi->kernel_virt_base + ksize) {
+            return (paddr_t)(va - bi->kernel_virt_base + bi->kernel_phys_base);
+        }
     }
     return (paddr_t)addr;
 }

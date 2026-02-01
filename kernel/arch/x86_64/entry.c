@@ -12,6 +12,8 @@
 
 #define COM1_PORT 0x3f8
 
+static bool serial_inited = false;
+
 static inline void serial_init(void) {
     outb(COM1_PORT + 1, 0x00);
     outb(COM1_PORT + 3, 0x80);
@@ -27,6 +29,10 @@ static inline int serial_tx_ready(void) {
 }
 
 void arch_early_putchar(char c) {
+    if (!serial_inited) {
+        serial_init();
+        serial_inited = true;
+    }
     if (c == '\n') {
         arch_early_putchar('\r');
     }
@@ -92,6 +98,7 @@ static uint64_t cpu_id_slots[CONFIG_MAX_CPUS];
 
 void arch_cpu_init(int cpu_id) {
     serial_init();
+    serial_inited = true;
     if (cpu_id < CONFIG_MAX_CPUS) {
         cpu_id_slots[cpu_id] = (uint64_t)cpu_id;
         wrmsr(0xC0000101, (uint64_t)&cpu_id_slots[cpu_id]); /* IA32_GS_BASE */

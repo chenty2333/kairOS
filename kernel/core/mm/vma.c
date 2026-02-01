@@ -567,3 +567,47 @@ int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
     mutex_unlock(&mm->lock);
     return 0;
 }
+
+int mm_map_user_pages(struct mm_struct *mm, size_t size, uint32_t prot,
+                      uint32_t flags, paddr_t *pages, size_t page_count,
+                      vaddr_t *out) {
+    if (!mm || !pages || !out || size == 0)
+        return -EINVAL;
+
+    size = ALIGN_UP(size, CONFIG_PAGE_SIZE);
+    size_t needed_pages = size / CONFIG_PAGE_SIZE;
+    if (page_count < needed_pages)
+        return -EINVAL;
+
+    vaddr_t start = 0;
+    int ret = mm_mmap(mm, 0, size, prot, flags, NULL, 0, false, &start);
+    if (ret < 0)
+        return ret;
+
+    uint64_t pte_flags = PTE_USER | PTE_READ;
+    if (prot & VM_WRITE)
+        pte_flags |= PTE_WRITE;
+    if (prot & VM_EXEC)
+        pte_flags |= PTE_EXEC;
+
+    mutex_lock(&mm->lock);
+    for (size_t i = 0; i < needed_pages; i++) {
+        if (!pages[i]) {
+            mutex_unlock(&mm->lock);
+            mm_munmap(mm, start, size);
+            return -EINVAL;
+        }
+        ret = arch_mmu_map(mm->pgdir, start + i * CONFIG_PAGE_SIZE, pages[i],
+                           pte_flags);
+        if (ret < 0) {
+            mutex_unlock(&mm->lock);
+            mm_munmap(mm, start, size);
+            return ret;
+        }
+        pmm_get_page(pages[i]);
+    }
+    mutex_unlock(&mm->lock);
+
+    *out = start;
+    return 0;
+}

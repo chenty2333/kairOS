@@ -15,6 +15,7 @@ BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/${ARCH}/compiler-rt}"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/build/${ARCH}/compiler-rt/lib}"
 JOBS="${JOBS:-$(nproc)}"
 
+ARCH_FLAGS=""
 case "$ARCH" in
   riscv64) TARGET="riscv64-linux-musl"; ARCH_FLAGS="-march=rv64gc -mabi=lp64" ;;
   x86_64) TARGET="x86_64-linux-musl" ;;
@@ -59,6 +60,21 @@ else
 fi
 
 mkdir -p "$BUILD_DIR" "$OUT_DIR"
+
+copy_if_different() {
+  local src="$1"
+  local dst="$2"
+  if [[ -e "$src" && -e "$dst" ]]; then
+    local src_real
+    local dst_real
+    src_real="$(realpath -m "$src")"
+    dst_real="$(realpath -m "$dst")"
+    if [[ "$src_real" == "$dst_real" ]]; then
+      return 0
+    fi
+  fi
+  cp -f "$src" "$dst"
+}
 
 LINUX_HEADERS_DIR="$BUILD_DIR/linux-headers"
 if [[ "$ARCH" == "riscv64" ]]; then
@@ -111,24 +127,24 @@ if [[ -z "$BUILTINS" ]]; then
   exit 1
 fi
 
-cp -f "$BUILTINS" "$OUT_DIR/"
+copy_if_different "$BUILTINS" "$OUT_DIR/$(basename "$BUILTINS")"
 
 RESOURCE_DIR="$BUILD_DIR/resource"
 TRIPLE="$(clang --target="$TARGET" -print-target-triple)"
 RESOURCE_LIB_DIR="$RESOURCE_DIR/lib/$TRIPLE"
 mkdir -p "$RESOURCE_LIB_DIR"
-cp -f "$BUILTINS" "$RESOURCE_LIB_DIR/libclang_rt.builtins.a"
+copy_if_different "$BUILTINS" "$RESOURCE_LIB_DIR/libclang_rt.builtins.a"
 
 CRTBEGIN="$(find "$BUILD_DIR" -name "clang_rt.crtbegin-*.o" | head -n1 || true)"
 CRTEND="$(find "$BUILD_DIR" -name "clang_rt.crtend-*.o" | head -n1 || true)"
 if [[ -n "$CRTBEGIN" ]]; then
-  cp -f "$CRTBEGIN" "$SYSROOT/lib/crtbeginT.o"
-  cp -f "$CRTBEGIN" "$SYSROOT/lib/crtbegin.o"
-  cp -f "$CRTBEGIN" "$SYSROOT/lib/crtbeginS.o"
+  copy_if_different "$CRTBEGIN" "$SYSROOT/lib/crtbeginT.o"
+  copy_if_different "$CRTBEGIN" "$SYSROOT/lib/crtbegin.o"
+  copy_if_different "$CRTBEGIN" "$SYSROOT/lib/crtbeginS.o"
 fi
 if [[ -n "$CRTEND" ]]; then
-  cp -f "$CRTEND" "$SYSROOT/lib/crtend.o"
-  cp -f "$CRTEND" "$SYSROOT/lib/crtendS.o"
+  copy_if_different "$CRTEND" "$SYSROOT/lib/crtend.o"
+  copy_if_different "$CRTEND" "$SYSROOT/lib/crtendS.o"
 fi
 
 echo "compiler-rt builtins installed: $OUT_DIR/$(basename "$BUILTINS")"

@@ -13,8 +13,18 @@ DISK_IMG="${DISK_IMG:-${ROOT_DIR}/build/${ARCH}/disk.img}"
 ROOTFS_DIR="${ROOTFS_DIR:-${ROOT_DIR}/build/${ARCH}/rootfs}"
 BUSYBOX_BIN="${BUSYBOX_BIN:-${ROOT_DIR}/build/${ARCH}/busybox/busybox}"
 INIT_BIN="${INIT_BIN:-${ROOT_DIR}/build/${ARCH}/user/init}"
+DOOM_BIN="${DOOM_BIN:-${ROOT_DIR}/build/${ARCH}/user/doom}"
+DOOM_WAD="${DOOM_WAD:-}"
 ROOTFS_ONLY="${ROOTFS_ONLY:-0}"
 ROOTFS_STAGE="${ROOTFS_STAGE:-all}"
+
+if [[ -z "$DOOM_WAD" ]]; then
+  if [[ -f "${ROOT_DIR}/third_party/freedoom/doom1.wad" ]]; then
+    DOOM_WAD="${ROOT_DIR}/third_party/freedoom/doom1.wad"
+  elif [[ -f "${ROOT_DIR}/third_party/freedoom/freedoom1.wad" ]]; then
+    DOOM_WAD="${ROOT_DIR}/third_party/freedoom/freedoom1.wad"
+  fi
+fi
 
 DISK_SIZE=64  # MB
 
@@ -69,11 +79,28 @@ stage_busybox() {
   fi
 }
 
+stage_doom() {
+  echo "Staging rootfs doom: $ROOTFS_DIR"
+  mkdir -p "$ROOTFS_DIR"/{bin,doom}
+  if [[ -x "$DOOM_BIN" ]]; then
+    cp -f "$DOOM_BIN" "$ROOTFS_DIR/bin/doom"
+    chmod 0755 "$ROOTFS_DIR/bin/doom"
+  else
+    echo "WARN: doom not found ($DOOM_BIN)"
+  fi
+
+  if [[ -n "$DOOM_WAD" && -f "$DOOM_WAD" ]]; then
+    cp -f "$DOOM_WAD" "$ROOTFS_DIR/doom/doom1.wad"
+    chmod 0644 "$ROOTFS_DIR/doom/doom1.wad"
+  fi
+}
+
 case "$ROOTFS_STAGE" in
   all)
     stage_base
     stage_init
     stage_busybox
+    stage_doom
     ;;
   base)
     stage_base

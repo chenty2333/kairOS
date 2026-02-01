@@ -18,6 +18,10 @@
 #define PTE_U (1ULL << 2)
 #define PTE_G (1ULL << 8)
 #define PTE_NX (1ULL << 63)
+#define PTE_ADDR_MASK 0x000ffffffffff000ULL
+
+#define IOAPIC_BASE_PHYS 0xFEC00000UL
+#define LAPIC_BASE_PHYS  0xFEE00000UL
 
 static paddr_t kernel_pgdir;
 extern char _kernel_start[], _kernel_end[];
@@ -85,14 +89,29 @@ void arch_mmu_init(const struct boot_info *bi) {
         const struct boot_memmap_entry *e = &bi->memmap[i];
         if (!boot_mem_is_ram(e->type))
             continue;
-        map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
-                   e->length, PTE_READ | PTE_WRITE | PTE_GLOBAL);
+        if (e->length == 0)
+            continue;
+        if (map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
+                       e->length, PTE_READ | PTE_WRITE | PTE_GLOBAL) < 0) {
+            pr_warn("MMU: HHDM map failed (base=%p len=%p)\n",
+                    (void *)e->base, (void *)e->length);
+        }
     }
 
     size_t ksize = ALIGN_UP((paddr_t)_kernel_end - (paddr_t)_kernel_start,
                             PAGE_SIZE);
-    map_region(kernel_pgdir, bi->kernel_virt_base, bi->kernel_phys_base, ksize,
-               PTE_READ | PTE_WRITE | PTE_EXEC | PTE_GLOBAL);
+    if (map_region(kernel_pgdir, bi->kernel_virt_base, bi->kernel_phys_base,
+                   ksize, PTE_READ | PTE_WRITE | PTE_EXEC | PTE_GLOBAL) < 0) {
+        panic("mmu: kernel map failed");
+    }
+
+    /* Map local APIC + IOAPIC MMIO into the HHDM. */
+    map_region(kernel_pgdir, bi->hhdm_offset + IOAPIC_BASE_PHYS,
+               IOAPIC_BASE_PHYS, PAGE_SIZE,
+               PTE_READ | PTE_WRITE | PTE_GLOBAL);
+    map_region(kernel_pgdir, bi->hhdm_offset + LAPIC_BASE_PHYS,
+               LAPIC_BASE_PHYS, PAGE_SIZE,
+               PTE_READ | PTE_WRITE | PTE_GLOBAL);
 
     arch_mmu_switch(kernel_pgdir);
     pr_info("MMU: x86_64 paging enabled (HHDM=%p)\n",
@@ -150,7 +169,7 @@ paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
     uint64_t *pte = walk_pgtable(table, va, false);
     if (!pte || !(*pte & PTE_P))
         return 0;
-    return ((paddr_t)(*pte & ~0xfffULL)) | (va & 0xfffULL);
+    return ((paddr_t)(*pte & PTE_ADDR_MASK)) | (va & 0xfffULL);
 }
 
 uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
@@ -208,9 +227,11 @@ paddr_t virt_to_phys(void *addr) {
         return (paddr_t)(va - bi->hhdm_offset);
     }
     if (bi && bi->kernel_virt_base &&
-        va >= bi->kernel_virt_base &&
-        va < bi->kernel_virt_base + ((uint64_t)_kernel_end - (uint64_t)_kernel_start)) {
+        va >= bi->kernel_virt_base) {
+        uint64_t ksize = (uint64_t)_kernel_end - (uint64_t)_kernel_start;
+        if (va <= bi->kernel_virt_base + ksize) {
         return (paddr_t)(va - bi->kernel_virt_base + bi->kernel_phys_base);
+        }
     }
     return (paddr_t)addr;
 }

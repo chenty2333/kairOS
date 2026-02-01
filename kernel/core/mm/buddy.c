@@ -405,7 +405,45 @@ void pmm_init_from_memmap(const struct boot_info *bi) {
 
     size_t array_pages =
         ALIGN_UP(total_pages * sizeof(struct page), PAGE_SIZE) >> PAGE_SHIFT;
-    page_array = (struct page *)phys_to_virt(mem_start);
+
+    paddr_t ks = virt_to_phys(_kernel_start);
+    paddr_t ke = ALIGN_UP(virt_to_phys(_kernel_end), PAGE_SIZE);
+
+    size_t array_bytes = array_pages * PAGE_SIZE;
+    paddr_t array_base = 0;
+    for (uint32_t i = 0; i < bi->memmap_count; i++) {
+        const struct boot_memmap_entry *e = &bi->memmap[i];
+        if (e->type != BOOT_MEM_USABLE)
+            continue;
+        paddr_t start = MAX(e->base, mem_start);
+        paddr_t end = MIN(e->base + e->length, mem_end);
+        start = ALIGN_UP(start, PAGE_SIZE);
+        end = ALIGN_DOWN(end, PAGE_SIZE);
+        if (end <= start)
+            continue;
+        if (start <= ks && ks < end) {
+            if (ks > start && (size_t)(ks - start) >= array_bytes) {
+                array_base = start;
+                break;
+            }
+            paddr_t after = ALIGN_UP(ke, PAGE_SIZE);
+            if (after < end && (size_t)(end - after) >= array_bytes) {
+                array_base = after;
+                break;
+            }
+            continue;
+        }
+        if ((size_t)(end - start) >= array_bytes) {
+            array_base = start;
+            break;
+        }
+    }
+    if (!array_base) {
+        panic("pmm: no space for page array");
+    }
+
+    page_array = (struct page *)phys_to_virt(array_base);
+
 
     for (size_t i = 0; i < total_pages; i++) {
         page_array[i].flags = PG_RESERVED;
@@ -442,13 +480,13 @@ void pmm_init_from_memmap(const struct boot_info *bi) {
     }
 
     /* Reserve page array itself */
-    for (size_t i = 0; i < array_pages && i < total_pages; i++) {
-        page_array[i].flags |= PG_RESERVED;
+    size_t array_start_pfn = (array_base - mem_start) >> PAGE_SHIFT;
+    for (size_t i = 0; i < array_pages && (array_start_pfn + i) < total_pages;
+         i++) {
+        page_array[array_start_pfn + i].flags |= PG_RESERVED;
     }
 
     /* Reserve kernel image */
-    paddr_t ks = virt_to_phys(_kernel_start);
-    paddr_t ke = ALIGN_UP(virt_to_phys(_kernel_end), PAGE_SIZE);
     if (ks >= mem_start && ks < mem_end) {
         size_t s = (ks - mem_start) >> PAGE_SHIFT;
         size_t e = (ke - mem_start) >> PAGE_SHIFT;

@@ -18,6 +18,22 @@ ISO_DIR="$BUILD_DIR/iso_root"
 ISO_FILE="$BUILD_DIR/kairos.iso"
 LIMINE_DIR="third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
+LIMINE_CFG_SRC="limine.cfg"
+
+if [ "$ARCH" = "x86_64" ]; then
+    LIMINE_CFG_SRC="$BUILD_DIR/limine.x86_64.cfg"
+    cat > "$LIMINE_CFG_SRC" <<'EOF'
+# Limine bootloader configuration for Kairos (x86_64 ISO)
+
+timeout: 3
+
+/Kairos (x86_64)
+	protocol: limine
+	path: boot():/kairos.elf
+	module_path: boot():/initramfs.cpio
+	module_string: initramfs
+EOF
+fi
 
 # Check prerequisites
 if [ ! -f "$KERNEL" ]; then
@@ -60,8 +76,8 @@ else
 fi
 
 # Copy Limine files
-cp limine.cfg "$ISO_DIR/boot/limine/limine.conf"
-cp limine.cfg "$ISO_DIR/EFI/limine/limine.conf"
+cp "$LIMINE_CFG_SRC" "$ISO_DIR/boot/limine/limine.conf"
+cp "$LIMINE_CFG_SRC" "$ISO_DIR/EFI/limine/limine.conf"
 cp "$LIMINE_DIR/limine-bios.sys" "$ISO_DIR/boot/limine/"
 cp "$LIMINE_DIR/limine-bios-cd.bin" "$ISO_DIR/boot/limine/"
 cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_DIR/boot/limine/"

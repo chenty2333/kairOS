@@ -103,8 +103,10 @@ static void handle_irq(struct trap_frame *tf);
 
 static void idt_set_gate(int n, void (*handler)(void)) {
     uint64_t addr = (uint64_t)handler;
+    uint16_t cs;
+    __asm__ __volatile__("mov %%cs, %0" : "=r"(cs));
     idt[n].off_low = addr & 0xffff;
-    idt[n].sel = 0x08; /* kernel code */
+    idt[n].sel = cs;
     idt[n].ist = 0;
     idt[n].type_attr = 0x8E;
     idt[n].off_mid = (addr >> 16) & 0xffff;
@@ -175,8 +177,18 @@ static void handle_exception(struct trap_frame *tf) {
         return;
     }
 
-    pr_err("x86_64 exception %lu rip=%p err=%p\n", trapno,
-           (void *)tf->rip, (void *)tf->err);
+    if (trapno == 13) {
+        void *ra = NULL;
+        if (tf->rsp)
+            ra = *(void **)(tf->rsp + sizeof(void *));
+        pr_err("x86_64 #GP rip=%p err=%p rsp=%p ra=%p rdi=%p rsi=%p rcx=%p rdx=%p rax=%p\n",
+               (void *)tf->rip, (void *)tf->err, (void *)tf->rsp, ra,
+               (void *)tf->rdi, (void *)tf->rsi, (void *)tf->rcx,
+               (void *)tf->rdx, (void *)tf->rax);
+    } else {
+        pr_err("x86_64 exception %lu rip=%p err=%p\n", trapno,
+               (void *)tf->rip, (void *)tf->err);
+    }
     panic("x86_64 exception");
 }
 

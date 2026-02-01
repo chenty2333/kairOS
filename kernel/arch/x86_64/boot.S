@@ -34,8 +34,8 @@ _halt:
  * rdi = struct limine_mp_info *
  */
 _secondary_start:
-    /* Load logical CPU id from extra_argument (offset 32) */
-    mov 32(%rdi), %rax
+    /* Load logical CPU id from extra_argument (offset 24) */
+    mov 24(%rdi), %rax
     mov %rax, %rdi
 
     /* Set up per-CPU stack */

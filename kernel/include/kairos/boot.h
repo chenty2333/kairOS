@@ -10,6 +10,7 @@
 
 #define BOOT_MEMMAP_MAX 256
 #define BOOT_MODULES_MAX 16
+#define BOOT_FRAMEBUFFERS_MAX 4
 
 enum boot_mem_type {
     BOOT_MEM_USABLE = 0,
@@ -41,6 +42,22 @@ struct boot_module {
     uint64_t size;
 };
 
+struct boot_framebuffer {
+    uint64_t phys;
+    uint64_t size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t bpp;
+    uint8_t memory_model;
+    uint8_t red_mask_size;
+    uint8_t red_mask_shift;
+    uint8_t green_mask_size;
+    uint8_t green_mask_shift;
+    uint8_t blue_mask_size;
+    uint8_t blue_mask_shift;
+};
+
 struct boot_info {
     const char *bootloader_name;
     const char *bootloader_version;
@@ -63,6 +80,9 @@ struct boot_info {
 
     uint32_t module_count;
     struct boot_module modules[BOOT_MODULES_MAX];
+
+    uint32_t framebuffer_count;
+    struct boot_framebuffer framebuffers[BOOT_FRAMEBUFFERS_MAX];
 
     uint32_t cpu_count;
     uint32_t bsp_cpu_id;
