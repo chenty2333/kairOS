@@ -194,6 +194,25 @@ void arch_mmu_init(const struct boot_info *bi) {
                    e->length, PTE_READ | PTE_WRITE);
     }
 
+    /* 1b. Map framebuffer MMIO into HHDM */
+    if (bi->framebuffer_count == 0) {
+        pr_warn("MMU: no framebuffers to map\n");
+    }
+    for (uint32_t i = 0; i < bi->framebuffer_count; i++) {
+        paddr_t phys = (paddr_t)bi->framebuffers[i].phys;
+        if (!phys || !bi->framebuffers[i].size)
+            continue;
+        if (bi->hhdm_offset && phys >= bi->hhdm_offset)
+            phys -= bi->hhdm_offset;
+        size_t size = ALIGN_UP((size_t)bi->framebuffers[i].size, PAGE_SIZE);
+        pr_info("MMU: map fb%u phys=%p size=%zu -> %p\n", i, (void *)phys,
+                size, (void *)(bi->hhdm_offset + phys));
+        if (map_region(kernel_pgdir, bi->hhdm_offset + phys, phys, size,
+                       PTE_READ | PTE_WRITE) < 0) {
+            pr_warn("MMU: map fb%u failed\n", i);
+        }
+    }
+
     /* 2. Map kernel high half */
     paddr_t kphys = bi->kernel_phys_base;
     vaddr_t kvirt = bi->kernel_virt_base;

@@ -253,6 +253,12 @@ void schedule(void) {
             /* Kernel thread: ensure we are on kernel page table */
             arch_mmu_switch(arch_mmu_get_kernel_pgdir());
         }
+
+        if (next->context) {
+            uint64_t kstack = arch_context_kernel_stack(next->context);
+            if (kstack)
+                arch_tss_set_rsp0(kstack);
+        }
         
         /* Update the CPU ID in the next task's context (for tp restoration) */
         if (next->context) arch_context_set_cpu(next->context, cpu->cpu_id);

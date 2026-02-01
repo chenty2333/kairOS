@@ -45,6 +45,16 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
                            uint64_t a2);
 void arch_context_set_cpu(struct arch_context *ctx, int cpu);
 void arch_set_tls(struct arch_context *ctx, uint64_t tls);
+#ifdef ARCH_x86_64
+void arch_tss_set_rsp0(uint64_t rsp0);
+uint64_t arch_context_kernel_stack(const struct arch_context *ctx);
+#else
+static inline void arch_tss_set_rsp0(uint64_t rsp0) { (void)rsp0; }
+static inline uint64_t arch_context_kernel_stack(const struct arch_context *ctx) {
+    (void)ctx;
+    return 0;
+}
+#endif
 #ifdef ARCH_HAS_CONTEXT_SET_USER_SP
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp);
 #else
