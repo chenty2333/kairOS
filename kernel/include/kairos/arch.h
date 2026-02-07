@@ -137,7 +137,6 @@ struct trap_info {
     bool is_write, is_user;
 };
 void arch_trap_init(void);
-void trap_handler(struct trap_info *info);
 struct trap_frame *get_current_trapframe(void);
 void arch_setup_fork_child(struct arch_context *child_ctx,
                            struct trap_frame *parent_tf);

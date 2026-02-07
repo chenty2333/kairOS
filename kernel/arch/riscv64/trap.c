@@ -10,6 +10,7 @@
 #include <kairos/sched.h>
 #include <kairos/signal.h>
 #include <kairos/syscall.h>
+#include <kairos/trap_core.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
@@ -144,22 +145,57 @@ static void handle_interrupt(struct trap_frame *tf) {
     }
 }
 
-void trap_dispatch(struct trap_frame *tf) {
-    struct percpu_data *cpu = arch_get_percpu();
-    struct trap_frame *old = cpu->current_tf;
-    cpu->current_tf = tf;
+static enum trap_core_event_type riscv_event_type(uint64_t scause) {
+    uint64_t cause = scause & ~SCAUSE_INTERRUPT;
 
-    if (tf->scause & SCAUSE_INTERRUPT)
-        handle_interrupt(tf);
-    else
-        handle_exception(tf);
-
-    /* Check for signals before returning to user mode */
-    if (!(tf->sstatus & SSTATUS_SPP)) {
-        signal_deliver_pending();
+    if (scause & SCAUSE_INTERRUPT) {
+        if (cause == IRQ_S_TIMER)
+            return TRAP_CORE_EVENT_TIMER;
+        if (cause == IRQ_S_EXT)
+            return TRAP_CORE_EVENT_EXT_IRQ;
+        if (cause == IRQ_S_SOFT)
+            return TRAP_CORE_EVENT_IPI;
+        return TRAP_CORE_EVENT_ARCH_OTHER;
     }
 
-    cpu->current_tf = old;
+    if (cause == EXC_ECALL_U || cause == EXC_ECALL_S)
+        return TRAP_CORE_EVENT_SYSCALL;
+    if (cause >= EXC_INST_PAGE_FAULT && cause <= EXC_STORE_PAGE_FAULT)
+        return TRAP_CORE_EVENT_PAGE_FAULT;
+    if (cause == EXC_BREAKPOINT)
+        return TRAP_CORE_EVENT_BREAKPOINT;
+    if (cause == EXC_ILLEGAL_INST)
+        return TRAP_CORE_EVENT_ILLEGAL_INST;
+    return TRAP_CORE_EVENT_ARCH_OTHER;
+}
+
+static int riscv_handle_event(const struct trap_core_event *ev) {
+    if (ev->code & SCAUSE_INTERRUPT)
+        handle_interrupt(ev->tf);
+    else
+        handle_exception(ev->tf);
+    return 0;
+}
+
+static bool riscv_should_deliver_signals(const struct trap_core_event *ev) {
+    return !(ev->tf->sstatus & SSTATUS_SPP);
+}
+
+static const struct trap_core_ops riscv_trap_ops = {
+    .handle_event = riscv_handle_event,
+    .should_deliver_signals = riscv_should_deliver_signals,
+};
+
+void trap_dispatch(struct trap_frame *tf) {
+    struct trap_core_event ev = {
+        .type = riscv_event_type(tf->scause),
+        .tf = tf,
+        .from_user = !(tf->sstatus & SSTATUS_SPP),
+        .code = tf->scause,
+        .fault_addr = tf->stval,
+    };
+
+    trap_core_dispatch(&ev, &riscv_trap_ops);
 }
 
 void arch_trap_init(void) {

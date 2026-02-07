@@ -152,6 +152,7 @@ CORE_SRCS := \
     kernel/core/mm/vmm.c \
     kernel/core/mm/vma.c \
     kernel/core/time/time.c \
+    kernel/core/trap/trap_core.c \
     kernel/core/dev/firmware.c \
     kernel/core/proc/proc_core.c \
     kernel/core/proc/proc_fork.c \

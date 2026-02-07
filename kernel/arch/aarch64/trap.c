@@ -11,6 +11,7 @@
 #include <kairos/sched.h>
 #include <kairos/signal.h>
 #include <kairos/syscall.h>
+#include <kairos/trap_core.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
@@ -78,22 +79,46 @@ static void handle_irq(void) {
         pr_debug("tick: %lu sec\n", tick / CONFIG_HZ);
 }
 
-void aarch64_trap_dispatch(struct trap_frame *tf) {
-    struct percpu_data *cpu = arch_get_percpu();
-    struct trap_frame *old = cpu->current_tf;
-    cpu->current_tf = tf;
+static enum trap_core_event_type aarch64_event_type(const struct trap_frame *tf) {
+    if (tf->esr == 0)
+        return TRAP_CORE_EVENT_EXT_IRQ;
 
+    uint64_t ec = (tf->esr >> 26) & 0x3f;
+    if (ec == 0x15)
+        return TRAP_CORE_EVENT_SYSCALL;
+    if (ec == 0x20 || ec == 0x24)
+        return TRAP_CORE_EVENT_PAGE_FAULT;
+    return TRAP_CORE_EVENT_ARCH_OTHER;
+}
+
+static int aarch64_handle_event(const struct trap_core_event *ev) {
+    struct trap_frame *tf = ev->tf;
     if (tf->esr == 0) {
         handle_irq();
     } else {
         handle_exception(tf);
     }
+    return 0;
+}
 
-    if ((tf->spsr & (1 << 4)) == 0) {
-        signal_deliver_pending();
-    }
+static bool aarch64_should_deliver_signals(const struct trap_core_event *ev) {
+    return (ev->tf->spsr & (1 << 4)) == 0;
+}
 
-    cpu->current_tf = old;
+static const struct trap_core_ops aarch64_trap_ops = {
+    .handle_event = aarch64_handle_event,
+    .should_deliver_signals = aarch64_should_deliver_signals,
+};
+
+void aarch64_trap_dispatch(struct trap_frame *tf) {
+    struct trap_core_event ev = {
+        .type = aarch64_event_type(tf),
+        .tf = tf,
+        .from_user = (tf->spsr & (1 << 4)) == 0,
+        .code = tf->esr,
+        .fault_addr = tf->far,
+    };
+    trap_core_dispatch(&ev, &aarch64_trap_ops);
 }
 
 void arch_trap_init(void) {

@@ -11,6 +11,7 @@
 #include <kairos/sched.h>
 #include <kairos/signal.h>
 #include <kairos/syscall.h>
+#include <kairos/trap_core.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
@@ -214,14 +215,31 @@ static void handle_irq(struct trap_frame *tf) {
     lapic_eoi();
 }
 
-void x86_trap_dispatch(struct trap_frame *tf) {
-    struct percpu_data *cpu = arch_get_percpu();
-    struct trap_frame *old = cpu->current_tf;
-    cpu->current_tf = tf;
+static enum trap_core_event_type x86_event_type(const struct trap_frame *tf) {
+    if (tf->trapno == SYSCALL_VEC)
+        return TRAP_CORE_EVENT_SYSCALL;
+    if (tf->trapno == 0xF0)
+        return TRAP_CORE_EVENT_IPI;
+    if (tf->trapno < IRQ_BASE) {
+        if (tf->trapno == 14)
+            return TRAP_CORE_EVENT_PAGE_FAULT;
+        if (tf->trapno == 3)
+            return TRAP_CORE_EVENT_BREAKPOINT;
+        if (tf->trapno == 6)
+            return TRAP_CORE_EVENT_ILLEGAL_INST;
+        return TRAP_CORE_EVENT_ARCH_OTHER;
+    }
+    if ((int)tf->trapno - IRQ_BASE == 0)
+        return TRAP_CORE_EVENT_TIMER;
+    return TRAP_CORE_EVENT_EXT_IRQ;
+}
 
+static int x86_handle_event(const struct trap_core_event *ev) {
+    struct trap_frame *tf = ev->tf;
     if (tf->trapno == SYSCALL_VEC) {
         handle_syscall(tf);
     } else if (tf->trapno == 0xF0) {
+        struct percpu_data *cpu = arch_get_percpu();
         int pending = __sync_fetch_and_and(&cpu->ipi_pending_mask, 0);
         if (pending & (1 << IPI_RESCHEDULE))
             cpu->resched_needed = true;
@@ -236,12 +254,27 @@ void x86_trap_dispatch(struct trap_frame *tf) {
     } else {
         handle_irq(tf);
     }
+    return 0;
+}
 
-    if ((tf->cs & 3) != 0) {
-        signal_deliver_pending();
-    }
+static bool x86_should_deliver_signals(const struct trap_core_event *ev) {
+    return (ev->tf->cs & 3) != 0;
+}
 
-    cpu->current_tf = old;
+static const struct trap_core_ops x86_trap_ops = {
+    .handle_event = x86_handle_event,
+    .should_deliver_signals = x86_should_deliver_signals,
+};
+
+void x86_trap_dispatch(struct trap_frame *tf) {
+    struct trap_core_event ev = {
+        .type = x86_event_type(tf),
+        .tf = tf,
+        .from_user = (tf->cs & 3) != 0,
+        .code = tf->trapno,
+        .fault_addr = 0,
+    };
+    trap_core_dispatch(&ev, &x86_trap_ops);
 }
 
 void arch_trap_init(void) {
