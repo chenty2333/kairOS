@@ -6,9 +6,8 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/console.h>
-#include <kairos/pollwait.h>
 #include <kairos/printk.h>
-#include <kairos/sched.h>
+#include <kairos/tick.h>
 #include <kairos/types.h>
 
 #define SBI_EXT_TIME 0x54494D45
@@ -16,7 +15,6 @@
 
 static uint64_t timer_freq = TIMER_FREQ;
 static uint64_t ticks_per_int;
-extern volatile uint64_t system_ticks;
 
 void arch_timer_init(uint64_t hz) {
     if (!hz)
@@ -44,24 +42,12 @@ void arch_timer_set_next(uint64_t t) {
 }
 void arch_timer_ack(void) {}
 
-void timer_interrupt_handler(void) {
-    /* Use a single CPU as the timekeeper to avoid SMP races. */
-    uint64_t tick = 0;
-    if (arch_cpu_id() == 0) {
-        tick = __atomic_add_fetch(&system_ticks, 1, __ATOMIC_RELAXED);
-    }
+void timer_interrupt_handler(struct trap_frame *tf) {
     sbi_call(SBI_EXT_TIME, 0, rdtime() + ticks_per_int, 0, 0);
     console_poll_input();
-    if (tick && (tick % CONFIG_HZ == 0))
-        pr_debug("tick: %lu sec\n", tick / CONFIG_HZ);
-    if (tick)
-        poll_sleep_tick(tick);
-    sched_tick();
-    struct trap_frame *tf = arch_get_percpu()->current_tf;
-    if (tf && !(tf->sstatus & SSTATUS_SPP) && sched_need_resched())
-        schedule();
+    tick_policy_on_timer_irq(tf, tf && !(tf->sstatus & SSTATUS_SPP));
 }
 
 uint64_t arch_timer_get_ticks(void) {
-    return __atomic_load_n(&system_ticks, __ATOMIC_RELAXED);
+    return tick_policy_get_ticks();
 }

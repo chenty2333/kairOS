@@ -27,8 +27,7 @@
 #define IRQ_S_EXT 9
 
 extern void trap_entry(void);
-void timer_interrupt_handler(void);
-volatile uint64_t system_ticks = 0;
+void timer_interrupt_handler(struct trap_frame *tf);
 
 struct trap_frame *get_current_trapframe(void) {
     return arch_get_percpu()->current_tf;
@@ -127,7 +126,7 @@ static void handle_exception(struct trap_frame *tf) {
 static void handle_interrupt(struct trap_frame *tf) {
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
     if (cause == IRQ_S_TIMER) {
-        timer_interrupt_handler();
+        timer_interrupt_handler(tf);
     } else if (cause == IRQ_S_EXT) {
         arch_irq_handler(tf);
     } else if (cause == IRQ_S_SOFT) {

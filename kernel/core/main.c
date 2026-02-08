@@ -11,9 +11,7 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/syscall.h>
-
-/* Timer tick counter (defined in timer.c) */
-extern volatile uint64_t system_ticks;
+#include <kairos/tick.h>
 
 /* External symbols from linker script */
 extern char _kernel_start[];
@@ -71,6 +69,7 @@ void kernel_main(const struct boot_info *bi) {
 
     syscall_init();
     arch_trap_init();
+    tick_policy_init();
     arch_timer_init(100);
 
     sched_init();
