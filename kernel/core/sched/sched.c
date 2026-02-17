@@ -126,7 +126,7 @@ void sched_enqueue(struct process *p) {
     __enqueue_entity(rq, &p->se);
     p->se.on_rq = true;
     p->se.cpu = cpu;
-    p->se.on_cpu = false;
+    __atomic_store_n(&p->se.on_cpu, false, __ATOMIC_RELEASE);
     rq->nr_running++;
     update_min_vruntime(rq);
 
@@ -182,7 +182,7 @@ static struct process *sched_steal_task(int self_id) {
                 p = container_of(se, struct process, se);
 
                 /* CRITICAL: Do not steal a task that is currently running on the remote CPU! */
-                if (se->on_cpu) {
+                if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE)) {
                     spin_unlock(&remote_rq->lock);
                     continue;
                 }
@@ -211,7 +211,7 @@ void schedule(void) {
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
         /* Mark prev as currently running on this CPU */
-        prev->se.on_cpu = true;
+        __atomic_store_n(&prev->se.on_cpu, true, __ATOMIC_RELEASE);
 
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_RUNNABLE;
@@ -251,7 +251,7 @@ void schedule(void) {
         next->se.last_run_time = sched_clock_ns();
         rq->curr_se = &next->se;
         next->state = PROC_RUNNING;
-        next->se.on_cpu = true;
+        __atomic_store_n(&next->se.on_cpu, true, __ATOMIC_RELEASE);
         __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
         proc_set_current(next);
 
@@ -279,7 +279,7 @@ void schedule(void) {
         arch_irq_restore(state);
     } else {
         next->state = PROC_RUNNING;
-        next->se.on_cpu = true;
+        __atomic_store_n(&next->se.on_cpu, true, __ATOMIC_RELEASE);
         rq->curr_se = &next->se;
         if (cpu->prev_task) sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
