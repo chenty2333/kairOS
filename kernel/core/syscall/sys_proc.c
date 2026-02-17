@@ -2,6 +2,7 @@
  * kernel/core/syscall/sys_proc.c - Process-related syscalls
  */
 
+#include <kairos/clone.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
 #include <kairos/namei.h>
@@ -381,20 +382,6 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
 int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                   uint64_t child_tid, uint64_t tls, uint64_t a5) {
     (void)a5;
-
-    /* Linux clone flag subset */
-    enum {
-        CLONE_VM             = 0x00000100,
-        CLONE_FS             = 0x00000200,
-        CLONE_FILES          = 0x00000400,
-        CLONE_SIGHAND        = 0x00000800,
-        CLONE_VFORK          = 0x00004000,
-        CLONE_THREAD         = 0x00010000,
-        CLONE_SETTLS         = 0x00080000,
-        CLONE_PARENT_SETTID  = 0x00100000,
-        CLONE_CHILD_CLEARTID = 0x00200000,
-        CLONE_CHILD_SETTID   = 0x01000000,
-    };
 
     uint64_t kflags = flags & ~0xFFULL;
     uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |

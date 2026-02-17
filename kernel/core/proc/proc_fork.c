@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/clone.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
 #include <kairos/mm.h>
@@ -73,7 +74,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     uint64_t clone_flags = opts ? opts->clone_flags : 0;
 
     /* File descriptor table: share or copy */
-    if (clone_flags & 0x00000400 /* CLONE_FILES */) {
+    if (clone_flags & CLONE_FILES) {
         fdtable_get(parent->fdtable);
         child->fdtable = parent->fdtable;
     } else {
@@ -85,7 +86,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     }
 
     /* Signal handlers: share or copy */
-    if (clone_flags & 0x00000800 /* CLONE_SIGHAND */) {
+    if (clone_flags & CLONE_SIGHAND) {
         sighand_get(parent->sighand);
         child->sighand = parent->sighand;
     } else if (parent->sighand) {
@@ -97,7 +98,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     }
 
     /* Thread group */
-    if (clone_flags & 0x00010000 /* CLONE_THREAD */) {
+    if (clone_flags & CLONE_THREAD) {
         child->tgid = parent->tgid;
         child->group_leader = parent->group_leader;
         spin_lock(&proc_table_lock);
@@ -106,7 +107,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     }
 
     /* Address space: share or clone */
-    if (clone_flags & 0x00000100 /* CLONE_VM */) {
+    if (clone_flags & CLONE_VM) {
         child->mm = parent->mm;
         mm_get(parent->mm);
     } else {
@@ -117,7 +118,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     }
 
     /* TLS */
-    if ((clone_flags & 0x00080000 /* CLONE_SETTLS */) && opts) {
+    if ((clone_flags & CLONE_SETTLS) && opts) {
         arch_set_tls(child->context, opts->tls);
     }
 
