@@ -97,7 +97,7 @@ struct process *proc_alloc(void) {
         return NULL;
     }
 
-    p->ppid = p->uid = p->gid = p->vruntime = p->nice = 0;
+    p->ppid = p->uid = p->gid = 0;
     p->pgid = p->pid;
     p->sid = p->pid;
     p->umask = 022;
@@ -105,10 +105,7 @@ struct process *proc_alloc(void) {
     p->name[0] = '\0';
     p->mm = NULL;
     p->parent = NULL;
-    p->on_rq = false;
-    p->on_cpu = false;
-    p->cpu = -1;
-    p->last_run_time = 0;
+    sched_entity_init(&p->se);
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
     p->fdtable = fdtable_alloc();
@@ -294,7 +291,7 @@ struct process *proc_idle_init(void) {
     if (!p)
         panic("idle alloc fail");
     proc_set_name(p, "idle");
-    p->nice = 19;
+    p->se.nice = 19;
     if (!p->context)
         panic("idle ctx missing");
     arch_context_init(p->context, (vaddr_t)idle_thread, 0, true);
@@ -334,6 +331,43 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
     proc_unlock(p);
 
     schedule();
+
+    proc_lock(p);
+    if (p->wait_entry.active)
+        wait_queue_remove_entry(&p->wait_entry);
+    p->wait_channel = NULL;
+    if (p->state == PROC_SLEEPING)
+        p->state = PROC_RUNNING;
+    proc_unlock(p);
+
+    if (interruptible && p->sig_pending)
+        return -EINTR;
+    return 0;
+}
+
+int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
+                        struct mutex *mtx, bool interruptible) {
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (interruptible && p->sig_pending)
+        return -EINTR;
+
+    if (wq)
+        wait_queue_add(wq, p);
+
+    proc_lock(p);
+    p->wait_channel = channel;
+    p->state = PROC_SLEEPING;
+    proc_unlock(p);
+
+    if (mtx)
+        mutex_unlock(mtx);
+
+    schedule();
+
+    if (mtx)
+        mutex_lock(mtx);
 
     proc_lock(p);
     if (p->wait_entry.active)

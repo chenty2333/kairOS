@@ -8,6 +8,7 @@
 #include <kairos/arch.h>
 #include <kairos/list.h>
 #include <kairos/rbtree.h>
+#include <kairos/sched_types.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
 
@@ -22,7 +23,8 @@ struct cfs_rq {
     struct rb_root tasks_timeline;
     uint64_t min_vruntime;
     uint32_t nr_running;
-    struct process *curr, *idle;
+    struct sched_entity *curr_se;
+    struct process *idle;
     spinlock_t lock;
 };
 
@@ -32,6 +34,8 @@ void sched_enqueue(struct process *p);
 void sched_dequeue(struct process *p);
 void schedule(void);
 void sched_tick(void);
+void sched_fork(struct process *child, struct process *parent);
+void sched_post_switch_cleanup(void);
 int sched_setnice(struct process *p, int nice);
 int sched_getnice(struct process *p);
 

@@ -35,8 +35,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->parent = parent;
     child->ppid = parent->pid;
-    child->nice = parent->nice;
-    child->vruntime = parent->vruntime;
+    sched_fork(child, parent);
     child->vfork_parent = NULL;
     child->vfork_done = true;
 

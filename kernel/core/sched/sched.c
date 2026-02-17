@@ -40,46 +40,46 @@ static uint64_t calc_delta_fair(uint64_t delta, int weight) {
 
 static void update_min_vruntime(struct cfs_rq *rq) {
     uint64_t v = rq->min_vruntime;
-    if (rq->curr && rq->curr != rq->idle && rq->curr->vruntime > v)
-        v = rq->curr->vruntime;
+    if (rq->curr_se && rq->curr_se->vruntime > v)
+        v = rq->curr_se->vruntime;
     struct rb_node *left = rb_first(&rq->tasks_timeline);
     if (left) {
-        struct process *p = rb_entry(left, struct process, sched_node);
-        if (p->vruntime < v) v = p->vruntime;
+        struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
+        if (se->vruntime < v) v = se->vruntime;
     }
     if (v > rq->min_vruntime) rq->min_vruntime = v;
 }
 
-static void __enqueue_entity(struct cfs_rq *rq, struct process *p) {
+static void __enqueue_entity(struct cfs_rq *rq, struct sched_entity *se) {
     struct rb_node **link = &rq->tasks_timeline.rb_node, *parent = NULL;
     while (*link) {
         parent = *link;
-        if (p->vruntime < rb_entry(parent, struct process, sched_node)->vruntime)
+        if (se->vruntime < rb_entry(parent, struct sched_entity, sched_node)->vruntime)
             link = &parent->rb_left;
         else
             link = &parent->rb_right;
     }
-    rb_link_node(&p->sched_node, parent, link);
-    rb_insert_color(&p->sched_node, &rq->tasks_timeline);
+    rb_link_node(&se->sched_node, parent, link);
+    rb_insert_color(&se->sched_node, &rq->tasks_timeline);
 }
 
 static void update_curr(struct cfs_rq *rq) {
-    struct process *curr = rq->curr;
-    if (!curr || curr == rq->idle) return;
+    struct sched_entity *curr_se = rq->curr_se;
+    if (!curr_se) return;
 
     uint64_t now = sched_clock_ns();
-    uint64_t delta = (now > curr->last_run_time) ? now - curr->last_run_time : 0;
+    uint64_t delta = (now > curr_se->last_run_time) ? now - curr_se->last_run_time : 0;
     if (delta == 0) return;
 
-    curr->vruntime += calc_delta_fair(delta, __weight(curr->nice));
-    curr->last_run_time = now;
+    curr_se->vruntime += calc_delta_fair(delta, __weight(curr_se->nice));
+    curr_se->last_run_time = now;
     update_min_vruntime(rq);
 }
 
-static void place_entity(struct cfs_rq *rq, struct process *p, bool initial) {
+static void place_entity(struct cfs_rq *rq, struct sched_entity *se, bool initial) {
     uint64_t v = rq->min_vruntime;
-    if (initial) v += calc_delta_fair(SCHED_LATENCY_NS, __weight(p->nice));
-    if (p->vruntime < v) p->vruntime = v;
+    if (initial) v += calc_delta_fair(SCHED_LATENCY_NS, __weight(se->nice));
+    if (se->vruntime < v) se->vruntime = v;
 }
 
 void sched_init(void) {
@@ -101,56 +101,61 @@ void sched_init_cpu(int cpu) {
 void sched_post_switch_cleanup(void) {
     struct percpu_data *cpu = arch_get_percpu();
     if (cpu->prev_task) {
-        __atomic_store_n(&cpu->prev_task->on_cpu, false, __ATOMIC_RELEASE);
+        struct process *prev = cpu->prev_task;
+        __atomic_store_n(&prev->se.on_cpu, false, __ATOMIC_RELEASE);
         cpu->prev_task = NULL;
+        /* Zombie finished context switch — notify waiting parent */
+        if (prev->state == PROC_ZOMBIE && prev->parent) {
+            wait_queue_wakeup_all(&prev->parent->exit_wait);
+        }
     }
 }
 
 void sched_enqueue(struct process *p) {
-    if (!p || p->on_rq) return;
-    
+    if (!p || p->se.on_rq) return;
+
     /* Find target CPU - currently simple: stay on current or preferred */
-    int cpu = (p->cpu >= 0 && p->cpu < nr_cpus_online) ? p->cpu : arch_cpu_id();
+    int cpu = (p->se.cpu >= 0 && p->se.cpu < nr_cpus_online) ? p->se.cpu : arch_cpu_id();
     struct cfs_rq *rq = &cpu_data[cpu].runqueue;
 
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
-    
-    place_entity(rq, p, p->vruntime == 0);
-    __enqueue_entity(rq, p);
-    p->on_rq = true;
-    p->cpu = cpu;
-    p->on_cpu = false; /* Ensure it's marked as not running if it was just created/woken */
+
+    place_entity(rq, &p->se, p->se.vruntime == 0);
+    __enqueue_entity(rq, &p->se);
+    p->se.on_rq = true;
+    p->se.cpu = cpu;
+    p->se.on_cpu = false;
     rq->nr_running++;
     update_min_vruntime(rq);
 
-    struct process *curr = rq->curr;
+    struct sched_entity *curr_se = rq->curr_se;
     spin_unlock(&rq->lock);
-    
-    if (curr && curr != rq->idle && curr != p) {
-        if (p->vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr->vruntime) {
+
+    if (curr_se && curr_se != &p->se) {
+        if (p->se.vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr_se->vruntime) {
             cpu_data[cpu].resched_needed = true;
         }
     }
 
     if (cpu != arch_cpu_id())
         arch_send_ipi(cpu, IPI_RESCHEDULE);
-        
+
     arch_irq_restore(state);
 }
 
 void sched_dequeue(struct process *p) {
-    if (!p || !p->on_rq) return;
-    
-    struct cfs_rq *rq = &cpu_data[p->cpu].runqueue;
+    if (!p || !p->se.on_rq) return;
+
+    struct cfs_rq *rq = &cpu_data[p->se.cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
-    
-    rb_erase(&p->sched_node, &rq->tasks_timeline);
-    p->on_rq = false;
+
+    rb_erase(&p->se.sched_node, &rq->tasks_timeline);
+    p->se.on_rq = false;
     rq->nr_running--;
     update_min_vruntime(rq);
-    
+
     spin_unlock(&rq->lock);
     arch_irq_restore(state);
 }
@@ -162,28 +167,29 @@ void sched_dequeue(struct process *p) {
 static struct process *sched_steal_task(int self_id) {
     for (int i = 0; i < nr_cpus_online; i++) {
         if (i == self_id) continue;
-        
+
         struct cfs_rq *remote_rq = &cpu_data[i].runqueue;
-        
+
         /* Attempt to lock remote queue without deadlocking */
         if (!spin_trylock(&remote_rq->lock)) continue;
-        
+
         struct process *p = NULL;
         if (remote_rq->nr_running > 0) {
             struct rb_node *left = rb_first(&remote_rq->tasks_timeline);
             if (left) {
-                p = rb_entry(left, struct process, sched_node);
-                
+                struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
+                p = container_of(se, struct process, se);
+
                 /* CRITICAL: Do not steal a task that is currently running on the remote CPU! */
-                if (p->on_cpu) {
+                if (se->on_cpu) {
                     spin_unlock(&remote_rq->lock);
                     continue;
                 }
 
-                rb_erase(&p->sched_node, &remote_rq->tasks_timeline);
-                p->on_rq = false;
+                rb_erase(&se->sched_node, &remote_rq->tasks_timeline);
+                se->on_rq = false;
                 remote_rq->nr_running--;
-                p->cpu = self_id;
+                se->cpu = self_id;
             }
         }
         spin_unlock(&remote_rq->lock);
@@ -204,53 +210,53 @@ void schedule(void) {
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
         /* Mark prev as currently running on this CPU */
-        prev->on_cpu = true;
-        
+        prev->se.on_cpu = true;
+
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_RUNNABLE;
-            __enqueue_entity(rq, prev);
-            prev->on_rq = true;
+            __enqueue_entity(rq, &prev->se);
+            prev->se.on_rq = true;
             rq->nr_running++;
-        } else if (prev->on_rq) {
-            rb_erase(&prev->sched_node, &rq->tasks_timeline);
-            prev->on_rq = false;
+        } else if (prev->se.on_rq) {
+            rb_erase(&prev->se.sched_node, &rq->tasks_timeline);
+            prev->se.on_rq = false;
             rq->nr_running--;
         }
     }
 
     struct rb_node *left = rb_first(&rq->tasks_timeline);
     if (left) {
-        next = rb_entry(left, struct process, sched_node);
-        rb_erase(&next->sched_node, &rq->tasks_timeline);
-        next->on_rq = false;
+        struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
+        next = container_of(se, struct process, se);
+        rb_erase(&se->sched_node, &rq->tasks_timeline);
+        se->on_rq = false;
         rq->nr_running--;
     } else {
         /* Local empty - attempt stealing without holding local lock to simplify */
         spin_unlock(&rq->lock);
         next = sched_steal_task(cpu->cpu_id);
         spin_lock(&rq->lock);
-        
+
         if (!next) next = cpu->idle_proc;
     }
 
     if (next == prev && prev->state == PROC_ZOMBIE && prev != cpu->idle_proc) {
-        pr_err("SCHED: CPU %d trying to re-schedule ZOMBIE PID %d. idle_proc PID %d\n", 
+        pr_err("SCHED: CPU %d trying to re-schedule ZOMBIE PID %d. idle_proc PID %d\n",
                cpu->cpu_id, prev->pid, cpu->idle_proc ? cpu->idle_proc->pid : -1);
         panic("SCHED: Zombie Rescheduling");
     }
 
     if (next != prev) {
-        next->last_run_time = sched_clock_ns();
-        rq->curr = next;
+        next->se.last_run_time = sched_clock_ns();
+        rq->curr_se = &next->se;
         next->state = PROC_RUNNING;
-        next->on_cpu = true; /* Mark next as running to prevent stealing */
+        next->se.on_cpu = true;
         __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
         proc_set_current(next);
 
         if (next->mm) {
             arch_mmu_switch(next->mm->pgdir);
         } else {
-            /* Kernel thread: ensure we are on kernel page table */
             arch_mmu_switch(arch_mmu_get_kernel_pgdir());
         }
 
@@ -259,28 +265,22 @@ void schedule(void) {
             if (kstack)
                 arch_tss_set_rsp0(kstack);
         }
-        
-        /* Update the CPU ID in the next task's context (for tp restoration) */
+
         if (next->context) arch_context_set_cpu(next->context, cpu->cpu_id);
 
-        /* Store prev for cleanup by next task */
         cpu->prev_task = prev;
-        
+
         spin_unlock(&rq->lock);
         if (prev && prev->context) arch_context_switch(prev->context, next->context);
-        
-        /* 
-         * Back from switch (as 'next' - now current).
-         * Cleanup the task that switched to us (which is cpu->prev_task).
-         */
+
         sched_post_switch_cleanup();
-        
+
         arch_irq_restore(state);
     } else {
         next->state = PROC_RUNNING;
-        next->on_cpu = true;
-        rq->curr = next;
-        if (cpu->prev_task) sched_post_switch_cleanup(); /* Just in case */
+        next->se.on_cpu = true;
+        rq->curr_se = &next->se;
+        if (cpu->prev_task) sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
         arch_irq_restore(state);
     }
@@ -293,11 +293,10 @@ void sched_tick(void) {
 
     cpu->ticks++;
     uint64_t now = sched_clock_ns();
-    uint64_t delta = (curr && now > curr->last_run_time) ? now - curr->last_run_time : 0;
-    /* We don't necessarily need the lock for simple status check, but safety first */
+    uint64_t delta = (curr && now > curr->se.last_run_time) ? now - curr->se.last_run_time : 0;
     if (spin_trylock(&rq->lock)) {
         if (curr && curr != cpu->idle_proc) {
-            rq->curr = curr;
+            rq->curr_se = &curr->se;
             update_curr(rq);
         }
         if (curr && curr != cpu->idle_proc) {
@@ -310,7 +309,6 @@ void sched_tick(void) {
         } else if (rq->nr_running > 0) {
             cpu->resched_needed = true;
         }
-        /* Preemption logic placeholder */
         spin_unlock(&rq->lock);
     }
 }
@@ -319,19 +317,19 @@ int sched_setnice(struct process *p, int nice) {
     if (!p) return -1;
     nice = (nice < NICE_MIN) ? NICE_MIN : (nice > NICE_MAX) ? NICE_MAX : nice;
 
-    struct cfs_rq *rq = &cpu_data[p->cpu].runqueue;
+    struct cfs_rq *rq = &cpu_data[p->se.cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
-    bool on_rq = p->on_rq;
-    if (on_rq) rb_erase(&p->sched_node, &rq->tasks_timeline);
-    p->nice = nice;
-    if (on_rq) __enqueue_entity(rq, p);
+    bool on_rq = p->se.on_rq;
+    if (on_rq) rb_erase(&p->se.sched_node, &rq->tasks_timeline);
+    p->se.nice = nice;
+    if (on_rq) __enqueue_entity(rq, &p->se);
     spin_unlock(&rq->lock);
     arch_irq_restore(state);
     return 0;
 }
 
-int sched_getnice(struct process *p) { return p ? p->nice : 0; }
+int sched_getnice(struct process *p) { return p ? p->se.nice : 0; }
 int sched_cpu_id(void) { return arch_cpu_id(); }
 struct cfs_rq *sched_cpu_rq(void) { return this_rq; }
 bool sched_need_resched(void) { return arch_get_percpu()->resched_needed; }
@@ -347,4 +345,10 @@ void sched_cpu_online(int cpu) {
 }
 struct percpu_data *sched_cpu_data(int cpu) {
     return (cpu < 0 || cpu >= CONFIG_MAX_CPUS) ? NULL : &cpu_data[cpu];
+}
+
+void sched_fork(struct process *child, struct process *parent) {
+    sched_entity_init(&child->se);
+    child->se.vruntime = parent->se.vruntime;
+    child->se.nice = parent->se.nice;
 }

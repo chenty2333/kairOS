@@ -264,7 +264,7 @@ static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz) {
     uint64_t rss_pages = 0;
     procfs_calc_vsz_rss(p, &vsz_bytes, &rss_pages);
 
-    int priority = 20 + p->nice;
+    int priority = 20 + p->se.nice;
     int num_threads = 1;
 
     return snprintf(
@@ -289,7 +289,7 @@ static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz) {
         "0 0 0 0 0 0 0 "  /* guest_time..env_end */
         "0\n",            /* exit_code */
         p->pid, p->name, proc_state_char(p->state), p->ppid, p->pgid, p->sid,
-        (unsigned long)p->utime, (unsigned long)p->stime, priority, p->nice,
+        (unsigned long)p->utime, (unsigned long)p->stime, priority, p->se.nice,
         num_threads, (unsigned long)p->start_time,
         (unsigned long long)vsz_bytes, (unsigned long)rss_pages);
 }
