@@ -20,6 +20,10 @@ ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
 EXTRA_CFLAGS ?=
 
+# Auto-detect parallelism: use all available cores
+NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+MAKEFLAGS += -j$(NPROC)
+
 # Build directory
 BUILD_DIR := build/$(ARCH)
 
@@ -112,18 +116,14 @@ LWIP_COMPAT_CFLAGS := -I kernel/net/lwip_port/compat
 
 # Architecture-specific flags
 ifeq ($(ARCH),riscv64)
-  ifeq ($(USE_GCC),1)
-    CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
-  else
-    CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
-  endif
+  CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
   LDFLAGS :=
 else ifeq ($(ARCH),x86_64)
   CFLAGS += -m64 -mno-red-zone -mno-sse -mno-sse2
   CFLAGS += -mcmodel=kernel
   LDFLAGS :=
 else ifeq ($(ARCH),aarch64)
-  CFLAGS += -mgeneral-regs-only
+  CFLAGS += -mgeneral-regs-only -fno-omit-frame-pointer
   LDFLAGS :=
 endif
 
@@ -287,15 +287,6 @@ ARCH_SRCS := \
     kernel/arch/aarch64/extable.c \
     kernel/arch/aarch64/lib/uaccess.S
 endif
-
-# Future phases will add:
-# - kernel/core/sched/sched.c, cfs.c
-# - kernel/core/mm/pmm.c, vmm.c, kmalloc.c
-# - kernel/core/proc/process.c, fork.c, exec.c
-# - kernel/core/trap/trap.c, kernel/arch/$(ARCH)/trap.S, trap.c
-# - kernel/core/time/time.c, kernel/arch/$(ARCH)/timer.c
-# - kernel/ipc/pipe.c, signal.c
-# - kernel/fs/*, kernel/drivers/*, kernel/syscall/*
 
 # lwIP sources
 LWIP_SRCS := \
@@ -581,31 +572,21 @@ ifeq ($(ARCH),riscv64)
 	fi
 endif
 
+# Per-arch boot prerequisites (kernel image + boot media + disk)
 ifeq ($(ARCH),x86_64)
-run: check-tools iso disk
-	@$(MAKE) --no-print-directory check-disk
-	$(QEMU) $(QEMU_RUN_FLAGS)
-
-# Run with e1000 network card (for testing)
-run-e1000: check-tools iso disk
-	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+  RUN_DEPS := check-tools iso disk
 else ifeq ($(ARCH),riscv64)
-run: check-tools $(KERNEL) uefi disk
-	@$(MAKE) --no-print-directory check-disk
-	$(QEMU) $(QEMU_RUN_FLAGS)
-
-# Run with e1000 network card (for testing)
-run-e1000: check-tools $(KERNEL) uefi disk
-	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+  RUN_DEPS := check-tools $(KERNEL) uefi disk
 else
-run: check-tools $(KERNEL) disk
+  RUN_DEPS := check-tools $(KERNEL) disk
+endif
+
+run: $(RUN_DEPS)
 	@$(MAKE) --no-print-directory check-disk
 	$(QEMU) $(QEMU_RUN_FLAGS)
 
-# Run with e1000 network card (for testing)
-run-e1000: check-tools $(KERNEL) disk
+run-e1000: $(RUN_DEPS)
 	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
-endif
 
 # Create bootable ISO (x86_64 only for now)
 iso: $(KERNEL) initramfs
@@ -615,25 +596,10 @@ iso: $(KERNEL) initramfs
 run-iso: iso
 	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
 
-ifeq ($(ARCH),x86_64)
-# Debug with GDB
-debug: check-tools iso disk
+debug: $(RUN_DEPS)
 	@echo "Starting QEMU with GDB server on localhost:1234"
 	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
 	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
-else ifeq ($(ARCH),riscv64)
-# Debug with GDB
-debug: check-tools $(KERNEL) uefi disk
-	@echo "Starting QEMU with GDB server on localhost:1234"
-	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
-	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
-else
-# Debug with GDB
-debug: check-tools $(KERNEL) disk
-	@echo "Starting QEMU with GDB server on localhost:1234"
-	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
-	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
-endif
 
 # ============================================================
 #                    Utility Targets
