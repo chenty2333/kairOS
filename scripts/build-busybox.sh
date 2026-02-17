@@ -12,6 +12,8 @@ if [[ -z "$ARCH" ]]; then
   exit 1
 fi
 
+QUIET="${QUIET:-0}"
+
 BUSYBOX_SRC="${BUSYBOX_SRC:-third_party/busybox}"
 OUT_DIR="${OUT_DIR:-build/${ARCH}/busybox}"
 DEFCONFIG="${DEFCONFIG:-tools/busybox/kairos_defconfig}"
@@ -93,7 +95,13 @@ fi
 
 mkdir -p "$OUT_DIR"
 
-make -C "$BUSYBOX_SRC" mrproper
+if [[ "$QUIET" == "1" ]]; then
+  _out=/dev/null
+else
+  _out=/dev/stdout
+fi
+
+make -C "$BUSYBOX_SRC" mrproper >"$_out" 2>&1
 
 for shipped in zconf.tab.c_shipped lex.zconf.c_shipped zconf.hash.c_shipped; do
   src="${BUSYBOX_SRC}/scripts/kconfig/${shipped}"
@@ -103,7 +111,7 @@ for shipped in zconf.tab.c_shipped lex.zconf.c_shipped zconf.hash.c_shipped; do
   fi
 done
 
-make -C "$BUSYBOX_SRC" O="$OUT_DIR" allnoconfig
+make -C "$BUSYBOX_SRC" O="$OUT_DIR" allnoconfig >"$_out" 2>&1
 
 CONFIG_FILE="${OUT_DIR}/.config"
 while IFS= read -r line; do
@@ -120,11 +128,15 @@ while IFS= read -r line; do
 done < "$DEFCONFIG"
 
 # Ensure new Kconfig symbols take defaults without prompting
-make -C "$BUSYBOX_SRC" O="$OUT_DIR" silentoldconfig
+make -C "$BUSYBOX_SRC" O="$OUT_DIR" silentoldconfig >"$_out" 2>&1
 
-echo "Using CC=$CC CROSS_COMPILE=$CROSS_COMPILE"
+[[ "$QUIET" != "1" ]] && echo "Using CC=$CC CROSS_COMPILE=$CROSS_COMPILE"
 make -C "$BUSYBOX_SRC" O="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
   CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
-  CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" -j"$JOBS"
+  CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" -j"$JOBS" >"$_out" 2>&1
 
-echo "BusyBox built: $OUT_DIR/busybox"
+if [[ "$QUIET" == "1" ]]; then
+  echo "  BBOX    $OUT_DIR/busybox"
+else
+  echo "BusyBox built: $OUT_DIR/busybox"
+fi

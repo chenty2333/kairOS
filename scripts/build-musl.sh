@@ -12,6 +12,8 @@ if [[ -z "$ARCH" ]]; then
   exit 1
 fi
 
+QUIET="${QUIET:-0}"
+
 MUSL_SRC="${MUSL_SRC:-third_party/musl}"
 SYSROOT="${SYSROOT:-build/${ARCH}/sysroot}"
 BUILD_DIR="${BUILD_DIR:-build/${ARCH}/musl}"
@@ -76,7 +78,7 @@ else
 fi
 
 if [[ -f "$SYSROOT/lib/libc.a" ]]; then
-  echo "musl already installed: $SYSROOT"
+  [[ "$QUIET" != "1" ]] && echo "musl already installed: $SYSROOT"
   exit 0
 fi
 
@@ -84,12 +86,22 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$SYSROOT"
 cp -a "$MUSL_SRC"/. "$BUILD_DIR"/
 
+if [[ "$QUIET" == "1" ]]; then
+  _out=/dev/null
+else
+  _out=/dev/stdout
+fi
+
 pushd "$BUILD_DIR" >/dev/null
   CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" CFLAGS="$CFLAGS" \
   LDFLAGS="$LDFLAGS" CROSS_COMPILE="$CROSS_COMPILE" \
-  ./configure --prefix=/ --target="$TARGET"
-  make -j"$JOBS"
-  DESTDIR="$SYSROOT" make install
+  ./configure --prefix=/ --target="$TARGET" >"$_out"
+  make -j"$JOBS" >"$_out"
+  DESTDIR="$SYSROOT" make install >"$_out"
 popd >/dev/null
 
-echo "musl installed to $SYSROOT"
+if [[ "$QUIET" == "1" ]]; then
+  echo "  MUSL    $SYSROOT"
+else
+  echo "musl installed to $SYSROOT"
+fi

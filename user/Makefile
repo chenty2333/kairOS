@@ -1,5 +1,6 @@
 ARCH ?= riscv64
 USE_GCC ?= 0
+V ?= 0
 ROOT_DIR := $(abspath ..)
 SYSROOT ?= $(ROOT_DIR)/build/$(ARCH)/sysroot
 TOOLCHAIN_PREFIX ?= $(ARCH)-linux-musl-
@@ -57,22 +58,30 @@ $(warning compiler-rt builtins not found; run ./scripts/build-compiler-rt.sh $(A
 endif
 endif
 
+ifeq ($(V),0)
+  Q := @
+else
+  Q :=
+endif
+
 .PHONY: all clean initramfs
 
 all: $(INIT) $(DOOM)
 
 $(INIT): init/main.c
 	@mkdir -p $(OUT_DIR)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	@echo "  CC      user/init"
+	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 initramfs: $(INITRAMFS)
 
 $(INITRAMFS): initramfs/init.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	@echo "  CC      user/initramfs/init"
+	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 DOOM_CFLAGS := $(CFLAGS) -I$(DOOM_DIR) -DDOOMGENERIC_RESX=320 \
-	-DDOOMGENERIC_RESY=200
+	-DDOOMGENERIC_RESY=200 -w
 DOOM_LDFLAGS := $(LDFLAGS)
 DOOM_SRCS := \
 	$(DOOM_DIR)/dummy.c \
@@ -159,7 +168,8 @@ DOOM_SRCS := \
 
 $(DOOM): $(DOOM_SRCS)
 	@mkdir -p $(OUT_DIR)
-	$(CC) $(DOOM_CFLAGS) -o $@ $(DOOM_SRCS) $(DOOM_LDFLAGS)
+	@echo "  CC      user/doom ($(words $(DOOM_SRCS)) sources)"
+	$(Q)$(CC) $(DOOM_CFLAGS) -o $@ $(DOOM_SRCS) $(DOOM_LDFLAGS)
 
 clean:
 	rm -rf $(OUT_DIR)

@@ -264,6 +264,7 @@ ROOTFS_STAMP := $(STAMP_DIR)/rootfs.stamp
 DISK_STAMP := $(STAMP_DIR)/disk.stamp
 INITRAMFS_STAMP := $(STAMP_DIR)/initramfs.stamp
 COMPILER_RT_STAMP := $(STAMP_DIR)/compiler-rt.stamp
+MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 
@@ -287,50 +288,53 @@ compiler-rt: $(COMPILER_RT_STAMP)
 
 $(COMPILER_RT_STAMP): scripts/build-compiler-rt.sh
 	@mkdir -p $(STAMP_DIR)
-	ARCH=$(ARCH) ./scripts/build-compiler-rt.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/build-compiler-rt.sh $(ARCH)
 	@touch $@
 
-$(USER_INIT): $(USER_TOOLCHAIN_DEPS) user/init/main.c user/Makefile scripts/build-musl.sh
-	./scripts/build-musl.sh $(ARCH)
-	$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC)
+$(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) scripts/build-musl.sh
+	@mkdir -p $(STAMP_DIR)
+	$(Q)$(QUIET_ENV) ./scripts/build-musl.sh $(ARCH)
+	@touch $@
+
+$(USER_INIT): $(MUSL_STAMP) user/init/main.c user/Makefile
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) V=$(V)
 
 initramfs: $(INITRAMFS_STAMP)
 
-$(USER_INITRAMFS): $(USER_TOOLCHAIN_DEPS) user/initramfs/init.c user/Makefile scripts/build-musl.sh
-	./scripts/build-musl.sh $(ARCH)
-	$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) initramfs
+$(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) scripts/make-initramfs.sh
 	@mkdir -p $(STAMP_DIR)
-	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-initramfs.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-initramfs.sh $(ARCH)
 	@touch $@
 
 busybox: $(BUSYBOX_STAMP)
 
-$(BUSYBOX_STAMP): tools/busybox/kairos_defconfig scripts/build-busybox.sh
+$(BUSYBOX_STAMP): $(MUSL_STAMP) tools/busybox/kairos_defconfig scripts/build-busybox.sh
 	@mkdir -p $(STAMP_DIR)
-	./scripts/build-busybox.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ./scripts/build-busybox.sh $(ARCH)
 	@touch $@
 
 rootfs-base: $(ROOTFS_BASE_STAMP)
 
 $(ROOTFS_BASE_STAMP): scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=base ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=base ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 rootfs-busybox: $(ROOTFS_BUSYBOX_STAMP)
 
 $(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=busybox ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=busybox ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 rootfs-init: $(ROOTFS_INIT_STAMP)
 
 $(ROOTFS_INIT_STAMP): $(USER_INIT) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 rootfs: $(ROOTFS_STAMP)
@@ -511,7 +515,7 @@ run-e1000: $(RUN_DEPS)
 
 # Create bootable ISO (x86_64 only for now)
 iso: $(KERNEL) initramfs
-	./scripts/make-iso.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ./scripts/make-iso.sh $(ARCH)
 
 # Run from ISO
 run-iso: iso
@@ -532,15 +536,15 @@ clean:
 
 # Prepare RISC-V UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
-	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
 
 # Create a disk image with ext2 filesystem
 disk: $(DISK_STAMP)
 
 $(DISK_STAMP): $(ROOTFS_STAMP) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 # Disassembly

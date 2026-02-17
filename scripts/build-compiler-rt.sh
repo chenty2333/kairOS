@@ -8,6 +8,7 @@ set -euo pipefail
 
 ARCH="${1:-riscv64}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+QUIET="${QUIET:-0}"
 LLVM_SRC="${LLVM_SRC:-$ROOT_DIR/third_party/llvm-project}"
 LLVM_TAG="${LLVM_TAG:-llvmorg-21.1.8}"
 SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
@@ -43,19 +44,25 @@ fi
 SYSROOT="$(realpath -m "$SYSROOT")"
 
 if [[ ! -f "$SYSROOT/lib/libc.a" ]] || [[ ! -f "$SYSROOT/include/stdlib.h" ]]; then
-  echo "musl sysroot not found: $SYSROOT (building via ./scripts/build-musl.sh $ARCH)"
-  SYSROOT="$SYSROOT" "$ROOT_DIR/scripts/build-musl.sh" "$ARCH"
+  [[ "$QUIET" != "1" ]] && echo "musl sysroot not found: $SYSROOT (building via ./scripts/build-musl.sh $ARCH)"
+  QUIET="$QUIET" SYSROOT="$SYSROOT" "$ROOT_DIR/scripts/build-musl.sh" "$ARCH"
+fi
+
+if [[ "$QUIET" == "1" ]]; then
+  _out=/dev/null
+else
+  _out=/dev/stdout
 fi
 
 if [[ ! -d "$LLVM_SRC" ]]; then
-  echo "=== Fetching llvm-project ($LLVM_TAG) ==="
+  [[ "$QUIET" != "1" ]] && echo "=== Fetching llvm-project ($LLVM_TAG) ==="
   git clone --depth=1 --filter=blob:none --sparse \
     https://github.com/llvm/llvm-project.git \
-    --branch="$LLVM_TAG" "$LLVM_SRC"
-  git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake
+    --branch="$LLVM_TAG" "$LLVM_SRC" >"$_out" 2>&1
+  git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake >"$_out" 2>&1
 else
   if [[ -d "$LLVM_SRC/.git" ]] && [[ -f "$LLVM_SRC/.git/info/sparse-checkout" ]]; then
-    git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake
+    git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake >"$_out" 2>&1
   fi
 fi
 
@@ -117,9 +124,9 @@ cmake -G Ninja -S "$LLVM_SRC/compiler-rt" -B "$BUILD_DIR" \
   -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
   -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
   -DCOMPILER_RT_BUILD_MEMPROF=OFF \
-  -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON
+  -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON >"$_out" 2>&1
 
-cmake --build "$BUILD_DIR" -j"$JOBS"
+cmake --build "$BUILD_DIR" -j"$JOBS" >"$_out" 2>&1
 
 BUILTINS=$(find "$BUILD_DIR" -name "libclang_rt.builtins-*.a" | head -n1 || true)
 if [[ -z "$BUILTINS" ]]; then
@@ -147,5 +154,9 @@ if [[ -n "$CRTEND" ]]; then
   copy_if_different "$CRTEND" "$SYSROOT/lib/crtendS.o"
 fi
 
-echo "compiler-rt builtins installed: $OUT_DIR/$(basename "$BUILTINS")"
-echo "compiler-rt resource dir: $RESOURCE_DIR"
+if [[ "$QUIET" == "1" ]]; then
+  echo "  RT      $OUT_DIR/$(basename "$BUILTINS")"
+else
+  echo "compiler-rt builtins installed: $OUT_DIR/$(basename "$BUILTINS")"
+  echo "compiler-rt resource dir: $RESOURCE_DIR"
+fi
