@@ -69,7 +69,7 @@ void kernel_main(const struct boot_info *bi) {
 
     syscall_init();
     arch_trap_init();
-    tick_policy_init();
+    tick_policy_init(arch_cpu_id());
     arch_timer_init(100);
 
     sched_init();

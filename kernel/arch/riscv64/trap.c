@@ -27,7 +27,7 @@
 #define IRQ_S_EXT 9
 
 extern void trap_entry(void);
-void timer_interrupt_handler(struct trap_frame *tf);
+void timer_interrupt_handler(const struct trap_core_event *ev);
 
 struct trap_frame *get_current_trapframe(void) {
     return arch_get_percpu()->current_tf;
@@ -123,10 +123,11 @@ static void handle_exception(struct trap_frame *tf) {
     panic(from_user ? "User exception" : "Kernel exception");
 }
 
-static void handle_interrupt(struct trap_frame *tf) {
+static void handle_interrupt(const struct trap_core_event *ev) {
+    struct trap_frame *tf = ev->tf;
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
     if (cause == IRQ_S_TIMER) {
-        timer_interrupt_handler(tf);
+        timer_interrupt_handler(ev);
     } else if (cause == IRQ_S_EXT) {
         arch_irq_handler(tf);
     } else if (cause == IRQ_S_SOFT) {
@@ -170,7 +171,7 @@ static enum trap_core_event_type riscv_event_type(uint64_t scause) {
 
 static int riscv_handle_event(const struct trap_core_event *ev) {
     if (ev->code & SCAUSE_INTERRUPT)
-        handle_interrupt(ev->tf);
+        handle_interrupt(ev);
     else
         handle_exception(ev->tf);
     return 0;

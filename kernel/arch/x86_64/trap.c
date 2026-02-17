@@ -12,6 +12,7 @@
 #include <kairos/signal.h>
 #include <kairos/syscall.h>
 #include <kairos/trap_core.h>
+#include <kairos/tick.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
@@ -34,8 +35,6 @@ struct idt_ptr {
 } __attribute__((packed));
 
 static struct idt_entry idt[256];
-
-volatile uint64_t system_ticks = 0;
 
 extern void isr0(void);
 extern void isr1(void);
@@ -198,16 +197,22 @@ static void handle_syscall(struct trap_frame *tf) {
                                tf->r8, tf->r9);
 }
 
-extern volatile uint64_t system_ticks;
+static void handle_timer_irq(struct trap_frame *tf) {
+    struct trap_core_event ev = {
+        .type = TRAP_CORE_EVENT_TIMER,
+        .tf = tf,
+        .from_user = (tf->cs & 3) != 0,
+        .code = tf->trapno,
+        .fault_addr = 0,
+    };
+    tick_policy_on_timer_irq(&ev);
+}
 
 static void handle_irq(struct trap_frame *tf) {
     int vec = (int)tf->trapno;
     int irq = vec - IRQ_BASE;
     if (irq == 0) {
-        uint64_t tick = __atomic_add_fetch(&system_ticks, 1, __ATOMIC_RELAXED);
-        sched_tick();
-        if (tick && (tick % CONFIG_HZ == 0))
-            pr_debug("tick: %lu sec\n", tick / CONFIG_HZ);
+        handle_timer_irq(tf);
     } else if (irq >= 0 && irq < 256) {
         if (irq_handlers[irq].handler)
             irq_handlers[irq].handler(irq_handlers[irq].arg);

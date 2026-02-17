@@ -4,9 +4,10 @@
 
 #include <asm/arch.h>
 #include <kairos/arch.h>
-#include <kairos/mm.h>
 #include <kairos/config.h>
+#include <kairos/mm.h>
 #include <kairos/printk.h>
+#include <kairos/tick.h>
 #include <kairos/types.h>
 
 #define PIT_FREQ 1193182
@@ -19,7 +20,6 @@
 #define LAPIC_TIMER_CURR 0x390
 #define LAPIC_LVT_TIMER  0x320
 
-extern volatile uint64_t system_ticks;
 extern uint32_t lapic_read(uint32_t reg);
 extern void lapic_init(void);
 extern void lapic_eoi(void);
@@ -90,5 +90,5 @@ void arch_timer_set_next(uint64_t t) {
 void arch_timer_ack(void) {}
 
 uint64_t arch_timer_get_ticks(void) {
-    return __atomic_load_n(&system_ticks, __ATOMIC_RELAXED);
+    return tick_policy_get_ticks();
 }

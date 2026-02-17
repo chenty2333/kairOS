@@ -1,5 +1,9 @@
 /**
  * kernel/arch/aarch64/mmu.c - AArch64 MMU implementation
+ *
+ * 4-level page table (48-bit VA), 4KB granule.
+ * MAIR indices: 0=Device-nGnRnE, 1=Device-nGnRE, 2=Normal-NC,
+ *               3=Normal-WT, 4=Normal-WB.
  */
 
 #include <kairos/arch.h>
@@ -8,59 +12,134 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
+#include "../../arch/common/mmu_common.h"
 
 #define PAGE_SIZE 4096
 #define PAGE_SHIFT 12
 #define PTES_PER_PAGE 512
+#define LEVELS 4
 
-#define AARCH64_PTE_VALID (1ULL << 0)
-#define AARCH64_PTE_TABLE (1ULL << 1)
-#define AARCH64_PTE_AF    (1ULL << 10)
-#define AARCH64_PTE_SH_INNER (3ULL << 8)
+/* --- Hardware PTE bits --- */
+#define AARCH64_PTE_VALID     (1ULL << 0)
+#define AARCH64_PTE_TABLE     (1ULL << 1)
+#define AARCH64_PTE_AF        (1ULL << 10)
+#define AARCH64_PTE_SH_INNER  (3ULL << 8)
+#define AARCH64_PTE_SH_OUTER  (2ULL << 8)
 #define AARCH64_PTE_ATTRIDX(n) ((uint64_t)(n) << 2)
 #define AARCH64_PTE_AP_RW_EL1 (0ULL << 6)
 #define AARCH64_PTE_AP_RO_EL1 (1ULL << 6)
 #define AARCH64_PTE_AP_RW_EL0 (2ULL << 6)
 #define AARCH64_PTE_AP_RO_EL0 (3ULL << 6)
-#define AARCH64_PTE_UXN  (1ULL << 54)
-#define AARCH64_PTE_PXN  (1ULL << 53)
+#define AARCH64_PTE_UXN       (1ULL << 54)
+#define AARCH64_PTE_PXN       (1ULL << 53)
+
+/* MAIR attribute indices */
+#define MT_DEVICE_nGnRnE 0
+#define MT_DEVICE_nGnRE  1
+#define MT_NORMAL_NC     2
+#define MT_NORMAL_WT     3
+#define MT_NORMAL_WB     4
 
 static paddr_t kernel_pgdir;
 extern char _kernel_start[], _kernel_end[];
 
-static inline size_t va_index(vaddr_t va, int level) {
+/* --- mmu_ops callbacks for common walker --- */
+
+static bool aarch64_pte_valid(uint64_t pte) {
+    return (pte & AARCH64_PTE_VALID) != 0;
+}
+
+static paddr_t aarch64_pte_addr(uint64_t pte) {
+    return (paddr_t)(pte & ~0xfffULL);
+}
+
+static uint64_t aarch64_make_branch(paddr_t pa) {
+    return pa | AARCH64_PTE_VALID | AARCH64_PTE_TABLE;
+}
+
+static size_t aarch64_va_index(vaddr_t va, int level) {
     return (va >> (PAGE_SHIFT + level * 9)) & 0x1ff;
 }
 
-static paddr_t pt_alloc(void) {
-    paddr_t pa = pmm_alloc_page();
-    if (!pa)
-        return 0;
-    memset(phys_to_virt(pa), 0, PAGE_SIZE);
-    return pa;
+static const struct mmu_ops aarch64_mmu_ops = {
+    .levels      = LEVELS,
+    .pte_valid   = aarch64_pte_valid,
+    .pte_addr    = aarch64_pte_addr,
+    .make_branch = aarch64_make_branch,
+    .va_index    = aarch64_va_index,
+};
+
+/* Convenience wrapper */
+static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
+    return mmu_walk_pgtable(&aarch64_mmu_ops, table, va, create);
 }
 
-static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
+static inline bool pte_is_table(uint64_t pte) {
+    return (pte & (AARCH64_PTE_VALID | AARCH64_PTE_TABLE)) ==
+           (AARCH64_PTE_VALID | AARCH64_PTE_TABLE);
+}
+
+static void destroy_pt(paddr_t table, int level) {
+    if (!table || table == kernel_pgdir)
+        return;
+
     uint64_t *pt = (uint64_t *)phys_to_virt(table);
-    for (int level = 3; level > 0; level--) {
-        size_t idx = va_index(va, level);
-        if (!(pt[idx] & AARCH64_PTE_VALID)) {
-            if (!create)
-                return NULL;
-            paddr_t next = pt_alloc();
-            if (!next)
-                return NULL;
-            pt[idx] = next | AARCH64_PTE_VALID | AARCH64_PTE_TABLE;
+    if (level > 0) {
+        for (size_t i = 0; i < PTES_PER_PAGE; i++) {
+            if (pte_is_table(pt[i])) {
+                destroy_pt((paddr_t)(pt[i] & ~0xfffULL), level - 1);
+            }
         }
-        pt = (uint64_t *)phys_to_virt((paddr_t)(pt[idx] & ~0xfffULL));
     }
-    return &pt[va_index(va, 0)];
+    pmm_free_page(table);
+}
+
+static paddr_t copy_pt(paddr_t src, int level) {
+    paddr_t dst = mmu_pt_alloc();
+    if (!dst)
+        return 0;
+
+    uint64_t *src_pt = (uint64_t *)phys_to_virt(src);
+    uint64_t *dst_pt = (uint64_t *)phys_to_virt(dst);
+    memcpy(dst_pt, src_pt, PAGE_SIZE);
+
+    for (size_t i = 0; i < PTES_PER_PAGE; i++) {
+        uint64_t pte = dst_pt[i];
+        if (!(pte & AARCH64_PTE_VALID))
+            continue;
+
+        /* Strip user mappings from kernel table copies */
+        if (pte & AARCH64_PTE_AP_RW_EL0) {
+            dst_pt[i] = 0;
+            continue;
+        }
+
+        if (level > 0 && pte_is_table(pte)) {
+            paddr_t child_src = (paddr_t)(pte & ~0xfffULL);
+            paddr_t child_dst = copy_pt(child_src, level - 1);
+            if (!child_dst) {
+                destroy_pt(dst, level);
+                return 0;
+            }
+            dst_pt[i] = child_dst | (pte & 0xfffULL);
+        }
+    }
+    return dst;
 }
 
 static uint64_t flags_to_pte(uint64_t f) {
-    uint64_t p =
-        AARCH64_PTE_VALID | AARCH64_PTE_AF | AARCH64_PTE_SH_INNER |
-        AARCH64_PTE_ATTRIDX(0);
+    uint64_t p = AARCH64_PTE_VALID | AARCH64_PTE_AF;
+
+    if (f & PTE_DEVICE) {
+        /* Device memory: nGnRnE, Outer Shareable */
+        p |= AARCH64_PTE_ATTRIDX(MT_DEVICE_nGnRnE);
+        p |= AARCH64_PTE_SH_OUTER;
+    } else {
+        /* Normal memory: Write-Back, Inner Shareable */
+        p |= AARCH64_PTE_ATTRIDX(MT_NORMAL_WB);
+        p |= AARCH64_PTE_SH_INNER;
+    }
+
     if (f & PTE_USER) {
         p |= (f & PTE_WRITE) ? AARCH64_PTE_AP_RW_EL0 : AARCH64_PTE_AP_RO_EL0;
     } else {
@@ -71,38 +150,91 @@ static uint64_t flags_to_pte(uint64_t f) {
     return p;
 }
 
-static int map_region(paddr_t root, vaddr_t va, paddr_t pa, size_t sz,
-                      uint64_t f) {
-    for (size_t off = 0; off < sz; off += PAGE_SIZE) {
-        if (arch_mmu_map(root, va + off, pa + off, f) < 0)
-            return -1;
-    }
-    return 0;
+/* --- Build TCR_EL1 --- */
+static uint64_t build_tcr(void) {
+    /* Read physical address size from ID_AA64MMFR0_EL1 */
+    uint64_t mmfr0;
+    __asm__ __volatile__("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
+    uint64_t pa_range = mmfr0 & 0xf;
+
+    uint64_t tcr = 0;
+    tcr |= (64 - 48);           /* T0SZ = 16 (48-bit TTBR0 VA) */
+    tcr |= (64 - 48) << 16;     /* T1SZ = 16 (48-bit TTBR1 VA) */
+    tcr |= (0b00ULL) << 14;     /* TG0 = 4KB */
+    tcr |= (0b10ULL) << 30;     /* TG1 = 4KB */
+    tcr |= (0b11ULL) << 8;      /* IRGN0 = WB-WA */
+    tcr |= (0b11ULL) << 24;     /* IRGN1 = WB-WA */
+    tcr |= (0b01ULL) << 10;     /* ORGN0 = WB-WA */
+    tcr |= (0b01ULL) << 26;     /* ORGN1 = WB-WA */
+    tcr |= (0b11ULL) << 12;     /* SH0 = Inner Shareable */
+    tcr |= (0b11ULL) << 28;     /* SH1 = Inner Shareable */
+    tcr |= pa_range << 32;      /* IPS = detected PA range */
+    return tcr;
 }
+
+/* --- Build MAIR_EL1 --- */
+static uint64_t build_mair(void) {
+    /* Attr0: Device-nGnRnE (0x00)
+     * Attr1: Device-nGnRE  (0x04)
+     * Attr2: Normal NC      (0x44)
+     * Attr3: Normal WT      (0xBB)
+     * Attr4: Normal WB      (0xFF)
+     */
+    return 0x00ULL | (0x04ULL << 8) | (0x44ULL << 16) |
+           (0xBBULL << 24) | (0xFFULL << 32);
+}
+
+/* --- Public Interface --- */
 
 void arch_mmu_init(const struct boot_info *bi) {
     if (!bi)
         panic("mmu: missing boot info");
 
-    kernel_pgdir = pt_alloc();
+    kernel_pgdir = mmu_pt_alloc();
     if (!kernel_pgdir)
         panic("mmu: init failed");
 
+    /* 1. Map HHDM for all RAM-backed memory regions */
     for (uint32_t i = 0; i < bi->memmap_count; i++) {
         const struct boot_memmap_entry *e = &bi->memmap[i];
         if (!boot_mem_is_ram(e->type))
             continue;
-        map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
+        mmu_map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
                    e->length, PTE_READ | PTE_WRITE | PTE_GLOBAL);
     }
 
+    /* 1b. Map framebuffer MMIO into HHDM */
+    for (uint32_t i = 0; i < bi->framebuffer_count; i++) {
+        paddr_t phys = (paddr_t)bi->framebuffers[i].phys;
+        if (!phys || !bi->framebuffers[i].size)
+            continue;
+        if (bi->hhdm_offset && phys >= bi->hhdm_offset)
+            phys -= bi->hhdm_offset;
+        size_t size = ALIGN_UP((size_t)bi->framebuffers[i].size, PAGE_SIZE);
+        mmu_map_region(kernel_pgdir, bi->hhdm_offset + phys, phys, size,
+                   PTE_READ | PTE_WRITE | PTE_DEVICE);
+    }
+
+    /* 2. Map kernel high half */
     size_t ksize = ALIGN_UP((paddr_t)_kernel_end - (paddr_t)_kernel_start,
                             PAGE_SIZE);
-    map_region(kernel_pgdir, bi->kernel_virt_base, bi->kernel_phys_base, ksize,
+    mmu_map_region(kernel_pgdir, bi->kernel_virt_base, bi->kernel_phys_base, ksize,
                PTE_READ | PTE_WRITE | PTE_EXEC | PTE_GLOBAL);
 
-    uint64_t mair = 0xff;
-    uint64_t tcr = (64 - 48) | ((64 - 48) << 16) | (1ULL << 8) | (1ULL << 24);
+    /* 3. MMIO identity maps for QEMU virt platform (via HHDM) */
+    /* GIC Distributor + Redistributor */
+    mmu_map_region(kernel_pgdir, bi->hhdm_offset + 0x08000000UL, 0x08000000UL,
+               0x100000, PTE_READ | PTE_WRITE | PTE_DEVICE);
+    /* PL011 UART */
+    mmu_map_region(kernel_pgdir, bi->hhdm_offset + 0x09000000UL, 0x09000000UL,
+               0x1000, PTE_READ | PTE_WRITE | PTE_DEVICE);
+    /* VirtIO MMIO region */
+    mmu_map_region(kernel_pgdir, bi->hhdm_offset + 0x0A000000UL, 0x0A000000UL,
+               0x4000, PTE_READ | PTE_WRITE | PTE_DEVICE);
+
+    /* 4. Program MAIR, TCR, TTBR1 and enable MMU */
+    uint64_t mair = build_mair();
+    uint64_t tcr = build_tcr();
 
     __asm__ __volatile__(
         "msr mair_el1, %0\n"
@@ -117,17 +249,11 @@ void arch_mmu_init(const struct boot_info *bi) {
 }
 
 paddr_t arch_mmu_create_table(void) {
-    paddr_t dst = pt_alloc();
-    if (!dst)
-        return 0;
-    uint64_t *src = (uint64_t *)phys_to_virt(kernel_pgdir);
-    uint64_t *out = (uint64_t *)phys_to_virt(dst);
-    memcpy(out, src, PAGE_SIZE);
-    return dst;
+    return copy_pt(kernel_pgdir, LEVELS - 1);
 }
 
 void arch_mmu_destroy_table(paddr_t table) {
-    (void)table;
+    destroy_pt(table, LEVELS - 1);
 }
 
 int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
@@ -143,7 +269,7 @@ int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
     if (!pte)
         return -ENOMEM;
     uint64_t nf = flags_to_pte(flags);
-    if (*pte & PTE_VALID) {
+    if (*pte & AARCH64_PTE_VALID) {
         paddr_t existing = (paddr_t)(*pte & ~0xfffULL);
         if (existing != (pa & ~0xfffULL))
             return -EEXIST;

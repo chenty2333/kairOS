@@ -11,6 +11,7 @@
 
 #define ARCH_HAS_CPU_ID 1
 #define ARCH_HAS_CONTEXT_SET_USER_SP 1
+#define ARCH_HAS_TSS 1
 
 #ifndef __ASSEMBLER__
 

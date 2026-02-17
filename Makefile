@@ -18,6 +18,7 @@
 # Default architecture
 ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
+EXTRA_CFLAGS ?=
 
 # Build directory
 BUILD_DIR := build/$(ARCH)
@@ -38,7 +39,8 @@ endif
 
 # Shared architecture sources
 COMMON_ARCH_SRCS := \
-    kernel/arch/common/arch_common.c
+    kernel/arch/common/arch_common.c \
+    kernel/arch/common/mmu_common.c
 
 # ============================================================
 #                    Toolchain Setup
@@ -67,7 +69,7 @@ else ifeq ($(ARCH),aarch64)
   CROSS_COMPILE ?= aarch64-none-elf-
   CLANG_TARGET := aarch64-unknown-elf
   QEMU := qemu-system-aarch64
-  QEMU_MACHINE := virt
+  QEMU_MACHINE := virt,gic-version=3
   QEMU_CPU := cortex-a72
   KERNEL_LOAD := 0x40000000
 else
@@ -99,6 +101,7 @@ CFLAGS += -I kernel/arch/$(ARCH)/include
 CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 CFLAGS += -DCONFIG_EMBEDDED_INIT=$(EMBEDDED_INIT)
 CFLAGS += -DCONFIG_DRM_LITE=$(CONFIG_DRM_LITE)
+CFLAGS += $(EXTRA_CFLAGS)
 
 # lwIP include paths
 LWIP_DIR := third_party/lwip
@@ -434,6 +437,14 @@ $(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAM
 	@mkdir -p $(STAMP_DIR)
 	@touch $@
 
+# Track CFLAGS changes so object files rebuild when EXTRA_CFLAGS changes.
+CFLAGS_HASH := $(shell printf '%s' "$(CFLAGS)" | sha1sum | awk '{print $$1}')
+CFLAGS_STAMP := $(BUILD_DIR)/.cflags.$(CFLAGS_HASH)
+
+$(CFLAGS_STAMP):
+	@mkdir -p $(dir $@)
+	@touch $@
+
 # Link kernel
 $(KERNEL): $(OBJS) $(LDSCRIPT)
 	@echo "  LD      $@"
@@ -447,19 +458,19 @@ $(KERNEL): $(OBJS) $(LDSCRIPT)
 	$(Q)$(OBJCOPY) -O binary $@ $(KERNEL_BIN)
 
 # Compile lwIP C files (relaxed warnings for third-party code)
-$(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c
+$(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c $(CFLAGS_STAMP)
 	@echo "  CC      $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(LWIP_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Compile C files
-$(BUILD_DIR)/%.o: %.c
+$(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP)
 	@echo "  CC      $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # Assemble .S files
-$(BUILD_DIR)/%.o: %.S
+$(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP)
 	@echo "  AS      $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
@@ -653,16 +664,15 @@ symbols: $(KERNEL)
 	$(OBJDUMP) -t $(KERNEL) | sort > $(BUILD_DIR)/kairos.sym
 
 # Run tests (in QEMU)
-ifeq ($(ARCH),x86_64)
-test: check-tools iso disk
-	$(QEMU) $(QEMU_RUN_FLAGS)
-else ifeq ($(ARCH),riscv64)
-test: check-tools $(KERNEL) uefi disk
-	$(QEMU) $(QEMU_RUN_FLAGS)
-else
-test: check-tools $(KERNEL) disk
-	$(QEMU) $(QEMU_RUN_FLAGS)
-endif
+TEST_EXTRA_CFLAGS := -DCONFIG_KERNEL_TESTS=1
+TEST_TIMEOUT ?= 180
+TEST_LOG ?= $(BUILD_DIR)/test.log
+
+test: check-tools scripts/run-qemu-test.sh
+	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
+	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS)' run" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$(TEST_LOG)" ./scripts/run-qemu-test.sh; rc=$$?; \
+	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
+	exit $$rc
 
 # Show help
 help:

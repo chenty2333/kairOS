@@ -25,11 +25,25 @@ static const uint8_t user_program[] = {
 
 /**
  * Crash test program:
- *   0x00: unimp (0x0000) - Illegal instruction
+ *   Use arch-specific illegal opcodes so the test terminates reliably.
  */
+#if defined(ARCH_riscv64)
+static const uint8_t crash_program[] = {
+    0x00, 0x00, 0x00, 0x00, /* unimp */
+};
+#elif defined(ARCH_x86_64)
+static const uint8_t crash_program[] = {
+    0x0f, 0x0b, /* ud2 */
+};
+#elif defined(ARCH_aarch64)
+static const uint8_t crash_program[] = {
+    0x00, 0x00, 0x20, 0xD4, /* brk #0 */
+};
+#else
 static const uint8_t crash_program[] = {
     0x00, 0x00, 0x00, 0x00,
 };
+#endif
 
 static struct process *create_user_process(const char *name, const uint8_t *code,
                                            size_t code_size,

@@ -32,7 +32,7 @@ int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque) {
     return 0;
 }
 
-#ifndef ARCH_riscv64
+__attribute__((weak))
 void arch_send_ipi_all(int type) {
     int self = arch_cpu_id();
     int count = arch_cpu_count();
@@ -44,4 +44,3 @@ void arch_send_ipi_all(int type) {
         arch_send_ipi(i, type);
     }
 }
-#endif

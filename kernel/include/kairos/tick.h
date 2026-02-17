@@ -7,10 +7,10 @@
 
 #include <kairos/types.h>
 
-struct trap_frame;
+struct trap_core_event;
 
-void tick_policy_init(void);
-void tick_policy_on_timer_irq(struct trap_frame *tf, bool from_user);
+void tick_policy_init(int timekeeper_cpu);
+void tick_policy_on_timer_irq(const struct trap_core_event *ev);
 uint64_t tick_policy_get_ticks(void);
 
 #endif

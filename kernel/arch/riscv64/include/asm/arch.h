@@ -28,6 +28,7 @@ static inline int arch_cpu_id(void) {
 }
 #define ARCH_HAS_CPU_ID 1
 #define ARCH_HAS_CONTEXT_SET_USER_SP 1
+#define ARCH_HAS_EARLY_GETCHAR 1
 
 /* SBI return structure */
 struct sbi_ret {

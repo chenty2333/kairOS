@@ -71,7 +71,11 @@ struct process {
     int exit_code;
     spinlock_t lock;
 
-    /* Scheduling */
+    /* Scheduling
+     * TODO: Extract into struct sched_entity for cleaner scheduler/process
+     * separation (e.g., sched_entity embedded in process, scheduler only
+     * touches sched_entity fields).
+     */
     uint64_t vruntime, last_run_time;
     int nice, cpu;
     struct rb_node sched_node;

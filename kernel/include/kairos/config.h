@@ -65,7 +65,9 @@
  */
 #define CONFIG_DEBUG 0
 #define CONFIG_VERBOSE 0
+#ifndef CONFIG_KERNEL_TESTS
 #define CONFIG_KERNEL_TESTS 0
+#endif
 #ifndef CONFIG_EMBEDDED_INIT
 #define CONFIG_EMBEDDED_INIT 0
 #endif

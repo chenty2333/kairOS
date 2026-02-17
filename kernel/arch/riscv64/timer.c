@@ -5,8 +5,8 @@
 #include <asm/arch.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
-#include <kairos/console.h>
 #include <kairos/printk.h>
+#include <kairos/trap_core.h>
 #include <kairos/tick.h>
 #include <kairos/types.h>
 
@@ -42,10 +42,9 @@ void arch_timer_set_next(uint64_t t) {
 }
 void arch_timer_ack(void) {}
 
-void timer_interrupt_handler(struct trap_frame *tf) {
+void timer_interrupt_handler(const struct trap_core_event *ev) {
     sbi_call(SBI_EXT_TIME, 0, rdtime() + ticks_per_int, 0, 0);
-    console_poll_input();
-    tick_policy_on_timer_irq(tf, tf && !(tf->sstatus & SSTATUS_SPP));
+    tick_policy_on_timer_irq(ev);
 }
 
 uint64_t arch_timer_get_ticks(void) {

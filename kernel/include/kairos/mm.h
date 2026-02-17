@@ -65,6 +65,11 @@ void kmem_cache_free(struct kmem_cache *cache, void *obj);
 /* Virtual Memory Manager */
 void vmm_init(void);
 
+/*
+ * HAL-level PTE flags — architecture-independent.
+ * Each architecture's flags_to_pte() translates these into hardware PTE bits.
+ * Core code should only use these flags, never raw hardware PTE values.
+ */
 #define PTE_VALID (1 << 0)
 #define PTE_READ (1 << 1)
 #define PTE_WRITE (1 << 2)
@@ -72,6 +77,7 @@ void vmm_init(void);
 #define PTE_USER (1 << 4)
 #define PTE_GLOBAL (1 << 5)
 #define PTE_COW (1 << 8)
+#define PTE_DEVICE (1 << 9)  /* MMIO: use device memory attributes (uncacheable) */
 
 #define VM_READ (1 << 0)
 #define VM_WRITE (1 << 1)

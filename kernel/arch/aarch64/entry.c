@@ -36,12 +36,25 @@ void arch_cpu_relax(void) {
     __asm__ __volatile__("yield" ::: "memory");
 }
 
+/* PSCI function IDs (SMCCC convention) */
+#define PSCI_SYSTEM_OFF  0x84000008
+#define PSCI_SYSTEM_RESET 0x84000009
+
+static inline int32_t psci_call(uint32_t fn) {
+    register uint64_t x0 __asm__("x0") = fn;
+    __asm__ __volatile__("hvc #0" : "+r"(x0) :: "x1", "x2", "x3");
+    return (int32_t)x0;
+}
+
 noreturn void arch_cpu_shutdown(void) {
+    psci_call(PSCI_SYSTEM_OFF);
+    /* If PSCI fails, fall back to wfi loop */
     for (;;)
         arch_cpu_halt();
 }
 
 noreturn void arch_cpu_reset(void) {
+    psci_call(PSCI_SYSTEM_RESET);
     for (;;)
         arch_cpu_halt();
 }
@@ -78,6 +91,10 @@ void arch_breakpoint(void) {
 
 void arch_cpu_init(int cpu_id) {
     __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((uint64_t)cpu_id));
+
+    /* Ensure VBAR_EL1 is set (secondary CPUs need this too) */
+    extern void vector_table(void);
+    __asm__ __volatile__("msr vbar_el1, %0" :: "r"(&vector_table));
 }
 
 extern void gic_send_sgi(uint32_t cpu, uint32_t intid);

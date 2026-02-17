@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
+#include "../../arch/common/mmu_common.h"
 
 #define PAGE_SIZE 4096
 #define PAGE_SHIFT 12
@@ -26,33 +27,34 @@
 static paddr_t kernel_pgdir;
 extern char _kernel_start[], _kernel_end[];
 
-static inline size_t va_index(vaddr_t va, int level) {
+/* --- mmu_ops callbacks for common walker --- */
+
+static bool x86_pte_valid(uint64_t pte) {
+    return (pte & PTE_P) != 0;
+}
+
+static paddr_t x86_pte_addr(uint64_t pte) {
+    return (paddr_t)(pte & ~0xfffULL);
+}
+
+static uint64_t x86_make_branch(paddr_t pa) {
+    return pa | PTE_P | PTE_W;
+}
+
+static size_t x86_va_index(vaddr_t va, int level) {
     return (va >> (PAGE_SHIFT + level * 9)) & 0x1ff;
 }
 
-static paddr_t pt_alloc(void) {
-    paddr_t pa = pmm_alloc_page();
-    if (!pa)
-        return 0;
-    memset(phys_to_virt(pa), 0, PAGE_SIZE);
-    return pa;
-}
+static const struct mmu_ops x86_mmu_ops = {
+    .levels      = 4,
+    .pte_valid   = x86_pte_valid,
+    .pte_addr    = x86_pte_addr,
+    .make_branch = x86_make_branch,
+    .va_index    = x86_va_index,
+};
 
 static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
-    uint64_t *pt = (uint64_t *)phys_to_virt(table);
-    for (int level = 3; level > 0; level--) {
-        size_t idx = va_index(va, level);
-        if (!(pt[idx] & PTE_P)) {
-            if (!create)
-                return NULL;
-            paddr_t next = pt_alloc();
-            if (!next)
-                return NULL;
-            pt[idx] = next | PTE_P | PTE_W;
-        }
-        pt = (uint64_t *)phys_to_virt((paddr_t)(pt[idx] & ~0xfffULL));
-    }
-    return &pt[va_index(va, 0)];
+    return mmu_walk_pgtable(&x86_mmu_ops, table, va, create);
 }
 
 static uint64_t flags_to_pte(uint64_t f) {
@@ -68,20 +70,11 @@ static uint64_t flags_to_pte(uint64_t f) {
     return p;
 }
 
-static int map_region(paddr_t root, vaddr_t va, paddr_t pa, size_t sz,
-                      uint64_t f) {
-    for (size_t off = 0; off < sz; off += PAGE_SIZE) {
-        if (arch_mmu_map(root, va + off, pa + off, f) < 0)
-            return -1;
-    }
-    return 0;
-}
-
 void arch_mmu_init(const struct boot_info *bi) {
     if (!bi)
         panic("mmu: missing boot info");
 
-    kernel_pgdir = pt_alloc();
+    kernel_pgdir = mmu_pt_alloc();
     if (!kernel_pgdir)
         panic("mmu: init failed");
 
@@ -91,7 +84,7 @@ void arch_mmu_init(const struct boot_info *bi) {
             continue;
         if (e->length == 0)
             continue;
-        if (map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
+        if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
                        e->length, PTE_READ | PTE_WRITE | PTE_GLOBAL) < 0) {
             pr_warn("MMU: HHDM map failed (base=%p len=%p)\n",
                     (void *)e->base, (void *)e->length);
@@ -100,16 +93,16 @@ void arch_mmu_init(const struct boot_info *bi) {
 
     size_t ksize = ALIGN_UP((paddr_t)_kernel_end - (paddr_t)_kernel_start,
                             PAGE_SIZE);
-    if (map_region(kernel_pgdir, bi->kernel_virt_base, bi->kernel_phys_base,
+    if (mmu_map_region(kernel_pgdir, bi->kernel_virt_base, bi->kernel_phys_base,
                    ksize, PTE_READ | PTE_WRITE | PTE_EXEC | PTE_GLOBAL) < 0) {
         panic("mmu: kernel map failed");
     }
 
     /* Map local APIC + IOAPIC MMIO into the HHDM. */
-    map_region(kernel_pgdir, bi->hhdm_offset + IOAPIC_BASE_PHYS,
+    mmu_map_region(kernel_pgdir, bi->hhdm_offset + IOAPIC_BASE_PHYS,
                IOAPIC_BASE_PHYS, PAGE_SIZE,
                PTE_READ | PTE_WRITE | PTE_GLOBAL);
-    map_region(kernel_pgdir, bi->hhdm_offset + LAPIC_BASE_PHYS,
+    mmu_map_region(kernel_pgdir, bi->hhdm_offset + LAPIC_BASE_PHYS,
                LAPIC_BASE_PHYS, PAGE_SIZE,
                PTE_READ | PTE_WRITE | PTE_GLOBAL);
 
@@ -119,7 +112,7 @@ void arch_mmu_init(const struct boot_info *bi) {
 }
 
 paddr_t arch_mmu_create_table(void) {
-    paddr_t dst = pt_alloc();
+    paddr_t dst = mmu_pt_alloc();
     if (!dst)
         return 0;
     uint64_t *src = (uint64_t *)phys_to_virt(kernel_pgdir);

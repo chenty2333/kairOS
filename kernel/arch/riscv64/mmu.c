@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
+#include "../../arch/common/mmu_common.h"
 
 #define PAGE_SIZE 4096
 #define PAGE_SHIFT 12
@@ -51,6 +52,37 @@ static inline bool pte_is_leaf(uint64_t pte) {
 
 static inline bool pte_is_branch(uint64_t pte) {
     return (pte & PTE_V) && !pte_is_leaf(pte);
+}
+
+/* --- mmu_ops callbacks for common walker --- */
+
+static bool riscv_pte_valid(uint64_t pte) {
+    return (pte & PTE_V) != 0;
+}
+
+static paddr_t riscv_pte_addr(uint64_t pte) {
+    return (paddr_t)pte_to_pa(pte);
+}
+
+static uint64_t riscv_make_branch(paddr_t pa) {
+    return pa_to_pte(pa) | PTE_V;
+}
+
+static size_t riscv_va_index(vaddr_t va, int level) {
+    return va_to_vpn(va, level);
+}
+
+static const struct mmu_ops riscv_mmu_ops = {
+    .levels      = LEVELS,
+    .pte_valid   = riscv_pte_valid,
+    .pte_addr    = riscv_pte_addr,
+    .make_branch = riscv_make_branch,
+    .va_index    = riscv_va_index,
+};
+
+/* Convenience wrapper */
+static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
+    return mmu_walk_pgtable(&riscv_mmu_ops, table, va, create);
 }
 
 static paddr_t pt_alloc(void) {
@@ -122,25 +154,6 @@ static paddr_t copy_pt(paddr_t src, int level) {
     return dst;
 }
 
-static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
-    uint64_t *pt = (uint64_t *)phys_to_virt(table);
-    for (int i = LEVELS - 1; i > 0; i--) {
-        size_t idx = va_to_vpn(va, i);
-        if (!(pt[idx] & PTE_V)) {
-            if (!create) {
-                return NULL;
-            }
-            paddr_t next = pt_alloc();
-            if (!next) {
-                return NULL;
-            }
-            pt[idx] = pa_to_pte(next) | PTE_V;
-        }
-        pt = (uint64_t *)phys_to_virt((paddr_t)pte_to_pa(pt[idx]));
-    }
-    return &pt[va_to_vpn(va, 0)];
-}
-
 static uint64_t flags_to_pte(uint64_t f) {
     uint64_t p = PTE_V | PTE_A | PTE_D;
     if (f & PTE_READ) {
@@ -164,16 +177,6 @@ static uint64_t flags_to_pte(uint64_t f) {
     return p;
 }
 
-static int map_region(paddr_t root, vaddr_t va, paddr_t pa, size_t sz,
-                      uint64_t f) {
-    for (size_t off = 0; off < sz; off += PAGE_SIZE) {
-        if (arch_mmu_map(root, va + off, pa + off, f) < 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
 /* --- Public Interface --- */
 
 void arch_mmu_init(const struct boot_info *bi) {
@@ -190,7 +193,7 @@ void arch_mmu_init(const struct boot_info *bi) {
         const struct boot_memmap_entry *e = &bi->memmap[i];
         if (!boot_mem_is_ram(e->type))
             continue;
-        map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
+        mmu_map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
                    e->length, PTE_READ | PTE_WRITE);
     }
 
@@ -207,7 +210,7 @@ void arch_mmu_init(const struct boot_info *bi) {
         size_t size = ALIGN_UP((size_t)bi->framebuffers[i].size, PAGE_SIZE);
         pr_info("MMU: map fb%u phys=%p size=%zu -> %p\n", i, (void *)phys,
                 size, (void *)(bi->hhdm_offset + phys));
-        if (map_region(kernel_pgdir, bi->hhdm_offset + phys, phys, size,
+        if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + phys, phys, size,
                        PTE_READ | PTE_WRITE) < 0) {
             pr_warn("MMU: map fb%u failed\n", i);
         }
@@ -218,13 +221,13 @@ void arch_mmu_init(const struct boot_info *bi) {
     vaddr_t kvirt = bi->kernel_virt_base;
     size_t ksize = ALIGN_UP((paddr_t)_kernel_end - (paddr_t)_kernel_start,
                             PAGE_SIZE);
-    map_region(kernel_pgdir, kvirt, kphys, ksize,
+    mmu_map_region(kernel_pgdir, kvirt, kphys, ksize,
                PTE_READ | PTE_WRITE | PTE_EXEC);
 
     /* 3. Identity-map common MMIO for early drivers */
-    map_region(kernel_pgdir, 0x0c000000UL, 0x0c000000UL, 4 << 20,
+    mmu_map_region(kernel_pgdir, 0x0c000000UL, 0x0c000000UL, 4 << 20,
                PTE_READ | PTE_WRITE);
-    map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 1 << 20,
+    mmu_map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 1 << 20,
                PTE_READ | PTE_WRITE);
 
     arch_mmu_switch(kernel_pgdir);

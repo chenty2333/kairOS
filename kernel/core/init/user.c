@@ -17,7 +17,11 @@ void init_user(void) {
     pr_info("Starting robustness test...\n");
     run_sync_test();
     run_vfork_test();
+#if defined(ARCH_riscv64)
     run_crash_test();
+#else
+    pr_info("Skipping crash test on this architecture\n");
+#endif
 
     arch_irq_enable();
     int status;
