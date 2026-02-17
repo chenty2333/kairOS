@@ -3,7 +3,7 @@
 # Create bootable ISO image for Kairos
 #
 # Prerequisites:
-#   - xorriso (apt install xorriso)
+#   - xorriso (dnf install xorriso)
 #   - Limine (run ./scripts/fetch-deps.sh limine first)
 #
 # Usage: ./scripts/make-iso.sh [ARCH]
@@ -50,7 +50,7 @@ fi
 
 if ! command -v xorriso &> /dev/null; then
     echo "Error: xorriso not found"
-    echo "Install with: apt install xorriso"
+    echo "Install with: sudo dnf install xorriso"
     exit 1
 fi
 

@@ -71,16 +71,11 @@ if [ -x "$LIMINE_DIR/limine" ]; then
     "$LIMINE_DIR/limine" enroll-config "$BOOT_EFI_DST" "$CFG_HASH" >/dev/null 2>&1 || true
 fi
 
-sudo mkdir -p "$MNT_DIR/EFI/BOOT" "$MNT_DIR/EFI/limine" "$MNT_DIR/boot/limine"
+sudo mkdir -p "$MNT_DIR/EFI/BOOT" "$MNT_DIR/boot/limine"
 sudo cp "$BOOT_EFI_DST" "$MNT_DIR/EFI/BOOT/$BOOT_EFI"
 sudo cp limine.cfg "$MNT_DIR/limine.cfg"
-sudo cp limine.cfg "$MNT_DIR/LIMINE.CFG"
-sudo cp limine.cfg "$MNT_DIR/boot/limine.cfg"
-sudo cp limine.cfg "$MNT_DIR/boot/limine/limine.conf"
 sudo cp limine.cfg "$MNT_DIR/boot/limine/limine.cfg"
-sudo cp limine.cfg "$MNT_DIR/EFI/BOOT/limine.cfg"
-sudo cp limine.cfg "$MNT_DIR/EFI/BOOT/LIMINE.CFG"
-sudo cp limine.cfg "$MNT_DIR/EFI/limine/limine.conf"
+sudo cp limine.cfg "$MNT_DIR/boot/limine/limine.conf"
 sudo cp "$KERNEL" "$MNT_DIR/kairos.elf"
 sudo cp "$KERNEL" "$MNT_DIR/boot/kairos.elf"
 if [ "$ARCH" = "riscv64" ] && [ -f "qemu-virt.dtb" ]; then

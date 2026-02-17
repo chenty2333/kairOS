@@ -60,18 +60,9 @@ stage_busybox() {
     cp -f "$BUSYBOX_BIN" "$ROOTFS_DIR/bin/busybox"
     chmod 0755 "$ROOTFS_DIR/bin/busybox"
 
-    # Install a minimal set of BusyBox applet links.
-    local applets=(
-      sh ls cat echo pwd mkdir rmdir rm mv cp ln touch
-      readlink realpath stat head tail wc grep sed awk cut tr sort uniq tee printf
-      sleep date time uptime uname dmesg kill nice id whoami env
-      basename dirname which true false yes
-      chmod chown chgrp chroot mknod mkfifo mktemp sync mount umount
-      df du free ps pidof pgrep pkill killall
-      xargs find expr test seq
-      dd hexdump od strings
-      comm cmp diff paste fold nl
-    )
+    # Install BusyBox applet links from shared list.
+    local applets
+    read -ra applets < <(tr '\n' ' ' < "$ROOT_DIR/scripts/busybox-applets.txt")
     for app in "${applets[@]}"; do
       ln -sf /bin/busybox "$ROOTFS_DIR/bin/$app"
     done

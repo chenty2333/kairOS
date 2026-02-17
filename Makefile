@@ -150,50 +150,9 @@ ifeq ($(CONFIG_DRM_LITE),0)
 CORE_SRCS := $(filter-out kernel/drivers/gpu/drm_lite.c,$(CORE_SRCS))
 endif
 
-# Architecture-specific sources
-ifeq ($(ARCH),riscv64)
-ARCH_SRCS := \
-    kernel/arch/riscv64/boot.S \
-    kernel/arch/riscv64/entry.c \
-    kernel/arch/riscv64/plic.c \
-    kernel/arch/riscv64/mmu.c \
-    kernel/arch/riscv64/trapasm.S \
-    kernel/arch/riscv64/trap.c \
-    kernel/arch/riscv64/timer.c \
-    kernel/arch/riscv64/switch.S \
-    kernel/arch/riscv64/context.c \
-    kernel/arch/riscv64/extable.c \
-    kernel/arch/riscv64/lib/uaccess.S
-else ifeq ($(ARCH),x86_64)
-ARCH_SRCS := \
-    kernel/arch/x86_64/boot.S \
-    kernel/arch/x86_64/entry.c \
-    kernel/arch/x86_64/mmu.c \
-    kernel/arch/x86_64/trapasm.S \
-    kernel/arch/x86_64/trap.c \
-    kernel/arch/x86_64/timer.c \
-    kernel/arch/x86_64/apic.c \
-    kernel/arch/x86_64/ioapic.c \
-    kernel/arch/x86_64/firmware.c \
-    kernel/arch/x86_64/switch.S \
-    kernel/arch/x86_64/context.c \
-    kernel/arch/x86_64/extable.c \
-    kernel/arch/x86_64/lib/uaccess.S
-else ifeq ($(ARCH),aarch64)
-ARCH_SRCS := \
-    kernel/arch/aarch64/boot.S \
-    kernel/arch/aarch64/entry.c \
-    kernel/arch/aarch64/mmu.c \
-    kernel/arch/aarch64/trapasm.S \
-    kernel/arch/aarch64/trap.c \
-    kernel/arch/aarch64/timer.c \
-    kernel/arch/aarch64/gic.c \
-    kernel/arch/aarch64/firmware.c \
-    kernel/arch/aarch64/switch.S \
-    kernel/arch/aarch64/context.c \
-    kernel/arch/aarch64/extable.c \
-    kernel/arch/aarch64/lib/uaccess.S
-endif
+# Architecture-specific sources (auto-discovered)
+ARCH_SRCS := $(wildcard kernel/arch/$(ARCH)/*.c kernel/arch/$(ARCH)/*.S)
+ARCH_SRCS += $(wildcard kernel/arch/$(ARCH)/lib/*.c kernel/arch/$(ARCH)/lib/*.S)
 
 # lwIP sources
 LWIP_SRCS := \
@@ -419,7 +378,8 @@ QEMU_FLAGS += -global isa-debugcon.iobase=0x402 -debugcon file:/dev/null
 endif
 QEMU_FLAGS += $(QEMU_EXTRA)
 
-ifeq ($(ARCH),aarch64)
+# Pass -cpu when defined (riscv64 and aarch64)
+ifneq ($(QEMU_CPU),)
   QEMU_FLAGS += -cpu $(QEMU_CPU)
 endif
 
@@ -523,7 +483,7 @@ iso: $(KERNEL) initramfs
 # Run from ISO
 run-iso: iso
 	@echo "  QEMU    $(ARCH) (ISO boot)"
-	$(Q)$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
+	$(Q)$(QEMU) -cdrom $(ISO) -m 256M $(QEMU_EXTRA)
 
 debug: $(RUN_DEPS)
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, GDB :1234)"
