@@ -8,7 +8,7 @@
 #   make debug              # Run with GDB server
 #   make clean              # Clean build artifacts
 #   make test               # Run kernel tests
-#   make uefi               # Prepare RISC-V UEFI boot image (riscv64 only)
+#   make uefi               # Prepare UEFI boot image (all architectures)
 #   make disk               # Build ext2 disk image with busybox + init
 
 # ============================================================
@@ -268,7 +268,7 @@ MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 
-.PHONY: all clean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk check-tools
+.PHONY: all clean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk uefi check-tools
 
 all: | _reset_count
 all: $(KERNEL)
@@ -431,23 +431,34 @@ else
   QEMU_DISK_FLAGS += -drive file=$(DISK_IMG),if=virtio,format=raw
 endif
 
-# RISC-V UEFI boot (Limine)
+# UEFI firmware paths (per architecture)
 ifeq ($(ARCH),riscv64)
   UEFI_CODE_SRC ?= /usr/share/edk2/riscv/RISCV_VIRT_CODE.fd
   UEFI_VARS_SRC ?= /usr/share/edk2/riscv/RISCV_VIRT_VARS.fd
-  UEFI_CODE := $(BUILD_DIR)/uefi-code.fd
-  UEFI_VARS := $(BUILD_DIR)/uefi-vars.fd
-  UEFI_BOOT := $(BUILD_DIR)/boot.img
-  QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly=on
-  QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
+else ifeq ($(ARCH),x86_64)
+  UEFI_CODE_SRC ?= /usr/share/edk2/ovmf/OVMF_CODE.fd
+  UEFI_VARS_SRC ?= /usr/share/edk2/ovmf/OVMF_VARS.fd
+else ifeq ($(ARCH),aarch64)
+  UEFI_CODE_SRC ?= /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
+  UEFI_VARS_SRC ?= /usr/share/edk2/aarch64/vars-template-pflash.raw
+endif
+
+UEFI_CODE := $(BUILD_DIR)/uefi-code.fd
+UEFI_VARS := $(BUILD_DIR)/uefi-vars.fd
+UEFI_BOOT := $(BUILD_DIR)/boot.img
+
+# UEFI pflash + Limine boot image (all architectures)
+QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly=on
+QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
+
+ifeq ($(ARCH),riscv64)
   QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
   QEMU_BOOT_FLAGS += -device virtio-blk-device,drive=boot,bootindex=0
-  QEMU_MEDIA_FLAGS := $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS)
-else ifeq ($(ARCH),x86_64)
-  QEMU_MEDIA_FLAGS := -cdrom $(BUILD_DIR)/kairos.iso
 else
-  QEMU_MEDIA_FLAGS :=
+  QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=virtio,bootindex=0
 endif
+
+QEMU_MEDIA_FLAGS := $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS)
 
 # Add network (virtio-net for development)
 HOSTFWD_PORT ?=
@@ -480,29 +491,17 @@ check-tools:
 		echo "Error: mke2fs not found (install e2fsprogs)"; exit 1; }
 	@command -v python3 >/dev/null 2>&1 || { \
 		echo "Error: python3 not found"; exit 1; }
-ifeq ($(ARCH),x86_64)
-	@command -v xorriso >/dev/null 2>&1 || { \
-		echo "Error: xorriso not found (needed for ISO)"; exit 1; }
-endif
-ifeq ($(ARCH),riscv64)
 	@command -v mkfs.fat >/dev/null 2>&1 || command -v mkfs.vfat >/dev/null 2>&1 || { \
 		echo "Error: mkfs.fat not found (install dosfstools)"; exit 1; }
 	@if [ ! -f "$(UEFI_CODE_SRC)" ] || [ ! -f "$(UEFI_VARS_SRC)" ]; then \
-		echo "Error: RISC-V UEFI firmware not found:"; \
+		echo "Error: UEFI firmware not found for $(ARCH):"; \
 		echo "  $(UEFI_CODE_SRC)"; \
 		echo "  $(UEFI_VARS_SRC)"; \
 		exit 1; \
 	fi
-endif
 
-# Per-arch boot prerequisites (kernel image + boot media + disk)
-ifeq ($(ARCH),x86_64)
-  RUN_DEPS := check-tools iso disk
-else ifeq ($(ARCH),riscv64)
-  RUN_DEPS := check-tools $(KERNEL) uefi disk
-else
-  RUN_DEPS := check-tools $(KERNEL) disk
-endif
+# Boot prerequisites: UEFI firmware + Limine boot image + disk (all architectures)
+RUN_DEPS := check-tools $(KERNEL) uefi disk
 
 run: $(RUN_DEPS)
 	@$(MAKE) --no-print-directory check-disk
@@ -534,9 +533,9 @@ debug: $(RUN_DEPS)
 clean:
 	rm -rf build/
 
-# Prepare RISC-V UEFI firmware + Limine boot image
+# Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
+	$(Q)$(QUIET_ENV) UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) ./scripts/prepare-uefi.sh $(ARCH)
 	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
 
 # Create a disk image with ext2 filesystem
@@ -584,7 +583,7 @@ help:
 	@echo "  rootfs-init    - Stage init"
 	@echo "  rootfs         - Stage full rootfs"
 	@echo "  disk     - Create disk image"
-	@echo "  uefi     - Prepare RISC-V UEFI boot image"
+	@echo "  uefi     - Prepare UEFI boot image"
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  test     - Run kernel tests"
 	@echo ""
