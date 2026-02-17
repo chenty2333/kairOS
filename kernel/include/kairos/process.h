@@ -9,6 +9,7 @@
 #include <kairos/list.h>
 #include <kairos/mm.h>
 #include <kairos/rbtree.h>
+#include <kairos/sched_types.h>
 #include <kairos/spinlock.h>
 #include <kairos/signal.h>
 #include <kairos/sync.h>
@@ -71,17 +72,8 @@ struct process {
     int exit_code;
     spinlock_t lock;
 
-    /* Scheduling
-     * TODO: Extract into struct sched_entity for cleaner scheduler/process
-     * separation (e.g., sched_entity embedded in process, scheduler only
-     * touches sched_entity fields).
-     */
-    uint64_t vruntime, last_run_time;
-    int nice, cpu;
-    struct rb_node sched_node;
-    struct list_head sched_list;
-    bool on_rq;
-    bool on_cpu;
+    /* Scheduling */
+    struct sched_entity se;
 
     struct mm_struct *mm;
     struct fdtable *fdtable;
@@ -137,13 +129,13 @@ void proc_set_current(struct process *p);
 void proc_lock(struct process *p);
 void proc_unlock(struct process *p);
 int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible);
+int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
+                        struct mutex *mtx, bool interruptible);
 struct process *proc_idle_init(void);
 struct process *proc_start_init(void);
 void proc_yield(void);
 int proc_exec(const char *path, char *const argv[], char *const envp[]);
 void proc_wakeup(struct process *p);
-void proc_sleep(void *channel);
-void proc_wakeup_all(void *channel);
 void signal_init_process(struct process *p);
 void proc_setup_stdio(struct process *p);
 void proc_fork_child_setup(void);
