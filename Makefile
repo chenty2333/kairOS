@@ -36,9 +36,11 @@ ISO := $(BUILD_DIR)/kairos.iso
 V ?= 0
 ifeq ($(V),0)
   Q := @
+  QUIET_ENV := QUIET=1
   MAKEFLAGS += --no-print-directory
 else
   Q :=
+  QUIET_ENV :=
 endif
 
 # Shared architecture sources
@@ -115,19 +117,16 @@ CFLAGS += -I $(LWIP_DIR)/src/include
 LWIP_COMPAT_CFLAGS := -I kernel/net/lwip_port/compat
 
 # Architecture-specific flags
+LDFLAGS := -nostdlib -static
+
 ifeq ($(ARCH),riscv64)
   CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
-  LDFLAGS :=
 else ifeq ($(ARCH),x86_64)
   CFLAGS += -m64 -mno-red-zone -mno-sse -mno-sse2
   CFLAGS += -mcmodel=kernel
-  LDFLAGS :=
 else ifeq ($(ARCH),aarch64)
   CFLAGS += -mgeneral-regs-only -fno-omit-frame-pointer
-  LDFLAGS :=
 endif
-
-LDFLAGS += -nostdlib -static
 
 # Linker script
 LDSCRIPT := kernel/arch/$(ARCH)/linker.ld
@@ -136,111 +135,19 @@ LDSCRIPT := kernel/arch/$(ARCH)/linker.ld
 #                    Source Files
 # ============================================================
 
-# Phase 0: Minimal boot sources
-# Additional sources will be added as phases are implemented
+# Core kernel sources (architecture-independent) — auto-discovered via wildcard.
+# ARCH_SRCS and LWIP_SRCS are kept explicit (see below).
+CORE_SRCS := $(wildcard kernel/core/*.c kernel/core/*/*.c)
+CORE_SRCS += $(wildcard kernel/lib/*.c)
+CORE_SRCS += $(wildcard kernel/firmware/*.c)
+CORE_SRCS += $(wildcard kernel/fs/*/*.c)
+CORE_SRCS += $(wildcard kernel/bus/*.c)
+CORE_SRCS += $(wildcard kernel/drivers/*/*.c)
+CORE_SRCS += $(wildcard kernel/net/*.c) kernel/net/lwip_port/sys_arch.c
+CORE_SRCS += kernel/boot/boot.c kernel/boot/limine.c
 
-# Core kernel sources (architecture-independent)
-CORE_SRCS := \
-    kernel/boot/boot.c \
-    kernel/boot/limine.c \
-    kernel/core/main.c \
-    kernel/core/init/boot.c \
-    kernel/core/init/mm.c \
-    kernel/core/init/devices.c \
-    kernel/core/init/net.c \
-    kernel/core/init/fs.c \
-    kernel/core/init/user.c \
-    kernel/core/mm/buddy.c \
-    kernel/core/mm/kmalloc.c \
-    kernel/core/mm/vmm.c \
-    kernel/core/mm/vma.c \
-    kernel/core/time/time.c \
-    kernel/core/time/tick.c \
-    kernel/core/trap/trap_core.c \
-    kernel/core/dev/firmware.c \
-    kernel/core/proc/proc_core.c \
-    kernel/core/proc/proc_fork.c \
-    kernel/core/proc/proc_exec.c \
-    kernel/core/proc/proc_wait.c \
-    kernel/core/proc/proc_exit.c \
-    kernel/core/proc/proc_init.c \
-    kernel/core/proc/user_test.c \
-    kernel/core/proc/elf.c \
-    kernel/core/proc/fd.c \
-    kernel/core/proc/signal.c \
-    kernel/core/sched/sched.c \
-    kernel/core/net/net.c \
-    kernel/net/socket.c \
-    kernel/net/net_ioctl.c \
-    kernel/net/af_unix.c \
-    kernel/net/af_inet.c \
-    kernel/net/lwip_netif.c \
-    kernel/net/lwip_port/sys_arch.c \
-    kernel/core/sync/sync.c \
-    kernel/core/sync/wait.c \
-    kernel/core/sync/pollwait.c \
-    kernel/core/sync/futex.c \
-    kernel/core/syscall/abi_linux.c \
-    kernel/core/syscall/sys_dev.c \
-    kernel/core/syscall/sys_fs_helpers.c \
-    kernel/core/syscall/sys_fs_path.c \
-    kernel/core/syscall/sys_fs_mount.c \
-    kernel/core/syscall/sys_fs_stat.c \
-    kernel/core/syscall/sys_fs_io.c \
-    kernel/core/syscall/sys_fs_fd.c \
-    kernel/core/syscall/sys_mm.c \
-    kernel/core/syscall/sys_socket.c \
-    kernel/core/syscall/sys_epoll.c \
-    kernel/core/syscall/sys_poll.c \
-    kernel/core/syscall/sys_proc.c \
-    kernel/core/syscall/sys_sync.c \
-    kernel/core/syscall/sys_time.c \
-    kernel/core/syscall/sys_time_helpers.c \
-    kernel/core/syscall/syscall.c \
-    kernel/lib/printk.c \
-    kernel/lib/vsprintf.c \
-    kernel/lib/ringbuf.c \
-    kernel/firmware/acpi.c \
-    kernel/firmware/fdt.c \
-    kernel/lib/rbtree.c \
-    kernel/lib/string.c \
-    kernel/fs/bio/bio.c \
-    kernel/fs/vfs/core.c \
-    kernel/fs/vfs/mount.c \
-    kernel/fs/vfs/file.c \
-    kernel/fs/vfs/path.c \
-    kernel/fs/vfs/vnode.c \
-    kernel/fs/vfs/dentry.c \
-    kernel/fs/vfs/namei.c \
-    kernel/fs/ipc/pipe.c \
-    kernel/fs/poll/vfs_poll.c \
-    kernel/fs/poll/epoll.c \
-    kernel/fs/devfs/devfs.c \
-    kernel/fs/initramfs/initramfs.c \
-    kernel/fs/procfs/procfs.c \
-    kernel/fs/ext2/ext2.c \
-    kernel/fs/ext2/super.c \
-    kernel/fs/ext2/inode.c \
-    kernel/fs/ext2/block.c \
-    kernel/fs/ext2/vnode.c \
-    kernel/fs/ext2/dir.c \
-    kernel/fs/fat32/fat32.c \
-    kernel/fs/fat32/fat32_diskio.c \
-    kernel/fs/fat32/fat32_fatfs.c \
-    kernel/core/dev/device.c \
-    kernel/bus/platform.c \
-    kernel/bus/pci.c \
-    kernel/drivers/virtio/virtio.c \
-    kernel/drivers/virtio/virtio_mmio.c \
-    kernel/drivers/virtio/virtio_ring.c \
-    kernel/drivers/char/console.c \
-    kernel/drivers/block/blkdev.c \
-    kernel/drivers/block/virtio_blk.c \
-    kernel/drivers/net/virtio_net.c \
-    kernel/core/tests/driver_tests.c
-
-ifneq ($(CONFIG_DRM_LITE),0)
-CORE_SRCS += kernel/drivers/gpu/drm_lite.c
+ifeq ($(CONFIG_DRM_LITE),0)
+CORE_SRCS := $(filter-out kernel/drivers/gpu/drm_lite.c,$(CORE_SRCS))
 endif
 
 # Architecture-specific sources
@@ -362,7 +269,11 @@ USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 
 .PHONY: all clean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk check-tools
 
+all: | _reset_count
 all: $(KERNEL)
+
+_reset_count:
+	@mkdir -p $(BUILD_DIR) && echo 0 > $(OBJ_COUNT_FILE)
 
 user: $(USER_INIT)
 
@@ -391,7 +302,7 @@ $(USER_INITRAMFS): $(USER_TOOLCHAIN_DEPS) user/initramfs/init.c user/Makefile sc
 
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) scripts/make-initramfs.sh
 	@mkdir -p $(STAMP_DIR)
-	ARCH=$(ARCH) ./scripts/make-initramfs.sh $(ARCH)
+	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-initramfs.sh $(ARCH)
 	@touch $@
 
 busybox: $(BUSYBOX_STAMP)
@@ -405,21 +316,21 @@ rootfs-base: $(ROOTFS_BASE_STAMP)
 
 $(ROOTFS_BASE_STAMP): scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	ROOTFS_ONLY=1 ROOTFS_STAGE=base ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=base ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 rootfs-busybox: $(ROOTFS_BUSYBOX_STAMP)
 
 $(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	ROOTFS_ONLY=1 ROOTFS_STAGE=busybox ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=busybox ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 rootfs-init: $(ROOTFS_INIT_STAMP)
 
 $(ROOTFS_INIT_STAMP): $(USER_INIT) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 rootfs: $(ROOTFS_STAMP)
@@ -436,9 +347,19 @@ $(CFLAGS_STAMP):
 	@mkdir -p $(dir $@)
 	@touch $@
 
+# Progress counter for build output
+OBJ_TOTAL := $(words $(OBJS))
+OBJ_COUNT_FILE := $(BUILD_DIR)/.obj_count
+
+define inc_count
+$(shell mkdir -p $(BUILD_DIR) && \
+  flock $(OBJ_COUNT_FILE).lock sh -c \
+    'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); echo $$n')
+endef
+
 # Link kernel
 $(KERNEL): $(OBJS) $(LDSCRIPT)
-	@echo "  LD      $@"
+	@echo "  LD      kairos.elf ($(OBJ_TOTAL) objects, $(ARCH))"
 	@mkdir -p $(dir $@)
 	$(Q)$(LD) $(LDFLAGS) -T $(LDSCRIPT) -o $@ $(OBJS)
 	@if [ "$(ARCH)" = "riscv64" ]; then \
@@ -450,19 +371,19 @@ $(KERNEL): $(OBJS) $(LDSCRIPT)
 
 # Compile lwIP C files (relaxed warnings for third-party code)
 $(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c $(CFLAGS_STAMP)
-	@echo "  CC      $<"
+	@echo "  [$(inc_count)/$(OBJ_TOTAL)] CC $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(LWIP_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Compile C files
 $(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP)
-	@echo "  CC      $<"
+	@echo "  [$(inc_count)/$(OBJ_TOTAL)] CC $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # Assemble .S files
 $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP)
-	@echo "  AS      $<"
+	@echo "  [$(inc_count)/$(OBJ_TOTAL)] AS $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
@@ -541,9 +462,7 @@ QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_MEDIA_FLAGS) $(QEMU_DISK_FLAGS)
 
 check-disk:
 	@if [ -f "$(DISK_IMG)" ]; then \
-		if debugfs -R "stat /bin/busybox" "$(DISK_IMG)" >/dev/null 2>&1; then \
-			echo "disk: /bin/busybox present"; \
-		else \
+		if ! debugfs -R "stat /bin/busybox" "$(DISK_IMG)" >/dev/null 2>&1; then \
 			echo "WARN: $(DISK_IMG) missing /bin/busybox (run: make ARCH=$(ARCH) disk)"; \
 		fi; \
 	else \
@@ -583,10 +502,12 @@ endif
 
 run: $(RUN_DEPS)
 	@$(MAKE) --no-print-directory check-disk
-	$(QEMU) $(QEMU_RUN_FLAGS)
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP)"
+	$(Q)$(QEMU) $(QEMU_RUN_FLAGS)
 
 run-e1000: $(RUN_DEPS)
-	$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, e1000)"
+	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
 
 # Create bootable ISO (x86_64 only for now)
 iso: $(KERNEL) initramfs
@@ -594,12 +515,13 @@ iso: $(KERNEL) initramfs
 
 # Run from ISO
 run-iso: iso
-	$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
+	@echo "  QEMU    $(ARCH) (ISO boot)"
+	$(Q)$(QEMU) -cdrom $(BUILD_DIR)/kairos.iso -m 256M $(QEMU_EXTRA)
 
 debug: $(RUN_DEPS)
-	@echo "Starting QEMU with GDB server on localhost:1234"
-	@echo "In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
-	$(QEMU) $(QEMU_RUN_FLAGS) -s -S
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, GDB :1234)"
+	@echo "  In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
+	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -s -S
 
 # ============================================================
 #                    Utility Targets
@@ -610,15 +532,15 @@ clean:
 
 # Prepare RISC-V UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
-	ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
+	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/prepare-uefi.sh $(ARCH)
+	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
 
 # Create a disk image with ext2 filesystem
 disk: $(DISK_STAMP)
 
 $(DISK_STAMP): $(ROOTFS_STAMP) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
 # Disassembly

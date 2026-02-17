@@ -8,6 +8,7 @@ set -euo pipefail
 
 ARCH="${1:-riscv64}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+QUIET="${QUIET:-0}"
 
 DISK_IMG="${DISK_IMG:-${ROOT_DIR}/build/${ARCH}/disk.img}"
 ROOTFS_DIR="${ROOTFS_DIR:-${ROOT_DIR}/build/${ARCH}/rootfs}"
@@ -29,7 +30,7 @@ fi
 DISK_SIZE=64  # MB
 
 stage_base() {
-  echo "Staging rootfs base: $ROOTFS_DIR"
+  [[ "$QUIET" != "1" ]] && echo "Staging rootfs base: $ROOTFS_DIR"
   mkdir -p "$ROOTFS_DIR"/{bin,sbin,etc,home,dev}
 
   echo "Hello from Kairos filesystem!" >"$ROOTFS_DIR/test.txt"
@@ -39,7 +40,7 @@ stage_base() {
 }
 
 stage_init() {
-  echo "Staging rootfs init: $ROOTFS_DIR"
+  [[ "$QUIET" != "1" ]] && echo "Staging rootfs init: $ROOTFS_DIR"
   mkdir -p "$ROOTFS_DIR"/{bin,sbin}
   if [[ -x "$INIT_BIN" ]]; then
     cp -f "$INIT_BIN" "$ROOTFS_DIR/init"
@@ -53,7 +54,7 @@ stage_init() {
 }
 
 stage_busybox() {
-  echo "Staging rootfs busybox: $ROOTFS_DIR"
+  [[ "$QUIET" != "1" ]] && echo "Staging rootfs busybox: $ROOTFS_DIR"
   mkdir -p "$ROOTFS_DIR/bin"
   if [[ -x "$BUSYBOX_BIN" ]]; then
     cp -f "$BUSYBOX_BIN" "$ROOTFS_DIR/bin/busybox"
@@ -80,7 +81,7 @@ stage_busybox() {
 }
 
 stage_doom() {
-  echo "Staging rootfs doom: $ROOTFS_DIR"
+  [[ "$QUIET" != "1" ]] && echo "Staging rootfs doom: $ROOTFS_DIR"
   mkdir -p "$ROOTFS_DIR"/{bin,doom}
   if [[ -x "$DOOM_BIN" ]]; then
     cp -f "$DOOM_BIN" "$ROOTFS_DIR/bin/doom"
@@ -118,15 +119,19 @@ case "$ROOTFS_STAGE" in
 esac
 
 if [[ "$ROOTFS_ONLY" == "1" ]]; then
-  echo "Rootfs staged only; skipping disk image."
+  [[ "$QUIET" != "1" ]] && echo "Rootfs staged only; skipping disk image."
   exit 0
 fi
 
-echo "Creating ext2 disk image: $DISK_IMG"
+[[ "$QUIET" != "1" ]] && echo "Creating ext2 disk image: $DISK_IMG"
 mkdir -p "$(dirname "$DISK_IMG")"
 
 dd if=/dev/zero of="$DISK_IMG" bs=1M count=$DISK_SIZE 2>/dev/null
 mke2fs -t ext2 -F -d "$ROOTFS_DIR" "$DISK_IMG" >/dev/null 2>&1
 
-echo "Created $DISK_SIZE MB ext2 filesystem"
-echo "Disk image created successfully: $DISK_IMG"
+if [[ "$QUIET" == "1" ]]; then
+  echo "  DISK    $DISK_IMG (${DISK_SIZE}M ext2)"
+else
+  echo "Created $DISK_SIZE MB ext2 filesystem"
+  echo "Disk image created successfully: $DISK_IMG"
+fi

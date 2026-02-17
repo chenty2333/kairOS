@@ -9,6 +9,7 @@ set -euo pipefail
 ARCH="${1:-riscv64}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/$ARCH"
+QUIET="${QUIET:-0}"
 ROOTFS_DIR="${INITRAMFS_DIR:-$BUILD_DIR/initramfs-root}"
 INIT_BIN="${INITRAMFS_INIT:-$BUILD_DIR/user/initramfs/init}"
 BUSYBOX_BIN="${BUSYBOX_BIN:-$BUILD_DIR/busybox/busybox}"
@@ -65,4 +66,9 @@ mkdir -p "$(dirname "$OUT_CPIO")"
   find . | "$CPIO_BIN" -o -H newc >"$OUT_CPIO"
 )
 
-echo "initramfs image created: $OUT_CPIO"
+if [[ "$QUIET" == "1" ]]; then
+  SIZE=$(stat -c%s "$OUT_CPIO" 2>/dev/null || stat -f%z "$OUT_CPIO" 2>/dev/null || echo "?")
+  echo "  CPIO    $OUT_CPIO (${SIZE} bytes)"
+else
+  echo "initramfs image created: $OUT_CPIO"
+fi

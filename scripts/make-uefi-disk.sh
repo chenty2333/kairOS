@@ -9,6 +9,7 @@ set -e
 
 ARCH="${1:-riscv64}"
 BUILD_DIR="build/$ARCH"
+QUIET="${QUIET:-0}"
 KERNEL="$BUILD_DIR/kairos.elf"
 BOOT_IMG="$BUILD_DIR/boot.img"
 LIMINE_DIR="third_party/limine"
@@ -95,4 +96,8 @@ fi
 sync
 sudo umount "$MNT_DIR"
 
-echo "UEFI boot image created: $BOOT_IMG"
+if [ "$QUIET" = "1" ]; then
+    echo "  BOOT    $BOOT_IMG (${IMG_SIZE_MB}M FAT32)"
+else
+    echo "UEFI boot image created: $BOOT_IMG"
+fi

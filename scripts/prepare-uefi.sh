@@ -9,6 +9,7 @@ set -e
 
 ARCH="${1:-riscv64}"
 BUILD_DIR="build/$ARCH"
+QUIET="${QUIET:-0}"
 
 if [ "$ARCH" != "riscv64" ]; then
     echo "Error: UEFI firmware prep only supported for riscv64"
@@ -37,6 +38,10 @@ cp "$VARS_SRC" "$VARS_DST"
 truncate -s 32M "$CODE_DST"
 truncate -s 32M "$VARS_DST"
 
-echo "UEFI firmware prepared:"
-echo "  $CODE_DST"
-echo "  $VARS_DST"
+if [ "$QUIET" = "1" ]; then
+    echo "  UEFI    $CODE_DST (32M pflash)"
+else
+    echo "UEFI firmware prepared:"
+    echo "  $CODE_DST"
+    echo "  $VARS_DST"
+fi
