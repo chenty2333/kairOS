@@ -40,7 +40,8 @@ static uint64_t calc_delta_fair(uint64_t delta, int weight) {
 
 static void update_min_vruntime(struct cfs_rq *rq) {
     uint64_t v = rq->min_vruntime;
-    if (rq->curr_se && rq->curr_se->vruntime > v)
+    if (rq->curr_se && (!rq->idle || rq->curr_se != &rq->idle->se) &&
+        rq->curr_se->vruntime > v)
         v = rq->curr_se->vruntime;
     struct rb_node *left = rb_first(&rq->tasks_timeline);
     if (left) {
