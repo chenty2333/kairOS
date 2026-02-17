@@ -413,6 +413,10 @@ endif
 else
   QEMU_FLAGS += -nographic
 endif
+# Silence OVMF debug spew (Image Section Alignment warnings etc.)
+ifeq ($(ARCH),x86_64)
+QEMU_FLAGS += -global isa-debugcon.iobase=0x402 -debugcon file:/dev/null
+endif
 QEMU_FLAGS += $(QEMU_EXTRA)
 
 ifeq ($(ARCH),aarch64)
