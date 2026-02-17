@@ -42,12 +42,7 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout) {
 
     mutex_lock(&sem->lock);
     while (sem->count == 0) {
-        wait_queue_add(&sem->wq, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &sem->wq;
-        mutex_unlock(&sem->lock);
-        schedule();
-        mutex_lock(&sem->lock);
+        proc_sleep_on_mutex(&sem->wq, &sem->wq, &sem->lock, false);
     }
     sem->count--;
     mutex_unlock(&sem->lock);
@@ -111,12 +106,8 @@ void sys_mbox_free(sys_mbox_t *mbox) {
 void sys_mbox_post(sys_mbox_t *mbox, void *msg) {
     mutex_lock(&mbox->lock);
     while (mbox->count >= SYS_MBOX_SIZE) {
-        wait_queue_add(&mbox->not_full, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &mbox->not_full;
-        mutex_unlock(&mbox->lock);
-        schedule();
-        mutex_lock(&mbox->lock);
+        proc_sleep_on_mutex(&mbox->not_full, &mbox->not_full,
+                            &mbox->lock, false);
     }
     mbox->msgs[mbox->head] = msg;
     mbox->head = (mbox->head + 1) % SYS_MBOX_SIZE;
@@ -148,12 +139,8 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout) {
 
     mutex_lock(&mbox->lock);
     while (mbox->count == 0) {
-        wait_queue_add(&mbox->not_empty, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &mbox->not_empty;
-        mutex_unlock(&mbox->lock);
-        schedule();
-        mutex_lock(&mbox->lock);
+        proc_sleep_on_mutex(&mbox->not_empty, &mbox->not_empty,
+                            &mbox->lock, false);
     }
     void *m = mbox->msgs[mbox->tail];
     mbox->tail = (mbox->tail + 1) % SYS_MBOX_SIZE;

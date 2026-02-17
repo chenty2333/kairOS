@@ -408,12 +408,12 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
     /* Wait for connection completion */
     mutex_lock(&is->lock);
     while (!is->connect_done) {
-        wait_queue_add(&is->connect_wait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &is->connect_wait;
-        mutex_unlock(&is->lock);
-        schedule();
-        mutex_lock(&is->lock);
+        int rc = proc_sleep_on_mutex(&is->connect_wait, &is->connect_wait,
+                                     &is->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&is->lock);
+            return -EINTR;
+        }
     }
     ret = is->connect_err;
     mutex_unlock(&is->lock);
@@ -436,12 +436,12 @@ static int inet_tcp_accept(struct socket *sock, struct socket **newsock) {
     /* Wait for a pending connection */
     mutex_lock(&is->lock);
     while (list_empty(&is->accept_queue)) {
-        wait_queue_add(&is->accept_wait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &is->accept_wait;
-        mutex_unlock(&is->lock);
-        schedule();
-        mutex_lock(&is->lock);
+        int rc = proc_sleep_on_mutex(&is->accept_wait, &is->accept_wait,
+                                     &is->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&is->lock);
+            return -EINTR;
+        }
     }
 
     struct inet_pending *pend = list_first_entry(&is->accept_queue,
@@ -507,12 +507,12 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
             is->send_ready = false;
             mutex_lock(&is->lock);
             while (!is->send_ready && !is->peer_closed) {
-                wait_queue_add(&is->send_wait, proc_current());
-                proc_current()->state = PROC_SLEEPING;
-                proc_current()->wait_channel = &is->send_wait;
-                mutex_unlock(&is->lock);
-                schedule();
-                mutex_lock(&is->lock);
+                int rc = proc_sleep_on_mutex(&is->send_wait, &is->send_wait,
+                                             &is->lock, true);
+                if (rc == -EINTR) {
+                    mutex_unlock(&is->lock);
+                    return total ? (ssize_t)total : -EINTR;
+                }
             }
             mutex_unlock(&is->lock);
             if (is->peer_closed) {
@@ -559,12 +559,12 @@ static ssize_t inet_tcp_recvfrom(struct socket *sock, void *buf, size_t len,
             mutex_unlock(&is->lock);
             return 0; /* EOF */
         }
-        wait_queue_add(&is->recv_wait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &is->recv_wait;
-        mutex_unlock(&is->lock);
-        schedule();
-        mutex_lock(&is->lock);
+        int rc = proc_sleep_on_mutex(&is->recv_wait, &is->recv_wait,
+                                     &is->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&is->lock);
+            return -EINTR;
+        }
     }
 
     size_t n = inet_recv_buf_pop(is, buf, len);
@@ -714,12 +714,12 @@ static ssize_t inet_udp_recvfrom(struct socket *sock, void *buf, size_t len,
 
     mutex_lock(&is->lock);
     while (is->recv_count == 0) {
-        wait_queue_add(&is->recv_wait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &is->recv_wait;
-        mutex_unlock(&is->lock);
-        schedule();
-        mutex_lock(&is->lock);
+        int rc = proc_sleep_on_mutex(&is->recv_wait, &is->recv_wait,
+                                     &is->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&is->lock);
+            return -EINTR;
+        }
     }
 
     size_t n = inet_recv_buf_pop(is, buf, len);

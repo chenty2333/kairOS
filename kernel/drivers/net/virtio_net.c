@@ -144,12 +144,12 @@ static int virtio_net_xmit(struct netdev *dev, const void *data, size_t len) {
             mutex_unlock(&vn->lock);
             return -EAGAIN;
         }
-        wait_queue_add(&vn->tx_wait, curr);
-        curr->state = PROC_SLEEPING;
-        curr->wait_channel = &vn->tx_wait;
-        mutex_unlock(&vn->lock);
-        schedule();
-        mutex_lock(&vn->lock);
+        int rc = proc_sleep_on_mutex(&vn->tx_wait, &vn->tx_wait,
+                                     &vn->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&vn->lock);
+            return -EINTR;
+        }
     }
 
     struct virtio_net_tx_slot *slot = &vn->tx_slots[slot_idx];

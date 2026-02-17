@@ -126,12 +126,11 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
         }
     } else {
         while (!ctx.done) {
-            wait_queue_add(&vb->io_wait, curr);
-            curr->state = PROC_SLEEPING;
-            curr->wait_channel = &vb->io_wait;
-            mutex_unlock(&vb->lock);
-            schedule();
-            mutex_lock(&vb->lock);
+            int rc = proc_sleep_on_mutex(&vb->io_wait, &vb->io_wait,
+                                         &vb->lock, true);
+            if (rc == -EINTR && !ctx.done) {
+                continue;
+            }
         }
     }
 

@@ -485,9 +485,7 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         INIT_LIST_HEAD(&sleep.node);
         if (deadline)
             poll_sleep_arm(&sleep, curr, deadline);
-        curr->state = PROC_SLEEPING;
-        curr->wait_channel = NULL;
-        schedule();
+        proc_sleep_on(NULL, NULL, true);
         poll_sleep_cancel(&sleep);
         poll_wait_remove(&waiter);
     }

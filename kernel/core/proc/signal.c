@@ -65,9 +65,15 @@ int signal_send(pid_t pid, int sig) {
     struct process *p = proc_find(pid);
     if (!p) return -ESRCH;
 
-    __atomic_fetch_or(&p->sig_pending, (1ULL << (sig - 1)), __ATOMIC_RELAXED);
-    if (p->state == PROC_SLEEPING)
+    __atomic_fetch_or(&p->sig_pending, (1ULL << (sig - 1)), __ATOMIC_RELEASE);
+    /* Use process lock to synchronize with proc_sleep_on's state transition */
+    proc_lock(p);
+    if (p->state == PROC_SLEEPING) {
+        proc_unlock(p);
         proc_wakeup(p);
+    } else {
+        proc_unlock(p);
+    }
     return 0;
 }
 
@@ -401,9 +407,7 @@ int64_t sys_rt_sigsuspend(uint64_t mask_ptr, uint64_t sigsetsize, uint64_t a2,
     while (1) {
         if (p->sig_pending & ~p->sig_blocked)
             break;
-        p->state = PROC_SLEEPING;
-        p->wait_channel = p;
-        schedule();
+        proc_sleep_on(NULL, p, true);
     }
     p->sig_blocked = old;
     return -EINTR;
@@ -473,9 +477,7 @@ int64_t sys_rt_sigtimedwait(uint64_t mask_ptr, uint64_t info_ptr,
         struct poll_sleep sleep = {0};
         INIT_LIST_HEAD(&sleep.node);
         poll_sleep_arm(&sleep, p, has_timeout ? deadline : 0);
-        p->state = PROC_SLEEPING;
-        p->wait_channel = NULL;
-        schedule();
+        proc_sleep_on(NULL, NULL, true);
         poll_sleep_cancel(&sleep);
         if (has_timeout && arch_timer_get_ticks() >= deadline)
             return -EAGAIN;

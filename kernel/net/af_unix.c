@@ -177,12 +177,12 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
                 mutex_unlock(lock);
                 return total ? (ssize_t)total : -EAGAIN;
             }
-            wait_queue_add(&b->rwait, proc_current());
-            proc_current()->state = PROC_SLEEPING;
-            proc_current()->wait_channel = &b->rwait;
-            mutex_unlock(lock);
-            schedule();
-            mutex_lock(lock);
+            int rc = proc_sleep_on_mutex(&b->rwait, &b->rwait,
+                                         lock, true);
+            if (rc == -EINTR) {
+                mutex_unlock(lock);
+                return total ? (ssize_t)total : -EINTR;
+            }
         }
 
         size_t want = len - total;
@@ -231,12 +231,12 @@ static ssize_t unix_buf_write(struct unix_buf *b, struct mutex *lock,
                 mutex_unlock(lock);
                 return total ? (ssize_t)total : -EAGAIN;
             }
-            wait_queue_add(&b->wwait, proc_current());
-            proc_current()->state = PROC_SLEEPING;
-            proc_current()->wait_channel = &b->wwait;
-            mutex_unlock(lock);
-            schedule();
-            mutex_lock(lock);
+            int rc = proc_sleep_on_mutex(&b->wwait, &b->wwait,
+                                         lock, true);
+            if (rc == -EINTR) {
+                mutex_unlock(lock);
+                return total ? (ssize_t)total : -EINTR;
+            }
             continue;
         }
 
@@ -386,12 +386,12 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
     /* Wait for the listener to accept us (peer will be set) */
     mutex_lock(&us->lock);
     while (!us->peer) {
-        wait_queue_add(&us->buf.rwait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &us->buf.rwait;
-        mutex_unlock(&us->lock);
-        schedule();
-        mutex_lock(&us->lock);
+        int rc = proc_sleep_on_mutex(&us->buf.rwait, &us->buf.rwait,
+                                     &us->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&us->lock);
+            return -EINTR;
+        }
     }
     sock->state = SS_CONNECTED;
     mutex_unlock(&us->lock);
@@ -408,12 +408,12 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock) {
     /* Wait for a pending connection */
     mutex_lock(&us->lock);
     while (list_empty(&us->accept_queue)) {
-        wait_queue_add(&us->accept_wait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &us->accept_wait;
-        mutex_unlock(&us->lock);
-        schedule();
-        mutex_lock(&us->lock);
+        int rc = proc_sleep_on_mutex(&us->accept_wait, &us->accept_wait,
+                                     &us->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&us->lock);
+            return -EINTR;
+        }
     }
 
     /* Dequeue */
@@ -590,12 +590,12 @@ static ssize_t unix_dgram_recvfrom(struct socket *sock, void *buf,
 
     mutex_lock(&us->lock);
     while (list_empty(&us->dgram_queue)) {
-        wait_queue_add(&us->dgram_wait, proc_current());
-        proc_current()->state = PROC_SLEEPING;
-        proc_current()->wait_channel = &us->dgram_wait;
-        mutex_unlock(&us->lock);
-        schedule();
-        mutex_lock(&us->lock);
+        int rc = proc_sleep_on_mutex(&us->dgram_wait, &us->dgram_wait,
+                                     &us->lock, true);
+        if (rc == -EINTR) {
+            mutex_unlock(&us->lock);
+            return -EINTR;
+        }
     }
 
     struct unix_dgram_msg *msg = list_first_entry(&us->dgram_queue,

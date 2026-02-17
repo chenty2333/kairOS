@@ -58,12 +58,11 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
                 mutex_unlock(&p->lock);
                 return read ? (ssize_t)read : -EAGAIN;
             }
-            wait_queue_add(&p->rwait, proc_current());
-            proc_current()->state = PROC_SLEEPING;
-            proc_current()->wait_channel = &p->rwait;
-            mutex_unlock(&p->lock);
-            schedule();
-            mutex_lock(&p->lock);
+            int rc = proc_sleep_on_mutex(&p->rwait, &p->rwait,
+                                         &p->lock, true);
+            if (rc == -EINTR) {
+                return read ? (ssize_t)read : -EINTR;
+            }
         }
 
         size_t want = len - read;
@@ -121,12 +120,12 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
                     mutex_unlock(&p->lock);
                     return written ? (ssize_t)written : -EAGAIN;
                 }
-                wait_queue_add(&p->wwait, proc_current());
-                proc_current()->state = PROC_SLEEPING;
-                proc_current()->wait_channel = &p->wwait;
-                mutex_unlock(&p->lock);
-                schedule();
-                mutex_lock(&p->lock);
+                int rc = proc_sleep_on_mutex(&p->wwait, &p->wwait,
+                                             &p->lock, true);
+                if (rc == -EINTR) {
+                    mutex_unlock(&p->lock);
+                    return written ? (ssize_t)written : -EINTR;
+                }
                 space = PIPE_SIZE - p->count;
             }
         } else if (space == 0) {
@@ -134,12 +133,12 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
                 mutex_unlock(&p->lock);
                 return written ? (ssize_t)written : -EAGAIN;
             }
-            wait_queue_add(&p->wwait, proc_current());
-            proc_current()->state = PROC_SLEEPING;
-            proc_current()->wait_channel = &p->wwait;
-            mutex_unlock(&p->lock);
-            schedule();
-            mutex_lock(&p->lock);
+            int rc = proc_sleep_on_mutex(&p->wwait, &p->wwait,
+                                         &p->lock, true);
+            if (rc == -EINTR) {
+                mutex_unlock(&p->lock);
+                return written ? (ssize_t)written : -EINTR;
+            }
             continue;
         }
 

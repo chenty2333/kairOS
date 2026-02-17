@@ -230,7 +230,7 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
             poll_wait_remove(&waiter);
             continue;
         }
-        proc_sleep(&waiter);
+        proc_sleep_on(NULL, &waiter, true);
         poll_wait_remove(&waiter);
     }
 }
