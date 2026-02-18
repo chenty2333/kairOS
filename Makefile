@@ -218,9 +218,11 @@ DEPS := $(OBJS:.o=.d)
 
 STAMP_DIR := $(BUILD_DIR)/stamps
 BUSYBOX_STAMP := $(STAMP_DIR)/busybox.stamp
+TCC_STAMP := $(STAMP_DIR)/tcc.stamp
 ROOTFS_BASE_STAMP := $(STAMP_DIR)/rootfs-base.stamp
 ROOTFS_BUSYBOX_STAMP := $(STAMP_DIR)/rootfs-busybox.stamp
 ROOTFS_INIT_STAMP := $(STAMP_DIR)/rootfs-init.stamp
+ROOTFS_TCC_STAMP := $(STAMP_DIR)/rootfs-tcc.stamp
 ROOTFS_STAMP := $(STAMP_DIR)/rootfs.stamp
 DISK_STAMP := $(STAMP_DIR)/disk.stamp
 INITRAMFS_STAMP := $(STAMP_DIR)/initramfs.stamp
@@ -229,7 +231,7 @@ MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 
-.PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk uefi check-tools
+.PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools
 
 all: | _reset_count
 all: $(KERNEL)
@@ -277,6 +279,13 @@ $(BUSYBOX_STAMP): $(MUSL_STAMP) tools/busybox/kairos_defconfig scripts/build-bus
 	$(Q)$(QUIET_ENV) ./scripts/build-busybox.sh $(ARCH)
 	@touch $@
 
+tcc: $(TCC_STAMP)
+
+$(TCC_STAMP): $(MUSL_STAMP) scripts/build-tcc.sh
+	@mkdir -p $(STAMP_DIR)
+	$(Q)$(QUIET_ENV) ./scripts/build-tcc.sh $(ARCH)
+	@touch $@
+
 rootfs-base: $(ROOTFS_BASE_STAMP)
 
 $(ROOTFS_BASE_STAMP): scripts/make-disk.sh
@@ -298,10 +307,21 @@ $(ROOTFS_INIT_STAMP): $(USER_INIT) scripts/make-disk.sh
 	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
 	@touch $@
 
+rootfs-tcc: $(ROOTFS_TCC_STAMP)
+
+$(ROOTFS_TCC_STAMP): $(TCC_STAMP) scripts/make-disk.sh
+	@mkdir -p $(STAMP_DIR)
+	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=tcc ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	@touch $@
+
 rootfs: $(ROOTFS_STAMP)
 
 $(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAMP)
 	@mkdir -p $(STAMP_DIR)
+	@# Stage TCC if it has been built (optional — not a hard dependency)
+	@if [ -x build/$(ARCH)/tcc/bin/tcc ]; then \
+		$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=tcc ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH); \
+	fi
 	@touch $@
 
 # Track CFLAGS changes so object files rebuild when EXTRA_CFLAGS changes.
@@ -531,10 +551,18 @@ symbols: $(KERNEL)
 TEST_EXTRA_CFLAGS := -DCONFIG_KERNEL_TESTS=1
 TEST_TIMEOUT ?= 180
 TEST_LOG ?= $(BUILD_DIR)/test.log
+SOAK_TIMEOUT ?= 600
+SOAK_LOG ?= $(BUILD_DIR)/soak.log
 
 test: check-tools scripts/run-qemu-test.sh
 	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
 	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS)' run" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$(TEST_LOG)" ./scripts/run-qemu-test.sh; rc=$$?; \
+	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
+	exit $$rc
+
+test-soak: check-tools scripts/run-qemu-test.sh
+	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
+	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) run" TEST_TIMEOUT="$(SOAK_TIMEOUT)" TEST_LOG="$(SOAK_LOG)" TEST_REQUIRE_MARKERS=0 TEST_EXPECT_TIMEOUT=1 ./scripts/run-qemu-test.sh; rc=$$?; \
 	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
 	exit $$rc
 
@@ -551,14 +579,17 @@ help:
 	@echo "  initramfs - Build initramfs image"
 	@echo "  compiler-rt - Build clang compiler-rt builtins"
 	@echo "  busybox  - Build busybox for userland"
+	@echo "  tcc      - Build TCC (Tiny C Compiler) for userland"
 	@echo "  rootfs-base    - Stage rootfs base"
 	@echo "  rootfs-busybox - Stage busybox + applets"
 	@echo "  rootfs-init    - Stage init"
+	@echo "  rootfs-tcc     - Stage tcc + musl sysroot"
 	@echo "  rootfs         - Stage full rootfs"
 	@echo "  disk     - Create disk image"
 	@echo "  uefi     - Prepare UEFI boot image"
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  test     - Run kernel tests"
+	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"

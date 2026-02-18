@@ -71,6 +71,7 @@ static int procfs_close(struct vnode *vn);
 static int gen_meminfo(pid_t pid, char *buf, size_t bufsz);
 static int gen_uptime(pid_t pid, char *buf, size_t bufsz);
 static int gen_stat(pid_t pid, char *buf, size_t bufsz);
+static int gen_sched(pid_t pid, char *buf, size_t bufsz);
 static int gen_version(pid_t pid, char *buf, size_t bufsz);
 static int gen_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz);
@@ -188,6 +189,43 @@ static int gen_stat(pid_t pid __attribute__((unused)),
                         "cpu%d %lu 0 0 0 0 0 0 0 0 0\n",
                         i, (unsigned long)t);
     }
+    return len;
+}
+
+static int gen_sched(pid_t pid __attribute__((unused)),
+                     char *buf, size_t bufsz) {
+    struct sched_stats stats;
+    sched_get_stats(&stats);
+
+    int len = 0;
+    len += snprintf(buf + len, bufsz - (size_t)len,
+                    "cpus %u\n"
+                    "steal_enabled %u\n",
+                    stats.cpu_count, stats.steal_enabled ? 1U : 0U);
+
+    for (uint32_t i = 0; i < stats.cpu_count && (size_t)len < bufsz; i++) {
+        struct percpu_data *cd = sched_cpu_data((int)i);
+        uint32_t nr_running = cd ? cd->runqueue.nr_running : 0;
+        uint64_t min_vruntime = cd ? cd->runqueue.min_vruntime : 0;
+        uint64_t ticks = cd ? cd->ticks : 0;
+        struct sched_cpu_stats *cpu = &stats.cpu[i];
+        len += snprintf(
+            buf + len, bufsz - (size_t)len,
+            "cpu%u rq=%u min_vruntime=%llu ticks=%llu "
+            "enq=%llu deq=%llu pick=%llu switch=%llu idle_pick=%llu "
+            "steal=%llu/%llu violations=%llu\n",
+            i, nr_running, (unsigned long long)min_vruntime,
+            (unsigned long long)ticks,
+            (unsigned long long)cpu->enqueue_count,
+            (unsigned long long)cpu->dequeue_count,
+            (unsigned long long)cpu->pick_count,
+            (unsigned long long)cpu->switch_count,
+            (unsigned long long)cpu->idle_pick_count,
+            (unsigned long long)cpu->steal_success_count,
+            (unsigned long long)cpu->steal_attempt_count,
+            (unsigned long long)cpu->state_violation_count);
+    }
+
     return len;
 }
 
@@ -488,6 +526,7 @@ static const struct static_entry_def static_entries[] = {
     {"meminfo", gen_meminfo},
     {"uptime",  gen_uptime},
     {"stat",    gen_stat},
+    {"sched",   gen_sched},
     {"version", gen_version},
     {"cmdline", gen_cmdline},
 };

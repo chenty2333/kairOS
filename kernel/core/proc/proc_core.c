@@ -333,6 +333,7 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
     p->wait_channel = channel;
     p->sleep_deadline = 0;
     p->state = PROC_SLEEPING;
+    sched_trace_event(SCHED_TRACE_SLEEP, p, (uint64_t)channel, 0);
     proc_unlock(p);
 
     schedule();
@@ -366,6 +367,7 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
     p->wait_channel = channel;
     p->sleep_deadline = 0;
     p->state = PROC_SLEEPING;
+    sched_trace_event(SCHED_TRACE_SLEEP, p, (uint64_t)channel, 0);
     proc_unlock(p);
 
     if (mtx)
@@ -406,6 +408,7 @@ int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
     p->wait_channel = channel;
     p->sleep_deadline = deadline;
     p->state = PROC_SLEEPING;
+    sched_trace_event(SCHED_TRACE_SLEEP, p, (uint64_t)channel, deadline);
     proc_unlock(p);
 
     if (mtx)

@@ -6,6 +6,7 @@
 #define _KAIROS_SCHED_H
 
 #include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/list.h>
 #include <kairos/rbtree.h>
 #include <kairos/sched_types.h>
@@ -39,6 +40,35 @@ void sched_post_switch_cleanup(void);
 int sched_setnice(struct process *p, int nice);
 int sched_getnice(struct process *p);
 
+struct sched_cpu_stats {
+    uint64_t enqueue_count;
+    uint64_t dequeue_count;
+    uint64_t pick_count;
+    uint64_t switch_count;
+    uint64_t idle_pick_count;
+    uint64_t steal_attempt_count;
+    uint64_t steal_success_count;
+    uint64_t state_violation_count;
+};
+
+struct sched_stats {
+    uint32_t cpu_count;
+    bool steal_enabled;
+    struct sched_cpu_stats cpu[CONFIG_MAX_CPUS];
+};
+
+enum sched_trace_event_type {
+    SCHED_TRACE_ENQUEUE = 1,
+    SCHED_TRACE_DEQUEUE = 2,
+    SCHED_TRACE_PICK = 3,
+    SCHED_TRACE_SWITCH = 4,
+    SCHED_TRACE_IDLE = 5,
+    SCHED_TRACE_STEAL = 6,
+    SCHED_TRACE_SLEEP = 7,
+    SCHED_TRACE_WAKEUP = 8,
+    SCHED_TRACE_TRAP = 9,
+};
+
 struct percpu_data {
     int cpu_id;
     struct cfs_rq runqueue;
@@ -51,6 +81,7 @@ struct percpu_data {
     void *ipi_call_arg;
     uint64_t ticks;
     bool resched_needed;
+    struct sched_cpu_stats stats;
 };
 
 extern struct percpu_data cpu_data[];
@@ -65,5 +96,11 @@ int sched_cpu_count(void);
 void sched_cpu_online(int cpu);
 struct percpu_data *sched_cpu_data(int cpu);
 void sched_set_steal_enabled(bool enabled);
+void sched_get_stats(struct sched_stats *out);
+void sched_debug_dump_cpu(int cpu_id);
+void sched_trace_event(enum sched_trace_event_type type,
+                       const struct process *p,
+                       uint64_t arg0, uint64_t arg1);
+void sched_trace_dump_recent(int max_events);
 
 #endif
