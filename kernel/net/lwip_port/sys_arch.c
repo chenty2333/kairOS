@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -37,16 +38,23 @@ void sys_sem_signal(sys_sem_t *sem) {
 }
 
 u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout) {
-    /* timeout==0 means wait forever */
-    (void)timeout; /* TODO: implement timed wait */
+    uint64_t deadline = 0;
+    if (timeout != 0) {
+        uint64_t ticks = ((uint64_t)timeout * CONFIG_HZ + 999) / 1000;
+        deadline = arch_timer_get_ticks() + ticks;
+    }
 
     mutex_lock(&sem->lock);
     while (sem->count == 0) {
+        if (timeout != 0 && arch_timer_get_ticks() >= deadline) {
+            mutex_unlock(&sem->lock);
+            return SYS_ARCH_TIMEOUT;
+        }
         proc_sleep_on_mutex(&sem->wq, &sem->wq, &sem->lock, false);
     }
     sem->count--;
     mutex_unlock(&sem->lock);
-    return 0; /* time waited (0 = success) */
+    return 0;
 }
 
 int sys_sem_valid(sys_sem_t *sem) {
@@ -135,10 +143,18 @@ err_t sys_mbox_trypost_fromisr(sys_mbox_t *mbox, void *msg) {
 }
 
 u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout) {
-    (void)timeout; /* TODO: implement timed fetch */
+    uint64_t deadline = 0;
+    if (timeout != 0) {
+        uint64_t ticks = ((uint64_t)timeout * CONFIG_HZ + 999) / 1000;
+        deadline = arch_timer_get_ticks() + ticks;
+    }
 
     mutex_lock(&mbox->lock);
     while (mbox->count == 0) {
+        if (timeout != 0 && arch_timer_get_ticks() >= deadline) {
+            mutex_unlock(&mbox->lock);
+            return SYS_ARCH_TIMEOUT;
+        }
         proc_sleep_on_mutex(&mbox->not_empty, &mbox->not_empty,
                             &mbox->lock, false);
     }
@@ -226,19 +242,17 @@ void sys_init(void) {
 u32_t sys_now(void) {
     /* Return milliseconds since boot */
     uint64_t ticks = arch_timer_ticks();
-    /* Assuming 100 Hz tick rate (CONFIG_HZ=100) */
-    return (u32_t)(ticks * 10);
+    return (u32_t)(ticks * 1000 / CONFIG_HZ);
 }
 
 /* --- Critical sections --- */
 
 sys_prot_t sys_arch_protect(void) {
-    /* TODO: disable preemption or use spinlock */
-    return 0;
+    return (sys_prot_t)arch_irq_save();
 }
 
 void sys_arch_unprotect(sys_prot_t pval) {
-    (void)pval;
+    arch_irq_restore((bool)pval);
 }
 
 /* --- Random --- */
