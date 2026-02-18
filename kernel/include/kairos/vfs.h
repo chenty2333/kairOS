@@ -257,6 +257,7 @@ void vfs_poll_wake(struct vnode *vn, uint32_t events);
 off_t vfs_seek(struct file *file, off_t offset, int whence);
 int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);
+int vfs_stat_vnode(struct vnode *vn, struct stat *st);
 int vfs_fstat(struct file *file, struct stat *st);
 int vfs_statfs(struct mount *mnt, struct kstatfs *st);
 int vfs_fsync(struct file *file, int datasync);

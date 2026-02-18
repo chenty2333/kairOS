@@ -250,13 +250,14 @@ int vfs_stat(const char *path, struct stat *st) {
             dentry_put(resolved.dentry);
         return -ENOENT;
     }
-    ret = vfs_fstat(&(struct file){.vnode = resolved.dentry->vnode}, st);
+    ret = vfs_stat_vnode(resolved.dentry->vnode, st);
     dentry_put(resolved.dentry);
     return ret;
 }
 
-int vfs_fstat(struct file *file, struct stat *st) {
-    struct vnode *vn = file->vnode;
+int vfs_stat_vnode(struct vnode *vn, struct stat *st) {
+    if (!vn)
+        return -EINVAL;
     if (vn->ops->stat)
         return vn->ops->stat(vn, st);
     mutex_lock(&vn->lock);
@@ -274,6 +275,10 @@ int vfs_fstat(struct file *file, struct stat *st) {
     st->st_blksize = CONFIG_PAGE_SIZE;
     mutex_unlock(&vn->lock);
     return 0;
+}
+
+int vfs_fstat(struct file *file, struct stat *st) {
+    return vfs_stat_vnode(file->vnode, st);
 }
 
 int vfs_mkdir(const char *path, mode_t mode) {

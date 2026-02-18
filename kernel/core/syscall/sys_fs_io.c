@@ -273,7 +273,7 @@ int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    return 0;
+    return vfs_fsync(f, 0);
 }
 
 int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -282,5 +282,5 @@ int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    return 0;
+    return vfs_fsync(f, 1);
 }

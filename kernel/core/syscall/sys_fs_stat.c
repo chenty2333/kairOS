@@ -224,7 +224,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
             dentry_put(resolved.dentry);
         return -ENOENT;
     }
-    ret = vfs_fstat(&(struct file){.vnode = resolved.dentry->vnode}, &st);
+    ret = vfs_stat_vnode(resolved.dentry->vnode, &st);
     dentry_put(resolved.dentry);
     if (ret < 0)
         return ret;
