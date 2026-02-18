@@ -110,7 +110,7 @@ fi
 if [[ ! -d "$BUILD_DIR/obj" ]]; then
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR" "$SYSROOT"
-  rsync -a --exclude='obj/' --exclude='lib/' "$MUSL_SRC"/ "$BUILD_DIR"/
+  rsync -a --exclude='obj/' --exclude='lib/' --exclude='config.mak' "$MUSL_SRC"/ "$BUILD_DIR"/
 fi
 
 if [[ "$QUIET" == "1" ]]; then
