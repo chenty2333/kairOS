@@ -65,6 +65,13 @@ noreturn void proc_exit(int status) {
         p->tid_address = 0;
     }
 
+    /* Call registered exit callbacks (before releasing shared resources) */
+    for (int i = 0; i < exit_callback_count; i++) {
+        if (exit_callbacks[i]) {
+            exit_callbacks[i](p);
+        }
+    }
+
     /* Release shared resources via refcount */
     if (p->fdtable) {
         fdtable_put(p->fdtable);
@@ -73,13 +80,6 @@ noreturn void proc_exit(int status) {
     if (p->sighand) {
         sighand_put(p->sighand);
         p->sighand = NULL;
-    }
-
-    /* Call registered exit callbacks */
-    for (int i = 0; i < exit_callback_count; i++) {
-        if (exit_callbacks[i]) {
-            exit_callbacks[i](p);
-        }
     }
 
     /* Remove from thread group if a non-leader thread */

@@ -18,7 +18,6 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
-/* Per-process mapping record, linked into drm_lite_buffer.mappings */
 struct drm_lite_mapping {
     struct list_head list;
     pid_t pid;
@@ -35,12 +34,10 @@ struct drm_lite_buffer {
     uint64_t size;
     size_t page_count;
     paddr_t *pages;
-
     atomic_t refcount;
-    struct mutex lock;              /* protects mappings list */
+    struct mutex lock;              /* protects mappings */
     struct list_head mappings;
-
-    struct list_head list;          /* link into drm_lite_device.buffers */
+    struct list_head list;
 };
 
 struct drm_lite_device {
@@ -55,10 +52,16 @@ struct drm_lite_device {
     struct drm_lite_fb_ops *ops;
 };
 
+/* Pluggable framebuffer backend (unused for now, wired in future) */
+struct drm_lite_fb_ops {
+    int (*present)(struct drm_lite_device *dev, struct drm_lite_buffer *buf,
+                   uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    int (*get_info)(struct drm_lite_device *dev, struct drm_lite_info *info);
+};
+
 static uint32_t drm_lite_next_card = 0;
 static struct drm_lite_device *global_drm_device = NULL;
 
-/* Forward declarations */
 static void drm_lite_buffer_free(struct drm_lite_buffer *buf);
 static void drm_lite_buffer_unmap_all(struct drm_lite_buffer *buf);
 
@@ -67,12 +70,6 @@ static inline void drm_lite_buffer_get(struct drm_lite_buffer *buf)
     atomic_inc(&buf->refcount);
 }
 
-/*
- * Drop one reference.  When the last reference is released the buffer
- * pages are freed.  Callers must have already removed the buffer from
- * the device list and unmapped it from every process before the final
- * put (or accept that drm_lite_buffer_free will do so).
- */
 static void drm_lite_buffer_put(struct drm_lite_buffer *buf)
 {
     if (atomic_dec_return(&buf->refcount) == 0) {
@@ -80,10 +77,8 @@ static void drm_lite_buffer_put(struct drm_lite_buffer *buf)
     }
 }
 
-/* Release physical pages and metadata.  Called only when refcount == 0. */
 static void drm_lite_buffer_free(struct drm_lite_buffer *buf)
 {
-    /* Safety: unmap any stale mappings that were not cleaned up */
     drm_lite_buffer_unmap_all(buf);
 
     for (size_t i = 0; i < buf->page_count; i++) {
@@ -93,7 +88,6 @@ static void drm_lite_buffer_free(struct drm_lite_buffer *buf)
     kfree(buf);
 }
 
-/* Record a new mapping and take a reference on the buffer. */
 static int drm_lite_buffer_add_mapping(struct drm_lite_buffer *buf,
                                        pid_t pid, vaddr_t user_va,
                                        struct mm_struct *mm)
@@ -116,12 +110,8 @@ static int drm_lite_buffer_add_mapping(struct drm_lite_buffer *buf,
 }
 
 /*
- * Remove ALL mappings belonging to @pid from @buf, unmapping each one
- * from the process address space and dropping the corresponding
- * reference.  Safe to call even if @pid has no mappings on @buf.
- *
- * IMPORTANT: the caller must NOT hold ldev->lock while calling this,
- * because the final drm_lite_buffer_put may free the buffer.
+ * Remove all mappings for @pid.  Caller must NOT hold ldev->lock
+ * because the final buffer_put may free the buffer.
  */
 static void drm_lite_buffer_remove_mappings_for_pid(
     struct drm_lite_buffer *buf, pid_t pid)
@@ -131,7 +121,6 @@ static void drm_lite_buffer_remove_mappings_for_pid(
 
     INIT_LIST_HEAD(&removed);
 
-    /* Collect matching entries under the lock */
     mutex_lock(&buf->lock);
     list_for_each_entry_safe(mapping, tmp, &buf->mappings, list) {
         if (mapping->pid == pid) {
@@ -141,7 +130,6 @@ static void drm_lite_buffer_remove_mappings_for_pid(
     }
     mutex_unlock(&buf->lock);
 
-    /* Unmap and release outside the lock */
     list_for_each_entry_safe(mapping, tmp, &removed, list) {
         list_del(&mapping->list);
         mm_munmap(mapping->mm, mapping->user_va, buf->size);
@@ -150,11 +138,7 @@ static void drm_lite_buffer_remove_mappings_for_pid(
     }
 }
 
-/*
- * Unmap every mapping and free the mapping records.
- * Does NOT touch the refcount — this is used during the final
- * destroy path where refcount is already zero.
- */
+/* Unmap all mappings without touching refcount (final destroy path). */
 static void drm_lite_buffer_unmap_all(struct drm_lite_buffer *buf)
 {
     struct drm_lite_mapping *mapping, *tmp;
@@ -204,10 +188,6 @@ static void drm_lite_copy_from_pages(uint8_t *dst,
     }
 }
 
-/*
- * Present buffer contents (or a sub-rectangle) to the framebuffer.
- * When w==0 && h==0 the entire buffer is copied (backward compatible).
- */
 static int drm_lite_present(struct drm_lite_device *ldev,
                             struct drm_lite_buffer *buf,
                             uint32_t x, uint32_t y,
@@ -217,36 +197,27 @@ static int drm_lite_present(struct drm_lite_device *ldev,
         return -EINVAL;
     }
 
-    /* Default: full buffer */
-    if (w == 0) {
-        w = MIN(buf->width, ldev->fb.width) - x;
-    }
-    if (h == 0) {
-        h = MIN(buf->height, ldev->fb.height) - y;
-    }
-
-    /* Clamp to both buffer and framebuffer bounds */
-    if (x >= buf->width || y >= buf->height) {
+    /* Validate origin before computing defaults */
+    if (x >= buf->width || x >= ldev->fb.width ||
+        y >= buf->height || y >= ldev->fb.height) {
         return -EINVAL;
     }
-    if (x + w > buf->width) {
-        w = buf->width - x;
+
+    /* Default: full extent from (x,y) */
+    uint32_t max_w = MIN(buf->width, ldev->fb.width) - x;
+    uint32_t max_h = MIN(buf->height, ldev->fb.height) - y;
+    if (w == 0 || w > max_w) {
+        w = max_w;
     }
-    if (y + h > buf->height) {
-        h = buf->height - y;
-    }
-    if (x + w > ldev->fb.width) {
-        w = ldev->fb.width - x;
-    }
-    if (y + h > ldev->fb.height) {
-        h = ldev->fb.height - y;
+    if (h == 0 || h > max_h) {
+        h = max_h;
     }
 
     uint8_t *dst = (uint8_t *)ldev->fb_kva;
-    uint32_t bpp_bytes = 4; /* XRGB8888 */
+    uint32_t bpp_bytes = 4;
 
-    /* Check whether the buffer pages are physically contiguous */
-    bool contiguous = true;
+    /* Check whether buffer pages are physically contiguous */
+    bool contiguous = (buf->page_count > 0);
     for (size_t i = 1; i < buf->page_count; i++) {
         if (buf->pages[i] != buf->pages[i - 1] + CONFIG_PAGE_SIZE) {
             contiguous = false;
@@ -256,27 +227,18 @@ static int drm_lite_present(struct drm_lite_device *ldev,
 
     if (contiguous && x == 0 && w == buf->width &&
         buf->pitch == ldev->fb.pitch) {
-        /*
-         * Fast path: contiguous pages, full-width, matching pitch.
-         * Single memcpy for the entire dirty region.
-         */
+        /* Fast path: single memcpy */
         uint8_t *src = (uint8_t *)phys_to_virt(buf->pages[0]);
-        size_t src_off = (size_t)y * buf->pitch;
-        size_t dst_off = (size_t)y * ldev->fb.pitch;
-        size_t copy_size = (size_t)h * buf->pitch;
-
-        memcpy(dst + dst_off, src + src_off, copy_size);
+        size_t off = (size_t)y * buf->pitch;
+        memcpy(dst + off, src + off, (size_t)h * buf->pitch);
     } else {
-        /* Slow path: per-row copy through page helper */
         for (uint32_t row = 0; row < h; row++) {
             size_t src_off = (size_t)(y + row) * buf->pitch +
                              (size_t)x * bpp_bytes;
             size_t dst_off = (size_t)(y + row) * ldev->fb.pitch +
                              (size_t)x * bpp_bytes;
-            size_t copy_bytes = (size_t)w * bpp_bytes;
-
             drm_lite_copy_from_pages(dst + dst_off, buf,
-                                     src_off, copy_bytes);
+                                     src_off, (size_t)w * bpp_bytes);
         }
     }
 
@@ -533,12 +495,8 @@ static struct file_ops drm_lite_ops = {
 };
 
 /*
- * Process-exit cleanup callback.
- *
- * We must not hold ldev->lock while calling remove_mappings_for_pid
- * because the final buffer_put may free the buffer.  Instead we take
- * a snapshot of buffer pointers (with an extra ref each) under the
- * device lock, then process them without the device lock held.
+ * Snapshot buffers under device lock, then clean up mappings outside
+ * the lock to avoid freeing a buffer while iterating the device list.
  */
 static void drm_lite_exit_callback(struct process *p)
 {

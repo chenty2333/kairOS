@@ -59,14 +59,4 @@ struct drm_lite_buffer_list {
     uint32_t handles[DRM_LITE_MAX_BUFFERS];
 };
 
-/* Framebuffer backend operations (kernel-internal) */
-struct drm_lite_device;
-struct drm_lite_buffer;
-
-struct drm_lite_fb_ops {
-    int (*present)(struct drm_lite_device *dev, struct drm_lite_buffer *buf,
-                   uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-    int (*get_info)(struct drm_lite_device *dev, struct drm_lite_info *info);
-};
-
 #endif /* _KAIROS_DRM_LITE_H */
