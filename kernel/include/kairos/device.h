@@ -12,6 +12,7 @@
 
 struct device;
 struct driver;
+struct sysfs_node;
 
 /* 
  * Bus Type: Describes how to match devices on this bus.
@@ -35,6 +36,7 @@ struct device {
     struct resource *resources; /* Resource array */
     size_t num_resources;
     void *driver_data;          /* Driver private data */
+    struct sysfs_node *sysfs_node; /* sysfs directory for this device */
     struct list_head list;      /* Global device list node */
     struct list_head bus_list;  /* Bus-specific device list node */
 };

@@ -12,12 +12,16 @@
 #include <kairos/ext2.h>
 #include <kairos/fat32.h>
 #include <kairos/procfs.h>
+#include <kairos/tmpfs.h>
+#include <kairos/sysfs.h>
 
 void init_fs(void) {
     binit();
     vfs_init();
     devfs_init();
     procfs_init();
+    tmpfs_init();
+    sysfs_init();
     initramfs_init();
     ext2_init();
     fat32_init();
@@ -68,6 +72,20 @@ void init_fs(void) {
         ret = vfs_mount(NULL, "/proc", "procfs", 0);
         if (ret < 0)
             pr_warn("procfs: mount failed (ret=%d)\n", ret);
+
+        mkret = vfs_mkdir("/tmp", 01777);
+        if (mkret < 0 && mkret != -EEXIST)
+            pr_warn("tmpfs: failed to create /tmp (ret=%d)\n", mkret);
+        ret = vfs_mount(NULL, "/tmp", "tmpfs", 0);
+        if (ret < 0)
+            pr_warn("tmpfs: mount failed (ret=%d)\n", ret);
+
+        mkret = vfs_mkdir("/sys", 0555);
+        if (mkret < 0 && mkret != -EEXIST)
+            pr_warn("sysfs: failed to create /sys (ret=%d)\n", mkret);
+        ret = vfs_mount(NULL, "/sys", "sysfs", 0);
+        if (ret < 0)
+            pr_warn("sysfs: mount failed (ret=%d)\n", ret);
     } else {
         pr_warn("ext2 root: mount failed on any vda..vdz (ret=%d)\n", ret);
         ret = vfs_mount(NULL, "/", "devfs", 0);

@@ -203,6 +203,7 @@ struct file_ops {
     int (*stat)(struct vnode *vn, struct stat *st);
     int (*truncate)(struct vnode *vn, off_t length);
     int (*poll)(struct vnode *vn, uint32_t events);
+    int (*fsync)(struct vnode *vn, int datasync);
 };
 
 struct poll_waiter;
@@ -258,6 +259,7 @@ int vfs_readdir(struct file *file, struct dirent *ent);
 int vfs_stat(const char *path, struct stat *st);
 int vfs_fstat(struct file *file, struct stat *st);
 int vfs_statfs(struct mount *mnt, struct kstatfs *st);
+int vfs_fsync(struct file *file, int datasync);
 int vfs_mkdir(const char *path, mode_t mode);
 int vfs_rmdir(const char *path);
 int vfs_unlink(const char *path);

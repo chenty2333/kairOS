@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
+#include <kairos/sysfs.h>
 
 static LIST_HEAD(bus_list);
 static LIST_HEAD(device_list);
@@ -66,14 +67,19 @@ void bus_unregister(struct bus_type *bus) {
 
 int device_register(struct device *dev) {
     if (!dev) return -EINVAL;
-    
+
     spin_lock(&device_model_lock);
     list_add_tail(&dev->list, &device_list);
-    
+
     /* Try to attach to an existing driver */
     device_try_bind(dev);
     spin_unlock(&device_model_lock);
-    
+
+    /* Create sysfs node under /sys/devices/ */
+    struct sysfs_node *devs = sysfs_devices_dir();
+    if (devs)
+        dev->sysfs_node = sysfs_mkdir(devs, dev->name);
+
     return 0;
 }
 
@@ -86,6 +92,12 @@ void device_unregister(struct device *dev) {
     list_del(&dev->list);
     dev->driver = NULL;
     spin_unlock(&device_model_lock);
+
+    /* Remove sysfs node */
+    if (dev->sysfs_node) {
+        sysfs_rmdir(dev->sysfs_node);
+        dev->sysfs_node = NULL;
+    }
 }
 
 int driver_register(struct driver *drv) {

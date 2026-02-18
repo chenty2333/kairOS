@@ -450,6 +450,14 @@ int vfs_symlink(const char *target, const char *linkpath) {
     return ret;
 }
 
+int vfs_fsync(struct file *file, int datasync) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    if (!file->vnode->ops || !file->vnode->ops->fsync)
+        return 0;
+    return file->vnode->ops->fsync(file->vnode, datasync);
+}
+
 ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz) {
     if (!path || !buf || bufsz == 0)
         return -EINVAL;
