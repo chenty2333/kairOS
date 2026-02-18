@@ -72,13 +72,18 @@ int sysfs_get_base_path(int64_t dirfd, const char *path, struct path *base,
     struct file *f = fd_get(p, (int)dirfd);
     if (!f)
         return -EBADF;
-    if (!f->vnode || f->vnode->type != VNODE_DIR)
+    if (!f->vnode || f->vnode->type != VNODE_DIR) {
+        file_put(f);
         return -ENOTDIR;
-    if (!f->dentry)
+    }
+    if (!f->dentry) {
+        file_put(f);
         return -ENOENT;
+    }
     base->dentry = f->dentry;
     base->mnt = f->dentry->mnt;
     *basep = base;
+    file_put(f);
     return 0;
 }
 
@@ -109,11 +114,16 @@ ssize_t sysfs_readlink_from_vnode(struct vnode *vn, char *buf, size_t bufsz) {
         return -EINVAL;
     if (vn->type != VNODE_SYMLINK || !vn->ops || !vn->ops->read)
         return -EINVAL;
+    rwlock_read_lock(&vn->lock);
     size_t need = (size_t)vn->size;
     size_t want = (need < bufsz) ? need : bufsz;
-    if (!want)
+    if (!want) {
+        rwlock_read_unlock(&vn->lock);
         return 0;
-    return vn->ops->read(vn, buf, want, 0);
+    }
+    ssize_t ret = vn->ops->read(vn, buf, want, 0);
+    rwlock_read_unlock(&vn->lock);
+    return ret;
 }
 
 mode_t sysfs_apply_umask(mode_t mode) {

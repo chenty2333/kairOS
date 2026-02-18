@@ -353,7 +353,9 @@ int ext2_unlink(struct vnode *dir, const char *name) {
 
     struct vnode *cvn = ext2_cache_get(did->mnt, (ino_t)victim_ino);
     if (cvn) {
+        rwlock_write_lock(&cvn->lock);
         cvn->nlink = vi.i_links_count;
+        rwlock_write_unlock(&cvn->lock);
         vnode_put(cvn);
     }
 
@@ -437,7 +439,9 @@ int ext2_rmdir(struct vnode *dir, const char *name) {
     if (did->inode.i_links_count > 0) {
         did->inode.i_links_count--;
         ext2_write_inode(did->mnt, did->ino, &did->inode);
+        rwlock_write_lock(&dir->lock);
         dir->nlink = did->inode.i_links_count;
+        rwlock_write_unlock(&dir->lock);
     }
 
     return 0;
@@ -548,11 +552,15 @@ int ext2_rename(struct vnode *odir, const char *oname,
         if (odid->inode.i_links_count > 0) {
             odid->inode.i_links_count--;
             ext2_write_inode(mnt, odid->ino, &odid->inode);
+            rwlock_write_lock(&odir->lock);
             odir->nlink = odid->inode.i_links_count;
+            rwlock_write_unlock(&odir->lock);
         }
         ndid->inode.i_links_count++;
         ext2_write_inode(mnt, ndid->ino, &ndid->inode);
+        rwlock_write_lock(&ndir->lock);
         ndir->nlink = ndid->inode.i_links_count;
+        rwlock_write_unlock(&ndir->lock);
     }
 
     return 0;

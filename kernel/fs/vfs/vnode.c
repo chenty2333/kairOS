@@ -2,6 +2,7 @@
  * kernel/fs/vfs/vnode.c - vnode helpers
  */
 
+#include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
@@ -10,13 +11,19 @@ ssize_t vfs_readlink_vnode(struct vnode *vn, char *buf, size_t bufsz,
                            bool require_full) {
     if (!vn || vn->type != VNODE_SYMLINK || !vn->ops || !vn->ops->read)
         return -EINVAL;
+    rwlock_read_lock(&vn->lock);
     size_t need = (size_t)vn->size;
-    if (require_full && need >= bufsz)
+    if (require_full && need >= bufsz) {
+        rwlock_read_unlock(&vn->lock);
         return -ENAMETOOLONG;
+    }
     size_t want = (need < bufsz) ? need : bufsz;
-    if (!want)
+    if (!want) {
+        rwlock_read_unlock(&vn->lock);
         return 0;
+    }
     ssize_t ret = vn->ops->read(vn, buf, want, 0);
+    rwlock_read_unlock(&vn->lock);
     if (ret < 0)
         return ret;
     if (require_full && (size_t)ret != need)
@@ -28,12 +35,13 @@ void vnode_set_parent(struct vnode *vn, struct vnode *parent,
                       const char *name) {
     if (!vn)
         return;
+    rwlock_write_lock(&vn->lock);
     if (vn->parent == parent) {
         if (name && name[0]) {
             if (strncmp(vn->name, name, sizeof(vn->name)) == 0)
-                return;
+                goto unlock;
         } else if (vn->name[0] == '\0') {
-            return;
+            goto unlock;
         }
     }
 
@@ -53,30 +61,29 @@ void vnode_set_parent(struct vnode *vn, struct vnode *parent,
     } else {
         vn->name[0] = '\0';
     }
+unlock:
+    rwlock_write_unlock(&vn->lock);
 }
 
 void vnode_get(struct vnode *vn) {
-    if (vn) {
-        mutex_lock(&vn->lock);
-        vn->refcount++;
-        mutex_unlock(&vn->lock);
-    }
+    if (vn)
+        atomic_inc(&vn->refcount);
 }
 
 void vnode_put(struct vnode *vn) {
     if (!vn)
         return;
-    struct vnode *parent = NULL;
-    mutex_lock(&vn->lock);
-    if (--vn->refcount == 0) {
-        parent = vn->parent;
+    uint32_t old = atomic_fetch_sub(&vn->refcount, 1);
+    if (old == 0)
+        panic("vnode_put: refcount underflow on vnode ino=%lu",
+              (unsigned long)vn->ino);
+    if (old == 1) {
+        struct vnode *parent = vn->parent;
         vn->parent = NULL;
         vn->name[0] = '\0';
-        mutex_unlock(&vn->lock);
         if (vn->ops->close)
             vn->ops->close(vn);
         if (parent)
             vnode_put(parent);
-    } else
-        mutex_unlock(&vn->lock);
+    }
 }
