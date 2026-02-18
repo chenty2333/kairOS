@@ -624,8 +624,15 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
         if (!p)
             return NULL;
 
-        /* Create a dynamic PID dir entry */
+        /* Create a dynamic PID dir entry (or reuse existing) */
         spin_lock(&pm->lock);
+        for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+            if (e->type == PROCFS_PID_DIR && e->pid == pid) {
+                vnode_get(&e->vn);
+                spin_unlock(&pm->lock);
+                return &e->vn;
+            }
+        }
         struct procfs_entry *pdir = procfs_create_pid_dir(pm, pid);
         spin_unlock(&pm->lock);
         if (!pdir)
@@ -635,10 +642,18 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
     }
 
     if (pe->type == PROCFS_PID_DIR) {
-        /* Lookup inside a PID directory */
+        /* Lookup inside a PID directory (reuse existing or create) */
         for (size_t i = 0; i < NUM_PID_ENTRIES; i++) {
             if (strcmp(name, pid_entries[i].name) == 0) {
                 spin_lock(&pm->lock);
+                for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+                    if (e->type == PROCFS_PID_ENTRY && e->pid == pe->pid &&
+                        strcmp(e->name, pid_entries[i].name) == 0) {
+                        vnode_get(&e->vn);
+                        spin_unlock(&pm->lock);
+                        return &e->vn;
+                    }
+                }
                 struct procfs_entry *e =
                     procfs_create_pid_entry(pm, pe->pid, pid_entries[i].name,
                                             pid_entries[i].gen);
