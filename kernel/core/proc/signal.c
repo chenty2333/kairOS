@@ -89,7 +89,12 @@ void signal_deliver_pending(void) {
         if (p->sig_blocked & mask) continue;
 
         int sig = i + 1;
-        struct sigaction action = p->sighand ? p->sighand->actions[i] : (struct sigaction){0};
+        struct sigaction action = {0};
+        if (p->sighand) {
+            spin_lock(&p->sighand->lock);
+            action = p->sighand->actions[i];
+            spin_unlock(&p->sighand->lock);
+        }
         void (*handler)(int) = action.sa_handler ? action.sa_handler : SIG_DFL;
 
         if (handler == SIG_IGN || (handler == SIG_DFL && sig == SIGCHLD)) {
@@ -288,17 +293,25 @@ int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
 
     struct process *p = proc_current();
     if (!p) return -EINVAL;
+    if (!p->sighand) return -ENOMEM;
 
-    if (old_ptr) {
-        struct sigaction old = p->sighand ? p->sighand->actions[sig - 1] : (struct sigaction){0};
-        if (copy_to_user((void *)old_ptr, &old, sizeof(old)) < 0) return -EFAULT;
+    struct sigaction act = {0};
+    if (act_ptr) {
+        if (copy_from_user(&act, (void *)act_ptr, sizeof(act)) < 0) return -EFAULT;
     }
 
+    struct sigaction old = {0};
+    spin_lock(&p->sighand->lock);
+    if (old_ptr) {
+        old = p->sighand->actions[sig - 1];
+    }
     if (act_ptr) {
-        struct sigaction act;
-        if (copy_from_user(&act, (void *)act_ptr, sizeof(act)) < 0) return -EFAULT;
-        if (!p->sighand) return -ENOMEM;
         p->sighand->actions[sig - 1] = act;
+    }
+    spin_unlock(&p->sighand->lock);
+
+    if (old_ptr) {
+        if (copy_to_user((void *)old_ptr, &old, sizeof(old)) < 0) return -EFAULT;
     }
 
     return 0;
