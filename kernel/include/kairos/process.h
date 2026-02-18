@@ -20,6 +20,13 @@ struct vnode;
 struct dentry;
 struct mount_ns;
 
+/* Process exit callback */
+typedef void (*proc_exit_callback_t)(struct process *p);
+
+#define PROC_EXIT_CALLBACKS_MAX 8
+
+void proc_register_exit_callback(proc_exit_callback_t callback);
+
 /* Shared file descriptor table */
 struct fdtable {
     struct file *files[CONFIG_MAX_FILES_PER_PROC];

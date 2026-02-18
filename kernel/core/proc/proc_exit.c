@@ -12,6 +12,19 @@
 
 #include "proc_internal.h"
 
+static proc_exit_callback_t exit_callbacks[PROC_EXIT_CALLBACKS_MAX];
+static int exit_callback_count = 0;
+static spinlock_t exit_callback_lock = SPINLOCK_INIT;
+
+void proc_register_exit_callback(proc_exit_callback_t callback)
+{
+    spin_lock(&exit_callback_lock);
+    if (exit_callback_count < PROC_EXIT_CALLBACKS_MAX) {
+        exit_callbacks[exit_callback_count++] = callback;
+    }
+    spin_unlock(&exit_callback_lock);
+}
+
 static void proc_reparent_children(struct process *p) {
     struct process *reaper = reaper_proc;
     if (!reaper || reaper == p)
@@ -60,6 +73,13 @@ noreturn void proc_exit(int status) {
     if (p->sighand) {
         sighand_put(p->sighand);
         p->sighand = NULL;
+    }
+
+    /* Call registered exit callbacks */
+    for (int i = 0; i < exit_callback_count; i++) {
+        if (exit_callbacks[i]) {
+            exit_callbacks[i](p);
+        }
     }
 
     /* Remove from thread group if a non-leader thread */

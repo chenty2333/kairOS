@@ -3,6 +3,7 @@
  */
 
 #include <boot/limine.h>
+#include <kairos/atomic.h>
 #include <kairos/boot.h>
 #include <kairos/config.h>
 #include <kairos/devfs.h>
@@ -19,6 +20,13 @@
 
 #define DRM_LITE_MAX_BUFFERS 16
 
+struct drm_lite_mapping {
+    struct list_head list;      // 链接到 drm_lite_buffer->mappings
+    pid_t pid;                   // 拥有此映射的进程 PID
+    vaddr_t user_va;            // 用户空间虚拟地址
+    struct mm_struct *mm;       // 进程的 mm_struct（用于 cleanup）
+};
+
 struct drm_lite_buffer {
     uint32_t handle;
     uint32_t width;
@@ -28,7 +36,12 @@ struct drm_lite_buffer {
     uint64_t size;
     size_t page_count;
     paddr_t *pages;
-    bool mapped;
+
+    // 新增字段
+    atomic_t refcount;              // 引用计数
+    struct mutex lock;              // 保护 mappings 列表
+    struct list_head mappings;      // drm_lite_mapping 列表
+
     struct list_head list;
 };
 
@@ -44,6 +57,98 @@ struct drm_lite_device {
 };
 
 static uint32_t drm_lite_next_card = 0;
+static struct drm_lite_device *global_drm_device = NULL;  // 全局设备指针
+
+// Forward declarations
+static void drm_lite_buffer_destroy(struct drm_lite_buffer *buf);
+static void drm_lite_buffer_unmap_all(struct drm_lite_buffer *buf);
+
+// 增加引用计数
+static inline void drm_lite_buffer_get(struct drm_lite_buffer *buf)
+{
+    atomic_inc(&buf->refcount);
+}
+
+// 减少引用计数，为 0 时销毁
+static void drm_lite_buffer_put(struct drm_lite_buffer *buf)
+{
+    if (atomic_dec_return(&buf->refcount) == 0) {
+        drm_lite_buffer_destroy(buf);
+    }
+}
+
+// 实际销毁函数（从所有进程 unmap，释放页面）
+static void drm_lite_buffer_destroy(struct drm_lite_buffer *buf)
+{
+    // 1. Unmap from all processes
+    drm_lite_buffer_unmap_all(buf);
+
+    // 2. Free physical pages
+    for (size_t i = 0; i < buf->page_count; i++) {
+        pmm_free_page(buf->pages[i]);
+    }
+
+    // 3. Free metadata
+    kfree(buf->pages);
+    kfree(buf);
+}
+
+// 添加映射记录
+static int drm_lite_buffer_add_mapping(struct drm_lite_buffer *buf,
+                                       pid_t pid, vaddr_t user_va,
+                                       struct mm_struct *mm)
+{
+    struct drm_lite_mapping *mapping = kzalloc(sizeof(*mapping));
+    if (!mapping) {
+        return -ENOMEM;
+    }
+
+    mapping->pid = pid;
+    mapping->user_va = user_va;
+    mapping->mm = mm;
+
+    mutex_lock(&buf->lock);
+    list_add_tail(&mapping->list, &buf->mappings);
+    mutex_unlock(&buf->lock);
+
+    drm_lite_buffer_get(buf);  // 增加引用计数
+    return 0;
+}
+
+// 移除指定进程的映射
+static void drm_lite_buffer_remove_mapping(struct drm_lite_buffer *buf, pid_t pid)
+{
+    struct drm_lite_mapping *mapping, *tmp;
+
+    mutex_lock(&buf->lock);
+    list_for_each_entry_safe(mapping, tmp, &buf->mappings, list) {
+        if (mapping->pid == pid) {
+            list_del(&mapping->list);
+            mutex_unlock(&buf->lock);
+
+            // Unmap from process address space
+            mm_munmap(mapping->mm, mapping->user_va, buf->size);
+            kfree(mapping);
+            drm_lite_buffer_put(buf);  // 减少引用计数
+            return;
+        }
+    }
+    mutex_unlock(&buf->lock);
+}
+
+// 从所有进程 unmap（销毁前调用）
+static void drm_lite_buffer_unmap_all(struct drm_lite_buffer *buf)
+{
+    struct drm_lite_mapping *mapping, *tmp;
+
+    mutex_lock(&buf->lock);
+    list_for_each_entry_safe(mapping, tmp, &buf->mappings, list) {
+        list_del(&mapping->list);
+        mm_munmap(mapping->mm, mapping->user_va, buf->size);
+        kfree(mapping);
+    }
+    mutex_unlock(&buf->lock);
+}
 
 static struct drm_lite_buffer *drm_lite_find_buffer(struct drm_lite_device *ldev,
                                                     uint32_t handle) {
@@ -97,8 +202,9 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
 
     switch (cmd) {
     case DRM_LITE_IOC_GET_INFO: {
-        if (!arg)
+        if (!arg) {
             return -EFAULT;
+        }
         struct drm_lite_info info = {
             .width = ldev->fb.width,
             .height = ldev->fb.height,
@@ -107,24 +213,31 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             .format = DRM_LITE_FORMAT_XRGB8888,
             .max_buffers = DRM_LITE_MAX_BUFFERS,
         };
-        if (copy_to_user((void *)arg, &info, sizeof(info)) < 0)
+        if (copy_to_user((void *)arg, &info, sizeof(info)) < 0) {
             return -EFAULT;
+        }
         return 0;
     }
     case DRM_LITE_IOC_CREATE_BUFFER: {
-        if (!arg)
+        if (!arg) {
             return -EFAULT;
+        }
         struct drm_lite_create req;
-        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0)
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
             return -EFAULT;
-        if (req.format != DRM_LITE_FORMAT_XRGB8888)
+        }
+        if (req.format != DRM_LITE_FORMAT_XRGB8888) {
             return -EINVAL;
-        if (req.width == 0)
+        }
+        if (req.width == 0) {
             req.width = ldev->fb.width;
-        if (req.height == 0)
+        }
+        if (req.height == 0) {
             req.height = ldev->fb.height;
-        if (req.width > ldev->fb.width || req.height > ldev->fb.height)
+        }
+        if (req.width > ldev->fb.width || req.height > ldev->fb.height) {
             return -EINVAL;
+        }
 
         uint64_t pitch = (uint64_t)req.width * 4;
         uint64_t size = pitch * (uint64_t)req.height;
@@ -132,8 +245,9 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         size_t page_count = aligned / CONFIG_PAGE_SIZE;
 
         struct drm_lite_buffer *buf = kzalloc(sizeof(*buf));
-        if (!buf)
+        if (!buf) {
             return -ENOMEM;
+        }
         paddr_t *pages = kzalloc(sizeof(*pages) * page_count);
         if (!pages) {
             kfree(buf);
@@ -143,8 +257,9 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         for (size_t i = 0; i < page_count; i++) {
             paddr_t pa = pmm_alloc_page();
             if (!pa) {
-                for (size_t j = 0; j < i; j++)
+                for (size_t j = 0; j < i; j++) {
                     pmm_free_page(pages[j]);
+                }
                 kfree(pages);
                 kfree(buf);
                 return -ENOMEM;
@@ -155,14 +270,16 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         mutex_lock(&ldev->lock);
         if (ldev->buffer_count >= DRM_LITE_MAX_BUFFERS) {
             mutex_unlock(&ldev->lock);
-            for (size_t i = 0; i < page_count; i++)
+            for (size_t i = 0; i < page_count; i++) {
                 pmm_free_page(pages[i]);
+            }
             kfree(pages);
             kfree(buf);
             return -ENOSPC;
         }
-        if (ldev->next_handle == 0)
+        if (ldev->next_handle == 0) {
             ldev->next_handle = 1;
+        }
         buf->handle = ldev->next_handle++;
         buf->width = req.width;
         buf->height = req.height;
@@ -171,7 +288,9 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         buf->size = size;
         buf->page_count = page_count;
         buf->pages = pages;
-        buf->mapped = false;
+        atomic_init(&buf->refcount, 1);
+        mutex_init(&buf->lock, "drm_buffer_lock");
+        INIT_LIST_HEAD(&buf->mappings);
         list_add_tail(&buf->list, &ldev->buffers);
         ldev->buffer_count++;
         mutex_unlock(&ldev->lock);
@@ -184,8 +303,9 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
             list_del(&buf->list);
             ldev->buffer_count--;
             mutex_unlock(&ldev->lock);
-            for (size_t i = 0; i < page_count; i++)
+            for (size_t i = 0; i < page_count; i++) {
                 pmm_free_page(pages[i]);
+            }
             kfree(pages);
             kfree(buf);
             return -EFAULT;
@@ -193,87 +313,101 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         return 0;
     }
     case DRM_LITE_IOC_MAP_BUFFER: {
-        if (!arg)
-            return -EFAULT;
         struct drm_lite_map req;
-        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0)
+        struct drm_lite_buffer *buf = NULL;
+        vaddr_t user_va = 0;
+        int ret = 0;
+
+        if (!arg) {
             return -EFAULT;
+        }
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
+            return -EFAULT;
+        }
 
         mutex_lock(&ldev->lock);
-        struct drm_lite_buffer *buf = drm_lite_find_buffer(ldev, req.handle);
+        buf = drm_lite_find_buffer(ldev, req.handle);
         if (!buf) {
-            mutex_unlock(&ldev->lock);
-            return -ENOENT;
-        }
-        if (buf->mapped) {
-            mutex_unlock(&ldev->lock);
-            return -EBUSY;
-        }
-        struct process *p = proc_current();
-        if (!p || !p->mm) {
-            mutex_unlock(&ldev->lock);
-            return -EINVAL;
+            ret = -ENOENT;
+            goto err_unlock;
         }
 
-        vaddr_t user_va = 0;
-        int ret = mm_map_user_pages(p->mm, (size_t)buf->size,
-                                    VM_READ | VM_WRITE, VM_SHARED,
-                                    buf->pages, buf->page_count, &user_va);
-        if (ret < 0) {
-            mutex_unlock(&ldev->lock);
-            return ret;
+        struct process *p = proc_current();
+        if (!p || !p->mm) {
+            ret = -EINVAL;
+            goto err_unlock;
         }
-        buf->mapped = true;
+
+        ret = mm_map_user_pages(p->mm, (size_t)buf->size,
+                                VM_READ | VM_WRITE, VM_SHARED,
+                                buf->pages, buf->page_count, &user_va);
+        if (ret < 0) {
+            goto err_unlock;
+        }
+
+        ret = drm_lite_buffer_add_mapping(buf, p->pid, user_va, p->mm);
+        if (ret < 0) {
+            goto err_unmap;
+        }
+
         mutex_unlock(&ldev->lock);
 
         req.user_va = (uint64_t)user_va;
         if (copy_to_user((void *)arg, &req, sizeof(req)) < 0) {
-            mm_munmap(p->mm, user_va, (size_t)buf->size);
-            mutex_lock(&ldev->lock);
-            buf->mapped = false;
-            mutex_unlock(&ldev->lock);
+            drm_lite_buffer_remove_mapping(buf, p->pid);
             return -EFAULT;
         }
         return 0;
+
+    err_unmap:
+        mm_munmap(p->mm, user_va, (size_t)buf->size);
+    err_unlock:
+        mutex_unlock(&ldev->lock);
+        return ret;
     }
     case DRM_LITE_IOC_PRESENT: {
-        if (!arg)
+        if (!arg) {
             return -EFAULT;
+        }
         struct drm_lite_present req;
-        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0)
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
             return -EFAULT;
+        }
+
         mutex_lock(&ldev->lock);
         struct drm_lite_buffer *buf = drm_lite_find_buffer(ldev, req.handle);
         if (!buf) {
             mutex_unlock(&ldev->lock);
             return -ENOENT;
         }
+
         int ret = drm_lite_present(ldev, buf);
         mutex_unlock(&ldev->lock);
         return ret;
     }
     case DRM_LITE_IOC_DESTROY_BUFFER: {
-        if (!arg)
+        if (!arg) {
             return -EFAULT;
+        }
         struct drm_lite_destroy req;
-        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0)
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
             return -EFAULT;
+        }
 
         struct drm_lite_buffer *buf = NULL;
         mutex_lock(&ldev->lock);
         buf = drm_lite_find_buffer(ldev, req.handle);
-        if (buf)
+        if (buf) {
             list_del(&buf->list);
-        if (buf)
             ldev->buffer_count--;
+        }
         mutex_unlock(&ldev->lock);
-        if (!buf)
-            return -ENOENT;
 
-        for (size_t i = 0; i < buf->page_count; i++)
-            pmm_put_page(buf->pages[i]);
-        kfree(buf->pages);
-        kfree(buf);
+        if (!buf) {
+            return -ENOENT;
+        }
+
+        drm_lite_buffer_put(buf);  // 减少引用计数，可能触发销毁
         return 0;
     }
     default:
@@ -284,6 +418,23 @@ static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
 static struct file_ops drm_lite_ops = {
     .ioctl = drm_lite_ioctl,
 };
+
+// 进程退出清理回调
+static void drm_lite_exit_callback(struct process *p)
+{
+    struct drm_lite_device *ldev = global_drm_device;
+
+    if (!ldev) {
+        return;
+    }
+
+    struct drm_lite_buffer *buf;
+    mutex_lock(&ldev->lock);
+    list_for_each_entry(buf, &ldev->buffers, list) {
+        drm_lite_buffer_remove_mapping(buf, p->pid);
+    }
+    mutex_unlock(&ldev->lock);
+}
 
 static int drm_lite_probe(struct device *dev) {
     if (!dev || !dev->platform_data)
@@ -311,6 +462,18 @@ static int drm_lite_probe(struct device *dev) {
     INIT_LIST_HEAD(&ldev->buffers);
 
     dev_set_drvdata(dev, ldev);
+
+    // 保存全局设备指针
+    if (!global_drm_device) {
+        global_drm_device = ldev;
+    }
+
+    // 注册进程退出回调（只注册一次）
+    static bool callback_registered = false;
+    if (!callback_registered) {
+        proc_register_exit_callback(drm_lite_exit_callback);
+        callback_registered = true;
+    }
 
     char path[64];
     snprintf(path, sizeof(path), "/dev/fb%u", ldev->card_id);
