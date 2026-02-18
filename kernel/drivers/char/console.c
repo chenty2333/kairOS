@@ -19,7 +19,7 @@
 #define CONSOLE_BUF_SIZE 128
 
 struct console_state {
-    spinlock_t lock;
+    spinlock_irq_t lock;
     struct ringbuf in_rb;
     char in_storage[CONSOLE_BUF_SIZE];
     char canon_buf[CONSOLE_BUF_SIZE];
@@ -30,7 +30,7 @@ struct console_state {
 };
 
 static struct console_state console_state = {
-    .lock = SPINLOCK_INIT,
+    .lock = {.lock = SPINLOCK_INIT},
     .winsize = {.ws_row = 24, .ws_col = 80},
     .termios = {
     .c_iflag = ICRNL,
@@ -60,11 +60,12 @@ static void console_state_init_once(void) {
 
 void console_attach_vnode(struct vnode *vn) {
     console_state_init_once();
-    spin_lock(&console_state.lock);
+    spin_lock_irqsave(&console_state.lock);
     console_state.vnode = vn;
-    spin_unlock(&console_state.lock);
+    spin_unlock_irqrestore(&console_state.lock);
 }
 
+/* Echo helper — called under lock.  Safe with IRQs off: SBI ecall holds no kernel locks. */
 static void console_echo_char(char c) {
     if (!(console_state.termios.c_lflag & ECHO))
         return;
@@ -88,7 +89,12 @@ static void console_flush_input(void) {
     console_state.canon_len = 0;
 }
 
-static void console_handle_input_char(char c, bool *pushed) {
+/*
+ * Process one input character under console_state.lock (irqsave).
+ * Signal delivery is deferred via *sig_out to keep proc locks out of
+ * the critical section.  *pushed is set when data enters the ringbuf.
+ */
+static void console_handle_input_char(char c, bool *pushed, int *sig_out) {
     if (console_state.termios.c_iflag & ICRNL) {
         if (c == '\r')
             c = '\n';
@@ -100,8 +106,7 @@ static void console_handle_input_char(char c, bool *pushed) {
             return;
     }
 
-    /* ISIG is independent of ICANON — signal chars are handled in both
-     * canonical and raw modes when ISIG is set. */
+    /* ISIG is independent of ICANON (POSIX). */
     if (console_state.termios.c_lflag & ISIG) {
         char intr = console_state.termios.c_cc[VINTR]
                         ? (char)console_state.termios.c_cc[VINTR]
@@ -117,9 +122,7 @@ static void console_handle_input_char(char c, bool *pushed) {
                 arch_early_putchar(c == intr ? 'C' : '\\');
                 console_echo_char('\n');
             }
-            struct process *p = proc_current();
-            if (p)
-                signal_send(p->pid, c == intr ? SIGINT : SIGQUIT);
+            *sig_out = (c == intr) ? SIGINT : SIGQUIT;
             return;
         }
     }
@@ -170,25 +173,31 @@ static void console_handle_input_char(char c, bool *pushed) {
         return;
     }
 
+    /* Raw mode */
     ringbuf_push(&console_state.in_rb, c, true);
     console_echo_char(c);
     if (pushed)
         *pushed = true;
 }
 
+/* Poll UART for one char; signal_send/vfs_poll_wake deferred outside lock. */
 static bool console_try_fill(void) {
     console_state_init_once();
     int ch = arch_early_getchar_nb();
     if (ch < 0)
         return false;
-    bool was_empty;
     bool pushed = false;
-    spin_lock(&console_state.lock);
-    was_empty = ringbuf_empty(&console_state.in_rb);
-    console_handle_input_char((char)ch, &pushed);
+    int sig = 0;
+    spin_lock_irqsave(&console_state.lock);
+    console_handle_input_char((char)ch, &pushed, &sig);
     struct vnode *vn = console_state.vnode;
-    spin_unlock(&console_state.lock);
-    if (pushed && was_empty && vn)
+    spin_unlock_irqrestore(&console_state.lock);
+    if (sig) {
+        struct process *p = proc_current();
+        if (p)
+            signal_send(p->pid, sig);
+    }
+    if (pushed && vn)
         vfs_poll_wake(vn, POLLIN);
     return true;
 }
@@ -211,13 +220,13 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
     console_state_init_once();
     char ch;
     for (;;) {
-        spin_lock(&console_state.lock);
+        spin_lock_irqsave(&console_state.lock);
         if (ringbuf_pop(&console_state.in_rb, &ch)) {
-            spin_unlock(&console_state.lock);
+            spin_unlock_irqrestore(&console_state.lock);
             ((char *)buf)[0] = ch;
             return 1;
         }
-        spin_unlock(&console_state.lock);
+        spin_unlock_irqrestore(&console_state.lock);
 
         if (console_try_fill())
             continue;
@@ -230,13 +239,11 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
         INIT_LIST_HEAD(&waiter.entry.node);
         waiter.entry.proc = p;
         poll_wait_add(&vn->pollers, &waiter);
-        /* Re-check ringbuf after registering waiter to close the race
-         * where a timer IRQ pushes data between our empty check above
-         * and the waiter registration — that wake would be lost. */
+        /* Re-check after registering waiter to avoid lost wakeup. */
         console_try_fill();
-        spin_lock(&console_state.lock);
+        spin_lock_irqsave(&console_state.lock);
         bool has_data = !ringbuf_empty(&console_state.in_rb);
-        spin_unlock(&console_state.lock);
+        spin_unlock_irqrestore(&console_state.lock);
         if (has_data) {
             poll_wait_remove(&waiter);
             continue;
@@ -288,7 +295,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
             return -EFAULT;
         bool wake = false;
-        spin_lock(&console_state.lock);
+        spin_lock_irqsave(&console_state.lock);
         bool was_empty = ringbuf_empty(&console_state.in_rb);
         if ((console_state.termios.c_lflag & ICANON) &&
             !(t.c_lflag & ICANON) && console_state.canon_len > 0) {
@@ -301,7 +308,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         }
         console_state.termios = t;
         struct vnode *wake_vn = console_state.vnode;
-        spin_unlock(&console_state.lock);
+        spin_unlock_irqrestore(&console_state.lock);
         if (wake && wake_vn)
             vfs_poll_wake(wake_vn, POLLIN);
         return 0;
@@ -347,9 +354,9 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if (!arg)
             return -EFAULT;
         int avail = 0;
-        spin_lock(&console_state.lock);
+        spin_lock_irqsave(&console_state.lock);
         avail = (int)ringbuf_len(&console_state.in_rb);
-        spin_unlock(&console_state.lock);
+        spin_unlock_irqrestore(&console_state.lock);
         if (copy_to_user((void *)arg, &avail, sizeof(avail)) < 0)
             return -EFAULT;
         return 0;
@@ -366,13 +373,13 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         return 0;
     }
     case TCFLSH: {
-        spin_lock(&console_state.lock);
+        spin_lock_irqsave(&console_state.lock);
         if (arg == 0 || arg == 2) {
             /* Flush input */
             console_flush_input();
         }
         /* arg == 1 or 2: flush output (no output buffer to flush) */
-        spin_unlock(&console_state.lock);
+        spin_unlock_irqrestore(&console_state.lock);
         return 0;
     }
     case TCSBRK:
@@ -390,10 +397,10 @@ int console_poll(struct vnode *vn, uint32_t events) {
     uint32_t revents = 0;
     console_state_init_once();
     console_try_fill();
-    spin_lock(&console_state.lock);
+    spin_lock_irqsave(&console_state.lock);
     if (!ringbuf_empty(&console_state.in_rb))
         revents |= POLLIN;
-    spin_unlock(&console_state.lock);
+    spin_unlock_irqrestore(&console_state.lock);
     revents |= POLLOUT;
     return (int)(revents & events);
 }
