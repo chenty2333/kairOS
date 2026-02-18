@@ -128,10 +128,10 @@ static void tmpfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->ops = ops;
     vn->fs_data = tn;
     vn->mount = mnt;
-    vn->refcount = 1;
+    atomic_init(&vn->refcount, 1);
     vn->parent = NULL;
     vn->name[0] = '\0';
-    mutex_init(&vn->lock, "tmpfs_vn");
+    rwlock_init(&vn->lock, "tmpfs_vn");
     poll_wait_head_init(&vn->pollers);
 }
 
@@ -187,7 +187,6 @@ static struct tmpfs_node *tmpfs_alloc_node(struct tmpfs_mount *tm,
     if (parent) {
         list_add_tail(&tn->sibling, &parent->children);
         vnode_set_parent(&tn->vn, &parent->vn, tn->name);
-        parent->vn.nlink++;
     }
     return tn;
 }
@@ -224,8 +223,6 @@ static void tmpfs_free_node(struct tmpfs_mount *tm, struct tmpfs_node *tn) {
 }
 
 static void tmpfs_remove_child(struct tmpfs_node *tn) {
-    if (tn->parent)
-        tn->parent->vn.nlink--;
     list_del(&tn->sibling);
 }
 
@@ -240,11 +237,8 @@ static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off) {
     if (off < 0)
         return -EINVAL;
 
-    mutex_lock(&vn->lock);
-    if ((size_t)off >= tn->size) {
-        mutex_unlock(&vn->lock);
+    if ((size_t)off >= tn->size)
         return 0;
-    }
 
     size_t avail = tn->size - (size_t)off;
     if (len > avail)
@@ -268,8 +262,9 @@ static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off) {
         done += chunk;
     }
 
-    vn->atime = tmpfs_now();
-    mutex_unlock(&vn->lock);
+    /* Relaxed store: called under read_lock, concurrent readers may race
+       on atime but the value is always a valid timestamp. */
+    __atomic_store_n(&vn->atime, tmpfs_now(), __ATOMIC_RELAXED);
     return (ssize_t)done;
 }
 
@@ -300,16 +295,12 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
     if (off < 0)
         return -EINVAL;
 
-    mutex_lock(&vn->lock);
-
     size_t end = (size_t)off + len;
     size_t need_pages = (end + CONFIG_PAGE_SIZE - 1) / CONFIG_PAGE_SIZE;
 
     int ret = tmpfs_ensure_pages(tn, need_pages);
-    if (ret < 0) {
-        mutex_unlock(&vn->lock);
+    if (ret < 0)
         return ret;
-    }
 
     size_t done = 0;
     ret = 0;
@@ -350,7 +341,6 @@ out:
     }
     if (done > 0)
         vn->mtime = vn->ctime = tmpfs_now();
-    mutex_unlock(&vn->lock);
     if (done > 0)
         return (ssize_t)done;
     /* done == 0, return the error */
@@ -364,8 +354,6 @@ static int tmpfs_truncate(struct vnode *vn, off_t length) {
         return -EINVAL;
     if (length < 0)
         return -EINVAL;
-
-    mutex_lock(&vn->lock);
 
     size_t new_size = (size_t)length;
     size_t old_size = tn->size;
@@ -395,7 +383,6 @@ static int tmpfs_truncate(struct vnode *vn, off_t length) {
     tn->size = new_size;
     vn->size = new_size;
     vn->mtime = vn->ctime = tmpfs_now();
-    mutex_unlock(&vn->lock);
     return 0;
 }
 
@@ -403,7 +390,6 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st) {
     struct tmpfs_node *tn = vn->fs_data;
     if (!tn)
         return -EINVAL;
-    mutex_lock(&vn->lock);
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
     st->st_mode = vn->mode;
@@ -417,7 +403,6 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st) {
     st->st_atime = vn->atime;
     st->st_mtime = vn->mtime;
     st->st_ctime = vn->ctime;
-    mutex_unlock(&vn->lock);
     return 0;
 }
 
@@ -534,6 +519,11 @@ static int tmpfs_create(struct vnode *dir, const char *name, mode_t mode) {
     struct tmpfs_node *tn = tmpfs_alloc_node(tm, dir->mount, d, name,
                                              VNODE_FILE, fmode);
     spin_unlock(&tm->lock);
+    if (tn) {
+        rwlock_write_lock(&dir->lock);
+        dir->nlink++;
+        rwlock_write_unlock(&dir->lock);
+    }
     return tn ? 0 : -ENOMEM;
 }
 
@@ -553,6 +543,11 @@ static int tmpfs_mkdir_op(struct vnode *dir, const char *name, mode_t mode) {
     struct tmpfs_node *tn = tmpfs_alloc_node(tm, dir->mount, d, name,
                                              VNODE_DIR, dmode);
     spin_unlock(&tm->lock);
+    if (tn) {
+        rwlock_write_lock(&dir->lock);
+        dir->nlink++;
+        rwlock_write_unlock(&dir->lock);
+    }
     return tn ? 0 : -ENOMEM;
 }
 
@@ -587,6 +582,9 @@ static int tmpfs_symlink_op(struct vnode *dir, const char *name,
     tn->size = tlen;
     tn->vn.size = tlen;
     spin_unlock(&tm->lock);
+    rwlock_write_lock(&dir->lock);
+    dir->nlink++;
+    rwlock_write_unlock(&dir->lock);
     return 0;
 }
 
@@ -610,6 +608,9 @@ static int tmpfs_mknod_op(struct vnode *dir, const char *name, mode_t mode,
     }
     tn->vn.rdev = dev;
     spin_unlock(&tm->lock);
+    rwlock_write_lock(&dir->lock);
+    dir->nlink++;
+    rwlock_write_unlock(&dir->lock);
     return 0;
 }
 
@@ -633,6 +634,9 @@ static int tmpfs_unlink_op(struct vnode *dir, const char *name) {
     tmpfs_free_node(tm, child);
     d->vn.mtime = d->vn.ctime = tmpfs_now();
     spin_unlock(&tm->lock);
+    rwlock_write_lock(&dir->lock);
+    dir->nlink--;
+    rwlock_write_unlock(&dir->lock);
     return 0;
 }
 
@@ -660,6 +664,9 @@ static int tmpfs_rmdir_op(struct vnode *dir, const char *name) {
     tmpfs_free_node(tm, child);
     d->vn.mtime = d->vn.ctime = tmpfs_now();
     spin_unlock(&tm->lock);
+    rwlock_write_lock(&dir->lock);
+    dir->nlink--;
+    rwlock_write_unlock(&dir->lock);
     return 0;
 }
 
@@ -689,11 +696,14 @@ static int tmpfs_rename_op(struct vnode *odir, const char *oname,
     }
 
     /* Move src from old parent to new parent */
+    int odir_delta = 0, ndir_delta = 0;
+    if (dst)
+        ndir_delta--;       /* dst removed from nd */
+    odir_delta--;           /* src leaves old parent */
+    ndir_delta++;           /* src joins new parent */
+
     list_del(&src->sibling);
-    if (src->parent)
-        src->parent->vn.nlink--;
     src->parent = nd;
-    nd->vn.nlink++;
     list_add_tail(&src->sibling, &nd->children);
     strncpy(src->name, nname, CONFIG_NAME_MAX - 1);
     src->name[CONFIG_NAME_MAX - 1] = '\0';
@@ -704,6 +714,27 @@ static int tmpfs_rename_op(struct vnode *odir, const char *oname,
     nd->vn.mtime = nd->vn.ctime = now;
     src->vn.ctime = now;
     spin_unlock(&tm->lock);
+
+    /* Update nlink outside spinlock */
+    if (odir == ndir) {
+        int total = odir_delta + ndir_delta;
+        if (total) {
+            rwlock_write_lock(&odir->lock);
+            odir->nlink += total;
+            rwlock_write_unlock(&odir->lock);
+        }
+    } else {
+        if (odir_delta) {
+            rwlock_write_lock(&odir->lock);
+            odir->nlink += odir_delta;
+            rwlock_write_unlock(&odir->lock);
+        }
+        if (ndir_delta) {
+            rwlock_write_lock(&ndir->lock);
+            ndir->nlink += ndir_delta;
+            rwlock_write_unlock(&ndir->lock);
+        }
+    }
     return 0;
 }
 

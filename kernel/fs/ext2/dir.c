@@ -8,6 +8,13 @@
 
 #include "ext2_internal.h"
 
+static inline void ext2_sync_nlink(struct vnode *vn,
+                                   struct ext2_inode_data *id) {
+    rwlock_write_lock(&vn->lock);
+    vn->nlink = id->inode.i_links_count;
+    rwlock_write_unlock(&vn->lock);
+}
+
 struct vnode *ext2_lookup(struct vnode *dir, const char *name) {
     struct ext2_inode_data *id = dir->fs_data;
     off_t off = 0;
@@ -105,6 +112,7 @@ int ext2_create(struct vnode *dir, const char *name, mode_t mode) {
         return -EIO;
     did->inode.i_links_count++;
     ext2_write_inode(did->mnt, did->ino, &did->inode);
+    ext2_sync_nlink(dir, did);
     return 0;
 }
 
@@ -135,6 +143,7 @@ int ext2_symlink(struct vnode *dir, const char *name, const char *target) {
 
     did->inode.i_links_count++;
     ext2_write_inode(did->mnt, did->ino, &did->inode);
+    ext2_sync_nlink(dir, did);
     return 0;
 }
 
@@ -176,6 +185,7 @@ int ext2_mkdir(struct vnode *dir, const char *name, mode_t mode) {
     ext2_add_dirent(did->mnt, did->ino, name, nino, EXT2_FT_DIR);
     did->inode.i_links_count++;
     ext2_write_inode(did->mnt, did->ino, &did->inode);
+    ext2_sync_nlink(dir, did);
     return 0;
 }
 
@@ -208,6 +218,7 @@ int ext2_mknod(struct vnode *dir, const char *name, mode_t mode, dev_t dev) {
     }
     did->inode.i_links_count++;
     ext2_write_inode(did->mnt, did->ino, &did->inode);
+    ext2_sync_nlink(dir, did);
     return 0;
 }
 
@@ -228,8 +239,10 @@ int ext2_link(struct vnode *dir, const char *name, struct vnode *target) {
     if (ret < 0) {
         return ret;
     }
+    rwlock_write_lock(&target->lock);
     tid->inode.i_links_count++;
     ext2_write_inode(did->mnt, tid->ino, &tid->inode);
+    rwlock_write_unlock(&target->lock);
     return 0;
 }
 
@@ -408,28 +421,36 @@ int ext2_rmdir(struct vnode *dir, const char *name) {
         return -EINVAL;
     }
 
+    /* Hold dir write_lock across empty-check and remove to close TOCTOU */
+    rwlock_write_lock(&dir->lock);
+
     struct vnode *target = ext2_lookup(dir, name);
     if (!target) {
+        rwlock_write_unlock(&dir->lock);
         return -ENOENT;
     }
     struct ext2_inode_data *tid = target->fs_data;
     if ((tid->inode.i_mode & 0xF000) != EXT2_S_IFDIR) {
         vnode_put(target);
+        rwlock_write_unlock(&dir->lock);
         return -ENOTDIR;
     }
     if (!ext2_dir_is_empty(tid->mnt, tid->ino)) {
         vnode_put(target);
+        rwlock_write_unlock(&dir->lock);
         return -ENOTEMPTY;
     }
     vnode_put(target);
 
     int64_t victim_ino = ext2_remove_dirent(did->mnt, did->ino, name);
     if (victim_ino < 0) {
+        rwlock_write_unlock(&dir->lock);
         return (int)victim_ino;
     }
 
     struct ext2_inode vi;
     if (ext2_read_inode(did->mnt, (ino_t)victim_ino, &vi) < 0) {
+        rwlock_write_unlock(&dir->lock);
         return -EIO;
     }
     vi.i_links_count = 0;
@@ -439,11 +460,10 @@ int ext2_rmdir(struct vnode *dir, const char *name) {
     if (did->inode.i_links_count > 0) {
         did->inode.i_links_count--;
         ext2_write_inode(did->mnt, did->ino, &did->inode);
-        rwlock_write_lock(&dir->lock);
         dir->nlink = did->inode.i_links_count;
-        rwlock_write_unlock(&dir->lock);
     }
 
+    rwlock_write_unlock(&dir->lock);
     return 0;
 }
 
@@ -552,15 +572,11 @@ int ext2_rename(struct vnode *odir, const char *oname,
         if (odid->inode.i_links_count > 0) {
             odid->inode.i_links_count--;
             ext2_write_inode(mnt, odid->ino, &odid->inode);
-            rwlock_write_lock(&odir->lock);
-            odir->nlink = odid->inode.i_links_count;
-            rwlock_write_unlock(&odir->lock);
+            ext2_sync_nlink(odir, odid);
         }
         ndid->inode.i_links_count++;
         ext2_write_inode(mnt, ndid->ino, &ndid->inode);
-        rwlock_write_lock(&ndir->lock);
-        ndir->nlink = ndid->inode.i_links_count;
-        rwlock_write_unlock(&ndir->lock);
+        ext2_sync_nlink(ndir, ndid);
     }
 
     return 0;

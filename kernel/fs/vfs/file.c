@@ -277,9 +277,12 @@ int vfs_stat(const char *path, struct stat *st) {
 int vfs_stat_vnode(struct vnode *vn, struct stat *st) {
     if (!vn)
         return -EINVAL;
-    if (vn->ops->stat)
-        return vn->ops->stat(vn, st);
     rwlock_read_lock(&vn->lock);
+    if (vn->ops->stat) {
+        int ret = vn->ops->stat(vn, st);
+        rwlock_read_unlock(&vn->lock);
+        return ret;
+    }
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
     st->st_mode = vn->mode;
