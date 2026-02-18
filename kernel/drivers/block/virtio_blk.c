@@ -45,6 +45,7 @@ struct virtio_blk_dev {
     struct wait_queue io_wait;
     struct blkdev blkdev;
     bool irq_seen;
+    bool wakeup_pending;
 };
 
 static void virtio_blk_handle_used(struct virtio_blk_dev *vb) {
@@ -54,9 +55,8 @@ static void virtio_blk_handle_used(struct virtio_blk_dev *vb) {
     while (vb->vq->last_used_idx != virtqueue_used_idx(vb->vq)) {
         struct virtio_blk_req_ctx *ctx = virtqueue_get_buf(vb->vq, NULL);
         if (ctx)
-            ctx->done = true;
+            __atomic_store_n(&ctx->done, true, __ATOMIC_RELEASE);
     }
-    wait_queue_wakeup_all(&vb->io_wait);
 }
 
 static void virtio_blk_intr(struct virtio_device *vdev) {
@@ -64,7 +64,11 @@ static void virtio_blk_intr(struct virtio_device *vdev) {
     if (!vb || !vb->vq)
         return;
     vb->irq_seen = true;
+    /* Process used ring and mark requests done, but don't call
+     * wait_queue_wakeup from IRQ context — it's not IRQ-safe.
+     * Instead, set a flag for the transfer polling path. */
     virtio_blk_handle_used(vb);
+    __atomic_store_n(&vb->wakeup_pending, true, __ATOMIC_RELEASE);
 }
 
 static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
@@ -76,41 +80,44 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
     if (lba + count > dev->sector_count)
         return -EINVAL;
 
-    struct virtio_blk_req_ctx ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.hdr.type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
-    ctx.hdr.reserved = 0;
-    ctx.hdr.sector = lba;
-    ctx.byte_len = count * dev->sector_size;
+    /* Heap-allocate ctx to avoid DMA from stack addresses */
+    struct virtio_blk_req_ctx *ctx = kzalloc(sizeof(*ctx));
+    if (!ctx)
+        return -ENOMEM;
+    ctx->hdr.type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    ctx->hdr.reserved = 0;
+    ctx->hdr.sector = lba;
+    ctx->byte_len = count * dev->sector_size;
 
     struct virtq_desc descs[3];
-    ctx.dma_hdr = dma_map_single(&ctx.hdr, sizeof(ctx.hdr), DMA_TO_DEVICE);
-    descs[0].addr = ctx.dma_hdr;
-    descs[0].len = sizeof(ctx.hdr);
+    ctx->dma_hdr = dma_map_single(&ctx->hdr, sizeof(ctx->hdr), DMA_TO_DEVICE);
+    descs[0].addr = ctx->dma_hdr;
+    descs[0].len = sizeof(ctx->hdr);
     descs[0].flags = VIRTQ_DESC_F_NEXT;
     descs[0].next = 0;
 
-    ctx.dma_buf = dma_map_single(buf, ctx.byte_len,
+    ctx->dma_buf = dma_map_single(buf, ctx->byte_len,
                                  write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-    descs[1].addr = ctx.dma_buf;
-    descs[1].len = (uint32_t)ctx.byte_len;
+    descs[1].addr = ctx->dma_buf;
+    descs[1].len = (uint32_t)ctx->byte_len;
     descs[1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
     descs[1].next = 0;
 
-    ctx.dma_status = dma_map_single(&ctx.status, 1, DMA_FROM_DEVICE);
-    descs[2].addr = ctx.dma_status;
+    ctx->dma_status = dma_map_single(&ctx->status, 1, DMA_FROM_DEVICE);
+    descs[2].addr = ctx->dma_status;
     descs[2].len = 1;
     descs[2].flags = VIRTQ_DESC_F_WRITE;
     descs[2].next = 0;
 
     mutex_lock(&vb->lock);
-    int ret = virtqueue_add_buf(vb->vq, descs, 3, &ctx);
+    int ret = virtqueue_add_buf(vb->vq, descs, 3, ctx);
     if (ret < 0) {
         mutex_unlock(&vb->lock);
-        dma_unmap_single(ctx.dma_hdr, sizeof(ctx.hdr), DMA_TO_DEVICE);
-        dma_unmap_single(ctx.dma_buf, ctx.byte_len,
+        dma_unmap_single(ctx->dma_hdr, sizeof(ctx->hdr), DMA_TO_DEVICE);
+        dma_unmap_single(ctx->dma_buf, ctx->byte_len,
                          write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-        dma_unmap_single(ctx.dma_status, 1, DMA_FROM_DEVICE);
+        dma_unmap_single(ctx->dma_status, 1, DMA_FROM_DEVICE);
+        kfree(ctx);
         return ret;
     }
     virtqueue_kick(vb->vq);
@@ -120,15 +127,19 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
                      curr && curr != arch_get_percpu()->idle_proc &&
                      vb->irq_seen;
     if (!can_sleep) {
-        while (!ctx.done) {
+        while (!__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE)) {
             virtio_blk_handle_used(vb);
             arch_cpu_relax();
         }
     } else {
-        while (!ctx.done) {
+        while (!__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE)) {
+            /* Check if IRQ handler flagged a wakeup */
+            if (__atomic_exchange_n(&vb->wakeup_pending, false, __ATOMIC_ACQ_REL)) {
+                wait_queue_wakeup_all(&vb->io_wait);
+            }
             int rc = proc_sleep_on_mutex(&vb->io_wait, &vb->io_wait,
                                          &vb->lock, true);
-            if (rc == -EINTR && !ctx.done) {
+            if (rc == -EINTR && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE)) {
                 continue;
             }
         }
@@ -136,12 +147,14 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
 
     mutex_unlock(&vb->lock);
 
-    dma_unmap_single(ctx.dma_hdr, sizeof(ctx.hdr), DMA_TO_DEVICE);
-    dma_unmap_single(ctx.dma_buf, ctx.byte_len,
+    dma_unmap_single(ctx->dma_hdr, sizeof(ctx->hdr), DMA_TO_DEVICE);
+    dma_unmap_single(ctx->dma_buf, ctx->byte_len,
                      write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-    dma_unmap_single(ctx.dma_status, 1, DMA_FROM_DEVICE);
+    dma_unmap_single(ctx->dma_status, 1, DMA_FROM_DEVICE);
 
-    return (ctx.status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
+    int status = (ctx->status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
+    kfree(ctx);
+    return status;
 }
 
 static int virtio_blk_read(struct blkdev *dev, uint64_t lba, void *buf,

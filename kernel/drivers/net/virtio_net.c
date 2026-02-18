@@ -60,6 +60,8 @@ struct virtio_net_dev {
     struct virtio_net_cookie tx_cookie[VIRTQ_SIZE];
     struct virtio_net_cookie rx_cookie[VIRTQ_SIZE];
     struct netdev netdev;
+    bool tx_wakeup_pending;
+    bool rx_wakeup_pending;
 };
 
 static int virtio_net_post_rx(struct virtio_net_dev *vn, uint16_t idx) {
@@ -89,7 +91,7 @@ static void virtio_net_intr(struct virtio_device *vdev) {
     if (!vn)
         return;
 
-    /* TX completion */
+    /* TX completion — process used ring but don't call wakeup from IRQ */
     while (vn->tx_vq->last_used_idx != virtqueue_used_idx(vn->tx_vq)) {
         struct virtio_net_cookie *cookie = virtqueue_get_buf(vn->tx_vq, NULL);
         if (cookie && cookie->type == 0 && cookie->idx < VIRTQ_SIZE) {
@@ -100,7 +102,7 @@ static void virtio_net_intr(struct virtio_device *vdev) {
                 slot->in_use = false;
             }
         }
-        wait_queue_wakeup_all(&vn->tx_wait);
+        __atomic_store_n(&vn->tx_wakeup_pending, true, __ATOMIC_RELEASE);
     }
 
     /* RX completion */
@@ -116,7 +118,7 @@ static void virtio_net_intr(struct virtio_device *vdev) {
             }
             virtio_net_post_rx(vn, cookie->idx);
         }
-        wait_queue_wakeup_all(&vn->rx_wait);
+        __atomic_store_n(&vn->rx_wakeup_pending, true, __ATOMIC_RELEASE);
     }
 }
 
@@ -143,6 +145,10 @@ static int virtio_net_xmit(struct netdev *dev, const void *data, size_t len) {
         if (!curr) {
             mutex_unlock(&vn->lock);
             return -EAGAIN;
+        }
+        /* Drain deferred wakeup from IRQ handler before sleeping */
+        if (__atomic_exchange_n(&vn->tx_wakeup_pending, false, __ATOMIC_ACQ_REL)) {
+            wait_queue_wakeup_all(&vn->tx_wait);
         }
         int rc = proc_sleep_on_mutex(&vn->tx_wait, &vn->tx_wait,
                                      &vn->lock, true);
