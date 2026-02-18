@@ -31,6 +31,7 @@ void proc_init(void) {
         wait_queue_entry_init(&proc_table[i].wait_entry, &proc_table[i]);
         wait_queue_init(&proc_table[i].exit_wait);
         completion_init(&proc_table[i].vfork_completion);
+        complete_all(&proc_table[i].vfork_completion);
         spin_init(&proc_table[i].lock);
     }
     pr_info("Process: initialized\n");
@@ -147,6 +148,7 @@ struct process *proc_alloc(void) {
     wait_queue_entry_init(&p->wait_entry, p);
     wait_queue_init(&p->exit_wait);
     completion_init(&p->vfork_completion);
+    complete_all(&p->vfork_completion);
     spin_init(&p->lock);
 
     p->tgid = p->pid;
@@ -161,7 +163,6 @@ struct process *proc_alloc(void) {
     signal_init_process(p);
     p->start_time = arch_timer_ticks();
     p->vfork_parent = NULL;
-    /* completion starts "done" — only reinit when CLONE_VFORK is used */
     return p;
 }
 

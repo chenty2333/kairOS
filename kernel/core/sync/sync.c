@@ -313,6 +313,7 @@ void rwlock_read_lock(struct rwlock *rw) {
 }
 
 int rwlock_read_lock_interruptible(struct rwlock *rw) {
+    SLEEP_LOCK_DEBUG_CHECK();
     struct process *curr = proc_current();
 
     if (!curr) {
@@ -399,6 +400,7 @@ void rwlock_write_lock(struct rwlock *rw) {
 }
 
 int rwlock_write_lock_interruptible(struct rwlock *rw) {
+    SLEEP_LOCK_DEBUG_CHECK();
     struct process *curr = proc_current();
 
     if (curr && rw->writer == curr) {
