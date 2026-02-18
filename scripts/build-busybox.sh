@@ -13,19 +13,21 @@ if [[ -z "$ARCH" ]]; then
 fi
 
 QUIET="${QUIET:-0}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/common.sh"
 
-BUSYBOX_SRC="${BUSYBOX_SRC:-third_party/busybox}"
-OUT_DIR="${OUT_DIR:-build/${ARCH}/busybox}"
-DEFCONFIG="${DEFCONFIG:-tools/busybox/kairos_defconfig}"
-SYSROOT="${SYSROOT:-build/${ARCH}/sysroot}"
+BUSYBOX_SRC="${BUSYBOX_SRC:-$ROOT_DIR/third_party/busybox}"
+OUT_DIR="${OUT_DIR:-$ROOT_DIR/build/${ARCH}/busybox}"
+DEFCONFIG="${DEFCONFIG:-$ROOT_DIR/tools/busybox/kairos_defconfig}"
+SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
+USE_GCC="${USE_GCC:-0}"
 
-case "$ARCH" in
-  riscv64) TARGET="riscv64-linux-musl"; ARCH_CFLAGS="-march=rv64gc -mabi=lp64";;
-  x86_64) TARGET="x86_64-linux-musl";;
-  aarch64) TARGET="aarch64-linux-musl";;
-  *) echo "Unsupported ARCH: $ARCH" >&2; exit 1;;
-esac
+TARGET="$(kairos_arch_to_musl_target "$ARCH")" || {
+  echo "Unsupported ARCH: $ARCH" >&2
+  exit 1
+}
+ARCH_CFLAGS="$(kairos_arch_cflags "$ARCH")"
 
 # Ignore any CROSS_COMPILE/CFLAGS/LDFLAGS from the environment (e.g. from
 # the kernel Makefile) — we determine the correct toolchain ourselves.
@@ -35,8 +37,11 @@ CC=""
 AR=""
 RANLIB=""
 STRIP=""
-CFLAGS="${ARCH_CFLAGS:-}"
-LDFLAGS="${ARCH_CFLAGS:-}"
+BASE_CFLAGS="${ARCH_CFLAGS:-}"
+BASE_LDFLAGS="${ARCH_CFLAGS:-}"
+CFLAGS="${BASE_CFLAGS}"
+LDFLAGS="${BASE_LDFLAGS}"
+GNU_CROSS="${TARGET/-musl/-gnu}-"
 
 BUSYBOX_SRC="$(realpath -m "$BUSYBOX_SRC")"
 OUT_DIR="$(realpath -m "$OUT_DIR")"
@@ -56,7 +61,6 @@ fi
 # Create libgcc.a / libgcc_eh.a compatibility symlinks for BusyBox.
 # BusyBox's build system hardcodes -lgcc -lgcc_eh; when using clang +
 # compiler-rt we satisfy those with symlinks to the builtins library.
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
 _builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' 2>/dev/null | head -n1)"
 if [[ -n "$_builtins" ]]; then
@@ -67,41 +71,83 @@ if [[ -n "$_builtins" ]]; then
   fi
 fi
 
-if command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
-  CC="${CROSS_COMPILE}gcc"
-  AR="${CROSS_COMPILE}ar"
-  RANLIB="${CROSS_COMPILE}ranlib"
-  STRIP="${CROSS_COMPILE}strip"
-  CFLAGS="--sysroot=${SYSROOT} -isystem ${SYSROOT}/include ${CFLAGS}"
-  LDFLAGS="--sysroot=${SYSROOT} -L${SYSROOT}/lib ${LDFLAGS}"
-else
-  GNU_CROSS="${TARGET/-musl/-gnu}-"
-  if command -v "${GNU_CROSS}gcc" >/dev/null 2>&1; then
-    CROSS_COMPILE="${GNU_CROSS}"
-    CC="${CROSS_COMPILE}gcc"
-    AR="${CROSS_COMPILE}ar"
-    RANLIB="${CROSS_COMPILE}ranlib"
-    STRIP="${CROSS_COMPILE}strip"
-    CFLAGS="--sysroot=${SYSROOT} -isystem ${SYSROOT}/include ${CFLAGS}"
-    LDFLAGS="--sysroot=${SYSROOT} -L${SYSROOT}/lib ${LDFLAGS}"
-  else
+select_clang() {
   if ! command -v clang >/dev/null 2>&1; then
-    echo "Toolchain not found: ${CROSS_COMPILE}gcc or clang" >&2
-    exit 1
+    return 1
   fi
   for tool in llvm-ar llvm-ranlib llvm-strip; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "Toolchain not found: $tool" >&2
-      exit 1
+      return 1
     fi
   done
-  CC="clang --target=${TARGET} --sysroot=${SYSROOT} -fuse-ld=lld"
+  CC="clang --target=${TARGET} --sysroot=${SYSROOT}"
   AR="llvm-ar"
   RANLIB="llvm-ranlib"
   STRIP="llvm-strip"
-  CFLAGS="--target=${TARGET} --sysroot=${SYSROOT} -isystem ${SYSROOT}/include ${CFLAGS}"
-  LDFLAGS="--target=${TARGET} --sysroot=${SYSROOT} -fuse-ld=lld -L${SYSROOT}/lib ${LDFLAGS}"
+  CFLAGS="--target=${TARGET} --sysroot=${SYSROOT} -isystem ${SYSROOT}/include ${BASE_CFLAGS}"
+  LDFLAGS="--target=${TARGET} --sysroot=${SYSROOT} -fuse-ld=lld -L${SYSROOT}/lib ${BASE_LDFLAGS}"
   CROSS_COMPILE=""
+  return 0
+}
+
+select_gcc() {
+  local prefix="$1"
+  if ! command -v "${prefix}gcc" >/dev/null 2>&1; then
+    return 1
+  fi
+  CC="${prefix}gcc"
+  AR="${prefix}ar"
+  RANLIB="${prefix}ranlib"
+  STRIP="${prefix}strip"
+  CROSS_COMPILE="${prefix}"
+  CFLAGS="--sysroot=${SYSROOT} -isystem ${SYSROOT}/include ${BASE_CFLAGS}"
+  LDFLAGS="--sysroot=${SYSROOT} -L${SYSROOT}/lib ${BASE_LDFLAGS}"
+  return 0
+}
+
+clang_can_link_static() {
+  local src out
+  src="$(mktemp /tmp/kairos-busybox-link-XXXXXX.c)"
+  out="${src%.c}.bin"
+  cat > "$src" <<'EOF'
+int main(void) { return 0; }
+EOF
+  if clang --target="${TARGET}" --sysroot="${SYSROOT}" -fuse-ld=lld \
+      -isystem "${SYSROOT}/include" -L"${SYSROOT}/lib" ${ARCH_CFLAGS} \
+      -static "$src" -o "$out" >/dev/null 2>&1; then
+    rm -f "$src" "$out"
+    return 0
+  fi
+  rm -f "$src" "$out"
+  return 1
+}
+
+if [[ "$USE_GCC" == "1" ]]; then
+  if ! select_gcc "${TARGET}-"; then
+    if ! select_gcc "$GNU_CROSS"; then
+      if ! select_clang; then
+        echo "Toolchain not found: ${TARGET}-gcc, ${GNU_CROSS}gcc, or clang/llvm-* tools" >&2
+        exit 1
+      fi
+    fi
+  fi
+else
+  if ! select_clang; then
+    if ! select_gcc "${TARGET}-"; then
+      if ! select_gcc "$GNU_CROSS"; then
+        echo "Toolchain not found: clang/llvm-* tools, ${TARGET}-gcc, or ${GNU_CROSS}gcc" >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
+
+if [[ "$CC" == clang* ]] && ! clang_can_link_static; then
+  if select_gcc "${TARGET}-" || select_gcc "$GNU_CROSS"; then
+    [[ "$QUIET" != "1" ]] && echo "clang static link probe failed, falling back to GCC toolchain"
+  else
+    echo "clang cannot link static target binaries (missing crtbegin/crtend), and no GCC fallback was found" >&2
+    exit 1
   fi
 fi
 
@@ -116,6 +162,12 @@ if [[ "$QUIET" == "1" ]]; then
   _out=/dev/null
 else
   _out=/dev/stdout
+fi
+
+make_jobs=()
+if [[ "${MAKEFLAGS:-}" != *"--jobserver-auth="* ]] &&
+   [[ "${MAKEFLAGS:-}" != *"--jobserver-fds="* ]]; then
+  make_jobs=(-j"$JOBS")
 fi
 
 make -C "$BUSYBOX_SRC" mrproper >"$_out" 2>&1
@@ -154,7 +206,7 @@ set -o pipefail
 [[ "$QUIET" != "1" ]] && echo "Using CC=$CC CROSS_COMPILE=$CROSS_COMPILE"
 make -C "$BUSYBOX_SRC" O="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \
   CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
-  CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" -j"$JOBS" >"$_out" 2>&1
+  CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" "${make_jobs[@]}" >"$_out" 2>&1
 
 if [[ "$QUIET" == "1" ]]; then
   echo "  BBOX    $OUT_DIR/busybox"

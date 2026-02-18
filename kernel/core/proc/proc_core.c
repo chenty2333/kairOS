@@ -336,6 +336,19 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
         wait_queue_add(wq, p);
 
     proc_lock(p);
+    /*
+     * A wakeup can happen after wait_queue_add() but before we mark the task
+     * sleeping. In that case wait_queue_wakeup() already removed wait_entry.
+     */
+    if (wq && !p->wait_entry.active) {
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        proc_unlock(p);
+        if (interruptible && p->sig_pending)
+            return -EINTR;
+        return 0;
+    }
     p->wait_channel = channel;
     p->sleep_deadline = 0;
     p->state = PROC_SLEEPING;
@@ -370,6 +383,18 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
         wait_queue_add(wq, p);
 
     proc_lock(p);
+    /*
+     * Handle early wakeup racing between wait_queue_add() and sleep state set.
+     */
+    if (wq && !p->wait_entry.active) {
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        proc_unlock(p);
+        if (interruptible && p->sig_pending)
+            return -EINTR;
+        return 0;
+    }
     p->wait_channel = channel;
     p->sleep_deadline = 0;
     p->state = PROC_SLEEPING;
@@ -411,6 +436,18 @@ int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
         wait_queue_add(wq, p);
 
     proc_lock(p);
+    /*
+     * Handle early wakeup racing between wait_queue_add() and sleep state set.
+     */
+    if (wq && !p->wait_entry.active) {
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        proc_unlock(p);
+        if (interruptible && p->sig_pending)
+            return -EINTR;
+        return 0;
+    }
     p->wait_channel = channel;
     p->sleep_deadline = deadline;
     p->state = PROC_SLEEPING;

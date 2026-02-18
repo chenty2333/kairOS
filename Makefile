@@ -45,6 +45,13 @@ else
   QUIET_ENV :=
 endif
 
+KAIROS_CMD := ./scripts/kairos.sh --arch $(ARCH) --jobs $(NPROC)
+ifeq ($(V),0)
+  KAIROS_CMD += --quiet
+else
+  KAIROS_CMD += --verbose
+endif
+
 # Shared architecture sources
 COMMON_ARCH_SRCS := \
     kernel/arch/common/arch_common.c \
@@ -232,8 +239,9 @@ COMPILER_RT_STAMP := $(STAMP_DIR)/compiler-rt.stamp
 MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
+KAIROS_DEPS := scripts/kairos.sh $(wildcard scripts/modules/*.sh scripts/lib/*.sh)
 
-.PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools
+.PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -251,14 +259,14 @@ endif
 
 compiler-rt: $(COMPILER_RT_STAMP)
 
-$(COMPILER_RT_STAMP): scripts/build-compiler-rt.sh
+$(COMPILER_RT_STAMP): $(KAIROS_DEPS) scripts/build-compiler-rt.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/build-compiler-rt.sh $(ARCH)
+	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain compiler-rt
 	@touch $@
 
-$(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) scripts/build-musl.sh
+$(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) $(KAIROS_DEPS) scripts/build-musl.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ./scripts/build-musl.sh $(ARCH)
+	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain musl
 	@touch $@
 
 $(USER_INIT): $(MUSL_STAMP) user/init/main.c user/Makefile
@@ -269,51 +277,51 @@ initramfs: $(INITRAMFS_STAMP)
 $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
 	$(Q)$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
-$(INITRAMFS_STAMP): $(USER_INITRAMFS) scripts/make-initramfs.sh
+$(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS) scripts/make-initramfs.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-initramfs.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image initramfs
 	@touch $@
 
 busybox: $(BUSYBOX_STAMP)
 
-$(BUSYBOX_STAMP): $(MUSL_STAMP) tools/busybox/kairos_defconfig scripts/build-busybox.sh
+$(BUSYBOX_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS) tools/busybox/kairos_defconfig scripts/build-busybox.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ./scripts/build-busybox.sh $(ARCH)
+	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain busybox
 	@touch $@
 
 tcc: $(TCC_STAMP)
 
-$(TCC_STAMP): $(MUSL_STAMP) scripts/build-tcc.sh
+$(TCC_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS) scripts/build-tcc.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ./scripts/build-tcc.sh $(ARCH)
+	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain tcc
 	@touch $@
 
 rootfs-base: $(ROOTFS_BASE_STAMP)
 
-$(ROOTFS_BASE_STAMP): scripts/make-disk.sh
+$(ROOTFS_BASE_STAMP): $(KAIROS_DEPS) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=base ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image rootfs-base
 	@touch $@
 
 rootfs-busybox: $(ROOTFS_BUSYBOX_STAMP)
 
-$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) scripts/make-disk.sh
+$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) $(KAIROS_DEPS) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=busybox ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image rootfs-busybox
 	@touch $@
 
 rootfs-init: $(ROOTFS_INIT_STAMP)
 
-$(ROOTFS_INIT_STAMP): $(USER_INIT) scripts/make-disk.sh
+$(ROOTFS_INIT_STAMP): $(USER_INIT) $(KAIROS_DEPS) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=init ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image rootfs-init
 	@touch $@
 
 rootfs-tcc: $(ROOTFS_TCC_STAMP)
 
-$(ROOTFS_TCC_STAMP): $(TCC_STAMP) scripts/make-disk.sh
+$(ROOTFS_TCC_STAMP): $(TCC_STAMP) $(KAIROS_DEPS) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=tcc ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image rootfs-tcc
 	@touch $@
 
 rootfs: $(ROOTFS_STAMP)
@@ -322,7 +330,7 @@ $(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAM
 	@mkdir -p $(STAMP_DIR)
 	@# Stage TCC if it has been built (optional — not a hard dependency)
 	@if [ -x build/$(ARCH)/tcc/bin/tcc ]; then \
-		$(QUIET_ENV) ROOTFS_ONLY=1 ROOTFS_STAGE=tcc ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH); \
+		$(KAIROS_CMD) image rootfs-tcc; \
 	fi
 	@touch $@
 
@@ -338,12 +346,6 @@ $(CFLAGS_STAMP):
 OBJ_TOTAL := $(words $(OBJS))
 OBJ_COUNT_FILE := $(BUILD_DIR)/.obj_count
 
-define inc_count
-$(shell mkdir -p $(BUILD_DIR) && \
-  flock $(OBJ_COUNT_FILE).lock sh -c \
-    'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); echo $$n')
-endef
-
 # Link kernel
 $(KERNEL): $(OBJS) $(LDSCRIPT)
 	@echo "  LD      kairos.elf ($(OBJ_TOTAL) objects, $(ARCH))"
@@ -358,20 +360,23 @@ $(KERNEL): $(OBJS) $(LDSCRIPT)
 
 # Compile lwIP C files (relaxed warnings for third-party code)
 $(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c $(CFLAGS_STAMP) | _reset_count
-	@echo "  [$(inc_count)/$(OBJ_TOTAL)] CC $<"
 	@mkdir -p $(dir $@)
+	@flock $(OBJ_COUNT_FILE).lock sh -c \
+	  'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); printf "  [%s/$(OBJ_TOTAL)] CC %s\n" "$$n" "$<"'
 	$(Q)$(CC) $(LWIP_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Compile C files
 $(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP) | _reset_count
-	@echo "  [$(inc_count)/$(OBJ_TOTAL)] CC $<"
 	@mkdir -p $(dir $@)
+	@flock $(OBJ_COUNT_FILE).lock sh -c \
+	  'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); printf "  [%s/$(OBJ_TOTAL)] CC %s\n" "$$n" "$<"'
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # Assemble .S files
 $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
-	@echo "  [$(inc_count)/$(OBJ_TOTAL)] AS $<"
 	@mkdir -p $(dir $@)
+	@flock $(OBJ_COUNT_FILE).lock sh -c \
+	  'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); printf "  [%s/$(OBJ_TOTAL)] AS %s\n" "$$n" "$<"'
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # Include dependencies
@@ -471,20 +476,9 @@ check-disk:
 	fi
 
 check-tools:
-	@command -v $(QEMU) >/dev/null 2>&1 || { \
-		echo "Error: $(QEMU) not found"; exit 1; }
-	@command -v mke2fs >/dev/null 2>&1 || { \
-		echo "Error: mke2fs not found (install e2fsprogs)"; exit 1; }
-	@command -v python3 >/dev/null 2>&1 || { \
-		echo "Error: python3 not found"; exit 1; }
-	@command -v mkfs.fat >/dev/null 2>&1 || command -v mkfs.vfat >/dev/null 2>&1 || { \
-		echo "Error: mkfs.fat not found (install dosfstools)"; exit 1; }
-	@if [ ! -f "$(UEFI_CODE_SRC)" ] || [ ! -f "$(UEFI_VARS_SRC)" ]; then \
-		echo "Error: UEFI firmware not found for $(ARCH):"; \
-		echo "  $(UEFI_CODE_SRC)"; \
-		echo "  $(UEFI_VARS_SRC)"; \
-		exit 1; \
-	fi
+	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) $(KAIROS_CMD) doctor
+
+doctor: check-tools
 
 # Boot prerequisites: UEFI firmware + Limine boot image + disk (all architectures)
 RUN_DEPS := check-tools $(KERNEL) uefi disk
@@ -500,7 +494,7 @@ run-e1000: $(RUN_DEPS)
 
 # Create bootable ISO (x86_64 only for now)
 iso: $(KERNEL) initramfs
-	$(Q)$(QUIET_ENV) ./scripts/make-iso.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image iso
 
 # Run from ISO
 run-iso: iso
@@ -530,15 +524,14 @@ distclean: clean
 
 # Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(Q)$(QUIET_ENV) UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) ./scripts/prepare-uefi.sh $(ARCH)
-	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-uefi-disk.sh $(ARCH)
+	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) $(KAIROS_CMD) image uefi
 
 # Create a disk image with ext2 filesystem
 disk: $(DISK_STAMP)
 
-$(DISK_STAMP): $(ROOTFS_STAMP) scripts/make-disk.sh
+$(DISK_STAMP): $(ROOTFS_STAMP) $(KAIROS_DEPS) scripts/make-disk.sh
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(QUIET_ENV) ARCH=$(ARCH) ./scripts/make-disk.sh $(ARCH)
+	$(Q)$(KAIROS_CMD) image disk
 	@touch $@
 
 # Disassembly
@@ -556,29 +549,17 @@ TEST_LOG ?= $(BUILD_DIR)/test.log
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 
-test: check-tools scripts/run-qemu-test.sh
-	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
-	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS)' run" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$(TEST_LOG)" ./scripts/run-qemu-test.sh; rc=$$?; \
-	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
-	exit $$rc
+test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+	$(Q)$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
-test-soak: check-tools scripts/run-qemu-test.sh
-	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
-	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS)' run" \
-	TEST_TIMEOUT="$(SOAK_TIMEOUT)" TEST_LOG="$(SOAK_LOG)" \
-	TEST_REQUIRE_MARKERS=0 TEST_EXPECT_TIMEOUT=1 ./scripts/run-qemu-test.sh; rc=$$?; \
-	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
-	exit $$rc
+test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+	$(Q)$(KAIROS_CMD) run test-soak --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
 
-test-matrix: check-tools scripts/test-matrix.sh
-	bash scripts/test-matrix.sh
+test-matrix: check-tools $(KAIROS_DEPS) scripts/test-matrix.sh
+	$(Q)$(KAIROS_CMD) run test-matrix
 
-test-debug: check-tools scripts/run-qemu-test.sh
-	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
-	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1' run" \
-	TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$(TEST_LOG)" ./scripts/run-qemu-test.sh; rc=$$?; \
-	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
-	exit $$rc
+test-debug: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+	$(Q)$(KAIROS_CMD) run test-debug --extra-cflags "$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
 # Show help
 help:
@@ -602,6 +583,7 @@ help:
 	@echo "  disk     - Create disk image"
 	@echo "  uefi     - Prepare UEFI boot image"
 	@echo "  check-tools - Verify host toolchain"
+	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"

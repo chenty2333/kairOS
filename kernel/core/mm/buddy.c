@@ -24,18 +24,21 @@ static struct page *page_array;
 static paddr_t mem_start, mem_end;
 static size_t total_pages, num_free_pages;
 static spinlock_t buddy_lock;
+static spinlock_t pcp_lock;
 
 static struct pcp_area {
     struct list_head list;
     int count;
 } pcp_areas[CONFIG_MAX_CPUS];
 
-static bool pcp_enabled = true;
+static bool pcp_enabled = false;
+static void __free_pages(struct page *page, unsigned int order);
 
 extern char _kernel_start[], _kernel_end[];
 
 static void pmm_init_common(void) {
     spin_init(&buddy_lock);
+    spin_init(&pcp_lock);
     for (int i = 0; i < MAX_ORDER; i++)
         INIT_LIST_HEAD(&free_lists[i]);
     for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
@@ -69,15 +72,45 @@ static inline bool page_ptr_valid(struct page *page) {
     return page >= page_array && page < page_array + total_pages;
 }
 
-static void pcp_disable(const char *reason, int cpu) {
+static void pcp_flush_cpu_locked(int cpu) {
+    struct pcp_area *pcp = &pcp_areas[cpu];
+
+    while (!list_empty(&pcp->list)) {
+        struct page *p = list_first_entry(&pcp->list, struct page, list);
+        list_del(&p->list);
+        if (pcp->count > 0)
+            pcp->count--;
+        if (!page_ptr_valid(p)) {
+            pr_err("pmm: invalid page in cpu%d pcp list during flush: %p\n",
+                   cpu, p);
+            continue;
+        }
+        p->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB);
+        p->refcount = 0;
+        p->order = 0;
+        __free_pages(p, 0);
+    }
+
+    pcp->count = 0;
+    INIT_LIST_HEAD(&pcp->list);
+}
+
+static void pcp_disable_locked(const char *reason, int cpu) {
     if (!pcp_enabled)
         return;
     pr_warn("pmm: disabling PCP on cpu %d (%s)\n", cpu, reason);
-    pcp_enabled = false;
+    spin_lock(&buddy_lock);
     for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
-        INIT_LIST_HEAD(&pcp_areas[i].list);
-        pcp_areas[i].count = 0;
+        pcp_flush_cpu_locked(i);
     }
+    spin_unlock(&buddy_lock);
+    pcp_enabled = false;
+}
+
+static void pcp_disable(const char *reason, int cpu) {
+    spin_lock(&pcp_lock);
+    pcp_disable_locked(reason, cpu);
+    spin_unlock(&pcp_lock);
 }
 
 /* --- Internal Alloc/Free (buddy_lock must be held) --- */
@@ -134,47 +167,53 @@ struct page *alloc_pages(unsigned int order) {
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
         cpu = 0;
 
-    if (order == 0 && pcp_enabled) {
-        struct pcp_area *pcp = &pcp_areas[cpu];
-        if (pcp->count > 0 && list_empty(&pcp->list)) {
-            pr_warn("pmm: pcp list empty on cpu %d (count=%d), resetting\n",
-                    cpu, pcp->count);
-            INIT_LIST_HEAD(&pcp->list);
-            pcp->count = 0;
-            pcp_disable("pcp list corruption", cpu);
-        }
-        if (pcp->count == 0) {
-            spin_lock(&buddy_lock);
-            for (int i = 0; i < PCP_BATCH; i++) {
-                struct page *p = __alloc_pages(0);
-                if (!p)
-                    break;
-                if (!page_ptr_valid(p)) {
-                    pr_err("pmm: invalid page from buddy list (%p)\n", p);
-                    pcp_disable("invalid buddy page", cpu);
-                    break;
-                }
-                /* Pages staged in the PCP cache are free: refcount must be 0. */
-                p->refcount = 0;
-                p->flags = 0;
-                list_add(&p->list, &pcp->list);
-                pcp->count++;
-            }
-            spin_unlock(&buddy_lock);
-        }
-        if (pcp->count > 0 && !list_empty(&pcp->list)) {
-            page = list_first_entry(&pcp->list, struct page, list);
-            if (!page_ptr_valid(page)) {
-                pr_err("pmm: invalid page in pcp list (%p), resetting\n", page);
+    if (order == 0) {
+        spin_lock(&pcp_lock);
+        if (pcp_enabled) {
+            struct pcp_area *pcp = &pcp_areas[cpu];
+            if (pcp->count > 0 && list_empty(&pcp->list)) {
+                pr_warn("pmm: pcp list empty on cpu %d (count=%d), resetting\n",
+                        cpu, pcp->count);
                 INIT_LIST_HEAD(&pcp->list);
                 pcp->count = 0;
-                pcp_disable("invalid pcp page", cpu);
-                page = NULL;
-            } else {
-                list_del(&page->list);
-                pcp->count--;
-                page->order = 0;
-                page->refcount = 1;
+                pcp_disable_locked("pcp list corruption", cpu);
+            }
+            if (pcp_enabled && pcp->count == 0) {
+                bool bad_page = false;
+                spin_lock(&buddy_lock);
+                for (int i = 0; i < PCP_BATCH; i++) {
+                    struct page *p = __alloc_pages(0);
+                    if (!p)
+                        break;
+                    if (!page_ptr_valid(p)) {
+                        pr_err("pmm: invalid page from buddy list (%p)\n", p);
+                        bad_page = true;
+                        break;
+                    }
+                    /* Pages staged in the PCP cache are free. */
+                    p->refcount = 0;
+                    p->flags = 0;
+                    list_add(&p->list, &pcp->list);
+                    pcp->count++;
+                }
+                spin_unlock(&buddy_lock);
+                if (bad_page)
+                    pcp_disable_locked("invalid buddy page", cpu);
+            }
+            if (pcp_enabled && pcp->count > 0 && !list_empty(&pcp->list)) {
+                page = list_first_entry(&pcp->list, struct page, list);
+                if (!page_ptr_valid(page)) {
+                    pr_err("pmm: invalid page in pcp list (%p), resetting\n", page);
+                    INIT_LIST_HEAD(&pcp->list);
+                    pcp->count = 0;
+                    pcp_disable_locked("invalid pcp page", cpu);
+                    page = NULL;
+                } else {
+                    list_del(&page->list);
+                    pcp->count--;
+                    page->order = 0;
+                    page->refcount = 1;
+                }
             }
         }
         if (!page) {
@@ -183,10 +222,11 @@ struct page *alloc_pages(unsigned int order) {
             spin_unlock(&buddy_lock);
             if (page && !page_ptr_valid(page)) {
                 pr_err("pmm: invalid page from buddy list (%p)\n", page);
-                pcp_disable("invalid buddy page", cpu);
                 page = NULL;
+                pcp_disable_locked("invalid buddy page", cpu);
             }
         }
+        spin_unlock(&pcp_lock);
     } else {
         spin_lock(&buddy_lock);
         page = __alloc_pages(order);
@@ -215,26 +255,35 @@ void free_pages(struct page *page, unsigned int order) {
     page->refcount = 0;
     page->order = order;
 
-    if (order == 0 && pcp_enabled) {
-        int cpu = (int)arch_cpu_id();
-        if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
-            cpu = 0;
-        struct pcp_area *pcp = &pcp_areas[cpu];
-        list_add(&page->list, &pcp->list);
-        if (++pcp->count >= PCP_HIGH) {
-            spin_lock(&buddy_lock);
-            for (int i = 0; i < PCP_BATCH; i++) {
-                if (list_empty(&pcp->list)) {
-                    pcp->count = 0;
-                    break;
+    if (order == 0) {
+        spin_lock(&pcp_lock);
+        if (pcp_enabled) {
+            int cpu = (int)arch_cpu_id();
+            if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+                cpu = 0;
+            struct pcp_area *pcp = &pcp_areas[cpu];
+            list_add(&page->list, &pcp->list);
+            if (++pcp->count >= PCP_HIGH) {
+                spin_lock(&buddy_lock);
+                for (int i = 0; i < PCP_BATCH; i++) {
+                    if (list_empty(&pcp->list)) {
+                        pcp->count = 0;
+                        break;
+                    }
+                    struct page *p =
+                        list_first_entry(&pcp->list, struct page, list);
+                    list_del(&p->list);
+                    pcp->count--;
+                    __free_pages(p, 0);
                 }
-                struct page *p = list_first_entry(&pcp->list, struct page, list);
-                list_del(&p->list);
-                pcp->count--;
-                __free_pages(p, 0);
+                spin_unlock(&buddy_lock);
             }
+        } else {
+            spin_lock(&buddy_lock);
+            __free_pages(page, order);
             spin_unlock(&buddy_lock);
         }
+        spin_unlock(&pcp_lock);
     } else {
         spin_lock(&buddy_lock);
         __free_pages(page, order);
@@ -248,11 +297,18 @@ void free_pages(struct page *page, unsigned int order) {
 size_t pmm_total_pages(void) { return total_pages; }
 
 size_t pmm_num_free_pages(void) {
+    bool irq = arch_irq_save();
+    spin_lock(&pcp_lock);
+    spin_lock(&buddy_lock);
     size_t total = num_free_pages;
     int ncpus = arch_cpu_count();
-    for (int i = 0; i < ncpus; i++) {
-        total += pcp_areas[i].count;
-    }
+    if (ncpus > CONFIG_MAX_CPUS)
+        ncpus = CONFIG_MAX_CPUS;
+    for (int i = 0; i < ncpus; i++)
+        total += (size_t)pcp_areas[i].count;
+    spin_unlock(&buddy_lock);
+    spin_unlock(&pcp_lock);
+    arch_irq_restore(irq);
     return total;
 }
 

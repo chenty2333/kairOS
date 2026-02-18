@@ -14,18 +14,19 @@ fi
 
 QUIET="${QUIET:-0}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/common.sh"
 
 MUSL_SRC="${MUSL_SRC:-$ROOT_DIR/third_party/musl}"
 SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/${ARCH}/musl}"
 JOBS="${JOBS:-$(nproc)}"
+USE_GCC="${USE_GCC:-0}"
 
-case "$ARCH" in
-  riscv64) TARGET="riscv64-linux-musl"; ARCH_CFLAGS="-march=rv64gc -mabi=lp64";;
-  x86_64) TARGET="x86_64-linux-musl";;
-  aarch64) TARGET="aarch64-linux-musl";;
-  *) echo "Unsupported ARCH: $ARCH" >&2; exit 1;;
-esac
+TARGET="$(kairos_arch_to_musl_target "$ARCH")" || {
+  echo "Unsupported ARCH: $ARCH" >&2
+  exit 1
+}
+ARCH_CFLAGS="$(kairos_arch_cflags "$ARCH")"
 
 # Ignore any CROSS_COMPILE/CFLAGS/LDFLAGS from the environment (e.g. from
 # the kernel Makefile) — we determine the correct toolchain ourselves.
@@ -40,35 +41,20 @@ LDFLAGS="${ARCH_CFLAGS:-}"
 
 MUSL_SRC="$(realpath -m "$MUSL_SRC")"
 SYSROOT="$(realpath -m "$SYSROOT")"
-BUILD_DIR="$(realpath -m "$BUILD_DIR"))"
+BUILD_DIR="$(realpath -m "$BUILD_DIR")"
 
 if [[ ! -d "$MUSL_SRC" ]]; then
   echo "musl source not found: $MUSL_SRC (run ./scripts/fetch-deps.sh musl)" >&2
   exit 1
 fi
 
-if command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
-  CC="${CROSS_COMPILE}gcc"
-  AR="${CROSS_COMPILE}ar"
-  RANLIB="${CROSS_COMPILE}ranlib"
-  STRIP="${CROSS_COMPILE}strip"
-else
-  GNU_CROSS="${TARGET/-musl/-gnu}-"
-  if command -v "${GNU_CROSS}gcc" >/dev/null 2>&1; then
-    CROSS_COMPILE="${GNU_CROSS}"
-    CC="${CROSS_COMPILE}gcc"
-    AR="${CROSS_COMPILE}ar"
-    RANLIB="${CROSS_COMPILE}ranlib"
-    STRIP="${CROSS_COMPILE}strip"
-  else
+select_clang() {
   if ! command -v clang >/dev/null 2>&1; then
-    echo "Toolchain not found: ${CROSS_COMPILE}gcc or clang" >&2
-    exit 1
+    return 1
   fi
   for tool in llvm-ar llvm-ranlib llvm-strip; do
     if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "Toolchain not found: $tool" >&2
-      exit 1
+      return 1
     fi
   done
   CC="clang --target=${TARGET} -fuse-ld=lld"
@@ -78,6 +64,41 @@ else
   CFLAGS="--target=${TARGET} ${CFLAGS}"
   LDFLAGS="--target=${TARGET} -fuse-ld=lld ${LDFLAGS}"
   CROSS_COMPILE=""
+  return 0
+}
+
+select_gcc() {
+  local prefix="$1"
+  if ! command -v "${prefix}gcc" >/dev/null 2>&1; then
+    return 1
+  fi
+  CC="${prefix}gcc"
+  AR="${prefix}ar"
+  RANLIB="${prefix}ranlib"
+  STRIP="${prefix}strip"
+  CROSS_COMPILE="${prefix}"
+  return 0
+}
+
+if [[ "$USE_GCC" == "1" ]]; then
+  if ! select_gcc "${TARGET}-"; then
+    GNU_CROSS="${TARGET/-musl/-gnu}-"
+    if ! select_gcc "$GNU_CROSS"; then
+      if ! select_clang; then
+        echo "Toolchain not found: ${TARGET}-gcc, ${GNU_CROSS}gcc, or clang/llvm-* tools" >&2
+        exit 1
+      fi
+    fi
+  fi
+else
+  if ! select_clang; then
+    if ! select_gcc "${TARGET}-"; then
+      GNU_CROSS="${TARGET/-musl/-gnu}-"
+      if ! select_gcc "$GNU_CROSS"; then
+        echo "Toolchain not found: clang/llvm-* tools, ${TARGET}-gcc, or ${GNU_CROSS}gcc" >&2
+        exit 1
+      fi
+    fi
   fi
 fi
 
@@ -122,7 +143,7 @@ fi
 # - Fresh start: rsync source tree, clean any leaked artifacts.
 # - Resuming after static-only: keep obj/ but force re-configure
 #   (full build needs -resource-dir for compiler-rt builtins).
-if [[ ! -d "$BUILD_DIR/Makefile" ]]; then
+if [[ ! -f "$BUILD_DIR/Makefile" ]]; then
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR" "$SYSROOT"
   rsync -a "$MUSL_SRC"/ "$BUILD_DIR"/
@@ -133,10 +154,52 @@ elif [[ "$MUSL_STATIC_ONLY" != "1" ]]; then
   rm -f "$BUILD_DIR/config.mak"
 fi
 
+# Keep local build warning-free in quiet mode by avoiding pointer-to-local
+# comparison in musl's getcwd implementation.
+if [[ -f "$BUILD_DIR/src/unistd/getcwd.c" ]]; then
+  cat > "$BUILD_DIR/src/unistd/getcwd.c" <<'EOF'
+#include <unistd.h>
+#include <errno.h>
+#include <limits.h>
+#include <string.h>
+#include "syscall.h"
+
+char *getcwd(char *buf, size_t size)
+{
+	char tmp[PATH_MAX];
+	char *out = buf;
+
+	if (!out) {
+		out = tmp;
+		size = sizeof(tmp);
+	} else if (!size) {
+		errno = EINVAL;
+		return 0;
+	}
+
+	long ret = syscall(SYS_getcwd, out, size);
+	if (ret < 0)
+		return 0;
+	if (ret == 0 || out[0] != '/') {
+		errno = ENOENT;
+		return 0;
+	}
+
+	return buf ? out : strdup(out);
+}
+EOF
+fi
+
 if [[ "$QUIET" == "1" ]]; then
   _out=/dev/null
 else
   _out=/dev/stdout
+fi
+
+make_jobs=()
+if [[ "${MAKEFLAGS:-}" != *"--jobserver-auth="* ]] &&
+   [[ "${MAKEFLAGS:-}" != *"--jobserver-fds="* ]]; then
+  make_jobs=(-j"$JOBS")
 fi
 
 pushd "$BUILD_DIR" >/dev/null
@@ -151,7 +214,7 @@ pushd "$BUILD_DIR" >/dev/null
   fi
 
   if [[ "$MUSL_STATIC_ONLY" == "1" ]]; then
-    make -j"$JOBS" lib/libc.a >"$_out"
+    make "${make_jobs[@]}" lib/libc.a >"$_out"
     DESTDIR="$SYSROOT" make install-headers >"$_out"
     mkdir -p "$SYSROOT/lib"
     cp -f lib/libc.a "$SYSROOT/lib/libc.a"
@@ -160,7 +223,7 @@ pushd "$BUILD_DIR" >/dev/null
       [[ -f "lib/$f" ]] && cp -f "lib/$f" "$SYSROOT/lib/$f"
     done
   else
-    make -j"$JOBS" >"$_out"
+    make "${make_jobs[@]}" >"$_out"
     DESTDIR="$SYSROOT" make install >"$_out"
   fi
 popd >/dev/null
