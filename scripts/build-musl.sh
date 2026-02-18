@@ -81,13 +81,21 @@ else
   fi
 fi
 
-# If compiler-rt builtins are available, tell clang where to find them.
-# This is needed for the full build (libc.so) on aarch64 where 128-bit
-# float operations require __subtf3 etc. from compiler-rt.
+# If using clang and compiler-rt builtins are available, tell clang where to
+# find them.  This is needed for the full build (libc.so) on aarch64 where
+# 128-bit float operations require __subtf3 etc. from compiler-rt.
+# GCC ships its own libgcc so none of this applies.
 RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
-if [[ -d "$RT_RESOURCE_DIR" ]]; then
+if [[ "$CC" == clang* ]] && [[ -d "$RT_RESOURCE_DIR" ]]; then
   CFLAGS="${CFLAGS} -resource-dir $RT_RESOURCE_DIR"
   LDFLAGS="${LDFLAGS} -resource-dir $RT_RESOURCE_DIR"
+  # Find the builtins library so we can pass it as LIBCC to musl's configure.
+  # musl's configure uses `$CC -print-libgcc-file-name` which doesn't honor
+  # -resource-dir, so we must pass LIBCC explicitly.
+  _builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' | head -n1)"
+  if [[ -n "$_builtins" ]]; then
+    LIBCC="$_builtins"
+  fi
 fi
 
 # MUSL_STATIC_ONLY=1: build only libc.a + headers (no libc.so).
@@ -110,13 +118,19 @@ else
   fi
 fi
 
-# Clean build dir only if starting fresh (not resuming after static-only)
-if [[ ! -d "$BUILD_DIR/obj" ]]; then
+# Prepare build directory.
+# - Fresh start: rsync source tree, clean any leaked artifacts.
+# - Resuming after static-only: keep obj/ but force re-configure
+#   (full build needs -resource-dir for compiler-rt builtins).
+if [[ ! -d "$BUILD_DIR/Makefile" ]]; then
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR" "$SYSROOT"
   rsync -a "$MUSL_SRC"/ "$BUILD_DIR"/
   # Nuke any build artifacts that may have leaked into the source tree
   make -C "$BUILD_DIR" distclean >/dev/null 2>&1 || true
+elif [[ "$MUSL_STATIC_ONLY" != "1" ]]; then
+  # Force re-configure so LIBCC picks up compiler-rt via -resource-dir
+  rm -f "$BUILD_DIR/config.mak"
 fi
 
 if [[ "$QUIET" == "1" ]]; then
@@ -127,9 +141,13 @@ fi
 
 pushd "$BUILD_DIR" >/dev/null
   if [[ ! -f config.mak ]]; then
+    CONFIGURE_ARGS="--prefix=/ --target=$TARGET"
+    if [[ -n "${LIBCC:-}" ]]; then
+      CONFIGURE_ARGS="$CONFIGURE_ARGS LIBCC=$LIBCC"
+    fi
     CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" CFLAGS="$CFLAGS" \
     LDFLAGS="$LDFLAGS" CROSS_COMPILE="$CROSS_COMPILE" \
-    ./configure --prefix=/ --target="$TARGET" >"$_out"
+    ./configure $CONFIGURE_ARGS >"$_out"
   fi
 
   if [[ "$MUSL_STATIC_ONLY" == "1" ]]; then
