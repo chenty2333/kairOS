@@ -46,7 +46,7 @@ static void test_sched_fork_exit_storm(void) {
 #define SLEEP_WAKE_SLEEPERS 4
 
 static struct wait_queue sw_wq;
-static volatile int sw_live_sleepers;
+static int sw_live_sleepers;
 
 static int sleeper_thread(void *arg) {
     (void)arg;
