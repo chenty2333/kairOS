@@ -2,11 +2,11 @@
 #
 # fetch-freedoom.sh - Download Freedoom WADs from GitHub releases
 #
-# Usage: ./scripts/fetch-freedoom.sh
+# Usage: scripts/kairos.sh deps freedoom
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT_DIR="${ROOT_DIR}/third_party/freedoom"
 OUT_WAD="${OUT_DIR}/doom1.wad"
 

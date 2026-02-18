@@ -2,13 +2,14 @@
 #
 # make-disk.sh - Create an ext2 disk image for testing
 #
-# Usage: ./scripts/make-disk.sh <arch>
+# Usage: scripts/kairos.sh --arch <arch> image disk
 
 set -euo pipefail
 
 ARCH="${1:-riscv64}"
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 QUIET="${QUIET:-0}"
+source "${ROOT_DIR}/scripts/lib/common.sh"
 
 DISK_IMG="${DISK_IMG:-${ROOT_DIR}/build/${ARCH}/disk.img}"
 ROOTFS_DIR="${ROOTFS_DIR:-${ROOT_DIR}/build/${ARCH}/rootfs}"
@@ -16,6 +17,9 @@ BUSYBOX_BIN="${BUSYBOX_BIN:-${ROOT_DIR}/build/${ARCH}/busybox/busybox}"
 INIT_BIN="${INIT_BIN:-${ROOT_DIR}/build/${ARCH}/user/init}"
 DOOM_BIN="${DOOM_BIN:-${ROOT_DIR}/build/${ARCH}/user/doom}"
 DOOM_WAD="${DOOM_WAD:-}"
+TCC_BIN="${TCC_BIN:-${ROOT_DIR}/build/${ARCH}/tcc/bin/tcc}"
+TCC_LIB="${TCC_LIB:-${ROOT_DIR}/build/${ARCH}/tcc/lib/tcc}"
+SYSROOT_DIR="${SYSROOT_DIR:-${ROOT_DIR}/build/${ARCH}/sysroot}"
 ROOTFS_ONLY="${ROOTFS_ONLY:-0}"
 ROOTFS_STAGE="${ROOTFS_STAGE:-all}"
 
@@ -59,13 +63,7 @@ stage_busybox() {
   if [[ -x "$BUSYBOX_BIN" ]]; then
     cp -f "$BUSYBOX_BIN" "$ROOTFS_DIR/bin/busybox"
     chmod 0755 "$ROOTFS_DIR/bin/busybox"
-
-    # Install BusyBox applet links from shared list.
-    local -a applets
-    mapfile -t applets < <(grep -o '[a-zA-Z_][a-zA-Z0-9_]*' "$ROOT_DIR/scripts/busybox-applets.txt")
-    for app in "${applets[@]}"; do
-      ln -sf /bin/busybox "$ROOTFS_DIR/bin/$app"
-    done
+    kairos_install_busybox_applet_links "$ROOTFS_DIR/bin" "/bin/busybox"
   else
     echo "WARN: busybox not found ($BUSYBOX_BIN)"
   fi
@@ -87,12 +85,41 @@ stage_doom() {
   fi
 }
 
+stage_tcc() {
+  [[ "$QUIET" != "1" ]] && echo "Staging rootfs tcc: $ROOTFS_DIR"
+  mkdir -p "$ROOTFS_DIR"/{usr/bin,usr/lib/tcc,usr/include,tmp}
+
+  # tcc binary
+  if [[ -x "$TCC_BIN" ]]; then
+    cp -f "$TCC_BIN" "$ROOTFS_DIR/usr/bin/tcc"
+    chmod 0755 "$ROOTFS_DIR/usr/bin/tcc"
+  else
+    echo "WARN: tcc not found ($TCC_BIN)"
+  fi
+
+  # libtcc1.a + tcc built-in headers (stdarg.h, stddef.h, etc.)
+  if [[ -d "$TCC_LIB" ]]; then
+    cp -rf "$TCC_LIB"/* "$ROOTFS_DIR/usr/lib/tcc/"
+  fi
+
+  # musl sysroot: headers + static lib + CRT objects
+  if [[ -d "$SYSROOT_DIR/include" ]]; then
+    cp -rf "$SYSROOT_DIR/include"/* "$ROOTFS_DIR/usr/include/"
+  fi
+  for f in libc.a libgcc.a crt1.o crti.o crtn.o; do
+    if [[ -f "$SYSROOT_DIR/lib/$f" ]]; then
+      cp -f "$SYSROOT_DIR/lib/$f" "$ROOTFS_DIR/usr/lib/$f"
+    fi
+  done
+}
+
 case "$ROOTFS_STAGE" in
   all)
     stage_base
     stage_init
     stage_busybox
     stage_doom
+    stage_tcc
     ;;
   base)
     stage_base
@@ -102,6 +129,9 @@ case "$ROOTFS_STAGE" in
     ;;
   busybox)
     stage_busybox
+    ;;
+  tcc)
+    stage_tcc
     ;;
   *)
     echo "Error: unknown ROOTFS_STAGE=$ROOTFS_STAGE"

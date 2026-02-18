@@ -2,16 +2,18 @@
 #
 # Fetch third-party dependencies for Kairos
 #
-# Usage: ./scripts/fetch-deps.sh [component]
-#   ./scripts/fetch-deps.sh all      - Fetch all dependencies
-#   ./scripts/fetch-deps.sh limine   - Fetch Limine bootloader
-#   ./scripts/fetch-deps.sh lwip     - Fetch lwIP network stack
-#   ./scripts/fetch-deps.sh tinyusb  - Fetch TinyUSB
-#   ./scripts/fetch-deps.sh fatfs    - Fetch FatFs
+# Usage: scripts/kairos.sh deps fetch [component]
+#   scripts/kairos.sh deps fetch all      - Fetch all dependencies
+#   scripts/kairos.sh deps fetch limine   - Fetch Limine bootloader
+#   scripts/kairos.sh deps fetch lwip     - Fetch lwIP network stack
+#   scripts/kairos.sh deps fetch tinyusb  - Fetch TinyUSB
+#   scripts/kairos.sh deps fetch fatfs    - Fetch FatFs
+#   scripts/kairos.sh deps fetch tcc      - Fetch TCC (Tiny C Compiler)
 
-set -e
+set -euo pipefail
 
-DEPS_DIR="third_party"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+DEPS_DIR="$ROOT_DIR/third_party"
 mkdir -p "$DEPS_DIR"
 
 fetch_limine() {
@@ -90,10 +92,22 @@ fetch_musl() {
 
 fetch_limine_header() {
     echo "=== Fetching Limine protocol header ==="
-    mkdir -p "kernel/include/boot"
+    mkdir -p "$ROOT_DIR/kernel/include/boot"
     curl -L "https://codeberg.org/Limine/limine-protocol/raw/branch/trunk/include/limine.h" \
-        -o "kernel/include/boot/limine.h"
-    echo "Limine header downloaded to kernel/include/boot/limine.h"
+        -o "$ROOT_DIR/kernel/include/boot/limine.h"
+    echo "Limine header downloaded to $ROOT_DIR/kernel/include/boot/limine.h"
+}
+
+fetch_tcc() {
+    echo "=== Fetching TCC (Tiny C Compiler) ==="
+    if [ -d "$DEPS_DIR/tinycc" ]; then
+        echo "TCC already exists, skipping"
+        return
+    fi
+    git clone https://repo.or.cz/tinycc.git \
+        --branch=mob --depth=1 "$DEPS_DIR/tinycc"
+    echo "TCC downloaded to $DEPS_DIR/tinycc"
+    echo "License: LGPL-2.1"
 }
 
 show_help() {
@@ -107,6 +121,7 @@ show_help() {
     echo "  fatfs    - FatFs FAT32 library (BSD license)"
     echo "  musl     - musl C library (MIT license)"
     echo "  busybox  - BusyBox userland (GPL-2.0)"
+    echo "  tcc      - TCC Tiny C Compiler (LGPL-2.1)"
     echo "  header   - Just the Limine protocol header"
     echo ""
     echo "All dependencies will be placed in ./third_party/"
@@ -121,6 +136,7 @@ case "${1:-help}" in
         fetch_fatfs
         fetch_musl
         fetch_busybox
+        fetch_tcc
         echo ""
         echo "=== All dependencies fetched ==="
         ;;
@@ -142,6 +158,9 @@ case "${1:-help}" in
         ;;
     busybox)
         fetch_busybox
+        ;;
+    tcc)
+        fetch_tcc
         ;;
     header)
         fetch_limine_header

@@ -4,21 +4,22 @@
 #
 # Prerequisites:
 #   - xorriso (dnf install xorriso)
-#   - Limine (run ./scripts/fetch-deps.sh limine first)
+#   - Limine (run scripts/kairos.sh deps fetch limine first)
 #
-# Usage: ./scripts/make-iso.sh [ARCH]
-#   ARCH defaults to x86_64
+# Usage: scripts/kairos.sh --arch <arch> image iso
 
-set -e
+set -euo pipefail
 
 ARCH="${1:-x86_64}"
-BUILD_DIR="build/$ARCH"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/common.sh"
+BUILD_DIR="$ROOT_DIR/build/$ARCH"
 KERNEL="$BUILD_DIR/kairos.elf"
 ISO_DIR="$BUILD_DIR/iso_root"
 ISO_FILE="$BUILD_DIR/kairos.iso"
-LIMINE_DIR="third_party/limine"
+LIMINE_DIR="$ROOT_DIR/third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
-LIMINE_CFG_SRC="limine.cfg"
+LIMINE_CFG_SRC="$ROOT_DIR/limine.cfg"
 
 if [ "$ARCH" = "x86_64" ]; then
     LIMINE_CFG_SRC="$BUILD_DIR/limine.x86_64.cfg"
@@ -44,7 +45,7 @@ fi
 
 if [ ! -d "$LIMINE_DIR" ]; then
     echo "Error: Limine not found"
-    echo "Run './scripts/fetch-deps.sh limine' first"
+    echo "Run 'scripts/kairos.sh deps fetch limine' first"
     exit 1
 fi
 
@@ -83,13 +84,11 @@ cp "$LIMINE_DIR/limine-bios-cd.bin" "$ISO_DIR/boot/limine/"
 cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_DIR/boot/limine/"
 
 # Copy UEFI bootloader
-if [ "$ARCH" = "x86_64" ]; then
-    cp "$LIMINE_DIR/BOOTX64.EFI" "$ISO_DIR/EFI/BOOT/"
-elif [ "$ARCH" = "aarch64" ]; then
-    cp "$LIMINE_DIR/BOOTAA64.EFI" "$ISO_DIR/EFI/BOOT/"
-elif [ "$ARCH" = "riscv64" ]; then
-    cp "$LIMINE_DIR/BOOTRISCV64.EFI" "$ISO_DIR/EFI/BOOT/"
-fi
+BOOT_EFI="$(kairos_arch_to_boot_efi "$ARCH")" || {
+    echo "Error: Unsupported ARCH for ISO image: $ARCH" >&2
+    exit 1
+}
+cp "$LIMINE_DIR/$BOOT_EFI" "$ISO_DIR/EFI/BOOT/"
 
 # Create ISO
 echo "Creating ISO..."

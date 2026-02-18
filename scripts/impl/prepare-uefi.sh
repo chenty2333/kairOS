@@ -2,17 +2,19 @@
 #
 # Prepare padded UEFI firmware images for QEMU.
 #
-# Usage: ./scripts/prepare-uefi.sh [ARCH]
+# Usage: scripts/kairos.sh --arch <arch> image prepare-uefi
 #
 # Environment variables:
 #   UEFI_CODE_SRC  - Path to UEFI CODE firmware (auto-detected per arch)
 #   UEFI_VARS_SRC  - Path to UEFI VARS firmware (auto-detected per arch)
 #
 
-set -e
+set -euo pipefail
 
 ARCH="${1:-riscv64}"
-BUILD_DIR="build/$ARCH"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/common.sh"
+BUILD_DIR="$ROOT_DIR/build/$ARCH"
 QUIET="${QUIET:-0}"
 
 case "$ARCH" in
@@ -29,7 +31,11 @@ case "$ARCH" in
         PKG_HINT="sudo dnf install edk2-ovmf"
         ;;
     aarch64)
-        CODE_SRC="${UEFI_CODE_SRC:-/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw}"
+        CODE_SRC_DEFAULT="/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw"
+        if [ -f "/usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw" ]; then
+            CODE_SRC_DEFAULT="/usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw"
+        fi
+        CODE_SRC="${UEFI_CODE_SRC:-$CODE_SRC_DEFAULT}"
         VARS_SRC="${UEFI_VARS_SRC:-/usr/share/edk2/aarch64/vars-template-pflash.raw}"
         PFLASH_SIZE="64M"
         PKG_HINT="sudo dnf install edk2-aarch64"

@@ -2,14 +2,15 @@
 #
 # make-initramfs.sh - Build initramfs cpio image
 #
-# Usage: ./scripts/make-initramfs.sh <arch>
+# Usage: scripts/kairos.sh --arch <arch> image initramfs
 
 set -euo pipefail
 
 ARCH="${1:-riscv64}"
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$ROOT_DIR/build/$ARCH"
 QUIET="${QUIET:-0}"
+source "${ROOT_DIR}/scripts/lib/common.sh"
 ROOTFS_DIR="${INITRAMFS_DIR:-$BUILD_DIR/initramfs-root}"
 INIT_BIN="${INITRAMFS_INIT:-$BUILD_DIR/user/initramfs/init}"
 BUSYBOX_BIN="${BUSYBOX_BIN:-$BUILD_DIR/busybox/busybox}"
@@ -39,12 +40,7 @@ if [[ "$INCLUDE_BUSYBOX" == "1" ]]; then
     mkdir -p "$ROOTFS_DIR/bin"
     cp -f "$BUSYBOX_BIN" "$ROOTFS_DIR/bin/busybox"
     chmod 0755 "$ROOTFS_DIR/bin/busybox"
-
-    # Install BusyBox applet links from shared list.
-    mapfile -t applets < <(grep -o '[a-zA-Z_][a-zA-Z0-9_]*' "$ROOT_DIR/scripts/busybox-applets.txt")
-    for app in "${applets[@]}"; do
-      ln -sf /bin/busybox "$ROOTFS_DIR/bin/$app"
-    done
+    kairos_install_busybox_applet_links "$ROOTFS_DIR/bin" "/bin/busybox"
   else
     echo "WARN: busybox not found ($BUSYBOX_BIN)" >&2
   fi

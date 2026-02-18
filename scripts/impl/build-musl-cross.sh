@@ -2,12 +2,12 @@
 #
 # build-musl-cross.sh - Build musl cross toolchain via musl-cross-make
 #
-# Usage: ./scripts/build-musl-cross.sh <arch>
+# Usage: scripts/kairos.sh --arch <arch> toolchain musl-cross
 
 set -euo pipefail
 
 ARCH="${1:-riscv64}"
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT_DIR}/scripts/lib/common.sh"
 MCM_DIR="$ROOT_DIR/third_party/musl-cross-make"
 JOBS="${JOBS:-$(nproc)}"

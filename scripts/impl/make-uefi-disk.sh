@@ -2,28 +2,26 @@
 #
 # Create a UEFI bootable FAT image with Limine + kernel.
 #
-# Usage: ./scripts/make-uefi-disk.sh [ARCH]
+# Usage: scripts/kairos.sh --arch <arch> image uefi-disk
 #
 
-set -e
+set -euo pipefail
 
 ARCH="${1:-riscv64}"
-BUILD_DIR="build/$ARCH"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${ROOT_DIR}/scripts/lib/common.sh"
+BUILD_DIR="$ROOT_DIR/build/$ARCH"
 QUIET="${QUIET:-0}"
 KERNEL="$BUILD_DIR/kairos.elf"
 BOOT_IMG="$BUILD_DIR/boot.img"
-LIMINE_DIR="third_party/limine"
+LIMINE_DIR="$ROOT_DIR/third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
+LIMINE_CFG="$ROOT_DIR/limine.cfg"
 
-case "$ARCH" in
-    x86_64) BOOT_EFI="BOOTX64.EFI" ;;
-    aarch64) BOOT_EFI="BOOTAA64.EFI" ;;
-    riscv64) BOOT_EFI="BOOTRISCV64.EFI" ;;
-    *)
-        echo "Error: Unsupported ARCH for UEFI boot image: $ARCH"
-        exit 1
-        ;;
-esac
+BOOT_EFI="$(kairos_arch_to_boot_efi "$ARCH")" || {
+    echo "Error: Unsupported ARCH for UEFI boot image: $ARCH"
+    exit 1
+}
 
 case "$ARCH" in
     riscv64) LIMINE_DEFAULT_ENTRY=1 ;;
@@ -42,7 +40,7 @@ BOOT_EFI_DST="$BUILD_DIR/$BOOT_EFI"
 
 if [ ! -f "$BOOT_EFI_SRC" ]; then
     echo "Error: Limine UEFI bootloader not found: $BOOT_EFI_SRC"
-    echo "Run './scripts/fetch-deps.sh limine' first"
+    echo "Run 'scripts/kairos.sh deps fetch limine' first"
     exit 1
 fi
 
@@ -59,8 +57,8 @@ rm -f "$BOOT_IMG"
 dd if=/dev/zero of="$BOOT_IMG" bs=1M count="$IMG_SIZE_MB" status=none
 "$MKFS_FAT" -F 32 "$BOOT_IMG" >/dev/null
 
-MNT_DIR="$(mktemp -d /tmp/kairos-uefi-XXXXXX)"
-CFG_TMP="$(mktemp /tmp/kairos-limine-XXXXXX.cfg)"
+MNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kairos-uefi-XXXXXX")"
+CFG_TMP="$(mktemp "${TMPDIR:-/tmp}/kairos-limine-XXXXXX.cfg")"
 
 cleanup() {
     if mountpoint -q "$MNT_DIR"; then
@@ -78,7 +76,7 @@ BEGIN {
 }
 tolower($0) ~ /^default_entry[[:space:]]*:/ { next }
 { print }
-' limine.cfg > "$CFG_TMP"
+' "$LIMINE_CFG" > "$CFG_TMP"
 
 sudo mount -o loop "$BOOT_IMG" "$MNT_DIR"
 mkdir -p "$BUILD_DIR"
