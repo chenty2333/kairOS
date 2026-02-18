@@ -27,6 +27,7 @@ struct epoll_item {
     bool deleted;
     struct list_head list;
     struct list_head ready_node;
+    struct wait_queue detach_wait;
 };
 
 struct epoll_instance {
@@ -64,7 +65,12 @@ static inline int epoll_item_refs(struct epoll_item *item) {
 static void epoll_item_put(struct epoll_item *item) {
     if (!item)
         return;
-    if (__atomic_sub_fetch(&item->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
+    int old = __atomic_sub_fetch(&item->refcount, 1, __ATOMIC_ACQ_REL);
+    if (old == 1) {
+        /* Last external ref dropped — wake detach waiter */
+        wait_queue_wakeup_all(&item->detach_wait);
+    }
+    if (old == 0) {
         vnode_put(item->vn);
         kfree(item);
     }
@@ -112,8 +118,9 @@ static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
 
 static void epoll_item_detach(struct epoll_item *item) {
     vfs_poll_unwatch(&item->watch);
-    while (epoll_item_refs(item) > 1)
-        schedule();
+    while (epoll_item_refs(item) > 1) {
+        proc_sleep_on(&item->detach_wait, item, false);
+    }
 }
 
 static int epoll_close(struct vnode *vn) {
@@ -239,6 +246,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->watch.data = item;
         INIT_LIST_HEAD(&item->list);
         INIT_LIST_HEAD(&item->ready_node);
+        wait_queue_init(&item->detach_wait);
         list_add_tail(&item->list, &ep->items);
         break;
     case EPOLL_CTL_MOD:
