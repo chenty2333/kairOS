@@ -390,6 +390,17 @@ $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
 # Common QEMU flags
 QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4
 QEMU_FLAGS += -serial stdio -monitor none
+QEMU_UEFI_NOISE_FILTER := ./scripts/impl/filter-uefi-noise.sh
+
+ifeq ($(ARCH),aarch64)
+  # Avoid loading mismatched PCI option ROMs in AArch64 UEFI boot.
+  QEMU_VIRTIO_PCI_ROM_OPT := ,romfile=
+  # Filter known non-fatal EDK2 noise by default on AArch64.
+  QEMU_FILTER_UEFI_NOISE ?= 1
+else
+  QEMU_VIRTIO_PCI_ROM_OPT :=
+  QEMU_FILTER_UEFI_NOISE ?= 0
+endif
 
 # Optional graphical output (QEMU_GUI=1)
 ifeq ($(QEMU_GUI),1)
@@ -421,7 +432,7 @@ ifeq ($(ARCH),riscv64)
   QEMU_DISK_FLAGS += -global virtio-mmio.force-legacy=false
 endif
 QEMU_DISK_FLAGS += -drive id=hd,file=$(DISK_IMG),format=raw,if=none
-QEMU_DISK_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=hd
+QEMU_DISK_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=hd$(QEMU_VIRTIO_PCI_ROM_OPT)
 
 # UEFI firmware paths (per architecture)
 ifeq ($(ARCH),riscv64)
@@ -448,7 +459,7 @@ QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly
 QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
 
 QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
-QEMU_BOOT_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=boot,bootindex=0
+QEMU_BOOT_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=boot,bootindex=0$(QEMU_VIRTIO_PCI_ROM_OPT)
 
 QEMU_MEDIA_FLAGS := $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS)
 
@@ -462,7 +473,7 @@ endif
 ifeq ($(ARCH),riscv64)
   QEMU_FLAGS += -device virtio-net-device,netdev=net0
 else
-  QEMU_FLAGS += -device virtio-net-pci,netdev=net0
+  QEMU_FLAGS += -device virtio-net-pci,netdev=net0$(QEMU_VIRTIO_PCI_ROM_OPT)
 endif
 
 QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_MEDIA_FLAGS) $(QEMU_DISK_FLAGS)
@@ -487,11 +498,19 @@ RUN_DEPS := check-tools $(KERNEL) uefi disk
 run: $(RUN_DEPS)
 	@$(MAKE) --no-print-directory check-disk
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP)"
+ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
+	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
+else
 	$(Q)$(QEMU) $(QEMU_RUN_FLAGS)
+endif
 
 run-e1000: $(RUN_DEPS)
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, e1000)"
+ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
+	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
+else
 	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+endif
 
 # Create bootable ISO (x86_64 only for now)
 iso: $(KERNEL) initramfs
@@ -595,6 +614,7 @@ help:
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
 	@echo "  EMBEDDED_INIT - Build embedded init blob (riscv64 only)"
 	@echo "  TOOLCHAIN_MODE - Toolchain policy (auto, clang, gcc)"
+	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""
 	@echo "Examples:"
