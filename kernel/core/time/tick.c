@@ -42,8 +42,7 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
         if (from_user) {
             schedule();
         } else if (proc_current() == arch_get_percpu()->idle_proc) {
-            /* Safe: idle's stack is designed for this. Do NOT extend to
-             * arbitrary kernel threads without preempt_count support. */
+            /* idle only — needs preempt_count for other kthreads */
             schedule();
         }
     }

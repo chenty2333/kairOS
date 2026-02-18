@@ -99,7 +99,7 @@ noreturn void proc_exit(int status) {
     sched_dequeue(p);
     /* Encode for waitpid/WIFEXITED semantics (like Linux) */
     p->exit_code = (code << 8);
-    __atomic_store_n((int *)&p->state, PROC_ZOMBIE, __ATOMIC_RELEASE);
+    proc_set_state_release(p, PROC_ZOMBIE);
 
     if (p->parent) {
         wait_queue_wakeup_all(&p->parent->exit_wait);

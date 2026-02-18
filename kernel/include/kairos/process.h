@@ -117,6 +117,13 @@ struct process {
     uint64_t utime, stime, start_time;
 };
 
+/* Atomic state store — orders prior writes (e.g. exit_code) before state. */
+static inline void proc_set_state_release(struct process *p,
+                                          enum proc_state s) {
+    _Static_assert(sizeof(p->state) == sizeof(int), "enum proc_state size");
+    __atomic_store_n((int *)&p->state, (int)s, __ATOMIC_RELEASE);
+}
+
 void proc_init(void);
 struct process *proc_create(const char *name, const void *elf, size_t size);
 struct process *proc_fork(void);

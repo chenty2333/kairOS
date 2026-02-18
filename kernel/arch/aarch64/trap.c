@@ -76,10 +76,9 @@ static void handle_exception(struct trap_frame *tf) {
         if (from_user && cur && cur->mm) {
             uint32_t f = 0;
             if (ec == 0x24 || ec == 0x25) {
-                /* Data abort — check WnR bit (bit 6) for write vs read */
+                /* Data abort: WnR (bit 6) distinguishes write vs read */
                 f = (esr & (1U << 6)) ? PTE_WRITE : 0;
             } else {
-                /* Instruction abort */
                 f = PTE_EXEC;
             }
             if (mm_handle_fault(cur->mm, tf->far, f) == 0)

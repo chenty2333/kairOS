@@ -29,11 +29,12 @@ const int sched_nice_to_weight[40] = {
 };
 
 struct percpu_data cpu_data[CONFIG_MAX_CPUS];
-static int nr_cpus_online = 1; /* accessed via sched_nr_cpus() / atomic ops */
+static int nr_cpus_online = 1;
 
 static inline int sched_nr_cpus(void) {
     return __atomic_load_n(&nr_cpus_online, __ATOMIC_ACQUIRE);
 }
+
 static bool sched_steal_enabled = false;
 
 static inline void sched_stat_inc(uint64_t *counter) {
@@ -355,8 +356,6 @@ void sched_enqueue(struct process *p) {
 
     if (p->se.on_rq) {
         spin_unlock(&rq->lock);
-        /* Already queued — try to fix up state; if CAS fails, someone else
-         * already moved it past RUNNABLE, so fall back to BLOCKED. */
         if (!se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_QUEUED))
             se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_BLOCKED);
         arch_irq_restore(state);
@@ -407,7 +406,7 @@ void sched_dequeue(struct process *p) {
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
 
-    /* Re-check under lock: steal may have changed on_rq/cpu concurrently */
+    /* Re-check under lock: steal can change on_rq/cpu concurrently */
     if (!p->se.on_rq || p->se.cpu != cpu) {
         spin_unlock(&rq->lock);
         arch_irq_restore(state);
@@ -667,7 +666,7 @@ int sched_setnice(struct process *p, int nice) {
     struct cfs_rq *rq = &cpu_data[cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
-    /* Re-check: steal may have moved this task to another CPU */
+    /* Re-check: steal can move this task between lock acquire */
     if (p->se.cpu != cpu) {
         spin_unlock(&rq->lock);
         arch_irq_restore(state);

@@ -27,7 +27,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->pgid = parent->pgid;
     child->sid = parent->sid;
     child->umask = parent->umask;
-    child->tid_address = 0;  /* per-thread; only set via CLONE_CHILD_CLEARTID */
+    child->tid_address = 0;
     child->tid_set_address = 0;
     child->robust_list = parent->robust_list;
     child->robust_len = parent->robust_len;
@@ -75,13 +75,13 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
 
     /* File descriptor table: share or copy */
     if (clone_flags & CLONE_FILES) {
-        fdtable_put(child->fdtable);  /* release proc_alloc's fdtable */
+        fdtable_put(child->fdtable);
         fdtable_get(parent->fdtable);
         child->fdtable = parent->fdtable;
     } else {
         struct fdtable *old_fdt = child->fdtable;
         child->fdtable = fdtable_copy(parent->fdtable);
-        fdtable_put(old_fdt);  /* release proc_alloc's fdtable */
+        fdtable_put(old_fdt);
         if (!child->fdtable) {
             proc_free(child);
             return NULL;
@@ -90,13 +90,13 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
 
     /* Signal handlers: share or copy */
     if (clone_flags & CLONE_SIGHAND) {
-        sighand_put(child->sighand);  /* release signal_init_process's sighand */
+        sighand_put(child->sighand);
         sighand_get(parent->sighand);
         child->sighand = parent->sighand;
     } else if (parent->sighand) {
         struct sighand_struct *old_sh = child->sighand;
         child->sighand = sighand_copy(parent->sighand);
-        sighand_put(old_sh);  /* release signal_init_process's sighand */
+        sighand_put(old_sh);
         if (!child->sighand) {
             proc_free(child);
             return NULL;
