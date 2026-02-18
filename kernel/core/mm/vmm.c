@@ -128,6 +128,12 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
                (void *)addr, vma->flags);
         return -EFAULT;
     }
+    if ((flags & PTE_EXEC) && !(vma->flags & VM_EXEC)) {
+        mutex_unlock(&mm->lock);
+        pr_err("mm: fault addr=%p exec denied (vma flags=0x%x)\n",
+               (void *)addr, vma->flags);
+        return -EFAULT;
+    }
 
     vaddr_t va = ALIGN_DOWN(addr, CONFIG_PAGE_SIZE);
     uint64_t pte = arch_mmu_get_pte(mm->pgdir, va);

@@ -27,7 +27,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->pgid = parent->pgid;
     child->sid = parent->sid;
     child->umask = parent->umask;
-    child->tid_address = parent->tid_address;
+    child->tid_address = 0;  /* per-thread; only set via CLONE_CHILD_CLEARTID */
     child->tid_set_address = 0;
     child->robust_list = parent->robust_list;
     child->robust_len = parent->robust_len;
