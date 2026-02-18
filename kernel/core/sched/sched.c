@@ -624,14 +624,15 @@ void sched_tick(void) {
     struct process *curr = proc_current();
 
     cpu->ticks++;
-    uint64_t now = sched_clock_ns();
-    uint64_t delta = (curr && now > curr->se.last_run_time) ? now - curr->se.last_run_time : 0;
     if (spin_trylock(&rq->lock)) {
         if (curr && curr != cpu->idle_proc) {
             rq->curr_se = &curr->se;
             update_curr(rq);
         }
         if (curr && curr != cpu->idle_proc) {
+            uint64_t now = sched_clock_ns();
+            uint64_t delta = (now > curr->se.last_run_time)
+                           ? now - curr->se.last_run_time : 0;
             uint32_t nr = rq->nr_running + 1;
             uint64_t slice = SCHED_LATENCY_NS / nr;
             if (slice < SCHED_MIN_GRANULARITY_NS)
