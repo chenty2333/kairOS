@@ -178,12 +178,7 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
         return -EISDIR;
     if (!f->vnode->ops || !f->vnode->ops->truncate)
         return -EINVAL;
-    mutex_lock(&f->vnode->lock);
-    int ret = f->vnode->ops->truncate(f->vnode, (off_t)length);
-    if (ret == 0)
-        f->vnode->size = (uint64_t)length;
-    mutex_unlock(&f->vnode->lock);
-    return ret;
+    return f->vnode->ops->truncate(f->vnode, (off_t)length);
 }
 
 int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,

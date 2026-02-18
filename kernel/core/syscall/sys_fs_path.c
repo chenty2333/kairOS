@@ -698,11 +698,7 @@ int64_t sys_truncate(uint64_t path_ptr, uint64_t length, uint64_t a2,
         return -EINVAL;
     }
 
-    mutex_lock(&vn->lock);
     ret = vn->ops->truncate(vn, (off_t)length);
-    if (ret == 0)
-        vn->size = (uint64_t)length;
-    mutex_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return ret;
 }
@@ -809,8 +805,10 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
     ret = newp.mnt->ops->link(newp.dentry->parent->vnode,
                               newp.dentry->name, target);
     if (ret == 0) {
+        mutex_lock(&target->lock);
         target->nlink++;
         target->ctime = current_time_sec();
+        mutex_unlock(&target->lock);
         /* Re-lookup and attach the new dentry */
         struct vnode *vn =
             newp.mnt->ops->lookup(newp.dentry->parent->vnode,
