@@ -2,6 +2,7 @@
  * kernel/fs/vfs/file.c - VFS file operations
  */
 
+#include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -106,8 +107,11 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
         strncpy(file->path, path, sizeof(file->path) - 1);
         file->path[sizeof(file->path) - 1] = '\0';
     }
-    if ((flags & O_TRUNC) && vn->ops->truncate)
+    if ((flags & O_TRUNC) && vn->ops->truncate) {
+        rwlock_write_lock(&vn->lock);
         vn->ops->truncate(vn, 0);
+        rwlock_write_unlock(&vn->lock);
+    }
     *fp = file;
     dentry_put(resolved.dentry);
     return 0;
@@ -145,12 +149,11 @@ int vfs_open(const char *path, int flags, mode_t mode, struct file **fp) {
 int vfs_close(struct file *file) {
     if (!file)
         return -EINVAL;
-    mutex_lock(&file->lock);
-    if (--file->refcount > 0) {
-        mutex_unlock(&file->lock);
+    uint32_t old = atomic_fetch_sub(&file->refcount, 1);
+    if (old == 0)
+        panic("vfs_close: refcount underflow on file '%s'", file->path);
+    if (old > 1)
         return 0;
-    }
-    mutex_unlock(&file->lock);
     if (file->vnode && file->vnode->type == VNODE_PIPE) {
         pipe_close_end(file->vnode, file->flags);
     }
@@ -163,6 +166,10 @@ int vfs_close(struct file *file) {
     return 0;
 }
 
+void file_put(struct file *file) {
+    vfs_close(file);
+}
+
 ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     if (!file)
         return -EINVAL;
@@ -173,11 +180,13 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     }
     if (!file->vnode->ops->read)
         return -EINVAL;
+    rwlock_read_lock(&file->vnode->lock);
     mutex_lock(&file->lock);
     ssize_t ret = file->vnode->ops->read(file->vnode, buf, len, file->offset);
     if (ret > 0)
         file->offset += ret;
     mutex_unlock(&file->lock);
+    rwlock_read_unlock(&file->vnode->lock);
     return ret;
 }
 
@@ -191,6 +200,7 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     }
     if (!file->vnode->ops->write)
         return -EINVAL;
+    rwlock_write_lock(&file->vnode->lock);
     mutex_lock(&file->lock);
     if (file->flags & O_APPEND)
         file->offset = file->vnode->size;
@@ -198,6 +208,7 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     if (ret > 0)
         file->offset += ret;
     mutex_unlock(&file->lock);
+    rwlock_write_unlock(&file->vnode->lock);
     return ret;
 }
 
@@ -208,14 +219,22 @@ int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {
-    mutex_lock(&file->lock);
     off_t next;
+    if (whence == SEEK_END) {
+        rwlock_read_lock(&file->vnode->lock);
+        mutex_lock(&file->lock);
+        next = file->vnode->size + offset;
+        if (next >= 0)
+            file->offset = next;
+        mutex_unlock(&file->lock);
+        rwlock_read_unlock(&file->vnode->lock);
+        return (next < 0) ? -EINVAL : next;
+    }
+    mutex_lock(&file->lock);
     if (whence == SEEK_SET)
         next = offset;
     else if (whence == SEEK_CUR)
         next = file->offset + offset;
-    else if (whence == SEEK_END)
-        next = file->vnode->size + offset;
     else {
         mutex_unlock(&file->lock);
         return -EINVAL;
@@ -260,7 +279,7 @@ int vfs_stat_vnode(struct vnode *vn, struct stat *st) {
         return -EINVAL;
     if (vn->ops->stat)
         return vn->ops->stat(vn, st);
-    mutex_lock(&vn->lock);
+    rwlock_read_lock(&vn->lock);
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
     st->st_mode = vn->mode;
@@ -273,7 +292,7 @@ int vfs_stat_vnode(struct vnode *vn, struct stat *st) {
     st->st_ctime = vn->ctime;
     st->st_rdev = vn->rdev;
     st->st_blksize = CONFIG_PAGE_SIZE;
-    mutex_unlock(&vn->lock);
+    rwlock_read_unlock(&vn->lock);
     return 0;
 }
 
@@ -346,9 +365,11 @@ int vfs_rmdir(const char *path) {
 int vfs_readdir(struct file *file, struct dirent *ent) {
     if (!file || !file->vnode->ops->readdir)
         return -ENOSYS;
+    rwlock_read_lock(&file->vnode->lock);
     mutex_lock(&file->lock);
     int ret = file->vnode->ops->readdir(file->vnode, ent, &file->offset);
     mutex_unlock(&file->lock);
+    rwlock_read_unlock(&file->vnode->lock);
     return ret;
 }
 

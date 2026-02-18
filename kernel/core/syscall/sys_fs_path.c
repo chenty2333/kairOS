@@ -96,10 +96,14 @@ int64_t sys_fchdir(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(p, (int)fd);
     if (!f)
         return -EBADF;
-    if (!f->vnode || f->vnode->type != VNODE_DIR)
+    if (!f->vnode || f->vnode->type != VNODE_DIR) {
+        file_put(f);
         return -ENOTDIR;
-    if (!f->dentry)
+    }
+    if (!f->dentry) {
+        file_put(f);
         return -ENOENT;
+    }
 
     if (p->cwd_vnode)
         vnode_put(p->cwd_vnode);
@@ -111,6 +115,7 @@ int64_t sys_fchdir(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     dentry_get(p->cwd_dentry);
     if (vfs_build_path_dentry(f->dentry, p->cwd, sizeof(p->cwd)) < 0)
         strcpy(p->cwd, "/");
+    file_put(f);
     return 0;
 }
 
@@ -137,13 +142,13 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return -ENOENT;
     }
     struct vnode *vn = resolved.dentry->vnode;
-    mutex_lock(&vn->lock);
+    rwlock_write_lock(&vn->lock);
     vn->mode = (vn->mode & S_IFMT) | ((mode_t)mode & 07777);
     vn->ctime = current_time_sec();
     if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->chmod) {
         resolved.mnt->ops->chmod(vn, vn->mode);
     }
-    mutex_unlock(&vn->lock);
+    rwlock_write_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -171,7 +176,7 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
         return -ENOENT;
     }
     struct vnode *vn = resolved.dentry->vnode;
-    mutex_lock(&vn->lock);
+    rwlock_write_lock(&vn->lock);
     if (owner != (uint64_t)-1) {
         vn->uid = (uid_t)owner;
     }
@@ -182,7 +187,7 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
     if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->chown) {
         resolved.mnt->ops->chown(vn, vn->uid, vn->gid);
     }
-    mutex_unlock(&vn->lock);
+    rwlock_write_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -230,7 +235,7 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
         ts[1].tv_nsec = 0;
     }
 
-    mutex_lock(&vn->lock);
+    rwlock_write_lock(&vn->lock);
     if (ts[0].tv_nsec == UTIME_NOW) {
         vn->atime = now;
     } else if (ts[0].tv_nsec != UTIME_OMIT) {
@@ -245,7 +250,7 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
     if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->utimes) {
         resolved.mnt->ops->utimes(vn, &ts[0], &ts[1]);
     }
-    mutex_unlock(&vn->lock);
+    rwlock_write_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -321,6 +326,7 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         uid_t uid = p ? p->uid : 0;
         gid_t gid = p ? p->gid : 0;
         struct vnode *vn = resolved.dentry->vnode;
+        rwlock_read_lock(&vn->lock);
         mode_t perms = vn->mode & 0777;
         uint32_t bits = 0;
         if (uid == vn->uid)
@@ -329,6 +335,7 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
             bits = (perms >> 3) & 0x7;
         else
             bits = perms & 0x7;
+        rwlock_read_unlock(&vn->lock);
 
         if ((mode & R_OK) && !(bits & 0x4)) {
             dentry_put(resolved.dentry);
@@ -698,7 +705,9 @@ int64_t sys_truncate(uint64_t path_ptr, uint64_t length, uint64_t a2,
         return -EINVAL;
     }
 
+    rwlock_write_lock(&vn->lock);
     ret = vn->ops->truncate(vn, (off_t)length);
+    rwlock_write_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return ret;
 }
@@ -805,10 +814,10 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
     ret = newp.mnt->ops->link(newp.dentry->parent->vnode,
                               newp.dentry->name, target);
     if (ret == 0) {
-        mutex_lock(&target->lock);
+        rwlock_write_lock(&target->lock);
         target->nlink++;
         target->ctime = current_time_sec();
-        mutex_unlock(&target->lock);
+        rwlock_write_unlock(&target->lock);
         /* Re-lookup and attach the new dentry */
         struct vnode *vn =
             newp.mnt->ops->lookup(newp.dentry->parent->vnode,
