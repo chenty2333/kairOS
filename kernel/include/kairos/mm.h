@@ -23,6 +23,7 @@ struct boot_info;
 
 struct page {
     uint32_t flags, order, refcount;
+    int16_t pcp_home_cpu;
     struct list_head list;
 #if CONFIG_PMM_DEBUG
     uint16_t dbg_state;
@@ -44,6 +45,9 @@ size_t pmm_num_free_pages(void);
 size_t pmm_total_pages(void);
 int pmm_pcp_report(char *buf, size_t bufsz);
 int pmm_integrity_report(char *buf, size_t bufsz);
+int pmm_remote_free_report(char *buf, size_t bufsz);
+size_t pmm_remote_free_drain_local(size_t budget);
+void pmm_debug_mark_slab_page(struct page *page, bool active);
 struct page *alloc_pages(unsigned int order);
 void free_pages(struct page *page, unsigned int order);
 static inline struct page *alloc_page(void) {

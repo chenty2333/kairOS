@@ -84,6 +84,9 @@ fi
 if ! command -v clang >/dev/null 2>&1; then
   kairos_die "compiler-rt requires clang, but clang is not available"
 fi
+if ! clang --target="$TARGET" --sysroot="$SYSROOT" -c -x c /dev/null -o /dev/null >/dev/null 2>&1; then
+  kairos_die "clang target probe failed for ${TARGET} (sysroot=${SYSROOT})"
+fi
 
 if [[ ! -f "$SYSROOT/lib/libc.a" ]] || [[ ! -f "$SYSROOT/include/stdlib.h" ]]; then
   [[ "$QUIET" != "1" ]] && echo "musl sysroot not found: $SYSROOT (building static-only via scripts/kairos.sh --arch $ARCH toolchain musl)"

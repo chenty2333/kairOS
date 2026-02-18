@@ -36,7 +36,7 @@ has_pass_marker=0
 has_done_marker=0
 has_boot_marker=0
 
-if grep -Eiq "driver tests: [1-9][0-9]* failures|panic\\(|panic:|User exception|Kernel exception|Trap dump|Inst page fault|sepc=0x0000000000000000|Zombie Rescheduling|ASSERT failed" "${TEST_LOG}"; then
+if grep -Eiq "driver tests: [1-9][0-9]* failures|panic\\(|panic:|User exception|Kernel exception|Trap dump|Inst page fault|sepc=0x0000000000000000|Zombie Rescheduling|ASSERT failed|pcp list corruption|PCP integrity failure|disabling PCP on cpu" "${TEST_LOG}"; then
     has_fail_markers=1
 fi
 

@@ -43,9 +43,11 @@ kairos_tc_probe_clang_static() {
     local sysroot="$2"
     local arch_cflags="$3"
 
-    local src out
+    local src out err
+    KAIROS_TC_PROBE_ERROR=""
     src="$(mktemp /tmp/kairos-tc-probe-XXXXXX.c)"
     out="${src%.c}.bin"
+    err="${src%.c}.err"
     cat > "$src" <<'EOF'
 int main(void) { return 0; }
 EOF
@@ -61,11 +63,14 @@ EOF
     fi
     cmd+=(-static "$src" -o "$out")
 
-    if "${cmd[@]}" >/dev/null 2>&1; then
-        rm -f "$src" "$out"
+    if "${cmd[@]}" >/dev/null 2>"$err"; then
+        rm -f "$src" "$out" "$err"
         return 0
     fi
-    rm -f "$src" "$out"
+    if [[ -s "$err" ]]; then
+        KAIROS_TC_PROBE_ERROR="$(tail -n 1 "$err" | tr -d '\r')"
+    fi
+    rm -f "$src" "$out" "$err"
     return 1
 }
 
@@ -147,12 +152,16 @@ kairos_tc_select() {
                 fi
                 return 0
             fi
-            KAIROS_TC_NOTE="clang static link probe failed"
+            if [[ -n "${KAIROS_TC_PROBE_ERROR:-}" ]]; then
+                KAIROS_TC_NOTE="clang static link probe failed: ${KAIROS_TC_PROBE_ERROR}"
+            else
+                KAIROS_TC_NOTE="clang static link probe failed"
+            fi
         else
             KAIROS_TC_NOTE="clang/llvm tool suite not found"
         fi
         if [[ "$mode" == "clang" ]]; then
-            kairos_die "TOOLCHAIN_MODE=clang requested, but clang target toolchain is not usable"
+            kairos_die "TOOLCHAIN_MODE=clang requested, but clang target toolchain is not usable (${KAIROS_TC_NOTE})"
         fi
     fi
 

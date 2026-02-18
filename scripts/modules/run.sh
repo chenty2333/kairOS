@@ -145,7 +145,7 @@ kairos_run_dispatch() {
             kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
             ;;
         test-soak)
-            extra="$default_extra"
+            extra="${SOAK_EXTRA_CFLAGS:--DCONFIG_PMM_PCP_MODE=2}"
             timeout_s="${SOAK_TIMEOUT:-600}"
             log_path="${SOAK_LOG:-${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}/soak.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"

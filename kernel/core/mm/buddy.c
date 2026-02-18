@@ -19,6 +19,8 @@
 
 #define PCP_BATCH       16
 #define PCP_HIGH        64
+#define REMOTE_FREE_BATCH CONFIG_PMM_REMOTE_FREE_BATCH
+#define REMOTE_FREE_HIGH CONFIG_PMM_REMOTE_FREE_HIGH
 
 #if (CONFIG_PMM_PCP_MODE < 0) || (CONFIG_PMM_PCP_MODE > 2)
 #error "CONFIG_PMM_PCP_MODE must be 0, 1, or 2"
@@ -40,6 +42,17 @@ static struct pcp_area {
     uint64_t drain_count;
 } pcp_areas[CONFIG_MAX_CPUS];
 
+static struct remote_free_queue {
+    struct list_head list;
+    spinlock_t lock;
+    int depth;
+    uint64_t enqueue_count;
+    uint64_t dequeue_count;
+    uint64_t drop_count;
+    uint64_t drain_count;
+    uint64_t high_water;
+} remote_free_queues[CONFIG_MAX_CPUS];
+
 static bool pcp_enabled = (CONFIG_PMM_PCP_MODE != 0);
 static uint64_t pcp_disable_count;
 static uint64_t pcp_integrity_failures;
@@ -53,15 +66,34 @@ enum pmm_dbg_state {
     PMM_DBG_PCP_FREE = 2,
     PMM_DBG_ALLOCATED = 3,
     PMM_DBG_SLAB = 4,
+    PMM_DBG_REMOTE_FREE = 5,
 };
 
 static void __free_pages(struct page *page, unsigned int order);
 static inline bool page_ptr_valid(struct page *page);
+static inline int pmm_sanitize_cpu(int cpu);
+static bool pcp_push_page_locked(int cpu, struct page *page);
 
 extern char _kernel_start[], _kernel_end[];
 
 static inline int pcp_mode(void) {
     return CONFIG_PMM_PCP_MODE;
+}
+
+static inline int pmm_active_cpus(void) {
+    int ncpus = arch_cpu_count();
+    if (ncpus < 1)
+        ncpus = 1;
+    if (ncpus > CONFIG_MAX_CPUS)
+        ncpus = CONFIG_MAX_CPUS;
+    return ncpus;
+}
+
+static inline int pmm_sanitize_cpu(int cpu) {
+    int ncpus = pmm_active_cpus();
+    if (cpu < 0 || cpu >= ncpus)
+        return 0;
+    return cpu;
 }
 
 static inline bool pcp_debug_enabled(void) {
@@ -91,6 +123,9 @@ static void pcp_record_integrity_error(const char *reason, int cpu,
     pcp_last_bad_reason[sizeof(pcp_last_bad_reason) - 1] = '\0';
     pr_err("pmm: PCP integrity failure on cpu %d: %s (page=%p pa=%p)\n",
            cpu, reason, page, (void *)pcp_last_bad_pa);
+#if CONFIG_PMM_INTEGRITY_PANIC
+    panic("pmm: PCP integrity failure on cpu %d: %s", cpu, reason);
+#endif
 }
 
 static int pcp_list_count_locked(struct pcp_area *pcp) {
@@ -117,7 +152,8 @@ static bool pcp_validate_locked(int cpu, const char *ctx) {
     int seen = 0;
     list_for_each(pos, &pcp->list) {
         struct page *p = list_entry(pos, struct page, list);
-        if (!page_ptr_valid(p) || !(p->flags & PG_PCP) || p->refcount != 0) {
+        if (!page_ptr_valid(p) || !(p->flags & PG_PCP) || p->refcount != 0 ||
+            p->pcp_home_cpu != cpu) {
             pcp_record_integrity_error(ctx, cpu, p);
             return false;
         }
@@ -148,6 +184,14 @@ static void pmm_init_common(void) {
         pcp_areas[i].push_count = 0;
         pcp_areas[i].pop_count = 0;
         pcp_areas[i].drain_count = 0;
+        INIT_LIST_HEAD(&remote_free_queues[i].list);
+        spin_init(&remote_free_queues[i].lock);
+        remote_free_queues[i].depth = 0;
+        remote_free_queues[i].enqueue_count = 0;
+        remote_free_queues[i].dequeue_count = 0;
+        remote_free_queues[i].drop_count = 0;
+        remote_free_queues[i].drain_count = 0;
+        remote_free_queues[i].high_water = 0;
     }
 }
 
@@ -176,6 +220,111 @@ static inline bool page_ptr_valid(struct page *page) {
     return page && page >= page_array && page < page_array + total_pages;
 }
 
+static bool pmm_remote_free_enqueue_locked(struct page *page, int target_cpu) {
+    target_cpu = pmm_sanitize_cpu(target_cpu);
+    if (!page_ptr_valid(page))
+        return false;
+    if (page->flags & (PG_RESERVED | PG_PCP)) {
+        pcp_record_integrity_error("remote free enqueue invalid flags",
+                                   target_cpu, page);
+        return false;
+    }
+    struct remote_free_queue *rq = &remote_free_queues[target_cpu];
+
+    spin_lock(&rq->lock);
+    if (rq->depth >= REMOTE_FREE_HIGH) {
+        rq->drop_count++;
+        spin_unlock(&rq->lock);
+        return false;
+    }
+
+    page->pcp_home_cpu = (int16_t)target_cpu;
+    INIT_LIST_HEAD(&page->list);
+    list_add_tail(&page->list, &rq->list);
+    rq->depth++;
+    rq->enqueue_count++;
+    if ((uint64_t)rq->depth > rq->high_water)
+        rq->high_water = (uint64_t)rq->depth;
+    spin_unlock(&rq->lock);
+    pmm_dbg_set_state(page, PMM_DBG_REMOTE_FREE, target_cpu);
+    return true;
+}
+
+static void pmm_remote_free_flush_cpu_locked(int cpu) {
+    cpu = pmm_sanitize_cpu(cpu);
+    struct remote_free_queue *rq = &remote_free_queues[cpu];
+
+    while (!list_empty(&rq->list)) {
+        struct page *p = list_first_entry(&rq->list, struct page, list);
+        list_del(&p->list);
+        if (rq->depth > 0)
+            rq->depth--;
+        rq->dequeue_count++;
+        if (!page_ptr_valid(p)) {
+            pcp_record_integrity_error("remote free invalid page", cpu, p);
+            continue;
+        }
+        p->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
+        p->refcount = 0;
+        p->order = 0;
+        p->pcp_home_cpu = -1;
+        pmm_dbg_set_state(p, PMM_DBG_BUDDY_FREE, cpu);
+        __free_pages(p, 0);
+    }
+}
+
+static size_t pmm_remote_free_drain_local_locked(int cpu, size_t budget) {
+    if (budget == 0)
+        return 0;
+
+    cpu = pmm_sanitize_cpu(cpu);
+    struct remote_free_queue *rq = &remote_free_queues[cpu];
+    size_t moved = 0;
+
+    while (moved < budget) {
+        struct page *p = NULL;
+
+        spin_lock(&rq->lock);
+        if (!list_empty(&rq->list)) {
+            p = list_first_entry(&rq->list, struct page, list);
+            list_del(&p->list);
+            if (rq->depth > 0)
+                rq->depth--;
+            rq->dequeue_count++;
+            rq->drain_count++;
+        }
+        spin_unlock(&rq->lock);
+
+        if (!p)
+            break;
+
+        if (!page_ptr_valid(p)) {
+            pcp_record_integrity_error("remote free drain invalid page", cpu, p);
+            continue;
+        }
+
+        moved++;
+        bool pushed_to_pcp = false;
+        if (pcp_enabled && pcp_areas[cpu].count < PCP_HIGH) {
+            pushed_to_pcp = pcp_push_page_locked(cpu, p);
+            if (!pushed_to_pcp)
+                pcp_record_integrity_error("remote free push failed", cpu, p);
+        }
+        if (!pushed_to_pcp) {
+            spin_lock(&buddy_lock);
+            p->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
+            p->refcount = 0;
+            p->order = 0;
+            p->pcp_home_cpu = -1;
+            pmm_dbg_set_state(p, PMM_DBG_BUDDY_FREE, cpu);
+            __free_pages(p, 0);
+            spin_unlock(&buddy_lock);
+        }
+    }
+
+    return moved;
+}
+
 static void pcp_flush_cpu_locked(int cpu) {
     struct pcp_area *pcp = &pcp_areas[cpu];
 
@@ -192,6 +341,7 @@ static void pcp_flush_cpu_locked(int cpu) {
         p->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
         p->refcount = 0;
         p->order = 0;
+        p->pcp_home_cpu = -1;
         pmm_dbg_set_state(p, PMM_DBG_BUDDY_FREE, cpu);
         __free_pages(p, 0);
     }
@@ -201,6 +351,7 @@ static void pcp_flush_cpu_locked(int cpu) {
 }
 
 static bool pcp_push_page_locked(int cpu, struct page *page) {
+    cpu = pmm_sanitize_cpu(cpu);
     struct pcp_area *pcp = &pcp_areas[cpu];
     if (!page_ptr_valid(page)) {
         pcp_record_integrity_error("pcp push invalid page", cpu, page);
@@ -218,6 +369,8 @@ static bool pcp_push_page_locked(int cpu, struct page *page) {
     page->flags |= PG_PCP;
     page->refcount = 0;
     page->order = 0;
+    page->pcp_home_cpu = (int16_t)cpu;
+    INIT_LIST_HEAD(&page->list);
     list_add(&page->list, &pcp->list);
     pcp->count++;
     pcp->push_count++;
@@ -244,6 +397,7 @@ static struct page *pcp_pop_page_locked(int cpu) {
     page->flags &= ~PG_PCP;
     page->order = 0;
     page->refcount = 1;
+    page->pcp_home_cpu = (int16_t)cpu;
     pmm_dbg_set_state(page, PMM_DBG_ALLOCATED, cpu);
     return page;
 }
@@ -256,6 +410,9 @@ static void pcp_disable_locked(const char *reason, int cpu) {
     spin_lock(&buddy_lock);
     for (int i = 0; i < CONFIG_MAX_CPUS; i++) {
         pcp_flush_cpu_locked(i);
+        spin_lock(&remote_free_queues[i].lock);
+        pmm_remote_free_flush_cpu_locked(i);
+        spin_unlock(&remote_free_queues[i].lock);
     }
     spin_unlock(&buddy_lock);
     pcp_enabled = false;
@@ -281,6 +438,7 @@ static struct page *__alloc_pages(unsigned int order) {
             struct page *buddy = page + (1UL << o);
             buddy->order = o;
             buddy->refcount = 0;
+            buddy->pcp_home_cpu = -1;
             buddy->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
             pmm_dbg_set_state(buddy, PMM_DBG_BUDDY_FREE, -1);
             list_add(&buddy->list, &free_lists[o]);
@@ -288,6 +446,7 @@ static struct page *__alloc_pages(unsigned int order) {
 
         page->order = order;
         page->refcount = 1;
+        page->pcp_home_cpu = -1;
         page->flags &= ~PG_PCP;
         pmm_dbg_set_state(page, PMM_DBG_ALLOCATED, -1);
         num_free_pages -= (1UL << order);
@@ -312,6 +471,7 @@ static void __free_pages(struct page *page, unsigned int order) {
 
     page->order = order;
     page->refcount = 0;
+    page->pcp_home_cpu = -1;
     page->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
     pmm_dbg_set_state(page, PMM_DBG_BUDDY_FREE, -1);
     list_add(&page->list, &free_lists[order]);
@@ -322,13 +482,12 @@ static void __free_pages(struct page *page, unsigned int order) {
 struct page *alloc_pages(unsigned int order) {
     struct page *page = NULL;
     bool irq = arch_irq_save();
-    int cpu = (int)arch_cpu_id();
-    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
-        cpu = 0;
+    int cpu = pmm_sanitize_cpu((int)arch_cpu_id());
 
     if (order == 0) {
         spin_lock(&pcp_lock);
         if (pcp_enabled) {
+            pmm_remote_free_drain_local_locked(cpu, REMOTE_FREE_BATCH);
             struct pcp_area *pcp = &pcp_areas[cpu];
             if (!pcp_validate_locked(cpu, "alloc precheck"))
                 pcp_disable_locked("alloc precheck failed", cpu);
@@ -347,6 +506,7 @@ struct page *alloc_pages(unsigned int order) {
                     p->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
                     p->refcount = 0;
                     p->order = 0;
+                    p->pcp_home_cpu = (int16_t)cpu;
                     if (!pcp_push_page_locked(cpu, p)) {
                         bad_page = true;
                         break;
@@ -384,7 +544,13 @@ struct page *alloc_pages(unsigned int order) {
         }
     }
 
-    if (page) page->flags |= PG_KERNEL;
+    if (page) {
+        page->flags |= PG_KERNEL;
+        page->pcp_home_cpu = (int16_t)cpu;
+        pmm_dbg_set_state(page, (page->flags & PG_SLAB) ? PMM_DBG_SLAB
+                                                         : PMM_DBG_ALLOCATED,
+                          cpu);
+    }
     arch_irq_restore(irq);
     return page;
 }
@@ -397,6 +563,7 @@ void free_pages(struct page *page, unsigned int order) {
         arch_irq_restore(irq);
         return;
     }
+    int cpu = pmm_sanitize_cpu((int)arch_cpu_id());
     bool was_on_pcp = (page->flags & PG_PCP) != 0;
     page->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB);
     page->refcount = 0;
@@ -404,19 +571,24 @@ void free_pages(struct page *page, unsigned int order) {
 
     if (order == 0) {
         bool queued_to_pcp = false;
+        bool queued_to_remote = false;
         spin_lock(&pcp_lock);
         if (pcp_enabled) {
-            int cpu = (int)arch_cpu_id();
-            if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
-                cpu = 0;
+            pmm_remote_free_drain_local_locked(cpu, REMOTE_FREE_BATCH);
             struct pcp_area *pcp = &pcp_areas[cpu];
             if (!pcp_validate_locked(cpu, "free precheck"))
                 pcp_disable_locked("free precheck failed", cpu);
             if (pcp_enabled) {
-                if (pcp_push_page_locked(cpu, page)) {
-                    queued_to_pcp = true;
-                } else {
-                    pcp_disable_locked("free push failed", cpu);
+                int target_cpu = pmm_sanitize_cpu((int)page->pcp_home_cpu);
+                if (target_cpu != cpu)
+                    queued_to_remote =
+                        pmm_remote_free_enqueue_locked(page, target_cpu);
+                if (!queued_to_remote) {
+                    if (pcp_push_page_locked(cpu, page)) {
+                        queued_to_pcp = true;
+                    } else {
+                        pcp_disable_locked("free push failed", cpu);
+                    }
                 }
             }
             if (pcp_enabled && pcp->count >= PCP_HIGH) {
@@ -428,6 +600,7 @@ void free_pages(struct page *page, unsigned int order) {
                     p->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP);
                     p->refcount = 0;
                     p->order = 0;
+                    p->pcp_home_cpu = -1;
                     __free_pages(p, 0);
                     pcp->drain_count++;
                 }
@@ -436,7 +609,8 @@ void free_pages(struct page *page, unsigned int order) {
             if (pcp_enabled && !pcp_validate_locked(cpu, "free postcheck"))
                 pcp_disable_locked("free postcheck failed", cpu);
         }
-        if (!pcp_enabled && !queued_to_pcp && !was_on_pcp) {
+        if ((!pcp_enabled || (!queued_to_pcp && !queued_to_remote)) &&
+            !was_on_pcp) {
             spin_lock(&buddy_lock);
             __free_pages(page, order);
             spin_unlock(&buddy_lock);
@@ -459,11 +633,11 @@ size_t pmm_num_free_pages(void) {
     spin_lock(&pcp_lock);
     spin_lock(&buddy_lock);
     size_t total = num_free_pages;
-    int ncpus = arch_cpu_count();
-    if (ncpus > CONFIG_MAX_CPUS)
-        ncpus = CONFIG_MAX_CPUS;
-    for (int i = 0; i < ncpus; i++)
+    int ncpus = pmm_active_cpus();
+    for (int i = 0; i < ncpus; i++) {
         total += (size_t)pcp_areas[i].count;
+        total += (size_t)remote_free_queues[i].depth;
+    }
     spin_unlock(&buddy_lock);
     spin_unlock(&pcp_lock);
     arch_irq_restore(irq);
@@ -476,9 +650,7 @@ int pmm_pcp_report(char *buf, size_t bufsz) {
 
     bool irq = arch_irq_save();
     spin_lock(&pcp_lock);
-    int ncpus = arch_cpu_count();
-    if (ncpus > CONFIG_MAX_CPUS)
-        ncpus = CONFIG_MAX_CPUS;
+    int ncpus = pmm_active_cpus();
     int len = snprintf(buf, bufsz,
                        "pcp_mode=%d pcp_enabled=%d disable_count=%llu "
                        "integrity_failures=%llu\n",
@@ -500,24 +672,158 @@ int pmm_pcp_report(char *buf, size_t bufsz) {
     return len;
 }
 
+int pmm_remote_free_report(char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    bool irq = arch_irq_save();
+    spin_lock(&pcp_lock);
+    int ncpus = pmm_active_cpus();
+    uint64_t total_depth = 0;
+    uint64_t total_drop = 0;
+    int len = snprintf(buf, bufsz,
+                       "remote_free_batch=%d remote_free_high=%d\n",
+                       REMOTE_FREE_BATCH, REMOTE_FREE_HIGH);
+    for (int i = 0; i < ncpus && (size_t)len < bufsz; i++) {
+        struct remote_free_queue *rq = &remote_free_queues[i];
+        total_depth += (uint64_t)rq->depth;
+        total_drop += rq->drop_count;
+        len += snprintf(buf + len, bufsz - (size_t)len,
+                        "cpu%d depth=%d enq=%llu deq=%llu drop=%llu "
+                        "drain=%llu high=%llu\n",
+                        i, rq->depth,
+                        (unsigned long long)rq->enqueue_count,
+                        (unsigned long long)rq->dequeue_count,
+                        (unsigned long long)rq->drop_count,
+                        (unsigned long long)rq->drain_count,
+                        (unsigned long long)rq->high_water);
+    }
+    if ((size_t)len < bufsz) {
+        len += snprintf(buf + len, bufsz - (size_t)len,
+                        "total_depth=%llu total_drop=%llu\n",
+                        (unsigned long long)total_depth,
+                        (unsigned long long)total_drop);
+    }
+    spin_unlock(&pcp_lock);
+    arch_irq_restore(irq);
+    return len;
+}
+
 int pmm_integrity_report(char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
         return -EINVAL;
 
     bool irq = arch_irq_save();
     spin_lock(&pcp_lock);
-    int len = snprintf(buf, bufsz,
-                       "pcp_integrity_failures=%llu\n"
-                       "pcp_last_bad_cpu=%d\n"
-                       "pcp_last_bad_pa=%p\n"
-                       "pcp_last_bad_reason=%s\n",
-                       (unsigned long long)pcp_integrity_failures,
-                       pcp_last_bad_cpu,
-                       (void *)pcp_last_bad_pa,
-                       pcp_last_bad_reason[0] ? pcp_last_bad_reason : "none");
+    spin_lock(&buddy_lock);
+    uint64_t bad_flags = 0;
+    uint64_t bad_refcount = 0;
+    uint64_t bad_cpu_hint = 0;
+    uint64_t debug_state_mismatch = 0;
+    uint64_t state_count[6] = {0};
+    int ncpus = pmm_active_cpus();
+    for (size_t i = 0; i < total_pages; i++) {
+        struct page *p = &page_array[i];
+        if (p->pcp_home_cpu < -1 || p->pcp_home_cpu >= ncpus)
+            bad_cpu_hint++;
+        if ((p->flags & PG_PCP) && (p->flags & (PG_RESERVED | PG_SLAB)))
+            bad_flags++;
+        if ((p->flags & PG_PCP) && p->refcount != 0)
+            bad_refcount++;
+#if CONFIG_PMM_DEBUG
+        if (p->dbg_state <= PMM_DBG_REMOTE_FREE)
+            state_count[p->dbg_state]++;
+        switch (p->dbg_state) {
+        case PMM_DBG_RESERVED:
+            if (!(p->flags & PG_RESERVED))
+                debug_state_mismatch++;
+            break;
+        case PMM_DBG_BUDDY_FREE:
+            if ((p->flags & (PG_RESERVED | PG_PCP | PG_SLAB)) || p->refcount)
+                debug_state_mismatch++;
+            break;
+        case PMM_DBG_PCP_FREE:
+            if (!(p->flags & PG_PCP) || p->refcount)
+                debug_state_mismatch++;
+            break;
+        case PMM_DBG_REMOTE_FREE:
+            if ((p->flags & (PG_PCP | PG_RESERVED)) || p->refcount)
+                debug_state_mismatch++;
+            break;
+        case PMM_DBG_ALLOCATED:
+            if ((p->flags & (PG_RESERVED | PG_PCP)) || p->refcount == 0)
+                debug_state_mismatch++;
+            break;
+        case PMM_DBG_SLAB:
+            if (!(p->flags & PG_SLAB))
+                debug_state_mismatch++;
+            break;
+        default:
+            debug_state_mismatch++;
+            break;
+        }
+#endif
+    }
+    int len = snprintf(
+        buf, bufsz,
+        "pcp_integrity_failures=%llu\n"
+        "pcp_last_bad_cpu=%d\n"
+        "pcp_last_bad_pa=%p\n"
+        "pcp_last_bad_reason=%s\n"
+        "bad_flags=%llu\n"
+        "bad_refcount=%llu\n"
+        "bad_cpu_hint=%llu\n"
+        "debug_state_mismatch=%llu\n"
+        "status=%s\n",
+        (unsigned long long)pcp_integrity_failures,
+        pcp_last_bad_cpu,
+        (void *)pcp_last_bad_pa,
+        pcp_last_bad_reason[0] ? pcp_last_bad_reason : "none",
+        (unsigned long long)bad_flags,
+        (unsigned long long)bad_refcount,
+        (unsigned long long)bad_cpu_hint,
+        (unsigned long long)debug_state_mismatch,
+        (pcp_integrity_failures || bad_flags || bad_refcount || bad_cpu_hint ||
+         debug_state_mismatch)
+            ? "fail"
+            : "pass");
+#if CONFIG_PMM_DEBUG
+    if ((size_t)len < bufsz) {
+        len += snprintf(buf + len, bufsz - (size_t)len,
+                        "state_reserved=%llu state_buddy_free=%llu "
+                        "state_pcp_free=%llu state_allocated=%llu "
+                        "state_slab=%llu state_remote_free=%llu\n",
+                        (unsigned long long)state_count[PMM_DBG_RESERVED],
+                        (unsigned long long)state_count[PMM_DBG_BUDDY_FREE],
+                        (unsigned long long)state_count[PMM_DBG_PCP_FREE],
+                        (unsigned long long)state_count[PMM_DBG_ALLOCATED],
+                        (unsigned long long)state_count[PMM_DBG_SLAB],
+                        (unsigned long long)state_count[PMM_DBG_REMOTE_FREE]);
+    }
+#endif
+    spin_unlock(&buddy_lock);
     spin_unlock(&pcp_lock);
     arch_irq_restore(irq);
     return len;
+}
+
+size_t pmm_remote_free_drain_local(size_t budget) {
+    if (budget == 0)
+        return 0;
+    bool irq = arch_irq_save();
+    spin_lock(&pcp_lock);
+    int cpu = pmm_sanitize_cpu((int)arch_cpu_id());
+    size_t drained = pmm_remote_free_drain_local_locked(cpu, budget);
+    spin_unlock(&pcp_lock);
+    arch_irq_restore(irq);
+    return drained;
+}
+
+void pmm_debug_mark_slab_page(struct page *page, bool active) {
+    if (!page_ptr_valid(page))
+        return;
+    int cpu = pmm_sanitize_cpu((int)arch_cpu_id());
+    pmm_dbg_set_state(page, active ? PMM_DBG_SLAB : PMM_DBG_ALLOCATED, cpu);
 }
 
 paddr_t pmm_alloc_page(void) { return pmm_alloc_pages(1); }
@@ -577,6 +883,7 @@ void pmm_reserve_range(paddr_t start, paddr_t end) {
         if (p) {
             p->flags |= PG_RESERVED;
             p->flags &= ~PG_PCP;
+            p->pcp_home_cpu = -1;
             pmm_dbg_set_state(p, PMM_DBG_RESERVED, (int)arch_cpu_id());
         }
     }
@@ -619,6 +926,7 @@ void pmm_init(paddr_t start, paddr_t end) {
     for (size_t i = 0; i < total_pages; i++) {
         page_array[i].flags = (i < array_pages) ? PG_RESERVED : 0;
         page_array[i].refcount = 0;
+        page_array[i].pcp_home_cpu = -1;
         INIT_LIST_HEAD(&page_array[i].list);
 #if CONFIG_PMM_DEBUG
         page_array[i].dbg_state = (i < array_pages) ? PMM_DBG_RESERVED : PMM_DBG_BUDDY_FREE;
@@ -727,6 +1035,7 @@ void pmm_init_from_memmap(const struct boot_info *bi) {
     for (size_t i = 0; i < total_pages; i++) {
         page_array[i].flags = PG_RESERVED;
         page_array[i].refcount = 0;
+        page_array[i].pcp_home_cpu = -1;
         INIT_LIST_HEAD(&page_array[i].list);
 #if CONFIG_PMM_DEBUG
         page_array[i].dbg_state = PMM_DBG_RESERVED;

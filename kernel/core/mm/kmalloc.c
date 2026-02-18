@@ -46,6 +46,7 @@ static int cache_grow(struct kmem_cache *c) {
 
     pg->flags |= PG_SLAB;
     pg->list.prev = (struct list_head *)c;
+    pmm_debug_mark_slab_page(pg, true);
 
     uint8_t *base = (uint8_t *)phys_to_virt(page_to_phys(pg));
     for (size_t i = 0; i < CONFIG_PAGE_SIZE / c->obj_size; i++) {

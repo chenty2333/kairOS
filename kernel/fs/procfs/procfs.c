@@ -76,6 +76,7 @@ static int gen_version(pid_t pid, char *buf, size_t bufsz);
 static int gen_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_mm_pcp(pid_t pid, char *buf, size_t bufsz);
 static int gen_mm_integrity(pid_t pid, char *buf, size_t bufsz);
+static int gen_mm_remote_free(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_status(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
@@ -259,6 +260,15 @@ static int gen_mm_integrity(pid_t pid __attribute__((unused)),
     if (n < 0)
         return snprintf(buf, bufsz, "pmm_integrity_report unavailable (%d)\n",
                         n);
+    return n;
+}
+
+static int gen_mm_remote_free(pid_t pid __attribute__((unused)),
+                              char *buf, size_t bufsz) {
+    int n = pmm_remote_free_report(buf, bufsz);
+    if (n < 0)
+        return snprintf(buf, bufsz,
+                        "pmm_remote_free_report unavailable (%d)\n", n);
     return n;
 }
 
@@ -550,6 +560,7 @@ static const struct static_entry_def static_entries[] = {
     {"cmdline", gen_cmdline},
     {"mm_pcp", gen_mm_pcp},
     {"mm_integrity", gen_mm_integrity},
+    {"mm_remote_free", gen_mm_remote_free},
 };
 
 #define NUM_STATIC_ENTRIES ARRAY_SIZE(static_entries)
