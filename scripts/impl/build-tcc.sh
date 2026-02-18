@@ -54,6 +54,7 @@ case "$ARCH" in
 esac
 
 unset CROSS_COMPILE CFLAGS LDFLAGS 2>/dev/null || true
+kairos_tc_prepare_libgcc_compat "$ARCH" "$SYSROOT"
 kairos_tc_select "$TARGET" "$SYSROOT" "$ARCH_CFLAGS" 1
 CC="$KAIROS_TC_CC"
 CROSS_PREFIX="$KAIROS_TC_CROSS_PREFIX"

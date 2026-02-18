@@ -54,7 +54,7 @@ CFLAGS += $(RT_RESOURCE_FLAGS)
 LDFLAGS += $(RTLIB_FLAGS) -L$(RTLIB_DIR) $(RT_RESOURCE_FLAGS)
 RTLIB_BUILTINS := $(wildcard $(RTLIB_DIR)/libclang_rt.builtins-*.a)
 ifeq ($(RTLIB_BUILTINS),)
-$(warning compiler-rt builtins not found; run ./scripts/build-compiler-rt.sh $(ARCH))
+$(warning compiler-rt builtins not found; run ./scripts/kairos.sh --arch $(ARCH) toolchain compiler-rt)
 endif
 endif
 

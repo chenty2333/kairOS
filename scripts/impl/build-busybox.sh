@@ -49,6 +49,10 @@ if [[ ! -f "$SYSROOT/lib/libc.a" ]]; then
   exit 1
 fi
 
+# BusyBox's link rules hardcode -lgcc/-lgcc_eh. Pre-populate compatibility
+# archives before static probe so clang toolchain detection can succeed.
+kairos_tc_prepare_libgcc_compat "$ARCH" "$SYSROOT"
+
 kairos_tc_select "$TARGET" "$SYSROOT" "$ARCH_CFLAGS" 1
 CC="$KAIROS_TC_CC"
 AR="$KAIROS_TC_AR"
@@ -60,19 +64,6 @@ LDFLAGS="$KAIROS_TC_LDFLAGS"
 
 if [[ -n "${KAIROS_TC_NOTE:-}" && "$QUIET" != "1" ]]; then
   echo "$KAIROS_TC_NOTE"
-fi
-
-# Create libgcc.a / libgcc_eh.a compatibility symlinks for BusyBox.
-# BusyBox's build system hardcodes -lgcc -lgcc_eh; when using clang +
-# compiler-rt we satisfy those with symlinks to the builtins library.
-RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
-_builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' 2>/dev/null | head -n1)"
-if [[ -n "$_builtins" ]]; then
-  ln -sf "$_builtins" "$SYSROOT/lib/libgcc.a"
-  # libgcc_eh.a can be empty — BusyBox doesn't actually need unwind symbols
-  if [[ ! -f "$SYSROOT/lib/libgcc_eh.a" ]]; then
-    "$AR" cr "$SYSROOT/lib/libgcc_eh.a"
-  fi
 fi
 
 if [[ ! -f "$DEFCONFIG" ]]; then
