@@ -140,10 +140,10 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     mutex_lock(&vn->lock);
     vn->mode = (vn->mode & S_IFMT) | ((mode_t)mode & 07777);
     vn->ctime = current_time_sec();
-    mutex_unlock(&vn->lock);
     if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->chmod) {
         resolved.mnt->ops->chmod(vn, vn->mode);
     }
+    mutex_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -179,10 +179,10 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
         vn->gid = (gid_t)group;
     }
     vn->ctime = current_time_sec();
-    mutex_unlock(&vn->lock);
     if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->chown) {
         resolved.mnt->ops->chown(vn, vn->uid, vn->gid);
     }
+    mutex_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -242,11 +242,10 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
         vn->mtime = ts[1].tv_sec;
     }
     vn->ctime = now;
-    mutex_unlock(&vn->lock);
-
     if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->utimes) {
         resolved.mnt->ops->utimes(vn, &ts[0], &ts[1]);
     }
+    mutex_unlock(&vn->lock);
     dentry_put(resolved.dentry);
     return 0;
 }

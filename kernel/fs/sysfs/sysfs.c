@@ -226,8 +226,10 @@ static int sysfs_build_path(struct sysfs_node *node, char *buf, size_t bufsz) {
     struct sysfs_node *chain[32];
     int depth = 0;
     for (struct sysfs_node *n = node; n && n->parent; n = n->parent) {
-        if (depth >= 32)
+        if (depth >= 32) {
+            pr_warn("sysfs: build_path depth overflow for '%s'\n", node->name);
             return -ENAMETOOLONG;
+        }
         chain[depth++] = n;
     }
     size_t pos = 0;
