@@ -1,5 +1,5 @@
 /**
- * kernel/core/sync/sync.c - Advanced Robust Mutex and Semaphore implementation
+ * kernel/core/sync/sync.c - Mutex, Semaphore, and RWLock implementation
  */
 
 #include <kairos/sync.h>
@@ -12,7 +12,7 @@
 #include <kairos/mm.h>
 #include <kairos/string.h>
 
-/* --- Lock debug sleep check (needs sched.h for in_atomic) --- */
+/* --- Lock debug (needs sched.h for in_atomic) --- */
 
 #if CONFIG_DEBUG_LOCKS
 void __lock_debug_sleep_check(const char *file, int line, const char *func) {
@@ -103,7 +103,7 @@ void mutex_lock(struct mutex *m) {
     spin_lock(&m->lock);
     while (m->locked) {
         spin_unlock(&m->lock);
-        proc_sleep_on(&m->wq, m, true);   /* return value discarded — unconditional retry */
+        proc_sleep_on(&m->wq, m, true);
         spin_lock(&m->lock);
     }
     m->locked = true;
@@ -114,9 +114,8 @@ void mutex_lock(struct mutex *m) {
 int mutex_lock_interruptible(struct mutex *m) {
     SLEEP_LOCK_DEBUG_CHECK();
     struct process *curr = proc_current();
-    if (curr && m->holder == curr) {
+    if (curr && m->holder == curr)
         panic("mutex_lock: recursive deadlock on mutex '%s'", m->name ? m->name : "unnamed");
-    }
 
     if (!curr) {
         spin_lock(&m->lock);
@@ -133,19 +132,16 @@ int mutex_lock_interruptible(struct mutex *m) {
 
     spin_lock(&m->lock);
     while (m->locked) {
-        /* Check for pending signals if we're in user context */
         if (curr->mm && curr->sig_pending) {
             spin_unlock(&m->lock);
             return -EINTR;
         }
-
         spin_unlock(&m->lock);
         int rc = proc_sleep_on(&m->wq, m, true);
         if (rc < 0)
             return rc;
         spin_lock(&m->lock);
     }
-    
     m->locked = true;
     m->holder = curr;
     spin_unlock(&m->lock);
@@ -200,7 +196,7 @@ void sem_wait(struct semaphore *s) {
     spin_lock(&s->lock);
     while (s->count <= 0) {
         spin_unlock(&s->lock);
-        proc_sleep_on(&s->wq, s, true);   /* return value discarded — unconditional retry */
+        proc_sleep_on(&s->wq, s, true);
         spin_lock(&s->lock);
     }
     s->count--;
@@ -276,7 +272,6 @@ void rwlock_read_lock(struct rwlock *rw) {
     struct process *curr = proc_current();
 
     if (!curr) {
-        /* No process context — spin */
         spin_lock(&rw->lock);
         while (rw->write_locked || rw->writers_waiting) {
             spin_unlock(&rw->lock);
@@ -302,7 +297,6 @@ int rwlock_read_lock_interruptible(struct rwlock *rw) {
     struct process *curr = proc_current();
 
     if (!curr) {
-        /* No process context — spin */
         spin_lock(&rw->lock);
         while (rw->write_locked || rw->writers_waiting) {
             spin_unlock(&rw->lock);
@@ -352,7 +346,6 @@ void rwlock_write_lock(struct rwlock *rw) {
     }
 
     if (!curr) {
-        /* No process context — spin */
         spin_lock(&rw->lock);
         rw->writers_waiting++;
         while (rw->write_locked || rw->readers > 0) {
@@ -389,7 +382,6 @@ int rwlock_write_lock_interruptible(struct rwlock *rw) {
     }
 
     if (!curr) {
-        /* No process context — spin */
         spin_lock(&rw->lock);
         rw->writers_waiting++;
         while (rw->write_locked || rw->readers > 0) {
@@ -415,7 +407,6 @@ int rwlock_write_lock_interruptible(struct rwlock *rw) {
         spin_unlock(&rw->lock);
         int rc = proc_sleep_on(&rw->wr_wq, rw, true);
         if (rc < 0) {
-            /* Roll back writers_waiting before returning */
             spin_lock(&rw->lock);
             rw->writers_waiting--;
             spin_unlock(&rw->lock);
@@ -438,10 +429,8 @@ void rwlock_write_unlock(struct rwlock *rw) {
     spin_unlock(&rw->lock);
 
     if (has_writers) {
-        /* Writer priority: wake one writer first */
         wait_queue_wakeup_one(&rw->wr_wq);
     } else {
-        /* No writers waiting: wake all readers */
         wait_queue_wakeup_all(&rw->rd_wq);
     }
 }
@@ -477,7 +466,6 @@ int mutex_lock_timeout(struct mutex *m, uint64_t timeout_ticks) {
               m->name ? m->name : "unnamed");
 
     if (!curr) {
-        /* No process context — spin with deadline */
         uint64_t deadline = arch_timer_get_ticks() + timeout_ticks;
         spin_lock(&m->lock);
         while (m->locked) {

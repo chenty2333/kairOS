@@ -1,8 +1,5 @@
 /**
  * kernel/include/kairos/completion.h - One-shot event synchronization
- *
- * Used for driver init handshakes, thread exit notification, etc.
- * Waiters sleep until complete_one() or complete_all() is called.
  */
 
 #ifndef _KAIROS_COMPLETION_H
@@ -18,8 +15,6 @@ struct completion {
     struct wait_queue wq;
 };
 
-#define COMPLETION_INIT { .done = 0, .lock = SPINLOCK_INIT, }
-
 void completion_init(struct completion *c);
 void wait_for_completion(struct completion *c);
 int  wait_for_completion_interruptible(struct completion *c);
@@ -28,4 +23,4 @@ void complete_one(struct completion *c);
 void complete_all(struct completion *c);
 void reinit_completion(struct completion *c);
 
-#endif /* _KAIROS_COMPLETION_H */
+#endif

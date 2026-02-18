@@ -1,8 +1,5 @@
 /**
- * kernel/include/kairos/spinlock.h - Ticket Spinlock primitives
- *
- * FIFO-fair ticket lock: each acquirer takes a ticket number and waits
- * until the serving counter matches.  Drop-in replacement for TAS lock.
+ * kernel/include/kairos/spinlock.h - Ticket spinlock primitives
  */
 
 #ifndef _KAIROS_SPINLOCK_H
@@ -31,7 +28,6 @@ static inline void spin_init(spinlock_t *lock) {
 
 /*
  * Preempt count hooks — implemented in sync.c to avoid circular deps.
- * When CONFIG_DEBUG_LOCKS=0 these are no-ops (never called).
  */
 #if CONFIG_DEBUG_LOCKS
 void __spin_preempt_disable(void);
@@ -68,7 +64,6 @@ static inline bool spin_trylock(spinlock_t *lock) {
     return acquired;
 }
 
-/* IRQ-safe spinlock — caller holds the flags variable (nesting-safe) */
 static inline void spin_lock_irqsave(spinlock_t *lock, bool *flags) {
     *flags = arch_irq_save();
     spin_lock(lock);

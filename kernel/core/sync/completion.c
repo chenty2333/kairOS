@@ -1,5 +1,5 @@
 /**
- * kernel/core/sync/completion.c - Completion primitive implementation
+ * kernel/core/sync/completion.c - Completion primitive
  */
 
 #include <kairos/completion.h>
@@ -16,9 +16,8 @@ void completion_init(struct completion *c) {
 
 void wait_for_completion(struct completion *c) {
     SLEEP_LOCK_DEBUG_CHECK();
-    struct process *curr = proc_current();
 
-    if (!curr) {
+    if (!proc_current()) {
         spin_lock(&c->lock);
         while (!c->done) {
             spin_unlock(&c->lock);
@@ -44,9 +43,8 @@ void wait_for_completion(struct completion *c) {
 
 int wait_for_completion_interruptible(struct completion *c) {
     SLEEP_LOCK_DEBUG_CHECK();
-    struct process *curr = proc_current();
 
-    if (!curr) {
+    if (!proc_current()) {
         spin_lock(&c->lock);
         while (!c->done) {
             spin_unlock(&c->lock);
@@ -75,9 +73,8 @@ int wait_for_completion_interruptible(struct completion *c) {
 
 int wait_for_completion_timeout(struct completion *c, uint64_t ticks) {
     SLEEP_LOCK_DEBUG_CHECK();
-    struct process *curr = proc_current();
 
-    if (!curr) {
+    if (!proc_current()) {
         uint64_t deadline = arch_timer_get_ticks() + ticks;
         spin_lock(&c->lock);
         while (!c->done) {

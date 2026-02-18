@@ -1,10 +1,5 @@
 /**
  * kernel/include/kairos/lock_debug.h - Lock debugging annotations
- *
- * When CONFIG_DEBUG_LOCKS=1, adds runtime checks to detect common locking bugs:
- *   - spinlock: same-CPU recursive acquisition, preempt count tracking
- *   - mutex/sem/rwlock: sleeping with IRQs disabled or in atomic context
- *   - rwlock: holding write lock while attempting read lock (self-deadlock)
  */
 
 #ifndef _KAIROS_LOCK_DEBUG_H
@@ -31,13 +26,7 @@
     (lock)->held_cpu = -1; \
 } while (0)
 
-/*
- * Check: sleeping locks must not be acquired with IRQs disabled.
- * The in_atomic() check (sleeping while holding spinlock) is done via
- * preempt_count — but that requires sched.h which creates a circular
- * dependency from spinlock.h.  So we provide it as an extern function
- * implemented in sync.c where the full header set is available.
- */
+/* Extern — implemented in sync.c to avoid circular deps with sched.h */
 void __lock_debug_sleep_check(const char *file, int line, const char *func);
 #define SLEEP_LOCK_DEBUG_CHECK() \
     __lock_debug_sleep_check(__FILE__, __LINE__, __func__)
