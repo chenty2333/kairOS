@@ -441,8 +441,8 @@ void sysfs_remove_file(struct sysfs_node *node) {
         return;
     spin_lock(&sysfs_sb.lock);
     list_del(&node->sibling);
-    spin_unlock(&sysfs_sb.lock);
     kfree(node);
+    spin_unlock(&sysfs_sb.lock);
 }
 
 int sysfs_create_files(struct sysfs_node *parent,
@@ -480,7 +480,9 @@ struct sysfs_node *sysfs_create_link(struct sysfs_node *parent,
                                              S_IFLNK | 0777);
     if (sn) {
         sn->link_target = target;
-        sn->vn.size = strlen(target->name);
+        char pathbuf[CONFIG_PATH_MAX];
+        int plen = sysfs_build_path(target, pathbuf, sizeof(pathbuf));
+        sn->vn.size = (plen > 0) ? (uint64_t)plen : strlen(target->name);
     }
     spin_unlock(&sysfs_sb.lock);
     return sn;
@@ -508,6 +510,7 @@ void sysfs_init(void) {
     }
     strncpy(sysfs_root_node->name, "/", CONFIG_NAME_MAX - 1);
     sysfs_root_node->type = SYSFS_DIR;
+    /* Single-threaded init context — no lock needed for root ino */
     sysfs_root_node->ino = sysfs_sb.next_ino++;
     sysfs_root_node->parent = NULL;
     INIT_LIST_HEAD(&sysfs_root_node->children);

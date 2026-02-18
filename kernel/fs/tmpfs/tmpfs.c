@@ -192,6 +192,7 @@ static struct tmpfs_node *tmpfs_alloc_node(struct tmpfs_mount *tm,
     return tn;
 }
 
+/* NOTE: called under tm->lock (spinlock) — pmm_free_page must not sleep */
 static void tmpfs_free_pages(struct tmpfs_mount *tm, struct tmpfs_node *tn) {
     if (!tn->pages)
         return;
@@ -311,6 +312,7 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
     }
 
     size_t done = 0;
+    ret = 0;
     while (done < len) {
         size_t pg_idx = ((size_t)off + done) / CONFIG_PAGE_SIZE;
         size_t pg_off = ((size_t)off + done) % CONFIG_PAGE_SIZE;
@@ -320,13 +322,13 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
 
         if (!tn->pages[pg_idx]) {
             if (tm->used_bytes + CONFIG_PAGE_SIZE > tm->max_bytes) {
-                mutex_unlock(&vn->lock);
-                return done > 0 ? (ssize_t)done : -ENOSPC;
+                ret = -ENOSPC;
+                goto out;
             }
             paddr_t pa = pmm_alloc_page();
             if (!pa) {
-                mutex_unlock(&vn->lock);
-                return done > 0 ? (ssize_t)done : -ENOMEM;
+                ret = -ENOMEM;
+                goto out;
             }
             memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
             tn->pages[pg_idx] = pa;
@@ -338,13 +340,21 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
         done += chunk;
     }
 
-    if (end > tn->size) {
-        tn->size = end;
-        vn->size = end;
+out:
+    {
+        size_t actual_end = (size_t)off + done;
+        if (actual_end > tn->size) {
+            tn->size = actual_end;
+            vn->size = actual_end;
+        }
     }
-    vn->mtime = vn->ctime = tmpfs_now();
+    if (done > 0)
+        vn->mtime = vn->ctime = tmpfs_now();
     mutex_unlock(&vn->lock);
-    return (ssize_t)done;
+    if (done > 0)
+        return (ssize_t)done;
+    /* done == 0, return the error */
+    return ret;
 }
 
 static int tmpfs_truncate(struct vnode *vn, off_t length) {
