@@ -61,8 +61,8 @@ stage_busybox() {
     chmod 0755 "$ROOTFS_DIR/bin/busybox"
 
     # Install BusyBox applet links from shared list.
-    local applets
-    read -ra applets < <(tr '\n' ' ' < "$ROOT_DIR/scripts/busybox-applets.txt")
+    local -a applets
+    mapfile -t applets < <(grep -o '[a-zA-Z_][a-zA-Z0-9_]*' "$ROOT_DIR/scripts/busybox-applets.txt")
     for app in "${applets[@]}"; do
       ln -sf /bin/busybox "$ROOTFS_DIR/bin/$app"
     done
