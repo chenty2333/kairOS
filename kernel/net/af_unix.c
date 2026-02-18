@@ -211,12 +211,12 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
 
 static ssize_t unix_buf_write(struct unix_buf *b, struct mutex *lock,
                                const void *buf, size_t len,
-                               int *reader_alive, bool nonblock) {
+                               int *shutdown_flags, bool nonblock) {
     size_t total = 0;
 
     mutex_lock(lock);
     while (total < len) {
-        if (!*reader_alive) {
+        if (*shutdown_flags & SHUT_RD) {
             mutex_unlock(lock);
             struct process *curr = proc_current();
             if (curr) {
@@ -276,8 +276,6 @@ static int unix_bind(struct socket *sock, const struct sockaddr *addr,
     if (sun->sun_family != AF_UNIX) {
         return -EINVAL;
     }
-
-    unix_bind_table_init();
 
     mutex_lock(&unix_bind_table.lock);
     if (us->bound) {
@@ -345,8 +343,6 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
     if (sock->state == SS_CONNECTED) {
         return -EISCONN;
     }
-
-    unix_bind_table_init();
 
     mutex_lock(&unix_bind_table.lock);
     struct unix_sock *listener = unix_find_bound(sun->sun_path);
@@ -482,9 +478,8 @@ static ssize_t unix_stream_sendto(struct socket *sock, const void *buf,
 
     /* Write into peer's recv buffer */
     struct unix_sock *peer = us->peer;
-    int reader_alive = (peer->shutdown_flags & SHUT_RD) ? 0 : 1;
     return unix_buf_write(&peer->buf, &peer->lock, buf, len,
-                          &reader_alive, false);
+                          &peer->shutdown_flags, false);
 }
 
 static ssize_t unix_stream_recvfrom(struct socket *sock, void *buf,
@@ -542,7 +537,6 @@ static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
     if (!dest && us->peer) {
         target = us->peer;
     } else if (sun && addrlen >= (int)sizeof(sun->sun_family) + 1) {
-        unix_bind_table_init();
         mutex_lock(&unix_bind_table.lock);
         target = unix_find_bound(sun->sun_path);
         mutex_unlock(&unix_bind_table.lock);
@@ -630,8 +624,6 @@ static int unix_dgram_connect(struct socket *sock, const struct sockaddr *addr,
         return -EINVAL;
     }
 
-    unix_bind_table_init();
-
     mutex_lock(&unix_bind_table.lock);
     struct unix_sock *target = unix_find_bound(sun->sun_path);
     mutex_unlock(&unix_bind_table.lock);
@@ -687,23 +679,28 @@ static int unix_close(struct socket *sock) {
         return 0;
     }
 
-    /* Disconnect peer */
+    /* Disconnect peer — avoid nested locking by breaking into two steps:
+     * 1. Under our lock, snapshot and clear the peer pointer.
+     * 2. Under peer's lock, notify it that we're gone. */
+    struct unix_sock *peer = NULL;
     mutex_lock(&us->lock);
-    if (us->peer) {
-        struct unix_sock *peer = us->peer;
+    peer = us->peer;
+    us->peer = NULL;
+    mutex_unlock(&us->lock);
+
+    if (peer) {
         mutex_lock(&peer->lock);
-        peer->peer = NULL;
+        if (peer->peer == us) {
+            peer->peer = NULL;
+        }
         wait_queue_wakeup_all(&peer->buf.rwait);
         wait_queue_wakeup_all(&peer->buf.wwait);
         poll_wait_wake(&peer->sock->pollers, POLLHUP | POLLIN);
         mutex_unlock(&peer->lock);
-        us->peer = NULL;
     }
-    mutex_unlock(&us->lock);
 
     /* Remove from bind table */
     if (us->bound) {
-        unix_bind_table_init();
         mutex_lock(&unix_bind_table.lock);
         unix_remove_bound(us);
         mutex_unlock(&unix_bind_table.lock);
