@@ -259,6 +259,7 @@ int vfs_fstat(struct file *file, struct stat *st) {
     struct vnode *vn = file->vnode;
     if (vn->ops->stat)
         return vn->ops->stat(vn, st);
+    mutex_lock(&vn->lock);
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
     st->st_mode = vn->mode;
@@ -271,6 +272,7 @@ int vfs_fstat(struct file *file, struct stat *st) {
     st->st_ctime = vn->ctime;
     st->st_rdev = vn->rdev;
     st->st_blksize = CONFIG_PAGE_SIZE;
+    mutex_unlock(&vn->lock);
     return 0;
 }
 

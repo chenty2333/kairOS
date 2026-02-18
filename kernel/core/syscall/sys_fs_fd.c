@@ -5,6 +5,7 @@
 #include <kairos/config.h>
 #include <kairos/process.h>
 #include <kairos/syscall.h>
+#include <kairos/time.h>
 #include <kairos/uaccess.h>
 #include <kairos/pipe.h>
 #include <kairos/vfs.h>
@@ -196,10 +197,11 @@ int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
         f->vnode->uid = (uid_t)owner;
     if (group != (uint64_t)-1)
         f->vnode->gid = (gid_t)group;
-    mutex_unlock(&f->vnode->lock);
+    f->vnode->ctime = time_now_sec();
     if (f->vnode->mount && f->vnode->mount->ops &&
         f->vnode->mount->ops->chown) {
         f->vnode->mount->ops->chown(f->vnode, f->vnode->uid, f->vnode->gid);
     }
+    mutex_unlock(&f->vnode->lock);
     return 0;
 }
