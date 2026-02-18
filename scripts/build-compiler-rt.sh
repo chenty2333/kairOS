@@ -44,8 +44,8 @@ fi
 SYSROOT="$(realpath -m "$SYSROOT")"
 
 if [[ ! -f "$SYSROOT/lib/libc.a" ]] || [[ ! -f "$SYSROOT/include/stdlib.h" ]]; then
-  [[ "$QUIET" != "1" ]] && echo "musl sysroot not found: $SYSROOT (building via ./scripts/build-musl.sh $ARCH)"
-  QUIET="$QUIET" SYSROOT="$SYSROOT" "$ROOT_DIR/scripts/build-musl.sh" "$ARCH"
+  [[ "$QUIET" != "1" ]] && echo "musl sysroot not found: $SYSROOT (building static-only via ./scripts/build-musl.sh $ARCH)"
+  MUSL_STATIC_ONLY=1 QUIET="$QUIET" SYSROOT="$SYSROOT" "$ROOT_DIR/scripts/build-musl.sh" "$ARCH"
 fi
 
 if [[ "$QUIET" == "1" ]]; then
