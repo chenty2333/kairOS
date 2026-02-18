@@ -7,3 +7,4 @@ df du free ps pidof pgrep pkill killall
 xargs find expr test seq
 dd hexdump od strings
 comm cmp diff paste fold nl
+vi
