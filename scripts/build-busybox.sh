@@ -27,13 +27,16 @@ case "$ARCH" in
   *) echo "Unsupported ARCH: $ARCH" >&2; exit 1;;
 esac
 
-CROSS_COMPILE="${CROSS_COMPILE:-${TARGET}-}"
+# Ignore any CROSS_COMPILE/CFLAGS/LDFLAGS from the environment (e.g. from
+# the kernel Makefile) — we determine the correct toolchain ourselves.
+unset CROSS_COMPILE CFLAGS LDFLAGS 2>/dev/null || true
+CROSS_COMPILE="${TARGET}-"
 CC=""
 AR=""
 RANLIB=""
 STRIP=""
-CFLAGS="${CFLAGS:-} ${ARCH_CFLAGS:-}"
-LDFLAGS="${LDFLAGS:-} ${ARCH_CFLAGS:-}"
+CFLAGS="${ARCH_CFLAGS:-}"
+LDFLAGS="${ARCH_CFLAGS:-}"
 
 BUSYBOX_SRC="$(realpath -m "$BUSYBOX_SRC")"
 OUT_DIR="$(realpath -m "$OUT_DIR")"

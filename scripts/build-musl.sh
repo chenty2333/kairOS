@@ -13,10 +13,11 @@ if [[ -z "$ARCH" ]]; then
 fi
 
 QUIET="${QUIET:-0}"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-MUSL_SRC="${MUSL_SRC:-third_party/musl}"
-SYSROOT="${SYSROOT:-build/${ARCH}/sysroot}"
-BUILD_DIR="${BUILD_DIR:-build/${ARCH}/musl}"
+MUSL_SRC="${MUSL_SRC:-$ROOT_DIR/third_party/musl}"
+SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
+BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/${ARCH}/musl}"
 JOBS="${JOBS:-$(nproc)}"
 
 case "$ARCH" in
@@ -26,17 +27,20 @@ case "$ARCH" in
   *) echo "Unsupported ARCH: $ARCH" >&2; exit 1;;
 esac
 
-CROSS_COMPILE="${CROSS_COMPILE:-${TARGET}-}"
+# Ignore any CROSS_COMPILE/CFLAGS/LDFLAGS from the environment (e.g. from
+# the kernel Makefile) — we determine the correct toolchain ourselves.
+unset CROSS_COMPILE CFLAGS LDFLAGS 2>/dev/null || true
+CROSS_COMPILE="${TARGET}-"
 CC=""
 AR=""
 RANLIB=""
 STRIP=""
-CFLAGS="${CFLAGS:-} ${ARCH_CFLAGS:-}"
-LDFLAGS="${LDFLAGS:-} ${ARCH_CFLAGS:-}"
+CFLAGS="${ARCH_CFLAGS:-}"
+LDFLAGS="${ARCH_CFLAGS:-}"
 
 MUSL_SRC="$(realpath -m "$MUSL_SRC")"
 SYSROOT="$(realpath -m "$SYSROOT")"
-BUILD_DIR="$(realpath -m "$BUILD_DIR")"
+BUILD_DIR="$(realpath -m "$BUILD_DIR"))"
 
 if [[ ! -d "$MUSL_SRC" ]]; then
   echo "musl source not found: $MUSL_SRC (run ./scripts/fetch-deps.sh musl)" >&2
@@ -80,7 +84,7 @@ fi
 # If compiler-rt builtins are available, tell clang where to find them.
 # This is needed for the full build (libc.so) on aarch64 where 128-bit
 # float operations require __subtf3 etc. from compiler-rt.
-RT_RESOURCE_DIR="$(realpath -m "build/${ARCH}/compiler-rt/resource")"
+RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
 if [[ -d "$RT_RESOURCE_DIR" ]]; then
   CFLAGS="${CFLAGS} -resource-dir $RT_RESOURCE_DIR"
   LDFLAGS="${LDFLAGS} -resource-dir $RT_RESOURCE_DIR"
@@ -110,7 +114,9 @@ fi
 if [[ ! -d "$BUILD_DIR/obj" ]]; then
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR" "$SYSROOT"
-  rsync -a --exclude='obj/' --exclude='lib/' --exclude='config.mak' "$MUSL_SRC"/ "$BUILD_DIR"/
+  rsync -a "$MUSL_SRC"/ "$BUILD_DIR"/
+  # Nuke any build artifacts that may have leaked into the source tree
+  make -C "$BUILD_DIR" distclean >/dev/null 2>&1 || true
 fi
 
 if [[ "$QUIET" == "1" ]]; then

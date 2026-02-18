@@ -63,7 +63,6 @@ ifeq ($(ARCH),riscv64)
   CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
-  QEMU_CPU := rv64gc
   KERNEL_LOAD := 0x80200000
 else ifeq ($(ARCH),x86_64)
   CROSS_COMPILE ?=
@@ -136,7 +135,7 @@ LDSCRIPT := kernel/arch/$(ARCH)/linker.ld
 # ============================================================
 
 # Core kernel sources (architecture-independent) — auto-discovered via wildcard.
-# ARCH_SRCS and LWIP_SRCS are kept explicit (see below).
+# LWIP_SRCS is kept explicit (see below).
 CORE_SRCS := $(wildcard kernel/core/*.c kernel/core/*/*.c)
 CORE_SRCS += $(wildcard kernel/lib/*.c)
 CORE_SRCS += $(wildcard kernel/firmware/*.c)
@@ -227,7 +226,7 @@ MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 
-.PHONY: all clean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk uefi check-tools
+.PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox rootfs rootfs-base rootfs-busybox rootfs-init disk uefi check-tools
 
 all: | _reset_count
 all: $(KERNEL)
@@ -496,6 +495,15 @@ debug: $(RUN_DEPS)
 
 clean:
 	rm -rf build/
+
+# Deep clean: also purge build artifacts from third_party source trees
+distclean: clean
+	@for d in third_party/musl third_party/busybox; do \
+		if [ -d "$$d" ]; then \
+			echo "  CLEAN   $$d"; \
+			$(MAKE) -C "$$d" distclean >/dev/null 2>&1 || true; \
+		fi; \
+	done
 
 # Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
