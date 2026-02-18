@@ -10,7 +10,7 @@ for smp in $CPUS; do
   for dbg in $DEBUG_LEVELS; do
     echo "=== ARCH=$ARCH SMP=$smp CONFIG_DEBUG=$dbg ==="
     EXTRA="-DCONFIG_KERNEL_TESTS=1"
-    [ "$dbg" = "1" ] && EXTRA="$EXTRA -DCONFIG_DEBUG=1"
+    if [ "$dbg" = "1" ]; then EXTRA="$EXTRA -DCONFIG_DEBUG=1"; fi
     if make ARCH="$ARCH" SMP="$smp" EXTRA_CFLAGS="$EXTRA" test; then
       echo "PASS: SMP=$smp DEBUG=$dbg"
     else

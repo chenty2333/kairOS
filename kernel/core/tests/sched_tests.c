@@ -24,15 +24,20 @@ static int fork_exit_child(void *arg) {
 
 static void test_sched_fork_exit_storm(void) {
     pr_info("sched_stress: fork_exit_storm\n");
+    int created = 0;
     for (int i = 0; i < FORK_STORM_N; i++) {
         struct process *p = kthread_create(fork_exit_child, NULL, "fes");
-        if (p)
+        if (p) {
             sched_enqueue(p);
+            created++;
+        } else {
+            pr_warn("sched_stress: fork_exit_storm: kthread_create failed at i=%d\n", i);
+        }
     }
     int status;
     while (proc_wait(-1, &status, 0) > 0)
         ;
-    pr_info("sched_stress: fork_exit_storm done\n");
+    pr_info("sched_stress: fork_exit_storm done (%d/%d created)\n", created, FORK_STORM_N);
 }
 
 /* ---------- test_sched_sleep_wakeup_stress ---------- */
@@ -41,13 +46,14 @@ static void test_sched_fork_exit_storm(void) {
 #define SLEEP_WAKE_SLEEPERS 4
 
 static struct wait_queue sw_wq;
-static volatile int sw_waker_go;
+static volatile int sw_live_sleepers;
 
 static int sleeper_thread(void *arg) {
     (void)arg;
     for (int i = 0; i < SLEEP_WAKE_ROUNDS; i++) {
         proc_sleep_on(&sw_wq, NULL, false);
     }
+    __atomic_fetch_sub(&sw_live_sleepers, 1, __ATOMIC_RELEASE);
     proc_exit(0);
     return 0;
 }
@@ -58,8 +64,11 @@ static int waker_thread(void *arg) {
         wait_queue_wakeup_all(&sw_wq);
         proc_yield();
     }
-    /* Final wakeup to flush any remaining sleepers */
-    wait_queue_wakeup_all(&sw_wq);
+    /* Keep waking until all sleepers have exited */
+    while (__atomic_load_n(&sw_live_sleepers, __ATOMIC_ACQUIRE) > 0) {
+        wait_queue_wakeup_all(&sw_wq);
+        proc_yield();
+    }
     proc_exit(0);
     return 0;
 }
@@ -67,21 +76,31 @@ static int waker_thread(void *arg) {
 static void test_sched_sleep_wakeup_stress(void) {
     pr_info("sched_stress: sleep_wakeup_stress\n");
     wait_queue_init(&sw_wq);
-    sw_waker_go = 0;
+    __atomic_store_n(&sw_live_sleepers, 0, __ATOMIC_RELEASE);
 
+    int created = 0;
     for (int i = 0; i < SLEEP_WAKE_SLEEPERS; i++) {
         struct process *p = kthread_create(sleeper_thread, NULL, "slp");
-        if (p)
+        if (p) {
+            __atomic_fetch_add(&sw_live_sleepers, 1, __ATOMIC_RELEASE);
             sched_enqueue(p);
+            created++;
+        } else {
+            pr_warn("sched_stress: sleep_wakeup: kthread_create failed at i=%d\n", i);
+        }
     }
     struct process *w = kthread_create(waker_thread, NULL, "wkr");
-    if (w)
+    if (w) {
         sched_enqueue(w);
+    } else {
+        pr_warn("sched_stress: sleep_wakeup: waker kthread_create failed\n");
+    }
 
     int status;
     while (proc_wait(-1, &status, 0) > 0)
         ;
-    pr_info("sched_stress: sleep_wakeup_stress done\n");
+    pr_info("sched_stress: sleep_wakeup_stress done (%d/%d sleepers created)\n",
+            created, SLEEP_WAKE_SLEEPERS);
 }
 
 /* ---------- test_sched_yield_storm ---------- */
@@ -100,22 +119,27 @@ static int yield_thread(void *arg) {
 static void test_sched_yield_storm(void) {
     pr_info("sched_stress: yield_storm\n");
     int n = sched_cpu_count() * 2;
+    int created = 0;
     for (int i = 0; i < n; i++) {
         struct process *p = kthread_create(yield_thread, NULL, "yld");
-        if (p)
+        if (p) {
             sched_enqueue(p);
+            created++;
+        } else {
+            pr_warn("sched_stress: yield_storm: kthread_create failed at i=%d\n", i);
+        }
     }
     int status;
     while (proc_wait(-1, &status, 0) > 0)
         ;
-    pr_info("sched_stress: yield_storm done\n");
+    pr_info("sched_stress: yield_storm done (%d/%d created)\n", created, n);
 }
 
 /* ---------- test_sched_preempt_stress ---------- */
 
 #define PREEMPT_ROUNDS 300
 
-static volatile uint64_t preempt_sink;
+static uint64_t preempt_sink;
 
 static int preempt_thread(void *arg) {
     (void)arg;
@@ -127,7 +151,7 @@ static int preempt_thread(void *arg) {
         if (i % 50 == 0)
             proc_yield();
     }
-    preempt_sink += acc;
+    __atomic_fetch_add(&preempt_sink, acc, __ATOMIC_RELAXED);
     proc_exit(0);
     return 0;
 }
@@ -135,15 +159,20 @@ static int preempt_thread(void *arg) {
 static void test_sched_preempt_stress(void) {
     pr_info("sched_stress: preempt_stress\n");
     int n = sched_cpu_count() * 2;
+    int created = 0;
     for (int i = 0; i < n; i++) {
         struct process *p = kthread_create(preempt_thread, NULL, "pre");
-        if (p)
+        if (p) {
             sched_enqueue(p);
+            created++;
+        } else {
+            pr_warn("sched_stress: preempt_stress: kthread_create failed at i=%d\n", i);
+        }
     }
     int status;
     while (proc_wait(-1, &status, 0) > 0)
         ;
-    pr_info("sched_stress: preempt_stress done\n");
+    pr_info("sched_stress: preempt_stress done (%d/%d created)\n", created, n);
 }
 
 /* ---------- Entry point ---------- */

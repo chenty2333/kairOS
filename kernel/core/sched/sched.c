@@ -90,7 +90,8 @@ void sched_trace_event(enum sched_trace_event_type type,
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
         cpu = 0;
     struct percpu_data *cd = &cpu_data[cpu];
-    uint32_t idx = cd->trace_head & SCHED_TRACE_PER_CPU_MASK;
+    uint32_t seq = ++cd->trace_head;
+    uint32_t idx = (seq - 1) & SCHED_TRACE_PER_CPU_MASK;
     struct sched_trace_entry *ent = &cd->trace_buf[idx];
 
     ent->ticks = arch_timer_get_ticks();
@@ -105,7 +106,7 @@ void sched_trace_event(enum sched_trace_event_type type,
     ent->on_cpu = p ? (uint8_t)(__atomic_load_n(&p->se.on_cpu, __ATOMIC_ACQUIRE) ? 1 : 0) : 0;
     ent->arg0 = arg0;
     ent->arg1 = arg1;
-    ent->seq = ++cd->trace_head;
+    ent->seq = seq;
 }
 
 void sched_trace_dump_recent(int max_events) {
@@ -474,9 +475,19 @@ void schedule(void) {
 
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
+        /*
+         * Temporarily mark prev as RUNNING so that se_mark_runnable /
+         * se_mark_queued below perform a clean state transition.
+         * This is invisible to other CPUs because we hold rq->lock.
+         */
         se_mark_running(&prev->se);
 
-        if (prev->state == PROC_RUNNING) {
+        /*
+         * A wakeup can race with sleep/yield just before schedule(), leaving
+         * current as RUNNABLE. Treat it like RUNNING and enqueue instead of
+         * misclassifying it as blocked.
+         */
+        if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
             prev->state = PROC_RUNNABLE;
             se_mark_runnable(&prev->se);
             __enqueue_entity(rq, &prev->se);
@@ -500,7 +511,7 @@ void schedule(void) {
         struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
         next = container_of(se, struct process, se);
         rb_erase(&se->sched_node, &rq->tasks_timeline);
-        se->on_rq = false;          /* removed from rq */
+        se_clear_on_rq(se);             /* removed from rq */
         rq->nr_running--;
         sched_stat_inc(&stats->pick_count);
         sched_trace_event(SCHED_TRACE_PICK, next, (uint64_t)cpu->cpu_id,
@@ -523,7 +534,7 @@ void schedule(void) {
                 struct sched_entity *se = rb_entry(recheck, struct sched_entity, sched_node);
                 next = container_of(se, struct process, se);
                 rb_erase(&se->sched_node, &rq->tasks_timeline);
-                se->on_rq = false;          /* removed from rq */
+                se_clear_on_rq(se);             /* removed from rq */
                 rq->nr_running--;
                 sched_stat_inc(&stats->pick_count);
                 sched_trace_event(SCHED_TRACE_PICK, next,
