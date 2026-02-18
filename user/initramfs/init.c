@@ -116,14 +116,14 @@ static int do_umount(const char *target) {
 
 static void exec_shell(void) {
     char *const envp[] = {
-        "PATH=/bin:/sbin",
+        "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
         "TERM=vt100",
-        "HOME=/",
+        "HOME=/root",
         "PS1=kairos$ ",
         NULL,
     };
-    char *const argv_sh[] = {"sh", NULL};
-    char *const argv_busybox[] = {"busybox", "sh", NULL};
+    char *const argv_sh[] = {"-sh", NULL};
+    char *const argv_busybox[] = {"busybox", "sh", "-l", NULL};
 
     execve("/bin/sh", argv_sh, envp);
     execve("/bin/busybox", argv_busybox, envp);
@@ -131,9 +131,9 @@ static void exec_shell(void) {
 
 static void exec_init(const char *path) {
     char *const envp[] = {
-        "PATH=/bin:/sbin",
+        "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
         "TERM=vt100",
-        "HOME=/",
+        "HOME=/root",
         "PS1=kairos$ ",
         NULL,
     };

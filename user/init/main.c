@@ -23,14 +23,14 @@ static void setup_stdio(void) {
 
 static void exec_shell(void) {
     char *const envp[] = {
-        "PATH=/bin:/sbin",
+        "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
         "TERM=vt100",
-        "HOME=/",
+        "HOME=/root",
         "PS1=kairos$ ",
         NULL,
     };
-    char *const argv_sh[] = {"sh", NULL};
-    char *const argv_busybox[] = {"busybox", "sh", NULL};
+    char *const argv_sh[] = {"-sh", NULL};
+    char *const argv_busybox[] = {"busybox", "sh", "-l", NULL};
 
     const char msg[] = "init: starting shell\n";
     write(1, msg, sizeof(msg) - 1);

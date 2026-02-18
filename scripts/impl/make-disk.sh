@@ -35,12 +35,36 @@ DISK_SIZE=64  # MB
 
 stage_base() {
   [[ "$QUIET" != "1" ]] && echo "Staging rootfs base: $ROOTFS_DIR"
-  mkdir -p "$ROOTFS_DIR"/{bin,sbin,etc,home,dev}
+  mkdir -p "$ROOTFS_DIR"/{bin,sbin,etc,home,root,dev}
 
   echo "Hello from Kairos filesystem!" >"$ROOTFS_DIR/test.txt"
   echo "This is another test file" >"$ROOTFS_DIR/test2.txt"
   echo "root:x:0:0:root:/root:/bin/sh" >"$ROOTFS_DIR/etc/passwd"
   echo "127.0.0.1 localhost" >"$ROOTFS_DIR/etc/hosts"
+  cat >"$ROOTFS_DIR/etc/profile" <<'EOF'
+# Kairos shell profile
+case "$-" in
+  *i*) ;;
+  *) return ;;
+esac
+
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin"
+export HISTFILE="/root/.ash_history"
+export HISTSIZE=200
+
+if [ "${TERM:-dumb}" = "dumb" ]; then
+  PS1='[\w] $ '
+else
+  PS1='\[\033[1;36m\][\w]\[\033[0m\] \$ '
+fi
+export PS1
+
+if ls --color=auto / >/dev/null 2>&1; then
+  alias ls='ls --color=auto'
+fi
+alias ll='ls -alF'
+alias la='ls -A'
+EOF
 }
 
 stage_init() {
