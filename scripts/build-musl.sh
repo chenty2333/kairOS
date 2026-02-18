@@ -84,7 +84,7 @@ fi
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$SYSROOT"
-cp -a "$MUSL_SRC"/. "$BUILD_DIR"/
+rsync -a --exclude='obj/' --exclude='lib/' "$MUSL_SRC"/ "$BUILD_DIR"/
 
 if [[ "$QUIET" == "1" ]]; then
   _out=/dev/null
