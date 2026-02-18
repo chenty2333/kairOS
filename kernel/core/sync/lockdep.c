@@ -23,8 +23,9 @@ static int held_depth[CONFIG_MAX_CPUS];
 static int lockdep_recursion[CONFIG_MAX_CPUS];
 
 static int class_ensure(struct lock_class_key *key) {
-    if (key->id != 0)
-        return key->id;
+    int id = __atomic_load_n(&key->id, __ATOMIC_ACQUIRE);
+    if (id != 0)
+        return id;
     spin_lock(&lockdep_lock);
     if (key->id == 0) {
         next_class_id++;
@@ -32,7 +33,7 @@ static int class_ensure(struct lock_class_key *key) {
             spin_unlock(&lockdep_lock);
             return -1;
         }
-        key->id = next_class_id;
+        __atomic_store_n(&key->id, next_class_id, __ATOMIC_RELEASE);
     }
     spin_unlock(&lockdep_lock);
     return key->id;
