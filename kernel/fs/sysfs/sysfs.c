@@ -188,6 +188,7 @@ static ssize_t sysfs_file_read(struct vnode *vn, void *buf, size_t len,
     if (!sn || sn->type != SYSFS_FILE || !sn->attr || !sn->attr->show)
         return -EINVAL;
 
+    /* TODO: consider stack buffer or per-node cache to avoid kmalloc per read */
     char *kbuf = kmalloc(SYSFS_BUF_SIZE);
     if (!kbuf)
         return -ENOMEM;
@@ -220,21 +221,49 @@ static ssize_t sysfs_file_write(struct vnode *vn, const void *buf, size_t len,
     return sn->attr->store(sn->attr->priv, buf, len);
 }
 
+static int sysfs_build_path(struct sysfs_node *node, char *buf, size_t bufsz) {
+    /* Collect ancestors up to root */
+    struct sysfs_node *chain[32];
+    int depth = 0;
+    for (struct sysfs_node *n = node; n && n->parent; n = n->parent) {
+        if (depth >= 32)
+            return -ENAMETOOLONG;
+        chain[depth++] = n;
+    }
+    size_t pos = 0;
+    for (int i = depth - 1; i >= 0; i--) {
+        size_t nlen = strlen(chain[i]->name);
+        if (pos + 1 + nlen >= bufsz)
+            return -ENAMETOOLONG;
+        buf[pos++] = '/';
+        memcpy(buf + pos, chain[i]->name, nlen);
+        pos += nlen;
+    }
+    if (pos == 0 && bufsz > 1) {
+        buf[pos++] = '/';
+    }
+    buf[pos] = '\0';
+    return (int)pos;
+}
+
 static ssize_t sysfs_link_read(struct vnode *vn, void *buf, size_t len,
                                 off_t off) {
     struct sysfs_node *sn = vn->fs_data;
     if (!sn || sn->type != SYSFS_LINK || !sn->link_target)
         return -EINVAL;
 
-    /* Return the target node's name as the link path */
-    const char *target = sn->link_target->name;
-    size_t tlen = strlen(target);
+    char pathbuf[CONFIG_PATH_MAX];
+    int plen = sysfs_build_path(sn->link_target, pathbuf, sizeof(pathbuf));
+    if (plen < 0)
+        return plen;
+
+    size_t tlen = (size_t)plen;
     if ((size_t)off >= tlen)
         return 0;
     size_t avail = tlen - (size_t)off;
     if (len > avail)
         len = avail;
-    memcpy(buf, target + off, len);
+    memcpy(buf, pathbuf + off, len);
     return (ssize_t)len;
 }
 
@@ -311,19 +340,20 @@ static struct vnode *sysfs_lookup(struct vnode *dir, const char *name) {
     return child ? &child->vn : NULL;
 }
 
+static void sysfs_fix_mount_recursive(struct sysfs_node *node,
+                                      struct mount *mnt) {
+    node->vn.mount = mnt;
+    struct sysfs_node *child;
+    list_for_each_entry(child, &node->children, sibling)
+        sysfs_fix_mount_recursive(child, mnt);
+}
+
 static int sysfs_mount_op(struct mount *mnt) {
     sysfs_sb.mnt = mnt;
 
     /* Update all existing vnodes to point to this mount */
-    /* The root and top-level dirs were created in sysfs_init() before mount */
-    if (sysfs_root_node) {
-        sysfs_root_node->vn.mount = mnt;
-        /* Recursively fix mount pointers for pre-created nodes */
-        struct sysfs_node *child;
-        list_for_each_entry(child, &sysfs_root_node->children, sibling) {
-            child->vn.mount = mnt;
-        }
-    }
+    if (sysfs_root_node)
+        sysfs_fix_mount_recursive(sysfs_root_node, mnt);
 
     mnt->fs_data = &sysfs_sb;
     mnt->root = &sysfs_root_node->vn;
@@ -383,8 +413,8 @@ void sysfs_rmdir(struct sysfs_node *node) {
         return;
     spin_lock(&sysfs_sb.lock);
     list_del(&node->sibling);
-    spin_unlock(&sysfs_sb.lock);
     sysfs_free_node(node);
+    spin_unlock(&sysfs_sb.lock);
 }
 
 struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
@@ -418,8 +448,19 @@ void sysfs_remove_file(struct sysfs_node *node) {
 int sysfs_create_files(struct sysfs_node *parent,
                        const struct sysfs_attribute *attrs, size_t count) {
     for (size_t i = 0; i < count; i++) {
-        if (!sysfs_create_file(parent, &attrs[i]))
+        if (!sysfs_create_file(parent, &attrs[i])) {
+            /* Rollback previously created files */
+            while (i-- > 0) {
+                spin_lock(&sysfs_sb.lock);
+                struct sysfs_node *f = sysfs_find_child(parent, attrs[i].name);
+                if (f) {
+                    list_del(&f->sibling);
+                    kfree(f);
+                }
+                spin_unlock(&sysfs_sb.lock);
+            }
             return -ENOMEM;
+        }
     }
     return 0;
 }
@@ -476,6 +517,7 @@ void sysfs_init(void) {
     sysfs_sb.root = sysfs_root_node;
 
     /* Create top-level directories */
+    spin_lock(&sysfs_sb.lock);
     sysfs_bus_node = sysfs_alloc_node(sysfs_root_node, "bus", SYSFS_DIR,
                                       S_IFDIR | 0555);
     sysfs_class_node = sysfs_alloc_node(sysfs_root_node, "class", SYSFS_DIR,
@@ -484,6 +526,7 @@ void sysfs_init(void) {
                                           S_IFDIR | 0555);
     sysfs_kernel_node = sysfs_alloc_node(sysfs_root_node, "kernel", SYSFS_DIR,
                                          S_IFDIR | 0555);
+    spin_unlock(&sysfs_sb.lock);
 
     if (vfs_register_fs(&sysfs_type) < 0)
         pr_err("sysfs: registration failed\n");

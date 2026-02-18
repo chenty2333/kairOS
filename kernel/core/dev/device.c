@@ -77,8 +77,11 @@ int device_register(struct device *dev) {
 
     /* Create sysfs node under /sys/devices/ */
     struct sysfs_node *devs = sysfs_devices_dir();
-    if (devs)
+    if (devs) {
         dev->sysfs_node = sysfs_mkdir(devs, dev->name);
+        if (!dev->sysfs_node)
+            pr_warn("device: sysfs mkdir failed for %s\n", dev->name);
+    }
 
     return 0;
 }

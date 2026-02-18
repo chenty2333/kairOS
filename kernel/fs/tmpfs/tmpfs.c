@@ -27,12 +27,6 @@
 struct tmpfs_node {
     struct vnode vn;
     char name[CONFIG_NAME_MAX];
-    mode_t mode;
-    uid_t uid;
-    gid_t gid;
-    nlink_t nlink;
-    dev_t rdev;
-    time_t atime, mtime, ctime;
 
     /* File data (VNODE_FILE) — page array, 0 = hole */
     paddr_t *pages;
@@ -87,6 +81,7 @@ static int tmpfs_close(struct vnode *vn);
 static int tmpfs_dir_poll(struct vnode *vn, uint32_t events);
 static int tmpfs_file_poll(struct vnode *vn, uint32_t events);
 static int tmpfs_fsync(struct vnode *vn, int datasync);
+static time_t tmpfs_now(void);
 
 /* ------------------------------------------------------------------ */
 /*  File operation tables                                              */
@@ -123,15 +118,13 @@ static void tmpfs_init_vnode(struct vnode *vn, struct mount *mnt,
                              mode_t mode, struct file_ops *ops) {
     vn->type = type;
     vn->mode = mode;
-    vn->uid = tn->uid;
-    vn->gid = tn->gid;
-    vn->size = tn->size;
+    vn->uid = 0;
+    vn->gid = 0;
+    vn->size = 0;
     vn->ino = 0;
-    vn->nlink = tn->nlink;
-    vn->atime = tn->atime;
-    vn->mtime = tn->mtime;
-    vn->ctime = tn->ctime;
-    vn->rdev = tn->rdev;
+    vn->nlink = (type == VNODE_DIR) ? 2 : 1;
+    vn->atime = vn->mtime = vn->ctime = tmpfs_now();
+    vn->rdev = 0;
     vn->ops = ops;
     vn->fs_data = tn;
     vn->mount = mnt;
@@ -171,12 +164,6 @@ static struct tmpfs_node *tmpfs_alloc_node(struct tmpfs_mount *tm,
 
     strncpy(tn->name, name, CONFIG_NAME_MAX - 1);
     tn->name[CONFIG_NAME_MAX - 1] = '\0';
-    tn->mode = mode;
-    tn->uid = 0;
-    tn->gid = 0;
-    tn->nlink = (type == VNODE_DIR) ? 2 : 1;
-    tn->rdev = 0;
-    tn->atime = tn->mtime = tn->ctime = tmpfs_now();
     tn->pages = NULL;
     tn->pages_cap = 0;
     tn->size = 0;
@@ -200,7 +187,7 @@ static struct tmpfs_node *tmpfs_alloc_node(struct tmpfs_mount *tm,
     if (parent) {
         list_add_tail(&tn->sibling, &parent->children);
         vnode_set_parent(&tn->vn, &parent->vn, tn->name);
-        parent->nlink++;
+        parent->vn.nlink++;
     }
     return tn;
 }
@@ -208,8 +195,7 @@ static struct tmpfs_node *tmpfs_alloc_node(struct tmpfs_mount *tm,
 static void tmpfs_free_pages(struct tmpfs_mount *tm, struct tmpfs_node *tn) {
     if (!tn->pages)
         return;
-    size_t npages = (tn->size + CONFIG_PAGE_SIZE - 1) / CONFIG_PAGE_SIZE;
-    for (size_t i = 0; i < npages && i < tn->pages_cap; i++) {
+    for (size_t i = 0; i < tn->pages_cap; i++) {
         if (tn->pages[i]) {
             pmm_free_page(tn->pages[i]);
             tm->used_bytes -= CONFIG_PAGE_SIZE;
@@ -238,7 +224,7 @@ static void tmpfs_free_node(struct tmpfs_mount *tm, struct tmpfs_node *tn) {
 
 static void tmpfs_remove_child(struct tmpfs_node *tn) {
     if (tn->parent)
-        tn->parent->nlink--;
+        tn->parent->vn.nlink--;
     list_del(&tn->sibling);
 }
 
@@ -250,8 +236,14 @@ static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off) {
     struct tmpfs_node *tn = vn->fs_data;
     if (!tn)
         return -EINVAL;
-    if ((size_t)off >= tn->size)
+    if (off < 0)
+        return -EINVAL;
+
+    mutex_lock(&vn->lock);
+    if ((size_t)off >= tn->size) {
+        mutex_unlock(&vn->lock);
         return 0;
+    }
 
     size_t avail = tn->size - (size_t)off;
     if (len > avail)
@@ -275,7 +267,8 @@ static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off) {
         done += chunk;
     }
 
-    tn->atime = tmpfs_now();
+    vn->atime = tmpfs_now();
+    mutex_unlock(&vn->lock);
     return (ssize_t)done;
 }
 
@@ -303,13 +296,19 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
     struct tmpfs_mount *tm = vn->mount->fs_data;
     if (!tn || !tm)
         return -EINVAL;
+    if (off < 0)
+        return -EINVAL;
+
+    mutex_lock(&vn->lock);
 
     size_t end = (size_t)off + len;
     size_t need_pages = (end + CONFIG_PAGE_SIZE - 1) / CONFIG_PAGE_SIZE;
 
     int ret = tmpfs_ensure_pages(tn, need_pages);
-    if (ret < 0)
+    if (ret < 0) {
+        mutex_unlock(&vn->lock);
         return ret;
+    }
 
     size_t done = 0;
     while (done < len) {
@@ -320,11 +319,15 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
             chunk = len - done;
 
         if (!tn->pages[pg_idx]) {
-            if (tm->used_bytes + CONFIG_PAGE_SIZE > tm->max_bytes)
+            if (tm->used_bytes + CONFIG_PAGE_SIZE > tm->max_bytes) {
+                mutex_unlock(&vn->lock);
                 return done > 0 ? (ssize_t)done : -ENOSPC;
+            }
             paddr_t pa = pmm_alloc_page();
-            if (!pa)
+            if (!pa) {
+                mutex_unlock(&vn->lock);
                 return done > 0 ? (ssize_t)done : -ENOMEM;
+            }
             memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
             tn->pages[pg_idx] = pa;
             tm->used_bytes += CONFIG_PAGE_SIZE;
@@ -339,8 +342,8 @@ static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
         tn->size = end;
         vn->size = end;
     }
-    tn->mtime = tn->ctime = tmpfs_now();
-    vn->mtime = tn->mtime;
+    vn->mtime = vn->ctime = tmpfs_now();
+    mutex_unlock(&vn->lock);
     return (ssize_t)done;
 }
 
@@ -351,6 +354,8 @@ static int tmpfs_truncate(struct vnode *vn, off_t length) {
         return -EINVAL;
     if (length < 0)
         return -EINVAL;
+
+    mutex_lock(&vn->lock);
 
     size_t new_size = (size_t)length;
     size_t old_size = tn->size;
@@ -379,8 +384,8 @@ static int tmpfs_truncate(struct vnode *vn, off_t length) {
 
     tn->size = new_size;
     vn->size = new_size;
-    tn->mtime = tn->ctime = tmpfs_now();
-    vn->mtime = tn->mtime;
+    vn->mtime = vn->ctime = tmpfs_now();
+    mutex_unlock(&vn->lock);
     return 0;
 }
 
@@ -390,17 +395,17 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st) {
         return -EINVAL;
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
-    st->st_mode = tn->mode;
-    st->st_nlink = tn->nlink;
-    st->st_uid = tn->uid;
-    st->st_gid = tn->gid;
+    st->st_mode = vn->mode;
+    st->st_nlink = vn->nlink;
+    st->st_uid = vn->uid;
+    st->st_gid = vn->gid;
     st->st_size = (off_t)tn->size;
-    st->st_rdev = tn->rdev;
+    st->st_rdev = vn->rdev;
     st->st_blksize = CONFIG_PAGE_SIZE;
     st->st_blocks = (blkcnt_t)((tn->size + 511) / 512);
-    st->st_atime = tn->atime;
-    st->st_mtime = tn->mtime;
-    st->st_ctime = tn->ctime;
+    st->st_atime = vn->atime;
+    st->st_mtime = vn->mtime;
+    st->st_ctime = vn->ctime;
     return 0;
 }
 
@@ -591,7 +596,6 @@ static int tmpfs_mknod_op(struct vnode *dir, const char *name, mode_t mode,
         spin_unlock(&tm->lock);
         return -ENOMEM;
     }
-    tn->rdev = dev;
     tn->vn.rdev = dev;
     spin_unlock(&tm->lock);
     return 0;
@@ -614,9 +618,9 @@ static int tmpfs_unlink_op(struct vnode *dir, const char *name) {
         return -EISDIR;
     }
     tmpfs_remove_child(child);
-    spin_unlock(&tm->lock);
     tmpfs_free_node(tm, child);
-    d->mtime = d->ctime = tmpfs_now();
+    d->vn.mtime = d->vn.ctime = tmpfs_now();
+    spin_unlock(&tm->lock);
     return 0;
 }
 
@@ -641,9 +645,9 @@ static int tmpfs_rmdir_op(struct vnode *dir, const char *name) {
         return -ENOTEMPTY;
     }
     tmpfs_remove_child(child);
-    spin_unlock(&tm->lock);
     tmpfs_free_node(tm, child);
-    d->mtime = d->ctime = tmpfs_now();
+    d->vn.mtime = d->vn.ctime = tmpfs_now();
+    spin_unlock(&tm->lock);
     return 0;
 }
 
@@ -669,66 +673,48 @@ static int tmpfs_rename_op(struct vnode *odir, const char *oname,
             return -ENOTEMPTY;
         }
         tmpfs_remove_child(dst);
-        spin_unlock(&tm->lock);
         tmpfs_free_node(tm, dst);
-        spin_lock(&tm->lock);
     }
 
     /* Move src from old parent to new parent */
     list_del(&src->sibling);
     if (src->parent)
-        src->parent->nlink--;
+        src->parent->vn.nlink--;
     src->parent = nd;
-    nd->nlink++;
+    nd->vn.nlink++;
     list_add_tail(&src->sibling, &nd->children);
     strncpy(src->name, nname, CONFIG_NAME_MAX - 1);
     src->name[CONFIG_NAME_MAX - 1] = '\0';
     vnode_set_parent(&src->vn, &nd->vn, src->name);
 
     time_t now = tmpfs_now();
-    od->mtime = od->ctime = now;
-    nd->mtime = nd->ctime = now;
-    src->ctime = now;
+    od->vn.mtime = od->vn.ctime = now;
+    nd->vn.mtime = nd->vn.ctime = now;
+    src->vn.ctime = now;
     spin_unlock(&tm->lock);
     return 0;
 }
 
 static int tmpfs_chmod_op(struct vnode *vn, mode_t mode) {
-    struct tmpfs_node *tn = vn->fs_data;
-    if (!tn)
-        return -EINVAL;
-    tn->mode = (tn->mode & S_IFMT) | (mode & 07777);
-    vn->mode = tn->mode;
-    tn->ctime = tmpfs_now();
+    vn->mode = (vn->mode & S_IFMT) | (mode & 07777);
+    vn->ctime = tmpfs_now();
     return 0;
 }
 
 static int tmpfs_chown_op(struct vnode *vn, uid_t uid, gid_t gid) {
-    struct tmpfs_node *tn = vn->fs_data;
-    if (!tn)
-        return -EINVAL;
-    tn->uid = uid;
-    tn->gid = gid;
     vn->uid = uid;
     vn->gid = gid;
-    tn->ctime = tmpfs_now();
+    vn->ctime = tmpfs_now();
     return 0;
 }
 
 static int tmpfs_utimes_op(struct vnode *vn, const struct timespec *atime,
                            const struct timespec *mtime) {
-    struct tmpfs_node *tn = vn->fs_data;
-    if (!tn)
-        return -EINVAL;
-    if (atime) {
-        tn->atime = atime->tv_sec;
-        vn->atime = tn->atime;
-    }
-    if (mtime) {
-        tn->mtime = mtime->tv_sec;
-        vn->mtime = tn->mtime;
-    }
-    tn->ctime = tmpfs_now();
+    if (atime)
+        vn->atime = atime->tv_sec;
+    if (mtime)
+        vn->mtime = mtime->tv_sec;
+    vn->ctime = tmpfs_now();
     return 0;
 }
 
@@ -754,17 +740,16 @@ static int tmpfs_mount_op(struct mount *mnt) {
         return -ENOMEM;
     }
 
+    /*
+     * Root node is manually initialized because tmpfs_alloc_node requires
+     * a mount that isn't fully set up yet.  Same pattern as initramfs/procfs.
+     */
     strncpy(tm->root->name, "/", CONFIG_NAME_MAX - 1);
-    tm->root->mode = S_IFDIR | 01777;
-    tm->root->uid = 0;
-    tm->root->gid = 0;
-    tm->root->nlink = 2;
-    tm->root->atime = tm->root->mtime = tm->root->ctime = tmpfs_now();
     tm->root->parent = NULL;
     INIT_LIST_HEAD(&tm->root->children);
     INIT_LIST_HEAD(&tm->root->sibling);
     tmpfs_init_vnode(&tm->root->vn, mnt, tm->root, VNODE_DIR,
-                     tm->root->mode, &tmpfs_dir_ops);
+                     S_IFDIR | 01777, &tmpfs_dir_ops);
     tm->root->vn.ino = tm->next_ino++;
     tm->used_inodes++;
 

@@ -12,7 +12,7 @@
 #include <kairos/string.h>
 #include <kairos/vfs.h>
 
-#define INITRAMFS_SUPER_MAGIC 0x01021994
+#define INITRAMFS_SUPER_MAGIC 0x858458f6
 #define CPIO_HDR_LEN 110
 #define CPIO_FIELD_SIZE 8
 #define CPIO_OFF_INO (6 + CPIO_FIELD_SIZE * 0)
