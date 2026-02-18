@@ -63,12 +63,14 @@ ifeq ($(ARCH),riscv64)
   CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
+  QEMU_VIRTIO_BLK_DEV := virtio-blk-device
   KERNEL_LOAD := 0x80200000
 else ifeq ($(ARCH),x86_64)
   CROSS_COMPILE ?=
   CLANG_TARGET := x86_64-unknown-elf
   QEMU := qemu-system-x86_64
   QEMU_MACHINE := q35
+  QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
   KERNEL_LOAD := 0xffffffff80000000
 else ifeq ($(ARCH),aarch64)
   CROSS_COMPILE ?= aarch64-none-elf-
@@ -76,6 +78,7 @@ else ifeq ($(ARCH),aarch64)
   QEMU := qemu-system-aarch64
   QEMU_MACHINE := virt,gic-version=3
   QEMU_CPU := cortex-a72
+  QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
   KERNEL_LOAD := 0x40000000
 else
   $(error Unsupported architecture: $(ARCH))
@@ -324,7 +327,7 @@ $(KERNEL): $(OBJS) $(LDSCRIPT)
 	@echo "  LD      kairos.elf ($(OBJ_TOTAL) objects, $(ARCH))"
 	@mkdir -p $(dir $@)
 	$(Q)$(LD) $(LDFLAGS) -T $(LDSCRIPT) -o $@ $(OBJS)
-	@if [ "$(ARCH)" = "riscv64" ]; then \
+	@if [ "$(ARCH)" = "riscv64" ] || [ "$(ARCH)" = "aarch64" ]; then \
 		echo "  PATCH   $@"; \
 		python3 scripts/patch-elf-phdrs.py $@; \
 	fi
@@ -386,13 +389,11 @@ endif
 DISK_IMG := $(BUILD_DIR)/disk.img
 QEMU_DISK_FLAGS :=
 ifeq ($(ARCH),riscv64)
-  # For RISC-V, explicitly create virtio-blk-device
+  # Use modern virtio-mmio mode on RISC-V.
   QEMU_DISK_FLAGS += -global virtio-mmio.force-legacy=false
-  QEMU_DISK_FLAGS += -drive id=hd,file=$(DISK_IMG),format=raw,if=none
-  QEMU_DISK_FLAGS += -device virtio-blk-device,drive=hd
-else
-  QEMU_DISK_FLAGS += -drive file=$(DISK_IMG),if=virtio,format=raw
 endif
+QEMU_DISK_FLAGS += -drive id=hd,file=$(DISK_IMG),format=raw,if=none
+QEMU_DISK_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=hd
 
 # UEFI firmware paths (per architecture)
 ifeq ($(ARCH),riscv64)
@@ -402,7 +403,11 @@ else ifeq ($(ARCH),x86_64)
   UEFI_CODE_SRC ?= /usr/share/edk2/ovmf/OVMF_CODE.fd
   UEFI_VARS_SRC ?= /usr/share/edk2/ovmf/OVMF_VARS.fd
 else ifeq ($(ARCH),aarch64)
-  UEFI_CODE_SRC ?= /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
+  ifneq ($(wildcard /usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw),)
+    UEFI_CODE_SRC ?= /usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw
+  else
+    UEFI_CODE_SRC ?= /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
+  endif
   UEFI_VARS_SRC ?= /usr/share/edk2/aarch64/vars-template-pflash.raw
 endif
 
@@ -414,12 +419,8 @@ UEFI_BOOT := $(BUILD_DIR)/boot.img
 QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly=on
 QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
 
-ifeq ($(ARCH),riscv64)
-  QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
-  QEMU_BOOT_FLAGS += -device virtio-blk-device,drive=boot,bootindex=0
-else
-  QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=virtio,bootindex=0
-endif
+QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
+QEMU_BOOT_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=boot,bootindex=0
 
 QEMU_MEDIA_FLAGS := $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS)
 

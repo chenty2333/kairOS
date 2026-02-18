@@ -144,8 +144,12 @@ while IFS= read -r line; do
   fi
 done < "$DEFCONFIG"
 
-# Ensure new Kconfig symbols take defaults without prompting
-make -C "$BUSYBOX_SRC" O="$OUT_DIR" silentoldconfig >"$_out" 2>&1
+# Ensure new Kconfig symbols resolve non-interactively.
+# BusyBox may introduce symbols without defaults; feeding empty answers to
+# oldconfig reliably accepts each prompt's default choice.
+set +o pipefail
+yes "" | make -C "$BUSYBOX_SRC" O="$OUT_DIR" oldconfig >"$_out" 2>&1
+set -o pipefail
 
 [[ "$QUIET" != "1" ]] && echo "Using CC=$CC CROSS_COMPILE=$CROSS_COMPILE"
 make -C "$BUSYBOX_SRC" O="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" \

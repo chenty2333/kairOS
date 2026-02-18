@@ -7,11 +7,14 @@
 
 #include <kairos/types.h>
 
-#define DRM_LITE_IOC_GET_INFO      0xF001
-#define DRM_LITE_IOC_CREATE_BUFFER 0xF002
-#define DRM_LITE_IOC_MAP_BUFFER    0xF003
-#define DRM_LITE_IOC_PRESENT       0xF004
+#define DRM_LITE_IOC_GET_INFO       0xF001
+#define DRM_LITE_IOC_CREATE_BUFFER  0xF002
+#define DRM_LITE_IOC_MAP_BUFFER     0xF003
+#define DRM_LITE_IOC_PRESENT        0xF004
 #define DRM_LITE_IOC_DESTROY_BUFFER 0xF005
+#define DRM_LITE_IOC_LIST_BUFFERS   0xF006
+
+#define DRM_LITE_MAX_BUFFERS        16
 
 enum drm_lite_format {
     DRM_LITE_FORMAT_XRGB8888 = 1,
@@ -43,10 +46,27 @@ struct drm_lite_map {
 struct drm_lite_present {
     uint32_t handle;
     uint32_t flags;
+    uint32_t x, y;              /* dirty rect origin (0,0 = top-left) */
+    uint32_t width, height;     /* dirty rect size (0 = full extent) */
 };
 
 struct drm_lite_destroy {
     uint32_t handle;
+};
+
+struct drm_lite_buffer_list {
+    uint32_t count;
+    uint32_t handles[DRM_LITE_MAX_BUFFERS];
+};
+
+/* Framebuffer backend operations (kernel-internal) */
+struct drm_lite_device;
+struct drm_lite_buffer;
+
+struct drm_lite_fb_ops {
+    int (*present)(struct drm_lite_device *dev, struct drm_lite_buffer *buf,
+                   uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    int (*get_info)(struct drm_lite_device *dev, struct drm_lite_info *info);
 };
 
 #endif /* _KAIROS_DRM_LITE_H */

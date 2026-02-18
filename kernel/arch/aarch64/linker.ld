@@ -6,7 +6,8 @@ OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
 KERNEL_PHYS_BASE = 0x40000000;
-KERNEL_VIRT_BASE = 0xffffff8000000000;
+/* Limine requires 64-bit higher-half PT_LOAD VAs >= 0xffffffff80000000. */
+KERNEL_VIRT_BASE = 0xffffffff80000000;
 
 SECTIONS
 {

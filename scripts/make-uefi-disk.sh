@@ -25,6 +25,12 @@ case "$ARCH" in
         ;;
 esac
 
+case "$ARCH" in
+    riscv64) LIMINE_DEFAULT_ENTRY=1 ;;
+    x86_64) LIMINE_DEFAULT_ENTRY=2 ;;
+    aarch64) LIMINE_DEFAULT_ENTRY=3 ;;
+esac
+
 if [ ! -f "$KERNEL" ]; then
     echo "Error: Kernel not found at $KERNEL"
     echo "Run 'make ARCH=$ARCH' first"
@@ -54,28 +60,39 @@ dd if=/dev/zero of="$BOOT_IMG" bs=1M count="$IMG_SIZE_MB" status=none
 "$MKFS_FAT" -F 32 "$BOOT_IMG" >/dev/null
 
 MNT_DIR="$(mktemp -d /tmp/kairos-uefi-XXXXXX)"
+CFG_TMP="$(mktemp /tmp/kairos-limine-XXXXXX.cfg)"
 
 cleanup() {
     if mountpoint -q "$MNT_DIR"; then
         sudo umount "$MNT_DIR" || true
     fi
+    rm -f "$CFG_TMP"
     rmdir "$MNT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+awk -v def_entry="$LIMINE_DEFAULT_ENTRY" '
+BEGIN {
+    print "default_entry: " def_entry;
+    print "";
+}
+tolower($0) ~ /^default_entry[[:space:]]*:/ { next }
+{ print }
+' limine.cfg > "$CFG_TMP"
 
 sudo mount -o loop "$BOOT_IMG" "$MNT_DIR"
 mkdir -p "$BUILD_DIR"
 cp "$BOOT_EFI_SRC" "$BOOT_EFI_DST"
 if [ -x "$LIMINE_DIR/limine" ]; then
-    CFG_HASH="$(b2sum limine.cfg | awk '{print $1}')"
+    CFG_HASH="$(b2sum "$CFG_TMP" | awk '{print $1}')"
     "$LIMINE_DIR/limine" enroll-config "$BOOT_EFI_DST" "$CFG_HASH" >/dev/null 2>&1 || true
 fi
 
 sudo mkdir -p "$MNT_DIR/EFI/BOOT" "$MNT_DIR/boot/limine"
 sudo cp "$BOOT_EFI_DST" "$MNT_DIR/EFI/BOOT/$BOOT_EFI"
-sudo cp limine.cfg "$MNT_DIR/limine.cfg"
-sudo cp limine.cfg "$MNT_DIR/boot/limine/limine.cfg"
-sudo cp limine.cfg "$MNT_DIR/boot/limine/limine.conf"
+sudo cp "$CFG_TMP" "$MNT_DIR/limine.cfg"
+sudo cp "$CFG_TMP" "$MNT_DIR/boot/limine/limine.cfg"
+sudo cp "$CFG_TMP" "$MNT_DIR/boot/limine/limine.conf"
 sudo cp "$KERNEL" "$MNT_DIR/kairos.elf"
 sudo cp "$KERNEL" "$MNT_DIR/boot/kairos.elf"
 if [ "$ARCH" = "riscv64" ] && [ -f "qemu-virt.dtb" ]; then
