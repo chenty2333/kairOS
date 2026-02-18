@@ -130,13 +130,19 @@ void sched_enqueue(struct process *p) {
     rq->nr_running++;
     update_min_vruntime(rq);
 
+    /* Snapshot preemption decision while still holding the lock */
     struct sched_entity *curr_se = rq->curr_se;
-    spin_unlock(&rq->lock);
-
+    bool need_resched = false;
     if (curr_se && curr_se != &p->se) {
         if (p->se.vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr_se->vruntime) {
-            cpu_data[cpu].resched_needed = true;
+            need_resched = true;
         }
+    }
+
+    spin_unlock(&rq->lock);
+
+    if (need_resched) {
+        cpu_data[cpu].resched_needed = true;
     }
 
     if (cpu != arch_cpu_id())
@@ -238,7 +244,19 @@ void schedule(void) {
         next = sched_steal_task(cpu->cpu_id);
         spin_lock(&rq->lock);
 
-        if (!next) next = cpu->idle_proc;
+        /* Re-check local queue: tasks may have been enqueued while lock was dropped */
+        if (!next) {
+            struct rb_node *recheck = rb_first(&rq->tasks_timeline);
+            if (recheck) {
+                struct sched_entity *se = rb_entry(recheck, struct sched_entity, sched_node);
+                next = container_of(se, struct process, se);
+                rb_erase(&se->sched_node, &rq->tasks_timeline);
+                se->on_rq = false;
+                rq->nr_running--;
+            } else {
+                next = cpu->idle_proc;
+            }
+        }
     }
 
     if (next == prev && prev->state == PROC_ZOMBIE && prev != cpu->idle_proc) {
@@ -279,7 +297,9 @@ void schedule(void) {
         arch_irq_restore(state);
     } else {
         next->state = PROC_RUNNING;
-        __atomic_store_n(&next->se.on_cpu, true, __ATOMIC_RELEASE);
+        /* Don't set on_cpu here: no context switch means no cleanup path
+         * (sched_post_switch_cleanup) to clear it. on_cpu was already set
+         * when this task was first scheduled in. */
         rq->curr_se = &next->se;
         if (cpu->prev_task) sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
@@ -302,7 +322,7 @@ void sched_tick(void) {
         }
         if (curr && curr != cpu->idle_proc) {
             uint32_t nr = rq->nr_running + 1;
-            uint64_t slice = SCHED_LATENCY_NS / (nr ? nr : 1);
+            uint64_t slice = SCHED_LATENCY_NS / nr;
             if (slice < SCHED_MIN_GRANULARITY_NS)
                 slice = SCHED_MIN_GRANULARITY_NS;
             if (delta >= slice)
