@@ -237,12 +237,12 @@ void proc_free(struct process *p) {
         vfs_mount_ns_put(p->mnt_ns);
         p->mnt_ns = NULL;
     }
+    spin_lock(&proc_table_lock);
     if (!list_empty(&p->sibling)) {
-        spin_lock(&proc_table_lock);
-        if (!list_empty(&p->sibling))
-            list_del(&p->sibling);
-        spin_unlock(&proc_table_lock);
+        list_del(&p->sibling);
     }
+    INIT_LIST_HEAD(&p->sibling);
+    spin_unlock(&proc_table_lock);
     proc_free_internal(p);
 }
 
