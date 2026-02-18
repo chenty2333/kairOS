@@ -355,7 +355,10 @@ void sched_enqueue(struct process *p) {
 
     if (p->se.on_rq) {
         spin_unlock(&rq->lock);
-        se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_QUEUED);
+        /* Already queued — try to fix up state; if CAS fails, someone else
+         * already moved it past RUNNABLE, so fall back to BLOCKED. */
+        if (!se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_QUEUED))
+            se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_BLOCKED);
         arch_irq_restore(state);
         return;
     }
@@ -664,6 +667,12 @@ int sched_setnice(struct process *p, int nice) {
     struct cfs_rq *rq = &cpu_data[cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
+    /* Re-check: steal may have moved this task to another CPU */
+    if (p->se.cpu != cpu) {
+        spin_unlock(&rq->lock);
+        arch_irq_restore(state);
+        return -EAGAIN;
+    }
     bool on_rq = p->se.on_rq;
     if (on_rq) rb_erase(&p->se.sched_node, &rq->tasks_timeline);
     p->se.nice = nice;

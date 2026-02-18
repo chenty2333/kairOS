@@ -178,7 +178,6 @@ void proc_adopt_child(struct process *parent, struct process *child) {
     child->syscall_abi = parent->syscall_abi;
     child->umask = parent->umask;
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
-    child->umask = parent->umask;
     spin_lock(&proc_table_lock);
     list_add(&child->sibling, &parent->children);
     spin_unlock(&proc_table_lock);
