@@ -22,6 +22,7 @@ case "$ARCH" in
         CODE_SRC="${UEFI_CODE_SRC:-/usr/share/edk2/riscv/RISCV_VIRT_CODE.fd}"
         VARS_SRC="${UEFI_VARS_SRC:-/usr/share/edk2/riscv/RISCV_VIRT_VARS.fd}"
         PFLASH_SIZE="32M"
+        PFLASH_SIZE_BYTES=33554432
         PKG_HINT="sudo dnf install edk2-ovmf"
         ;;
     x86_64)
@@ -38,6 +39,7 @@ case "$ARCH" in
         CODE_SRC="${UEFI_CODE_SRC:-$CODE_SRC_DEFAULT}"
         VARS_SRC="${UEFI_VARS_SRC:-/usr/share/edk2/aarch64/vars-template-pflash.raw}"
         PFLASH_SIZE="64M"
+        PFLASH_SIZE_BYTES=67108864
         PKG_HINT="sudo dnf install edk2-aarch64"
         ;;
     *)
@@ -66,6 +68,14 @@ cp "$VARS_SRC" "$VARS_DST"
 if [ -n "$PFLASH_SIZE" ]; then
     truncate -s "$PFLASH_SIZE" "$CODE_DST"
     truncate -s "$PFLASH_SIZE" "$VARS_DST"
+    code_sz="$(stat -c '%s' "$CODE_DST")"
+    vars_sz="$(stat -c '%s' "$VARS_DST")"
+    if [ "$code_sz" -ne "$PFLASH_SIZE_BYTES" ] || [ "$vars_sz" -ne "$PFLASH_SIZE_BYTES" ]; then
+        echo "Error: invalid pflash size for $ARCH."
+        echo "Expected: $PFLASH_SIZE_BYTES bytes"
+        echo "Actual:   code=$code_sz vars=$vars_sz"
+        exit 1
+    fi
 fi
 
 if [ "$QUIET" = "1" ]; then

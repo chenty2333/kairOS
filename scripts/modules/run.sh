@@ -71,7 +71,7 @@ kairos_run_test_once() {
     local expect_timeout="$5"
 
     local qemu_cmd
-    printf -v qemu_cmd 'make --no-print-directory ARCH=%q EXTRA_CFLAGS=%q run' \
+    printf -v qemu_cmd 'make --no-print-directory -j1 ARCH=%q EXTRA_CFLAGS=%q run' \
         "${KAIROS_ARCH}" "${extra_cflags}"
     kairos_run_clean_kernel_artifacts
 
@@ -81,6 +81,7 @@ kairos_run_test_once() {
         cd "${KAIROS_ROOT_DIR}"
         kairos_exec_script_env "test" \
             QEMU_CMD="${qemu_cmd}" \
+            QEMU_EXTRA="" \
             TEST_TIMEOUT="${timeout_s}" \
             TEST_LOG="${log_path}" \
             TEST_REQUIRE_MARKERS="${require_markers}" \

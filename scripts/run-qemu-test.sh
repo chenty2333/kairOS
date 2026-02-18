@@ -27,7 +27,8 @@ echo "test: log -> ${TEST_LOG}"
 echo "test: require_markers=${TEST_REQUIRE_MARKERS} expect_timeout=${TEST_EXPECT_TIMEOUT}"
 
 set +e
-timeout --foreground "${TEST_TIMEOUT}s" bash -lc "${QEMU_CMD}" >"${TEST_LOG}" 2>&1
+timeout --signal=TERM --kill-after=5s "${TEST_TIMEOUT}s" \
+    bash -lc "${QEMU_CMD}" >"${TEST_LOG}" 2>&1
 qemu_rc=$?
 set -e
 

@@ -549,12 +549,13 @@ TEST_TIMEOUT ?= 180
 TEST_LOG ?= $(BUILD_DIR)/test.log
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
+SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
 
 test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
 test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)$(KAIROS_CMD) run test-soak --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
+	$(Q)$(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
 
 test-matrix: check-tools $(KAIROS_DEPS) scripts/test-matrix.sh
 	$(Q)$(KAIROS_CMD) run test-matrix
