@@ -57,8 +57,14 @@ static void handle_exception(struct trap_frame *tf) {
                                        tf->tf_a3, tf->tf_a4, tf->tf_a5);
         tf->tf_a0 = ret;
         if (ret >= 0) {
-            if (nr == LINUX_NR_execve || nr == LINUX_NR_execveat)
-                return; /* execve set ELR to new entry; don't advance */
+            struct process *cur = proc_current();
+            if (!cur || cur->syscall_abi == SYSCALL_ABI_LINUX) {
+                if (nr == LINUX_NR_execve || nr == LINUX_NR_execveat)
+                    return; /* execve set ELR to new entry; don't advance */
+            } else {
+                if (nr == SYS_exec)
+                    return;
+            }
         }
         tf->elr += 4;
         return;
