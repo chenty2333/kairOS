@@ -10,6 +10,7 @@
 #include <kairos/spinlock.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
+#include <kairos/config.h>
 
 struct boot_info;
 
@@ -18,10 +19,16 @@ struct boot_info;
 #define PG_KERNEL (1 << 1)
 #define PG_USER (1 << 2)
 #define PG_SLAB (1 << 3)
+#define PG_PCP (1 << 4)
 
 struct page {
     uint32_t flags, order, refcount;
     struct list_head list;
+#if CONFIG_PMM_DEBUG
+    uint16_t dbg_state;
+    int16_t dbg_last_cpu;
+    uint32_t dbg_seq;
+#endif
 };
 
 void pmm_init(paddr_t start, paddr_t end);
@@ -35,6 +42,8 @@ void pmm_put_page(paddr_t pa);
 int pmm_page_refcount(paddr_t pa);
 size_t pmm_num_free_pages(void);
 size_t pmm_total_pages(void);
+int pmm_pcp_report(char *buf, size_t bufsz);
+int pmm_integrity_report(char *buf, size_t bufsz);
 struct page *alloc_pages(unsigned int order);
 void free_pages(struct page *page, unsigned int order);
 static inline struct page *alloc_page(void) {

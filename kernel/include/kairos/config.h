@@ -71,6 +71,18 @@
 #ifndef CONFIG_EMBEDDED_INIT
 #define CONFIG_EMBEDDED_INIT 0
 #endif
+#ifndef CONFIG_PMM_DEBUG
+#define CONFIG_PMM_DEBUG 1
+#endif
+/*
+ * PCP mode:
+ *   0 = disabled
+ *   1 = debug (enabled with integrity checks)
+ *   2 = enabled
+ */
+#ifndef CONFIG_PMM_PCP_MODE
+#define CONFIG_PMM_PCP_MODE 1
+#endif
 /* #define CONFIG_SLUB_DEBUG           1 */
 
 /*

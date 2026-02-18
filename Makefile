@@ -63,6 +63,7 @@ COMMON_ARCH_SRCS := \
 
 # Use clang for cross-compilation (set USE_GCC=1 to use GCC)
 USE_GCC ?= 0
+TOOLCHAIN_MODE ?= auto
 
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
@@ -239,7 +240,7 @@ COMPILER_RT_STAMP := $(STAMP_DIR)/compiler-rt.stamp
 MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
-KAIROS_DEPS := scripts/kairos.sh $(wildcard scripts/modules/*.sh scripts/lib/*.sh)
+KAIROS_DEPS := scripts/kairos.sh $(wildcard scripts/modules/*.sh scripts/lib/*.sh scripts/impl/*.sh scripts/patches/*/*)
 
 .PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
@@ -259,14 +260,14 @@ endif
 
 compiler-rt: $(COMPILER_RT_STAMP)
 
-$(COMPILER_RT_STAMP): $(KAIROS_DEPS) scripts/build-compiler-rt.sh
+$(COMPILER_RT_STAMP): $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain compiler-rt
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain compiler-rt
 	@touch $@
 
-$(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) $(KAIROS_DEPS) scripts/build-musl.sh
+$(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain musl
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain musl
 	@touch $@
 
 $(USER_INIT): $(MUSL_STAMP) user/init/main.c user/Makefile
@@ -277,49 +278,49 @@ initramfs: $(INITRAMFS_STAMP)
 $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
 	$(Q)$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
-$(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS) scripts/make-initramfs.sh
+$(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image initramfs
 	@touch $@
 
 busybox: $(BUSYBOX_STAMP)
 
-$(BUSYBOX_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS) tools/busybox/kairos_defconfig scripts/build-busybox.sh
+$(BUSYBOX_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS) tools/busybox/kairos_defconfig
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain busybox
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain busybox
 	@touch $@
 
 tcc: $(TCC_STAMP)
 
-$(TCC_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS) scripts/build-tcc.sh
+$(TCC_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) $(KAIROS_CMD) toolchain tcc
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain tcc
 	@touch $@
 
 rootfs-base: $(ROOTFS_BASE_STAMP)
 
-$(ROOTFS_BASE_STAMP): $(KAIROS_DEPS) scripts/make-disk.sh
+$(ROOTFS_BASE_STAMP): $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image rootfs-base
 	@touch $@
 
 rootfs-busybox: $(ROOTFS_BUSYBOX_STAMP)
 
-$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) $(KAIROS_DEPS) scripts/make-disk.sh
+$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image rootfs-busybox
 	@touch $@
 
 rootfs-init: $(ROOTFS_INIT_STAMP)
 
-$(ROOTFS_INIT_STAMP): $(USER_INIT) $(KAIROS_DEPS) scripts/make-disk.sh
+$(ROOTFS_INIT_STAMP): $(USER_INIT) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image rootfs-init
 	@touch $@
 
 rootfs-tcc: $(ROOTFS_TCC_STAMP)
 
-$(ROOTFS_TCC_STAMP): $(TCC_STAMP) $(KAIROS_DEPS) scripts/make-disk.sh
+$(ROOTFS_TCC_STAMP): $(TCC_STAMP) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image rootfs-tcc
 	@touch $@
@@ -529,7 +530,7 @@ uefi: $(KERNEL) initramfs
 # Create a disk image with ext2 filesystem
 disk: $(DISK_STAMP)
 
-$(DISK_STAMP): $(ROOTFS_STAMP) $(KAIROS_DEPS) scripts/make-disk.sh
+$(DISK_STAMP): $(ROOTFS_STAMP) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image disk
 	@touch $@
@@ -592,6 +593,7 @@ help:
 	@echo "Variables:"
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
 	@echo "  EMBEDDED_INIT - Build embedded init blob (riscv64 only)"
+	@echo "  TOOLCHAIN_MODE - Toolchain policy (auto, clang, gcc)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""
 	@echo "Examples:"

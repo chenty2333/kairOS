@@ -74,6 +74,8 @@ static int gen_stat(pid_t pid, char *buf, size_t bufsz);
 static int gen_sched(pid_t pid, char *buf, size_t bufsz);
 static int gen_version(pid_t pid, char *buf, size_t bufsz);
 static int gen_cmdline(pid_t pid, char *buf, size_t bufsz);
+static int gen_mm_pcp(pid_t pid, char *buf, size_t bufsz);
+static int gen_mm_integrity(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_status(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
@@ -241,6 +243,23 @@ static int gen_cmdline(pid_t pid __attribute__((unused)),
     const struct boot_info *bi = boot_info_get();
     const char *cmd = (bi && bi->cmdline) ? bi->cmdline : "";
     return snprintf(buf, bufsz, "%s\n", cmd);
+}
+
+static int gen_mm_pcp(pid_t pid __attribute__((unused)),
+                      char *buf, size_t bufsz) {
+    int n = pmm_pcp_report(buf, bufsz);
+    if (n < 0)
+        return snprintf(buf, bufsz, "pmm_pcp_report unavailable (%d)\n", n);
+    return n;
+}
+
+static int gen_mm_integrity(pid_t pid __attribute__((unused)),
+                            char *buf, size_t bufsz) {
+    int n = pmm_integrity_report(buf, bufsz);
+    if (n < 0)
+        return snprintf(buf, bufsz, "pmm_integrity_report unavailable (%d)\n",
+                        n);
+    return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -529,6 +548,8 @@ static const struct static_entry_def static_entries[] = {
     {"sched",   gen_sched},
     {"version", gen_version},
     {"cmdline", gen_cmdline},
+    {"mm_pcp", gen_mm_pcp},
+    {"mm_integrity", gen_mm_integrity},
 };
 
 #define NUM_STATIC_ENTRIES ARRAY_SIZE(static_entries)
