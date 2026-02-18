@@ -41,9 +41,16 @@ kairos_toolchain_dispatch() {
             kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-musl-cross.sh" "${KAIROS_ARCH}"
             ;;
         all)
-            if [[ "${USE_GCC:-0}" != "1" ]]; then
-                kairos_toolchain_dispatch compiler-rt
-            fi
+            case "${TOOLCHAIN_MODE:-auto}" in
+                clang)
+                    kairos_toolchain_dispatch compiler-rt
+                    ;;
+                auto|gcc)
+                    ;;
+                *)
+                    kairos_die "invalid TOOLCHAIN_MODE=${TOOLCHAIN_MODE:-auto} (expected auto|clang|gcc)"
+                    ;;
+            esac
             kairos_toolchain_dispatch musl
             kairos_toolchain_dispatch busybox
             kairos_toolchain_dispatch tcc

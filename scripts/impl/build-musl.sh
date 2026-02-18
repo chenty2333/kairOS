@@ -54,6 +54,21 @@ LDFLAGS="$KAIROS_TC_LDFLAGS"
 if [[ -n "${KAIROS_TC_NOTE:-}" && "$QUIET" != "1" ]]; then
   echo "$KAIROS_TC_NOTE"
 fi
+if [[ "$QUIET" != "1" ]]; then
+  echo "toolchain selected: ${KAIROS_TC_KIND}"
+fi
+
+# For full musl builds with clang, ensure compiler-rt builtins exist.
+# This keeps TOOLCHAIN_MODE=auto usable when clang is selected.
+if [[ "${MUSL_STATIC_ONLY:-0}" != "1" && "$KAIROS_TC_KIND" == "clang" ]]; then
+  RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
+  _rt_builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' | head -n1 || true)"
+  if [[ -z "$_rt_builtins" ]]; then
+    [[ "$QUIET" != "1" ]] && echo "compiler-rt builtins missing; building compiler-rt..."
+    env TOOLCHAIN_MODE=clang QUIET="$QUIET" SYSROOT="$SYSROOT" \
+      "$ROOT_DIR/scripts/impl/build-compiler-rt.sh" "$ARCH"
+  fi
+fi
 
 # If using clang and compiler-rt builtins are available, tell clang where to
 # find them.  This is needed for the full build (libc.so) on aarch64 where

@@ -252,7 +252,7 @@ _reset_count:
 
 user: $(USER_INIT)
 
-ifeq ($(USE_GCC),0)
+ifeq ($(TOOLCHAIN_MODE),clang)
 USER_TOOLCHAIN_DEPS := $(COMPILER_RT_STAMP)
 else
 USER_TOOLCHAIN_DEPS :=
