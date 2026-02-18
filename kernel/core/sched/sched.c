@@ -30,6 +30,69 @@ const int sched_nice_to_weight[40] = {
 
 struct percpu_data cpu_data[CONFIG_MAX_CPUS];
 static int nr_cpus_online = 1;
+static bool sched_steal_enabled = false;
+
+static inline uint32_t se_state_load(const struct sched_entity *se) {
+    return __atomic_load_n(&se->run_state, __ATOMIC_ACQUIRE);
+}
+
+static inline bool se_try_transition(struct sched_entity *se, uint32_t from,
+                                     uint32_t to) {
+    uint32_t expected = from;
+    return __atomic_compare_exchange_n(&se->run_state, &expected, to, false,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+static inline void se_set_state(struct sched_entity *se, uint32_t state) {
+    __atomic_store_n(&se->run_state, state, __ATOMIC_RELEASE);
+}
+
+static inline void se_mark_queued(struct sched_entity *se, int cpu_id) {
+    se->cpu = cpu_id;
+    se->on_rq = true;
+    se_set_state(se, SE_STATE_QUEUED);
+}
+
+static inline void se_mark_running(struct sched_entity *se) {
+    se->on_rq = false;
+    __atomic_store_n(&se->on_cpu, true, __ATOMIC_RELEASE);
+    se_set_state(se, SE_STATE_RUNNING);
+}
+
+static inline void se_mark_runnable(struct sched_entity *se) {
+    se->on_rq = false;
+    se_set_state(se, SE_STATE_RUNNABLE);
+}
+
+static inline void se_mark_blocked(struct sched_entity *se) {
+    se->on_rq = false;
+    se_set_state(se, SE_STATE_BLOCKED);
+}
+
+#if CONFIG_DEBUG
+static void sched_validate_entity(struct process *p, const char *where) {
+    struct sched_entity *se = &p->se;
+    uint32_t state = se_state_load(se);
+
+    if (se->on_rq && state != SE_STATE_QUEUED) {
+        panic("sched: invalid on_rq state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
+              where, p->pid, state, se->on_rq, se->on_cpu);
+    }
+    if (state == SE_STATE_QUEUED && !se->on_rq) {
+        panic("sched: invalid queued state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
+              where, p->pid, state, se->on_rq, se->on_cpu);
+    }
+    if (state == SE_STATE_RUNNING && !__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE)) {
+        panic("sched: invalid running state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
+              where, p->pid, state, se->on_rq, se->on_cpu);
+    }
+}
+#else
+static inline void sched_validate_entity(struct process *p
+                                         __attribute__((unused)),
+                                         const char *where
+                                         __attribute__((unused))) {}
+#endif
 
 static inline int __weight(int nice) {
     int idx = (nice < NICE_MIN) ? 0 : (nice > NICE_MAX) ? 39 : nice - NICE_MIN;
@@ -115,7 +178,10 @@ void sched_post_switch_cleanup(void) {
 }
 
 void sched_enqueue(struct process *p) {
-    if (!p || p->se.on_rq) return;
+    if (!p)
+        return;
+    if (!se_try_transition(&p->se, SE_STATE_BLOCKED, SE_STATE_RUNNABLE))
+        return;
 
     /* Find target CPU - currently simple: stay on current or preferred */
     int cpu = (p->se.cpu >= 0 && p->se.cpu < nr_cpus_online) ? p->se.cpu : arch_cpu_id();
@@ -124,13 +190,20 @@ void sched_enqueue(struct process *p) {
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
 
+    if (p->se.on_rq) {
+        spin_unlock(&rq->lock);
+        se_set_state(&p->se, SE_STATE_QUEUED);
+        arch_irq_restore(state);
+        return;
+    }
+
     place_entity(rq, &p->se, p->se.vruntime == 0);
     __enqueue_entity(rq, &p->se);
-    p->se.on_rq = true;
-    p->se.cpu = cpu;
+    se_mark_queued(&p->se, cpu);
     __atomic_store_n(&p->se.on_cpu, false, __ATOMIC_RELEASE);
     rq->nr_running++;
     update_min_vruntime(rq);
+    sched_validate_entity(p, "sched_enqueue");
 
     /* Snapshot preemption decision while still holding the lock */
     struct sched_entity *curr_se = rq->curr_se;
@@ -161,9 +234,10 @@ void sched_dequeue(struct process *p) {
     spin_lock(&rq->lock);
 
     rb_erase(&p->se.sched_node, &rq->tasks_timeline);
-    p->se.on_rq = false;
+    se_mark_blocked(&p->se);
     rq->nr_running--;
     update_min_vruntime(rq);
+    sched_validate_entity(p, "sched_dequeue");
 
     spin_unlock(&rq->lock);
     arch_irq_restore(state);
@@ -184,21 +258,28 @@ static struct process *sched_steal_task(int self_id) {
 
         struct process *p = NULL;
         if (remote_rq->nr_running > 0) {
-            struct rb_node *left = rb_first(&remote_rq->tasks_timeline);
-            if (left) {
-                struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
-                p = container_of(se, struct process, se);
-
-                /* CRITICAL: Do not steal a task that is currently running on the remote CPU! */
-                if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE)) {
-                    spin_unlock(&remote_rq->lock);
+            for (struct rb_node *node = rb_first(&remote_rq->tasks_timeline);
+                 node; node = rb_next(node)) {
+                struct sched_entity *se =
+                    rb_entry(node, struct sched_entity, sched_node);
+                struct process *cand = container_of(se, struct process, se);
+                if (remote_rq->curr_se == se)
                     continue;
-                }
+                if (cand->state != PROC_RUNNABLE)
+                    continue;
+                if (se_state_load(se) != SE_STATE_QUEUED)
+                    continue;
+                if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE))
+                    continue;
 
                 rb_erase(&se->sched_node, &remote_rq->tasks_timeline);
-                se->on_rq = false;
-                remote_rq->nr_running--;
+                se_mark_runnable(se);
                 se->cpu = self_id;
+                remote_rq->nr_running--;
+                update_min_vruntime(remote_rq);
+                sched_validate_entity(cand, "sched_steal_task");
+                p = cand;
+                break;
             }
         }
         spin_unlock(&remote_rq->lock);
@@ -218,19 +299,24 @@ void schedule(void) {
 
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
-        /* Mark prev as currently running on this CPU */
         __atomic_store_n(&prev->se.on_cpu, true, __ATOMIC_RELEASE);
+        se_set_state(&prev->se, SE_STATE_RUNNING);
 
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_RUNNABLE;
+            se_mark_runnable(&prev->se);
             __enqueue_entity(rq, &prev->se);
-            prev->se.on_rq = true;
+            se_mark_queued(&prev->se, cpu->cpu_id);
             rq->nr_running++;
-        } else if (prev->se.on_rq) {
-            rb_erase(&prev->se.sched_node, &rq->tasks_timeline);
-            prev->se.on_rq = false;
-            rq->nr_running--;
+        } else {
+            if (prev->se.on_rq) {
+                rb_erase(&prev->se.sched_node, &rq->tasks_timeline);
+                prev->se.on_rq = false;
+                rq->nr_running--;
+            }
+            se_mark_blocked(&prev->se);
         }
+        sched_validate_entity(prev, "schedule-prev");
     }
 
     struct rb_node *left = rb_first(&rq->tasks_timeline);
@@ -238,13 +324,20 @@ void schedule(void) {
         struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
         next = container_of(se, struct process, se);
         rb_erase(&se->sched_node, &rq->tasks_timeline);
-        se->on_rq = false;
+        se_mark_running(se);
         rq->nr_running--;
     } else {
         /* Local empty - attempt stealing without holding local lock to simplify */
-        spin_unlock(&rq->lock);
-        next = sched_steal_task(cpu->cpu_id);
-        spin_lock(&rq->lock);
+        bool steal_allowed =
+            __atomic_load_n(&sched_steal_enabled, __ATOMIC_ACQUIRE) &&
+            nr_cpus_online > 1;
+        if (steal_allowed) {
+            spin_unlock(&rq->lock);
+            next = sched_steal_task(cpu->cpu_id);
+            spin_lock(&rq->lock);
+        } else {
+            next = NULL;
+        }
 
         /* Re-check local queue: tasks may have been enqueued while lock was dropped */
         if (!next) {
@@ -253,7 +346,7 @@ void schedule(void) {
                 struct sched_entity *se = rb_entry(recheck, struct sched_entity, sched_node);
                 next = container_of(se, struct process, se);
                 rb_erase(&se->sched_node, &rq->tasks_timeline);
-                se->on_rq = false;
+                se_mark_running(se);
                 rq->nr_running--;
             } else {
                 next = cpu->idle_proc;
@@ -271,9 +364,10 @@ void schedule(void) {
         next->se.last_run_time = sched_clock_ns();
         rq->curr_se = &next->se;
         next->state = PROC_RUNNING;
-        __atomic_store_n(&next->se.on_cpu, true, __ATOMIC_RELEASE);
+        se_mark_running(&next->se);
         __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
         proc_set_current(next);
+        sched_validate_entity(next, "schedule-next");
 
         if (next->mm) {
             arch_mmu_switch(next->mm->pgdir);
@@ -299,9 +393,7 @@ void schedule(void) {
         arch_irq_restore(state);
     } else {
         next->state = PROC_RUNNING;
-        /* Don't set on_cpu here: no context switch means no cleanup path
-         * (sched_post_switch_cleanup) to clear it. on_cpu was already set
-         * when this task was first scheduled in. */
+        se_mark_running(&next->se);
         rq->curr_se = &next->se;
         if (cpu->prev_task) sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
@@ -372,6 +464,9 @@ void sched_set_idle(struct process *p) {
     cpu->runqueue.idle = p;
 }
 int sched_cpu_count(void) { return nr_cpus_online; }
+void sched_set_steal_enabled(bool enabled) {
+    __atomic_store_n(&sched_steal_enabled, enabled, __ATOMIC_RELEASE);
+}
 void sched_cpu_online(int cpu) {
     if (cpu >= 0 && cpu < CONFIG_MAX_CPUS && cpu >= nr_cpus_online)
         nr_cpus_online = cpu + 1;

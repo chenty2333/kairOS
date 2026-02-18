@@ -297,6 +297,9 @@ struct process *proc_idle_init(void) {
         panic("idle ctx missing");
     arch_context_init(p->context, (vaddr_t)idle_thread, 0, true);
     p->state = PROC_RUNNING;
+    p->se.run_state = SE_STATE_RUNNING;
+    p->se.on_cpu = true;
+    p->se.on_rq = false;
     struct percpu_data *cpu = arch_get_percpu();
     cpu->idle_proc = p;
     cpu->curr_proc = p;

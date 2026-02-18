@@ -64,5 +64,6 @@ void sched_set_idle(struct process *p);
 int sched_cpu_count(void);
 void sched_cpu_online(int cpu);
 struct percpu_data *sched_cpu_data(int cpu);
+void sched_set_steal_enabled(bool enabled);
 
 #endif
