@@ -31,6 +31,7 @@ static int poll_check_fds(struct pollfd *fds, size_t nfds) {
             continue;
         }
         uint32_t revents = (uint32_t)vfs_poll(f, (uint32_t)fds[i].events);
+        file_put(f);
         fds[i].revents = (short)revents;
         if (revents)
             ready++;
@@ -59,6 +60,7 @@ static void poll_register_waiters(struct pollfd *fds, struct poll_waiter *waiter
         if (!f)
             continue;
         vfs_poll_register(f, &waiters[i], (uint32_t)fds[i].events);
+        file_put(f);
     }
 }
 

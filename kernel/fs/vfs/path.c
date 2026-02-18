@@ -46,66 +46,6 @@ int vfs_build_relpath(struct dentry *root, struct dentry *target,
     return 0;
 }
 
-int vfs_build_path(struct vnode *vn, char *out, size_t len) {
-    if (!vn || !out || len == 0)
-        return -EINVAL;
-    struct mount *mnt = vn->mount;
-    if (!mnt || !mnt->mountpoint)
-        return -EINVAL;
-
-    char tmp[CONFIG_PATH_MAX];
-    size_t pos = sizeof(tmp) - 1;
-    tmp[pos] = '\0';
-
-    struct vnode *cur = vn;
-    while (cur && cur != mnt->root) {
-        if (!cur->name[0])
-            return -ENOENT;
-        size_t nlen = strlen(cur->name);
-        if (nlen + 1 > pos)
-            return -ENAMETOOLONG;
-        pos -= nlen;
-        memcpy(&tmp[pos], cur->name, nlen);
-        if (pos == 0)
-            return -ENAMETOOLONG;
-        tmp[--pos] = '/';
-        cur = cur->parent;
-    }
-    if (!cur)
-        return -ENOENT;
-    if (pos == sizeof(tmp) - 1) {
-        if (pos == 0)
-            return -ENAMETOOLONG;
-        tmp[--pos] = '/';
-    }
-
-    const char *mountpoint = mnt->mountpoint;
-    if (strcmp(mountpoint, "/") == 0) {
-        size_t plen = strlen(&tmp[pos]);
-        if (plen + 1 > len)
-            return -ERANGE;
-        memcpy(out, &tmp[pos], plen + 1);
-        return (int)plen;
-    }
-
-    const char *rel = &tmp[pos];
-    if (strcmp(rel, "/") == 0) {
-        size_t mlen = strlen(mountpoint);
-        if (mlen + 1 > len)
-            return -ERANGE;
-        memcpy(out, mountpoint, mlen + 1);
-        return (int)mlen;
-    }
-
-    size_t mlen = strlen(mountpoint);
-    size_t rlen = strlen(rel);
-    if (mlen + rlen + 1 > len)
-        return -ERANGE;
-    memcpy(out, mountpoint, mlen);
-    memcpy(out + mlen, rel, rlen + 1);
-    return (int)(mlen + rlen);
-}
-
 int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
     if (!d || !out || len == 0)
         return -EINVAL;

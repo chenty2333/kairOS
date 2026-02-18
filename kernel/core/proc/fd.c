@@ -36,9 +36,7 @@ struct fdtable *fdtable_copy(struct fdtable *src) {
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         struct file *f = src->files[i];
         if (f) {
-            mutex_lock(&f->lock);
-            f->refcount++;
-            mutex_unlock(&f->lock);
+            atomic_inc(&f->refcount);
             fdt->files[i] = f;
             fdt->fd_flags[i] = src->fd_flags[i];
         }
@@ -96,6 +94,8 @@ struct file *fd_get(struct process *p, int fd) {
     struct fdtable *fdt = p->fdtable;
     mutex_lock(&fdt->lock);
     struct file *file = fdt->files[fd];
+    if (file)
+        atomic_inc(&file->refcount);
     mutex_unlock(&fdt->lock);
     return file;
 }
@@ -120,9 +120,7 @@ int fd_close(struct process *p, int fd) {
 }
 
 static inline void file_get(struct file *file) {
-    mutex_lock(&file->lock);
-    file->refcount++;
-    mutex_unlock(&file->lock);
+    atomic_inc(&file->refcount);
 }
 
 int fd_dup(struct process *p, int oldfd) {

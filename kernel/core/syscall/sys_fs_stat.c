@@ -80,18 +80,25 @@ int64_t sys_fstatfs(uint64_t fd, uint64_t buf, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    if (!f->vnode || !f->vnode->mount)
+    if (!f->vnode || !f->vnode->mount) {
+        file_put(f);
         return -ENOSYS;
+    }
 
     struct kstatfs kst;
     int ret = vfs_statfs(f->vnode->mount, &kst);
-    if (ret < 0)
+    if (ret < 0) {
+        file_put(f);
         return ret;
+    }
 
     struct linux_statfs lst;
     kstatfs_to_linux(&kst, &lst);
-    if (copy_to_user((void *)buf, &lst, sizeof(lst)) < 0)
+    if (copy_to_user((void *)buf, &lst, sizeof(lst)) < 0) {
+        file_put(f);
         return -EFAULT;
+    }
+    file_put(f);
     return 0;
 }
 
@@ -188,12 +195,20 @@ int64_t sys_fstat(uint64_t fd, uint64_t st_ptr, uint64_t a2, uint64_t a3,
 
     struct stat st;
     int ret = vfs_fstat(f, &st);
-    if (ret < 0)
+    if (ret < 0) {
+        file_put(f);
         return ret;
-    if (use_linux_abi())
-        return copy_linux_stat_to_user(st_ptr, &st);
-    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0)
+    }
+    if (use_linux_abi()) {
+        ret = copy_linux_stat_to_user(st_ptr, &st);
+        file_put(f);
+        return ret;
+    }
+    if (copy_to_user((void *)st_ptr, &st, sizeof(st)) < 0) {
+        file_put(f);
         return -EFAULT;
+    }
+    file_put(f);
     return 0;
 }
 
@@ -245,14 +260,20 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    if (!f->vnode || f->vnode->type != VNODE_DIR)
+    if (!f->vnode || f->vnode->type != VNODE_DIR) {
+        file_put(f);
         return -ENOTDIR;
+    }
 
-    if (count > (uint64_t)(size_t)-1)
+    if (count > (uint64_t)(size_t)-1) {
+        file_put(f);
         return -EINVAL;
+    }
     uint8_t *kbuf = kmalloc((size_t)count);
-    if (!kbuf)
+    if (!kbuf) {
+        file_put(f);
         return -ENOMEM;
+    }
 
     size_t pos = 0;
     while (pos < (size_t)count) {
@@ -260,6 +281,7 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
         int ret = vfs_readdir(f, &ent);
         if (ret < 0) {
             kfree(kbuf);
+            file_put(f);
             return ret;
         }
         if (ret == 0)
@@ -282,9 +304,11 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
 
     if (pos > 0 && copy_to_user((void *)dirp, kbuf, pos) < 0) {
         kfree(kbuf);
+        file_put(f);
         return -EFAULT;
     }
 
     kfree(kbuf);
+    file_put(f);
     return (int64_t)pos;
 }

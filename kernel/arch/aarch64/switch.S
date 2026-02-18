@@ -50,9 +50,11 @@ arch_context_switch:
 .global arch_enter_user
 arch_enter_user:
     ldr x1, [x0, #CTX_USTACK]
-    mov sp, x1
+    msr sp_el0, x1
     ldr x1, [x0, #CTX_LR]
     msr elr_el1, x1
+    mov x1, #0              /* EL0t, interrupts enabled */
+    msr spsr_el1, x1
     eret
 
 .global kthread_entry
@@ -97,7 +99,7 @@ aarch64_return_to_user:
 
     msr elr_el1, x19
     msr spsr_el1, x20
-    mov sp, x18
+    msr sp_el0, x18
 
     ldp x18, x19, [x17, #144]
     ldr x20, [x17, #160]

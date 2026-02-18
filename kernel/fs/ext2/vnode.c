@@ -196,10 +196,10 @@ struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
     vn->ops = &ext2_file_ops;
     vn->fs_data = id;
     vn->mount = NULL;
-    vn->refcount = 1;
+    atomic_init(&vn->refcount, 1);
     vn->parent = NULL;
     vn->name[0] = '\0';
-    mutex_init(&vn->lock, "ext2_vnode");
+    rwlock_init(&vn->lock, "ext2_vnode");
     poll_wait_head_init(&vn->pollers);
     id->vn = vn;
     INIT_LIST_HEAD(&id->cache_node);

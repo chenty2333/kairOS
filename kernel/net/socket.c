@@ -126,10 +126,10 @@ int sock_create(int domain, int type, int protocol, struct socket **out) {
     vn->nlink = 1;
     vn->ops = &socket_file_ops;
     vn->fs_data = sock;
-    vn->refcount = 1;
+    atomic_init(&vn->refcount, 1);
     vn->parent = NULL;
     vn->name[0] = '\0';
-    mutex_init(&vn->lock, "sock_vnode");
+    rwlock_init(&vn->lock, "sock_vnode");
     poll_wait_head_init(&vn->pollers);
 
     sock->vnode = vn;

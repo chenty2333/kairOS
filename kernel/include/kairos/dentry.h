@@ -5,6 +5,7 @@
 #ifndef _KAIROS_DENTRY_H
 #define _KAIROS_DENTRY_H
 
+#include <kairos/atomic.h>
 #include <kairos/config.h>
 #include <kairos/list.h>
 #include <kairos/sync.h>
@@ -24,7 +25,7 @@ struct dentry {
     struct mount *mnt;
     struct mount *mounted;
     uint32_t flags;
-    uint32_t refcount;
+    atomic_t refcount;
     uint64_t neg_expire;
     char name[CONFIG_NAME_MAX];
     struct list_head children;

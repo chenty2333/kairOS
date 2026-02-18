@@ -20,7 +20,7 @@ void vfs_init(void) {
     dentry_init();
     mutex_init(&mount_mutex, "mount");
     memset(&init_mnt_ns, 0, sizeof(init_mnt_ns));
-    init_mnt_ns.refcount = 1;
+    atomic_init(&init_mnt_ns.refcount, 1);
     pr_info("VFS: initialized (caches ready)\n");
 }
 
@@ -29,7 +29,7 @@ struct file *vfs_file_alloc(void) {
     if (!file)
         return NULL;
     memset(file, 0, sizeof(*file));
-    file->refcount = 1;
+    atomic_init(&file->refcount, 1);
     mutex_init(&file->lock, "file");
     return file;
 }

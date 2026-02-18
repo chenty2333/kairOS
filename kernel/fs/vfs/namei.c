@@ -217,7 +217,9 @@ static int namei_walk_locked(const struct path *base, const char *path,
                 dentry_put(d);
                 return -ENOENT;
             }
+            rwlock_write_lock(&vn->lock);
             vnode_set_parent(vn, cur->vnode, comp);
+            rwlock_write_unlock(&vn->lock);
             dentry_add(d, vn);
             vnode_put(vn);
         } else if (d->flags & DENTRY_NEGATIVE) {

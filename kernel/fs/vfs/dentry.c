@@ -5,6 +5,7 @@
 #include <kairos/dentry.h>
 #include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/vfs.h>
 
@@ -45,7 +46,7 @@ void dentry_init(void) {
 
 static void dentry_init_struct(struct dentry *d) {
     memset(d, 0, sizeof(*d));
-    d->refcount = 1;
+    atomic_init(&d->refcount, 1);
     INIT_LIST_HEAD(&d->children);
     INIT_LIST_HEAD(&d->child);
     INIT_LIST_HEAD(&d->hash);
@@ -75,9 +76,8 @@ struct dentry *dentry_alloc(struct dentry *parent, const char *name) {
 void dentry_get(struct dentry *d) {
     if (!d)
         return;
-    mutex_lock(&d->lock);
-    d->refcount++;
-    mutex_unlock(&d->lock);
+    WARN_ON(atomic_read(&d->refcount) == 0);
+    atomic_inc(&d->refcount);
 }
 
 static void dentry_unhash(struct dentry *d) {
@@ -97,24 +97,22 @@ static void dentry_unhash(struct dentry *d) {
 void dentry_put(struct dentry *d) {
     if (!d)
         return;
-    struct dentry *parent = NULL;
-    struct vnode *vn = NULL;
-    mutex_lock(&d->lock);
-    if (--d->refcount == 0) {
-        parent = d->parent;
+    uint32_t old = atomic_read(&d->refcount);
+    if (old == 0)
+        panic("dentry_put: refcount underflow on dentry '%s'", d->name);
+    old = atomic_fetch_sub(&d->refcount, 1);
+    if (old == 1) {
+        struct dentry *parent = d->parent;
+        struct vnode *vn = d->vnode;
         d->parent = NULL;
-        vn = d->vnode;
         d->vnode = NULL;
-        mutex_unlock(&d->lock);
         dentry_unhash(d);
         if (vn)
             vnode_put(vn);
         if (parent)
             dentry_put(parent);
         kmem_cache_free(dentry_cache, d);
-        return;
     }
-    mutex_unlock(&d->lock);
 }
 
 struct dentry *dentry_lookup(struct dentry *parent, const char *name,
@@ -184,8 +182,7 @@ static void dcache_evict(void) {
             list_add(&d->lru, &dentry_lru);
             continue;
         }
-        bool can_evict = (d->refcount == 1) &&
-                         !(d->flags & DENTRY_MOUNTPOINT) &&
+        bool can_evict = !(d->flags & DENTRY_MOUNTPOINT) &&
                          d->parent != NULL;
         mutex_unlock(&d->lock);
         if (!can_evict) {
@@ -193,6 +190,16 @@ static void dcache_evict(void) {
             list_add(&d->lru, &dentry_lru);
             continue;
         }
+        /* Atomically transition refcount 1→0 to close the TOCTOU window.
+         * If another thread grabbed a reference after we released d->lock,
+         * the cmpxchg fails and we simply skip this dentry. */
+        uint32_t expected = 1;
+        if (!atomic_cmpxchg(&d->refcount, &expected, 0)) {
+            list_del(&d->lru);
+            list_add(&d->lru, &dentry_lru);
+            continue;
+        }
+        /* refcount is now 0 — safe to unhash and reclaim */
         list_del(&d->hash);
         list_del(&d->lru);
         d->hashed = false;
@@ -202,11 +209,20 @@ static void dcache_evict(void) {
     }
     mutex_unlock(&dcache_lock);
 
+    /* Clean up victims directly — refcount is already 0, so we must NOT
+     * call dentry_put (that would underflow). */
     struct dentry *d, *tmp;
     list_for_each_entry_safe(d, tmp, &victims, lru) {
         list_del(&d->lru);
-        INIT_LIST_HEAD(&d->lru);
-        dentry_put(d);
+        struct dentry *parent = d->parent;
+        struct vnode *vn = d->vnode;
+        d->parent = NULL;
+        d->vnode = NULL;
+        if (vn)
+            vnode_put(vn);
+        if (parent)
+            dentry_put(parent);
+        kmem_cache_free(dentry_cache, d);
     }
 }
 
@@ -264,7 +280,10 @@ void dentry_move(struct dentry *d, struct dentry *new_parent,
     strncpy(d->name, new_name, sizeof(d->name) - 1);
     d->name[sizeof(d->name) - 1] = '\0';
     mutex_unlock(&d->lock);
-    if (d->vnode && new_parent->vnode)
+    if (d->vnode && new_parent->vnode) {
+        rwlock_write_lock(&d->vnode->lock);
         vnode_set_parent(d->vnode, new_parent->vnode, new_name);
+        rwlock_write_unlock(&d->vnode->lock);
+    }
     dentry_hash_insert(d);
 }

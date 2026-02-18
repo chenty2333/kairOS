@@ -64,6 +64,7 @@ COMMON_ARCH_SRCS := \
 # Use clang for cross-compilation (set USE_GCC=1 to use GCC)
 USE_GCC ?= 0
 TOOLCHAIN_MODE ?= auto
+WITH_TCC ?= 1
 
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
@@ -242,6 +243,12 @@ USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 KAIROS_DEPS := scripts/kairos.sh $(wildcard scripts/modules/*.sh scripts/lib/*.sh scripts/impl/*.sh scripts/patches/*/*)
 
+ifeq ($(WITH_TCC),1)
+ROOTFS_OPTIONAL_STAMPS := $(ROOTFS_TCC_STAMP)
+else
+ROOTFS_OPTIONAL_STAMPS :=
+endif
+
 .PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
@@ -327,12 +334,8 @@ $(ROOTFS_TCC_STAMP): $(TCC_STAMP) $(KAIROS_DEPS)
 
 rootfs: $(ROOTFS_STAMP)
 
-$(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAMP)
+$(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAMP) $(ROOTFS_OPTIONAL_STAMPS)
 	@mkdir -p $(STAMP_DIR)
-	@# Stage TCC if it has been built (optional — not a hard dependency)
-	@if [ -x build/$(ARCH)/tcc/bin/tcc ]; then \
-		$(KAIROS_CMD) image rootfs-tcc; \
-	fi
 	@touch $@
 
 # Track CFLAGS changes so object files rebuild when EXTRA_CFLAGS changes.
@@ -614,6 +617,7 @@ help:
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
 	@echo "  EMBEDDED_INIT - Build embedded init blob (riscv64 only)"
 	@echo "  TOOLCHAIN_MODE - Toolchain policy (auto, clang, gcc)"
+	@echo "  WITH_TCC - Include tcc in rootfs for disk/run (default: 1)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""

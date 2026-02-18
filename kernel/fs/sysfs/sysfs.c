@@ -103,10 +103,10 @@ static void sysfs_init_vnode(struct vnode *vn, struct sysfs_node *sn,
     vn->ops = ops;
     vn->fs_data = sn;
     vn->mount = sysfs_sb.mnt;
-    vn->refcount = 1;
+    atomic_init(&vn->refcount, 1);
     vn->parent = NULL;
     vn->name[0] = '\0';
-    mutex_init(&vn->lock, "sysfs_vn");
+    rwlock_init(&vn->lock, "sysfs_vn");
     poll_wait_head_init(&vn->pollers);
 }
 

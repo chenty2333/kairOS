@@ -112,46 +112,63 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         return -EBADF;
 
     switch ((int)cmd) {
-    case F_DUPFD:
-        return (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, 0);
-    case F_DUPFD_CLOEXEC:
-        return (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, FD_CLOEXEC);
+    case F_DUPFD: {
+        int64_t ret = (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, 0);
+        file_put(f);
+        return ret;
+    }
+    case F_DUPFD_CLOEXEC: {
+        int64_t ret = (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, FD_CLOEXEC);
+        file_put(f);
+        return ret;
+    }
     case F_GETFD: {
         int flags = 0;
         struct fdtable *fdt = p->fdtable;
-        if (!fdt)
+        if (!fdt) {
+            file_put(f);
             return -EBADF;
+        }
         mutex_lock(&fdt->lock);
         if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
             !fdt->files[(int)fd]) {
             mutex_unlock(&fdt->lock);
+            file_put(f);
             return -EBADF;
         }
         if (fdt->fd_flags[(int)fd] & FD_CLOEXEC)
             flags |= FD_CLOEXEC;
         mutex_unlock(&fdt->lock);
+        file_put(f);
         return flags;
     }
     case F_SETFD: {
-        if (arg & ~FD_CLOEXEC)
+        if (arg & ~FD_CLOEXEC) {
+            file_put(f);
             return -EINVAL;
+        }
         struct fdtable *fdt = p->fdtable;
-        if (!fdt)
+        if (!fdt) {
+            file_put(f);
             return -EBADF;
+        }
         mutex_lock(&fdt->lock);
         if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
             !fdt->files[(int)fd]) {
             mutex_unlock(&fdt->lock);
+            file_put(f);
             return -EBADF;
         }
         fdt->fd_flags[(int)fd] = (uint32_t)arg & FD_CLOEXEC;
         mutex_unlock(&fdt->lock);
+        file_put(f);
         return 0;
     }
     case F_GETFL: {
         mutex_lock(&f->lock);
         int flags = (int)f->flags;
         mutex_unlock(&f->lock);
+        file_put(f);
         return flags;
     }
     case F_SETFL: {
@@ -159,9 +176,11 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         mutex_lock(&f->lock);
         f->flags = (f->flags & ~setmask) | ((uint32_t)arg & setmask);
         mutex_unlock(&f->lock);
+        file_put(f);
         return 0;
     }
     default:
+        file_put(f);
         return -EINVAL;
     }
 }
@@ -172,22 +191,34 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
     if ((int64_t)length < 0)
         return -EINVAL;
     struct file *f = fd_get(proc_current(), (int)fd);
-    if (!f || !f->vnode)
+    if (!f || !f->vnode) {
+        if (f) file_put(f);
         return -EBADF;
-    if (f->vnode->type == VNODE_DIR)
+    }
+    if (f->vnode->type == VNODE_DIR) {
+        file_put(f);
         return -EISDIR;
-    if (!f->vnode->ops || !f->vnode->ops->truncate)
+    }
+    if (!f->vnode->ops || !f->vnode->ops->truncate) {
+        file_put(f);
         return -EINVAL;
-    return f->vnode->ops->truncate(f->vnode, (off_t)length);
+    }
+    rwlock_write_lock(&f->vnode->lock);
+    int ret = f->vnode->ops->truncate(f->vnode, (off_t)length);
+    rwlock_write_unlock(&f->vnode->lock);
+    file_put(f);
+    return ret;
 }
 
 int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     struct file *f = fd_get(proc_current(), (int)fd);
-    if (!f || !f->vnode)
+    if (!f || !f->vnode) {
+        if (f) file_put(f);
         return -EBADF;
-    mutex_lock(&f->vnode->lock);
+    }
+    rwlock_write_lock(&f->vnode->lock);
     if (owner != (uint64_t)-1)
         f->vnode->uid = (uid_t)owner;
     if (group != (uint64_t)-1)
@@ -197,6 +228,7 @@ int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
         f->vnode->mount->ops->chown) {
         f->vnode->mount->ops->chown(f->vnode, f->vnode->uid, f->vnode->gid);
     }
-    mutex_unlock(&f->vnode->lock);
+    rwlock_write_unlock(&f->vnode->lock);
+    file_put(f);
     return 0;
 }

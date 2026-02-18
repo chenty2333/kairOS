@@ -194,13 +194,16 @@ struct dentry *vfs_root_dentry(void) {
 void vfs_mount_hold(struct mount *mnt) {
     if (!mnt)
         return;
-    __atomic_add_fetch(&mnt->refcount, 1, __ATOMIC_RELAXED);
+    atomic_inc(&mnt->refcount);
 }
 
 void vfs_mount_put(struct mount *mnt) {
     if (!mnt)
         return;
-    __atomic_sub_fetch(&mnt->refcount, 1, __ATOMIC_RELAXED);
+    uint32_t old = atomic_read(&mnt->refcount);
+    if (old == 0)
+        panic("vfs_mount_put: refcount underflow");
+    atomic_fetch_sub(&mnt->refcount, 1);
 }
 
 void vfs_mount_global_lock(void) {
@@ -230,18 +233,20 @@ struct mount_ns *vfs_mount_ns_get(void) {
 struct mount_ns *vfs_mount_ns_get_from(struct mount_ns *ns) {
     if (!ns)
         return NULL;
-    __atomic_add_fetch(&ns->refcount, 1, __ATOMIC_RELAXED);
+    atomic_inc(&ns->refcount);
     return ns;
 }
 
 void vfs_mount_ns_put(struct mount_ns *ns) {
     if (!ns)
         return;
-    if (ns == &init_mnt_ns) {
-        __atomic_sub_fetch(&ns->refcount, 1, __ATOMIC_RELAXED);
+    uint32_t old = atomic_read(&ns->refcount);
+    if (old == 0)
+        panic("vfs_mount_ns_put: refcount underflow");
+    old = atomic_fetch_sub(&ns->refcount, 1);
+    if (ns == &init_mnt_ns)
         return;
-    }
-    if (__atomic_sub_fetch(&ns->refcount, 1, __ATOMIC_RELAXED) == 0) {
+    if (old == 1) {
         if (ns->root_dentry)
             dentry_put(ns->root_dentry);
         kfree(ns);
@@ -258,7 +263,7 @@ struct mount_ns *vfs_mount_ns_clone(struct mount_ns *ns) {
     copy->root_dentry = ns->root_dentry;
     if (copy->root_dentry)
         dentry_get(copy->root_dentry);
-    copy->refcount = 1;
+    atomic_init(&copy->refcount, 1);
     return copy;
 }
 
@@ -334,7 +339,7 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     mnt->ops = fs->ops;
     mnt->dev = dev;
     mnt->flags = flags;
-    mnt->refcount = 1;
+    atomic_init(&mnt->refcount, 1);
     if ((ret = mnt->ops->mount(mnt)) < 0)
         goto err;
     if (mnt->root) {
@@ -463,7 +468,7 @@ static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
     mnt->fs_data = src_mnt->fs_data;
     mnt->prop = MOUNT_PRIVATE;
     mnt->mflags = MOUNT_F_BIND;
-    mnt->refcount = 1;
+    atomic_init(&mnt->refcount, 1);
     mnt->parent = target->mnt;
     mnt->mountpoint_dentry = target;
     dentry_get(target);

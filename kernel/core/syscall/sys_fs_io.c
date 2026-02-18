@@ -10,28 +10,15 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
-static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
-                              bool is_write) {
-    struct file *f = fd_get(proc_current(), (int)fd);
+/**
+ * sys_read_write_file - perform IO on an already-resolved file pointer.
+ * Caller holds a reference on @f; this function does NOT release it.
+ */
+static int64_t sys_read_write_file(struct file *f, uint64_t buf, uint64_t count,
+                                   bool is_write) {
     uint8_t kbuf[512];
     size_t done = 0;
 
-    if (!f) {
-        if (is_write && (fd == 1 || fd == 2)) {
-            while (done < count) {
-                size_t chunk = (count - done > sizeof(kbuf))
-                                   ? sizeof(kbuf)
-                                   : (size_t)(count - done);
-                if (copy_from_user(kbuf, (const void *)(buf + done), chunk) < 0)
-                    return done ? (int64_t)done : -EFAULT;
-                for (size_t i = 0; i < chunk; i++)
-                    arch_early_putchar((char)kbuf[i]);
-                done += chunk;
-            }
-            return (int64_t)done;
-        }
-        return -EBADF;
-    }
     int accmode = (int)(f->flags & O_ACCMODE);
     if (!is_write && accmode == O_WRONLY)
         return -EBADF;
@@ -71,6 +58,35 @@ static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
     return (int64_t)done;
 }
 
+static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
+                              bool is_write) {
+    struct file *f = fd_get(proc_current(), (int)fd);
+
+    if (!f) {
+        /* Fallback: early console for stdout/stderr without file */
+        if (is_write && (fd == 1 || fd == 2)) {
+            uint8_t kbuf[512];
+            size_t done = 0;
+            while (done < count) {
+                size_t chunk = (count - done > sizeof(kbuf))
+                                   ? sizeof(kbuf)
+                                   : (size_t)(count - done);
+                if (copy_from_user(kbuf, (const void *)(buf + done), chunk) < 0)
+                    return done ? (int64_t)done : -EFAULT;
+                for (size_t i = 0; i < chunk; i++)
+                    arch_early_putchar((char)kbuf[i]);
+                done += chunk;
+            }
+            return (int64_t)done;
+        }
+        return -EBADF;
+    }
+
+    int64_t ret = sys_read_write_file(f, buf, count, is_write);
+    file_put(f);
+    return ret;
+}
+
 int64_t sys_read(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
@@ -95,9 +111,13 @@ int64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    if (f->vnode && f->vnode->type == VNODE_PIPE)
+    if (f->vnode && f->vnode->type == VNODE_PIPE) {
+        file_put(f);
         return -ESPIPE;
-    return (int64_t)vfs_seek(f, (off_t)offset, (int)whence);
+    }
+    int64_t ret = (int64_t)vfs_seek(f, (off_t)offset, (int)whence);
+    file_put(f);
+    return ret;
 }
 
 struct iovec {
@@ -115,26 +135,50 @@ int64_t sys_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
 
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f) {
-        /* Fallback for stdout/stderr without file */
+        /* Fallback for stdout/stderr without file — delegate per-iov */
         if (fd != 1 && fd != 2)
             return -EBADF;
+        size_t total = 0;
+        for (size_t i = 0; i < iovcnt; i++) {
+            struct iovec iov;
+            if (copy_from_user(&iov,
+                               (void *)(iov_ptr + i * sizeof(struct iovec)),
+                               sizeof(iov)) < 0)
+                return total ? (int64_t)total : -EFAULT;
+            if (iov.iov_len == 0)
+                continue;
+            int64_t ret = sys_read_write(fd, (uint64_t)iov.iov_base,
+                                         iov.iov_len, true);
+            if (ret < 0)
+                return total ? (int64_t)total : ret;
+            total += (size_t)ret;
+            if ((size_t)ret < iov.iov_len)
+                break;
+        }
+        return (int64_t)total;
     }
 
     size_t total = 0;
     for (size_t i = 0; i < iovcnt; i++) {
         struct iovec iov;
         if (copy_from_user(&iov, (void *)(iov_ptr + i * sizeof(struct iovec)),
-                           sizeof(iov)) < 0)
+                           sizeof(iov)) < 0) {
+            file_put(f);
             return total ? (int64_t)total : -EFAULT;
+        }
         if (iov.iov_len == 0)
             continue;
-        int64_t ret = sys_read_write(fd, (uint64_t)iov.iov_base, iov.iov_len, true);
-        if (ret < 0)
+        int64_t ret = sys_read_write_file(f, (uint64_t)iov.iov_base,
+                                          iov.iov_len, true);
+        if (ret < 0) {
+            file_put(f);
             return total ? (int64_t)total : ret;
+        }
         total += (size_t)ret;
         if ((size_t)ret < iov.iov_len)
             break;
     }
+    file_put(f);
     return (int64_t)total;
 }
 
@@ -154,17 +198,23 @@ int64_t sys_readv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
     for (size_t i = 0; i < iovcnt; i++) {
         struct iovec iov;
         if (copy_from_user(&iov, (void *)(iov_ptr + i * sizeof(struct iovec)),
-                           sizeof(iov)) < 0)
+                           sizeof(iov)) < 0) {
+            file_put(f);
             return total ? (int64_t)total : -EFAULT;
+        }
         if (iov.iov_len == 0)
             continue;
-        int64_t ret = sys_read_write(fd, (uint64_t)iov.iov_base, iov.iov_len, false);
-        if (ret < 0)
+        int64_t ret = sys_read_write_file(f, (uint64_t)iov.iov_base,
+                                          iov.iov_len, false);
+        if (ret < 0) {
+            file_put(f);
             return total ? (int64_t)total : ret;
+        }
         total += (size_t)ret;
         if ((size_t)ret < iov.iov_len)
             break;
     }
+    file_put(f);
     return (int64_t)total;
 }
 
@@ -180,26 +230,38 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    if (!f->vnode || f->vnode->type == VNODE_PIPE)
+    if (!f->vnode || f->vnode->type == VNODE_PIPE) {
+        file_put(f);
         return -ESPIPE;
-    if (f->vnode->type == VNODE_DIR)
+    }
+    if (f->vnode->type == VNODE_DIR) {
+        file_put(f);
         return -EISDIR;
+    }
 
     int accmode = (int)(f->flags & O_ACCMODE);
-    if (!is_write && accmode == O_WRONLY)
+    if (!is_write && accmode == O_WRONLY) {
+        file_put(f);
         return -EBADF;
-    if (is_write && accmode == O_RDONLY)
+    }
+    if (is_write && accmode == O_RDONLY) {
+        file_put(f);
         return -EBADF;
+    }
 
     if (!is_write && (f->flags & O_NONBLOCK)) {
-        if (!(vfs_poll(f, POLLIN) & POLLIN))
+        if (!(vfs_poll(f, POLLIN) & POLLIN)) {
+            file_put(f);
             return -EAGAIN;
+        }
     }
 
     if (!f->vnode->ops ||
         (!is_write && !f->vnode->ops->read) ||
-        (is_write && !f->vnode->ops->write))
+        (is_write && !f->vnode->ops->write)) {
+        file_put(f);
         return -EINVAL;
+    }
 
     uint8_t kbuf[512];
     size_t total = 0;
@@ -207,8 +269,10 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
     for (size_t i = 0; i < iovcnt; i++) {
         struct iovec iov;
         if (copy_from_user(&iov, (void *)(iov_ptr + i * sizeof(struct iovec)),
-                           sizeof(iov)) < 0)
+                           sizeof(iov)) < 0) {
+            file_put(f);
             return total ? (int64_t)total : -EFAULT;
+        }
         if (iov.iov_len == 0)
             continue;
         size_t done = 0;
@@ -219,13 +283,17 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
             if (is_write) {
                 if (copy_from_user(kbuf,
                                    (const void *)((uint64_t)iov.iov_base + done),
-                                   chunk) < 0)
+                                   chunk) < 0) {
+                    file_put(f);
                     return total ? (int64_t)total : -EFAULT;
-                mutex_lock(&f->lock);
+                }
+                rwlock_write_lock(&f->vnode->lock);
                 ssize_t n = f->vnode->ops->write(f->vnode, kbuf, chunk, off);
-                mutex_unlock(&f->lock);
-                if (n < 0)
+                rwlock_write_unlock(&f->vnode->lock);
+                if (n < 0) {
+                    file_put(f);
                     return total ? (int64_t)total : (int64_t)n;
+                }
                 if (n == 0)
                     break;
                 off += n;
@@ -234,16 +302,20 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                 if ((size_t)n < chunk)
                     break;
             } else {
-                mutex_lock(&f->lock);
+                rwlock_read_lock(&f->vnode->lock);
                 ssize_t n = f->vnode->ops->read(f->vnode, kbuf, chunk, off);
-                mutex_unlock(&f->lock);
-                if (n < 0)
+                rwlock_read_unlock(&f->vnode->lock);
+                if (n < 0) {
+                    file_put(f);
                     return total ? (int64_t)total : (int64_t)n;
+                }
                 if (n == 0)
                     break;
                 if (copy_to_user((void *)((uint64_t)iov.iov_base + done), kbuf,
-                                 (size_t)n) < 0)
+                                 (size_t)n) < 0) {
+                    file_put(f);
                     return total ? (int64_t)total : -EFAULT;
+                }
                 off += n;
                 done += (size_t)n;
                 total += (size_t)n;
@@ -252,6 +324,7 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
             }
         }
     }
+    file_put(f);
     return (int64_t)total;
 }
 
@@ -273,7 +346,9 @@ int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    return vfs_fsync(f, 0);
+    int64_t ret = vfs_fsync(f, 0);
+    file_put(f);
+    return ret;
 }
 
 int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -282,5 +357,7 @@ int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    return vfs_fsync(f, 1);
+    int64_t ret = vfs_fsync(f, 1);
+    file_put(f);
+    return ret;
 }

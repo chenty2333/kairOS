@@ -5,6 +5,7 @@
 #ifndef _KAIROS_VFS_H
 #define _KAIROS_VFS_H
 
+#include <kairos/atomic.h>
 #include <kairos/config.h>
 #include <kairos/list.h>
 #include <kairos/pollwait.h>
@@ -98,10 +99,10 @@ struct vnode {
     struct file_ops *ops;
     void *fs_data;
     struct mount *mount;
-    uint32_t refcount;
+    atomic_t refcount;
     struct vnode *parent;
     char name[CONFIG_NAME_MAX];
-    struct mutex lock;
+    struct rwlock lock;
     struct poll_wait_head pollers;
 };
 
@@ -109,7 +110,8 @@ struct file {
     struct vnode *vnode;
     struct dentry *dentry;
     off_t offset;
-    uint32_t flags, refcount;
+    uint32_t flags;
+    atomic_t refcount;
     char path[CONFIG_PATH_MAX];
     struct mutex lock;
 };
@@ -146,11 +148,11 @@ struct mount {
     struct dentry *root_dentry;
     struct mount *parent;
     struct dentry *mountpoint_dentry;
-    uint32_t refcount;
     uint32_t mflags;
     struct blkdev *dev;
     void *fs_data;
     uint32_t flags;
+    atomic_t refcount;
     enum mount_prop prop;
     struct mount_group *group;
     struct list_head group_node;
@@ -163,7 +165,7 @@ struct mount {
 struct mount_ns {
     struct mount *root;
     struct dentry *root_dentry;
-    uint32_t refcount;
+    atomic_t refcount;
 };
 
 struct mount_group {
@@ -214,7 +216,6 @@ int vfs_mount(const char *src, const char *tgt, const char *type,
               uint32_t flags);
 int vfs_umount(const char *tgt);
 struct mount *vfs_mount_for_path(const char *path);
-int vfs_build_path(struct vnode *vn, char *out, size_t len);
 int vfs_build_path_dentry(struct dentry *d, char *out, size_t len);
 int vfs_build_relpath(struct dentry *root, struct dentry *target,
                       char *out, size_t len);
@@ -223,6 +224,7 @@ int vfs_open_at(const char *cwd, const char *path, int flags, mode_t mode, struc
 int vfs_open_at_path(const struct path *base, const char *path, int flags,
                      mode_t mode, struct file **fp);
 int vfs_close(struct file *file);
+void file_put(struct file *file);
 struct file *vfs_file_alloc(void);
 void vfs_file_free(struct file *file);
 void vfs_dump_mounts(void);

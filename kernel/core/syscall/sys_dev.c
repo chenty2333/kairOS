@@ -19,24 +19,33 @@ int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         return -EBADF;
 
     if (cmd == FIONBIO) {
-        if (!arg)
+        if (!arg) {
+            file_put(f);
             return -EFAULT;
+        }
         int on = 0;
-        if (copy_from_user(&on, (void *)arg, sizeof(on)) < 0)
+        if (copy_from_user(&on, (void *)arg, sizeof(on)) < 0) {
+            file_put(f);
             return -EFAULT;
+        }
         mutex_lock(&f->lock);
         if (on)
             f->flags |= O_NONBLOCK;
         else
             f->flags &= ~O_NONBLOCK;
         mutex_unlock(&f->lock);
+        file_put(f);
         return 0;
     }
 
     /* Route network ioctls (0x8900-0x89FF) to net_ioctl */
     if (cmd >= 0x8900 && cmd <= 0x89FF) {
-        return net_ioctl(f, cmd, arg);
+        int64_t ret = net_ioctl(f, cmd, arg);
+        file_put(f);
+        return ret;
     }
 
-    return vfs_ioctl(f, cmd, arg);
+    int64_t ret = vfs_ioctl(f, cmd, arg);
+    file_put(f);
+    return ret;
 }

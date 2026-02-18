@@ -35,13 +35,13 @@ void vnode_set_parent(struct vnode *vn, struct vnode *parent,
                       const char *name) {
     if (!vn)
         return;
-    rwlock_write_lock(&vn->lock);
+    /* Caller must hold vn->lock if vnode is already visible. */
     if (vn->parent == parent) {
         if (name && name[0]) {
             if (strncmp(vn->name, name, sizeof(vn->name)) == 0)
-                goto unlock;
+                return;
         } else if (vn->name[0] == '\0') {
-            goto unlock;
+            return;
         }
     }
 
@@ -61,8 +61,6 @@ void vnode_set_parent(struct vnode *vn, struct vnode *parent,
     } else {
         vn->name[0] = '\0';
     }
-unlock:
-    rwlock_write_unlock(&vn->lock);
 }
 
 void vnode_get(struct vnode *vn) {

@@ -146,6 +146,7 @@ el1_sync:
 
 el1_irq:
     SAVE_FRAME from_user=0
+    str xzr, [sp, #(31*8 + 24)]   /* ESR_EL1 is architecturally UNKNOWN for IRQ */
     mov x0, sp
     bl aarch64_trap_dispatch
     RESTORE_FRAME to_user=0
@@ -160,6 +161,7 @@ el0_sync:
 
 el0_irq:
     SAVE_FRAME from_user=1
+    str xzr, [sp, #(31*8 + 24)]   /* ESR_EL1 is architecturally UNKNOWN for IRQ */
     mov x0, sp
     bl aarch64_trap_dispatch
     RESTORE_FRAME to_user=1

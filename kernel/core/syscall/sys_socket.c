@@ -14,9 +14,12 @@
 static struct socket *sock_from_fd(struct process *p, int fd) {
     struct file *f = fd_get(p, fd);
     if (!f || !f->vnode) {
+        if (f) file_put(f);
         return NULL;
     }
-    return sock_from_vnode(f->vnode);
+    struct socket *sock = sock_from_vnode(f->vnode);
+    file_put(f);
+    return sock;
 }
 
 static int copy_sockaddr_from_user(struct sockaddr_storage *kaddr,

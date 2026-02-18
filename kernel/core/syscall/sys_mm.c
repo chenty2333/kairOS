@@ -76,9 +76,12 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         struct file *f = fd_get(p, (int)fd);
         if (!f)
             return -EBADF;
-        if (!f->vnode || f->vnode->type != VNODE_FILE)
+        if (!f->vnode || f->vnode->type != VNODE_FILE) {
+            file_put(f);
             return -ENODEV;
+        }
         vn = f->vnode;
+        file_put(f);
     } else if (off != 0) {
         return -EINVAL;
     }

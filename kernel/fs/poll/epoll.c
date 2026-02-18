@@ -40,9 +40,13 @@ struct epoll_instance {
 
 static struct epoll_instance *epoll_from_fd(int epfd) {
     struct file *file = fd_get(proc_current(), epfd);
-    if (!file || !file->vnode || file->vnode->type != VNODE_EPOLL)
+    if (!file || !file->vnode || file->vnode->type != VNODE_EPOLL) {
+        if (file) file_put(file);
         return NULL;
-    return (struct epoll_instance *)file->vnode->fs_data;
+    }
+    struct epoll_instance *ep = (struct epoll_instance *)file->vnode->fs_data;
+    file_put(file);
+    return ep;
 }
 
 static struct epoll_item *epoll_find(struct epoll_instance *ep, int fd) {
@@ -185,10 +189,10 @@ int epoll_create_file(struct file **out) {
     vn->type = VNODE_EPOLL;
     vn->ops = &epoll_ops;
     vn->fs_data = ep;
-    vn->refcount = 1;
+    atomic_init(&vn->refcount, 1);
     vn->parent = NULL;
     vn->name[0] = '\0';
-    mutex_init(&vn->lock, "epoll_vnode");
+    rwlock_init(&vn->lock, "epoll_vnode");
     poll_wait_head_init(&vn->pollers);
 
     file->vnode = vn;
@@ -207,10 +211,13 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         return -EBADF;
 
     struct file *target = fd_get(proc_current(), fd);
-    if (!target)
+    if (!target) {
         return -EBADF;
-    if (!target->vnode || target->vnode->type == VNODE_EPOLL)
+    }
+    if (!target->vnode || target->vnode->type == VNODE_EPOLL) {
+        file_put(target);
         return -EINVAL;
+    }
 
     uint32_t events = ev ? ev->events : 0;
     uint64_t data = ev ? ev->data : 0;
@@ -222,11 +229,13 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     case EPOLL_CTL_ADD:
         if (item) {
             mutex_unlock(&ep->lock);
+            file_put(target);
             return -EEXIST;
         }
         item = kzalloc(sizeof(*item));
         if (!item) {
             mutex_unlock(&ep->lock);
+            file_put(target);
             return -ENOMEM;
         }
         item->fd = fd;
@@ -252,6 +261,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     case EPOLL_CTL_MOD:
         if (!item) {
             mutex_unlock(&ep->lock);
+            file_put(target);
             return -ENOENT;
         }
         item->events = events;
@@ -261,6 +271,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     case EPOLL_CTL_DEL:
         if (!item) {
             mutex_unlock(&ep->lock);
+            file_put(target);
             return -ENOENT;
         }
         list_del(&item->list);
@@ -272,6 +283,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         break;
     default:
         mutex_unlock(&ep->lock);
+        file_put(target);
         return -EINVAL;
     }
 
@@ -283,6 +295,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
         if (revents)
             epoll_mark_ready(item, revents);
+        file_put(target);
         return 0;
     }
 
@@ -290,6 +303,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
         if (revents)
             epoll_mark_ready(item, revents);
+        file_put(target);
         return 0;
     }
 
@@ -297,6 +311,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         epoll_item_detach(item);
         epoll_item_put(item);
     }
+    file_put(target);
     return 0;
 }
 

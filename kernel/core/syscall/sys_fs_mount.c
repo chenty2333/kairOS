@@ -44,7 +44,7 @@ int64_t sys_chroot(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
     }
 
     if (p->mnt_ns &&
-        __atomic_load_n(&p->mnt_ns->refcount, __ATOMIC_RELAXED) > 1) {
+        atomic_read(&p->mnt_ns->refcount) > 1) {
         struct mount_ns *ns = vfs_mount_ns_clone(p->mnt_ns);
         if (!ns) {
             dentry_put(resolved.dentry);
@@ -160,7 +160,7 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
     }
 
     if (p->mnt_ns &&
-        __atomic_load_n(&p->mnt_ns->refcount, __ATOMIC_RELAXED) > 1) {
+        atomic_read(&p->mnt_ns->refcount) > 1) {
         struct mount_ns *ns = vfs_mount_ns_clone(p->mnt_ns);
         if (!ns) {
             dentry_put(newp.dentry);

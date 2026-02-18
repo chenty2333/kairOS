@@ -109,10 +109,10 @@ static void initramfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->ops = ops;
     vn->fs_data = node;
     vn->mount = mnt;
-    vn->refcount = 1;
+    atomic_init(&vn->refcount, 1);
     vn->parent = NULL;
     vn->name[0] = '\0';
-    mutex_init(&vn->lock, "initramfs_vn");
+    rwlock_init(&vn->lock, "initramfs_vn");
     poll_wait_head_init(&vn->pollers);
 }
 

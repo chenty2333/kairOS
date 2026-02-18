@@ -40,9 +40,15 @@
  * Clobbers x0.
  */
 .macro INIT_SYSREGS
-    /* SCTLR_EL1: MMU off, caches off, little-endian */
-    msr sctlr_el1, xzr
-    isb
+    /*
+     * Limine enters in higher-half VA space with paging already configured.
+     * Do not clear SCTLR_EL1 here, otherwise execution falls out of mapped
+     * VA ranges before we can reach C entry.
+     */
+
+    /* Force EL1 to use SP_EL1 (EL1h semantics), not SP_EL0. */
+    mov x0, #1
+    msr spsel, x0
 
     /* CPACR_EL1: FPEN=0b11 — no FP/SIMD traps */
     mov x0, #(3 << 20)
@@ -81,10 +87,12 @@ _start:
 /* Secondary CPU entry (Limine MP) */
 _secondary_start:
     /* x0 = struct limine_mp_info * */
+    mov x19, x0
     DROP_TO_EL1
     INIT_SYSREGS
 
-    ldr x1, [x0, #32] /* extra_argument */
+    mov x0, x19
+    ldr x1, [x0, #40] /* extra_argument (aarch64 limine_mp_info) */
     mov x18, x1
 
     ldr x2, =_percpu_stacks
