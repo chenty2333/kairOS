@@ -104,6 +104,7 @@ struct percpu_data {
     /* Per-CPU trace buffer — only written by local CPU with IRQs off */
     struct sched_trace_entry trace_buf[SCHED_TRACE_PER_CPU];
     uint32_t trace_head;
+    int preempt_count;          /* >0 means preemption disabled (debug only) */
 };
 
 extern struct percpu_data cpu_data[];

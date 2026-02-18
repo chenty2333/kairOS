@@ -95,6 +95,16 @@
 /* #define CONFIG_SLUB_DEBUG           1 */
 
 /*
+ * Lock debugging
+ */
+#ifndef CONFIG_DEBUG_LOCKS
+#define CONFIG_DEBUG_LOCKS 0
+#endif
+#ifndef CONFIG_LOCKDEP
+#define CONFIG_LOCKDEP 0
+#endif
+
+/*
  * Architecture-specific (set by build system)
  */
 #ifndef CONFIG_ARCH

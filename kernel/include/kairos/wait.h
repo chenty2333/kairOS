@@ -12,7 +12,7 @@
 struct process;
 
 struct wait_queue {
-    spinlock_irq_t lock;
+    spinlock_t lock;
     struct list_head head;
 };
 

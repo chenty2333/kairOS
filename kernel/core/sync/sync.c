@@ -7,8 +7,33 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/printk.h>
+#include <kairos/lock_debug.h>
+#include <kairos/preempt.h>
 #include <kairos/mm.h>
 #include <kairos/string.h>
+
+/* --- Lock debug sleep check (needs sched.h for in_atomic) --- */
+
+#if CONFIG_DEBUG_LOCKS
+void __lock_debug_sleep_check(const char *file, int line, const char *func) {
+    if (!arch_irq_enabled())
+        printk("[WARN] sleeping lock with IRQs disabled at %s:%d in %s()\n",
+               file, line, func);
+    if (in_atomic())
+        printk("[WARN] sleeping lock in atomic context at %s:%d in %s()\n",
+               file, line, func);
+}
+
+void __spin_preempt_disable(void) {
+    arch_get_percpu()->preempt_count++;
+    __asm__ __volatile__("" ::: "memory");
+}
+
+void __spin_preempt_enable(void) {
+    __asm__ __volatile__("" ::: "memory");
+    arch_get_percpu()->preempt_count--;
+}
+#endif
 
 /* --- User-space Semaphore Management --- */
 
@@ -57,10 +82,37 @@ void mutex_init(struct mutex *m, const char *name) {
 }
 
 void mutex_lock(struct mutex *m) {
-    (void)mutex_lock_interruptible(m);
+    SLEEP_LOCK_DEBUG_CHECK();
+    struct process *curr = proc_current();
+    if (curr && m->holder == curr)
+        panic("mutex_lock: recursive deadlock on mutex '%s'", m->name ? m->name : "unnamed");
+
+    if (!curr) {
+        spin_lock(&m->lock);
+        while (m->locked) {
+            spin_unlock(&m->lock);
+            arch_cpu_relax();
+            spin_lock(&m->lock);
+        }
+        m->locked = true;
+        m->holder = NULL;
+        spin_unlock(&m->lock);
+        return;
+    }
+
+    spin_lock(&m->lock);
+    while (m->locked) {
+        spin_unlock(&m->lock);
+        proc_sleep_on(&m->wq, m, true);   /* return value discarded — unconditional retry */
+        spin_lock(&m->lock);
+    }
+    m->locked = true;
+    m->holder = curr;
+    spin_unlock(&m->lock);
 }
 
 int mutex_lock_interruptible(struct mutex *m) {
+    SLEEP_LOCK_DEBUG_CHECK();
     struct process *curr = proc_current();
     if (curr && m->holder == curr) {
         panic("mutex_lock: recursive deadlock on mutex '%s'", m->name ? m->name : "unnamed");
@@ -130,10 +182,33 @@ void sem_init(struct semaphore *s, int count, const char *name) {
 }
 
 void sem_wait(struct semaphore *s) {
-    (void)sem_wait_interruptible(s);
+    SLEEP_LOCK_DEBUG_CHECK();
+    struct process *curr = proc_current();
+
+    if (!curr) {
+        spin_lock(&s->lock);
+        while (s->count <= 0) {
+            spin_unlock(&s->lock);
+            arch_cpu_relax();
+            spin_lock(&s->lock);
+        }
+        s->count--;
+        spin_unlock(&s->lock);
+        return;
+    }
+
+    spin_lock(&s->lock);
+    while (s->count <= 0) {
+        spin_unlock(&s->lock);
+        proc_sleep_on(&s->wq, s, true);   /* return value discarded — unconditional retry */
+        spin_lock(&s->lock);
+    }
+    s->count--;
+    spin_unlock(&s->lock);
 }
 
 int sem_wait_interruptible(struct semaphore *s) {
+    SLEEP_LOCK_DEBUG_CHECK();
     struct process *curr = proc_current();
     if (!curr) {
         spin_lock(&s->lock);
@@ -181,4 +256,254 @@ bool sem_trywait(struct semaphore *s) {
     }
     spin_unlock(&s->lock);
     return success;
+}
+
+/* --- RWLock Implementation --- */
+
+void rwlock_init(struct rwlock *rw, const char *name) {
+    spin_init(&rw->lock);
+    rw->readers = 0;
+    rw->write_locked = false;
+    rw->writers_waiting = 0;
+    wait_queue_init(&rw->rd_wq);
+    wait_queue_init(&rw->wr_wq);
+    rw->writer = NULL;
+    rw->name = name;
+}
+
+void rwlock_read_lock(struct rwlock *rw) {
+    SLEEP_LOCK_DEBUG_CHECK();
+    struct process *curr = proc_current();
+
+    if (!curr) {
+        /* No process context — spin */
+        spin_lock(&rw->lock);
+        while (rw->write_locked || rw->writers_waiting) {
+            spin_unlock(&rw->lock);
+            arch_cpu_relax();
+            spin_lock(&rw->lock);
+        }
+        rw->readers++;
+        spin_unlock(&rw->lock);
+        return;
+    }
+
+    spin_lock(&rw->lock);
+    while (rw->write_locked || rw->writers_waiting) {
+        spin_unlock(&rw->lock);
+        proc_sleep_on(&rw->rd_wq, rw, true);
+        spin_lock(&rw->lock);
+    }
+    rw->readers++;
+    spin_unlock(&rw->lock);
+}
+
+int rwlock_read_lock_interruptible(struct rwlock *rw) {
+    struct process *curr = proc_current();
+
+    if (!curr) {
+        /* No process context — spin */
+        spin_lock(&rw->lock);
+        while (rw->write_locked || rw->writers_waiting) {
+            spin_unlock(&rw->lock);
+            arch_cpu_relax();
+            spin_lock(&rw->lock);
+        }
+        rw->readers++;
+        spin_unlock(&rw->lock);
+        return 0;
+    }
+
+    spin_lock(&rw->lock);
+    while (rw->write_locked || rw->writers_waiting) {
+        if (curr->mm && curr->sig_pending) {
+            spin_unlock(&rw->lock);
+            return -EINTR;
+        }
+        spin_unlock(&rw->lock);
+        int rc = proc_sleep_on(&rw->rd_wq, rw, true);
+        if (rc < 0)
+            return rc;
+        spin_lock(&rw->lock);
+    }
+    rw->readers++;
+    spin_unlock(&rw->lock);
+    return 0;
+}
+
+void rwlock_read_unlock(struct rwlock *rw) {
+    spin_lock(&rw->lock);
+    rw->readers--;
+    if (rw->readers == 0 && rw->writers_waiting > 0) {
+        spin_unlock(&rw->lock);
+        wait_queue_wakeup_one(&rw->wr_wq);
+        return;
+    }
+    spin_unlock(&rw->lock);
+}
+
+void rwlock_write_lock(struct rwlock *rw) {
+    SLEEP_LOCK_DEBUG_CHECK();
+    struct process *curr = proc_current();
+
+    if (curr && rw->writer == curr) {
+        panic("rwlock_write_lock: recursive deadlock on rwlock '%s'",
+              rw->name ? rw->name : "unnamed");
+    }
+
+    if (!curr) {
+        /* No process context — spin */
+        spin_lock(&rw->lock);
+        rw->writers_waiting++;
+        while (rw->write_locked || rw->readers > 0) {
+            spin_unlock(&rw->lock);
+            arch_cpu_relax();
+            spin_lock(&rw->lock);
+        }
+        rw->writers_waiting--;
+        rw->write_locked = true;
+        rw->writer = NULL;
+        spin_unlock(&rw->lock);
+        return;
+    }
+
+    spin_lock(&rw->lock);
+    rw->writers_waiting++;
+    while (rw->write_locked || rw->readers > 0) {
+        spin_unlock(&rw->lock);
+        proc_sleep_on(&rw->wr_wq, rw, true);
+        spin_lock(&rw->lock);
+    }
+    rw->writers_waiting--;
+    rw->write_locked = true;
+    rw->writer = curr;
+    spin_unlock(&rw->lock);
+}
+
+int rwlock_write_lock_interruptible(struct rwlock *rw) {
+    struct process *curr = proc_current();
+
+    if (curr && rw->writer == curr) {
+        panic("rwlock_write_lock: recursive deadlock on rwlock '%s'",
+              rw->name ? rw->name : "unnamed");
+    }
+
+    if (!curr) {
+        /* No process context — spin */
+        spin_lock(&rw->lock);
+        rw->writers_waiting++;
+        while (rw->write_locked || rw->readers > 0) {
+            spin_unlock(&rw->lock);
+            arch_cpu_relax();
+            spin_lock(&rw->lock);
+        }
+        rw->writers_waiting--;
+        rw->write_locked = true;
+        rw->writer = NULL;
+        spin_unlock(&rw->lock);
+        return 0;
+    }
+
+    spin_lock(&rw->lock);
+    rw->writers_waiting++;
+    while (rw->write_locked || rw->readers > 0) {
+        if (curr->mm && curr->sig_pending) {
+            rw->writers_waiting--;
+            spin_unlock(&rw->lock);
+            return -EINTR;
+        }
+        spin_unlock(&rw->lock);
+        int rc = proc_sleep_on(&rw->wr_wq, rw, true);
+        if (rc < 0) {
+            /* Roll back writers_waiting before returning */
+            spin_lock(&rw->lock);
+            rw->writers_waiting--;
+            spin_unlock(&rw->lock);
+            return rc;
+        }
+        spin_lock(&rw->lock);
+    }
+    rw->writers_waiting--;
+    rw->write_locked = true;
+    rw->writer = curr;
+    spin_unlock(&rw->lock);
+    return 0;
+}
+
+void rwlock_write_unlock(struct rwlock *rw) {
+    spin_lock(&rw->lock);
+    rw->write_locked = false;
+    rw->writer = NULL;
+    bool has_writers = rw->writers_waiting > 0;
+    spin_unlock(&rw->lock);
+
+    if (has_writers) {
+        /* Writer priority: wake one writer first */
+        wait_queue_wakeup_one(&rw->wr_wq);
+    } else {
+        /* No writers waiting: wake all readers */
+        wait_queue_wakeup_all(&rw->rd_wq);
+    }
+}
+
+bool rwlock_write_trylock(struct rwlock *rw) {
+    bool success = false;
+    spin_lock(&rw->lock);
+    if (!rw->write_locked && rw->readers == 0) {
+        rw->write_locked = true;
+        rw->writer = proc_current();
+        success = true;
+    }
+    spin_unlock(&rw->lock);
+    return success;
+}
+
+bool rwlock_read_trylock(struct rwlock *rw) {
+    spin_lock(&rw->lock);
+    if (rw->write_locked || rw->writers_waiting > 0) {
+        spin_unlock(&rw->lock);
+        return false;
+    }
+    rw->readers++;
+    spin_unlock(&rw->lock);
+    return true;
+}
+
+int mutex_lock_timeout(struct mutex *m, uint64_t timeout_ticks) {
+    SLEEP_LOCK_DEBUG_CHECK();
+    struct process *curr = proc_current();
+    if (curr && m->holder == curr)
+        panic("mutex_lock_timeout: recursive deadlock on mutex '%s'",
+              m->name ? m->name : "unnamed");
+
+    if (!curr) {
+        /* No process context — spin with deadline */
+        uint64_t deadline = arch_timer_get_ticks() + timeout_ticks;
+        spin_lock(&m->lock);
+        while (m->locked) {
+            spin_unlock(&m->lock);
+            if (arch_timer_get_ticks() >= deadline)
+                return -ETIMEDOUT;
+            arch_cpu_relax();
+            spin_lock(&m->lock);
+        }
+        m->locked = true;
+        m->holder = NULL;
+        spin_unlock(&m->lock);
+        return 0;
+    }
+
+    uint64_t deadline = arch_timer_get_ticks() + timeout_ticks;
+    spin_lock(&m->lock);
+    while (m->locked) {
+        spin_unlock(&m->lock);
+        int rc = proc_sleep_on_mutex_timeout(&m->wq, m, NULL, false, deadline);
+        if (rc == -ETIMEDOUT)
+            return -ETIMEDOUT;
+        spin_lock(&m->lock);
+    }
+    m->locked = true;
+    m->holder = curr;
+    spin_unlock(&m->lock);
+    return 0;
 }
