@@ -108,6 +108,7 @@ struct process *proc_alloc(void) {
     sched_entity_init(&p->se);
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
+    p->sleep_deadline = 0;
     p->fdtable = fdtable_alloc();
     if (!p->fdtable) {
         p->state = PROC_UNUSED;
@@ -327,6 +328,7 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
 
     proc_lock(p);
     p->wait_channel = channel;
+    p->sleep_deadline = 0;
     p->state = PROC_SLEEPING;
     proc_unlock(p);
 
@@ -336,6 +338,7 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
     if (p->wait_entry.active)
         wait_queue_remove_entry(&p->wait_entry);
     p->wait_channel = NULL;
+    p->sleep_deadline = 0;
     if (p->state == PROC_SLEEPING)
         p->state = PROC_RUNNING;
     proc_unlock(p);
@@ -358,6 +361,7 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
 
     proc_lock(p);
     p->wait_channel = channel;
+    p->sleep_deadline = 0;
     p->state = PROC_SLEEPING;
     proc_unlock(p);
 
@@ -373,11 +377,55 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
     if (p->wait_entry.active)
         wait_queue_remove_entry(&p->wait_entry);
     p->wait_channel = NULL;
+    p->sleep_deadline = 0;
     if (p->state == PROC_SLEEPING)
         p->state = PROC_RUNNING;
     proc_unlock(p);
 
     if (interruptible && p->sig_pending)
         return -EINTR;
+    return 0;
+}
+
+int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
+                                struct mutex *mtx, bool interruptible,
+                                uint64_t deadline) {
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (interruptible && p->sig_pending)
+        return -EINTR;
+
+    if (wq)
+        wait_queue_add(wq, p);
+
+    proc_lock(p);
+    p->wait_channel = channel;
+    p->sleep_deadline = deadline;
+    p->state = PROC_SLEEPING;
+    proc_unlock(p);
+
+    if (mtx)
+        mutex_unlock(mtx);
+
+    schedule();
+
+    if (mtx)
+        mutex_lock(mtx);
+
+    proc_lock(p);
+    if (p->wait_entry.active)
+        wait_queue_remove_entry(&p->wait_entry);
+    p->wait_channel = NULL;
+    uint64_t dl = p->sleep_deadline;
+    p->sleep_deadline = 0;
+    if (p->state == PROC_SLEEPING)
+        p->state = PROC_RUNNING;
+    proc_unlock(p);
+
+    if (interruptible && p->sig_pending)
+        return -EINTR;
+    if (dl != 0 && arch_timer_get_ticks() >= dl)
+        return -ETIMEDOUT;
     return 0;
 }

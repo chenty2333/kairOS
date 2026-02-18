@@ -98,6 +98,7 @@ struct process {
     uint64_t sig_pending, sig_blocked;
     struct sighand_struct *sighand;
     void *wait_channel;
+    uint64_t sleep_deadline;  /* 0 = no timeout; >0 = tick deadline */
     struct wait_queue exit_wait;
     struct wait_queue vfork_wait;
     struct wait_queue_entry wait_entry;
@@ -131,6 +132,9 @@ void proc_unlock(struct process *p);
 int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible);
 int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
                         struct mutex *mtx, bool interruptible);
+int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
+                                struct mutex *mtx, bool interruptible,
+                                uint64_t deadline);
 struct process *proc_idle_init(void);
 struct process *proc_start_init(void);
 void proc_yield(void);
