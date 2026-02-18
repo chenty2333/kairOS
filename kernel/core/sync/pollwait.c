@@ -39,7 +39,7 @@ void poll_watch_add(struct poll_wait_head *head, struct poll_watch *watch) {
     if (!head || !watch || !watch->notify)
         return;
 
-    spin_lock(&head->wq.lock);
+    spin_lock_irqsave(&head->wq.lock);
     if (!watch->active) {
         watch->head = head;
         watch->active = true;
@@ -47,7 +47,7 @@ void poll_watch_add(struct poll_wait_head *head, struct poll_watch *watch) {
         INIT_LIST_HEAD(&watch->notify_node);
         list_add_tail(&watch->node, &head->watches);
     }
-    spin_unlock(&head->wq.lock);
+    spin_unlock_irqrestore(&head->wq.lock);
 }
 
 void poll_watch_remove(struct poll_watch *watch) {
@@ -55,7 +55,7 @@ void poll_watch_remove(struct poll_watch *watch) {
         return;
 
     struct poll_wait_head *head = watch->head;
-    spin_lock(&head->wq.lock);
+    spin_lock_irqsave(&head->wq.lock);
     if (watch->active) {
         watch->active = false;
         if (!watch->notifying) {
@@ -63,7 +63,7 @@ void poll_watch_remove(struct poll_watch *watch) {
             watch->head = NULL;
         }
     }
-    spin_unlock(&head->wq.lock);
+    spin_unlock_irqrestore(&head->wq.lock);
 }
 
 void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
@@ -73,7 +73,7 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
     LIST_HEAD(wake_list);
     LIST_HEAD(notify_list);
 
-    spin_lock(&head->wq.lock);
+    spin_lock_irqsave(&head->wq.lock);
     while (!list_empty(&head->wq.head)) {
         struct wait_queue_entry *entry =
             list_first_entry(&head->wq.head, struct wait_queue_entry, node);
@@ -94,7 +94,7 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
         watch->notifying = true;
         list_add_tail(&watch->notify_node, &notify_list);
     }
-    spin_unlock(&head->wq.lock);
+    spin_unlock_irqrestore(&head->wq.lock);
 
     struct wait_queue_entry *entry, *tmp;
     list_for_each_entry_safe(entry, tmp, &wake_list, node) {
@@ -108,13 +108,13 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
         list_del(&watch->notify_node);
         watch->notify(watch, events);
 
-        spin_lock(&head->wq.lock);
+        spin_lock_irqsave(&head->wq.lock);
         watch->notifying = false;
         if (!watch->active) {
             list_del(&watch->node);
             watch->head = NULL;
         }
-        spin_unlock(&head->wq.lock);
+        spin_unlock_irqrestore(&head->wq.lock);
     }
 }
 
@@ -125,14 +125,14 @@ void poll_sleep_arm(struct poll_sleep *sleep, struct process *proc,
 
     poll_sleep_head_init();
 
-    spin_lock(&poll_sleep_head.wq.lock);
+    spin_lock_irqsave(&poll_sleep_head.wq.lock);
     if (sleep->active)
         list_del(&sleep->node);
     sleep->proc = proc;
     sleep->deadline = deadline;
     sleep->active = true;
     list_add_tail(&sleep->node, &poll_sleep_head.wq.head);
-    spin_unlock(&poll_sleep_head.wq.lock);
+    spin_unlock_irqrestore(&poll_sleep_head.wq.lock);
 }
 
 void poll_sleep_cancel(struct poll_sleep *sleep) {
@@ -141,12 +141,12 @@ void poll_sleep_cancel(struct poll_sleep *sleep) {
 
     poll_sleep_head_init();
 
-    spin_lock(&poll_sleep_head.wq.lock);
+    spin_lock_irqsave(&poll_sleep_head.wq.lock);
     if (sleep->active) {
         list_del(&sleep->node);
         sleep->active = false;
     }
-    spin_unlock(&poll_sleep_head.wq.lock);
+    spin_unlock_irqrestore(&poll_sleep_head.wq.lock);
 }
 
 void poll_sleep_tick(uint64_t now) {
@@ -155,7 +155,7 @@ void poll_sleep_tick(uint64_t now) {
 
     LIST_HEAD(wake_list);
 
-    spin_lock(&poll_sleep_head.wq.lock);
+    spin_lock_irqsave(&poll_sleep_head.wq.lock);
     struct poll_sleep *sleep, *tmp;
     list_for_each_entry_safe(sleep, tmp, &poll_sleep_head.wq.head, node) {
         if (sleep->deadline && sleep->deadline <= now) {
@@ -164,7 +164,7 @@ void poll_sleep_tick(uint64_t now) {
             list_add_tail(&sleep->node, &wake_list);
         }
     }
-    spin_unlock(&poll_sleep_head.wq.lock);
+    spin_unlock_irqrestore(&poll_sleep_head.wq.lock);
 
     list_for_each_entry_safe(sleep, tmp, &wake_list, node) {
         list_del(&sleep->node);
