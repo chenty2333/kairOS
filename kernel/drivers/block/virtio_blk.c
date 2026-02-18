@@ -45,7 +45,6 @@ struct virtio_blk_dev {
     struct wait_queue io_wait;
     struct blkdev blkdev;
     bool irq_seen;
-    bool wakeup_pending;
 };
 
 static void virtio_blk_handle_used(struct virtio_blk_dev *vb) {
@@ -64,11 +63,8 @@ static void virtio_blk_intr(struct virtio_device *vdev) {
     if (!vb || !vb->vq)
         return;
     vb->irq_seen = true;
-    /* Process used ring and mark requests done, but don't call
-     * wait_queue_wakeup from IRQ context — it's not IRQ-safe.
-     * Instead, set a flag for the transfer polling path. */
     virtio_blk_handle_used(vb);
-    __atomic_store_n(&vb->wakeup_pending, true, __ATOMIC_RELEASE);
+    wait_queue_wakeup_all(&vb->io_wait);
 }
 
 static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
@@ -133,15 +129,10 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
         }
     } else {
         while (!__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE)) {
-            /* Check if IRQ handler flagged a wakeup */
-            if (__atomic_exchange_n(&vb->wakeup_pending, false, __ATOMIC_ACQ_REL)) {
-                wait_queue_wakeup_all(&vb->io_wait);
-            }
             int rc = proc_sleep_on_mutex(&vb->io_wait, &vb->io_wait,
                                          &vb->lock, true);
-            if (rc == -EINTR && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE)) {
+            if (rc == -EINTR && !__atomic_load_n(&ctx->done, __ATOMIC_ACQUIRE))
                 continue;
-            }
         }
     }
 
