@@ -59,10 +59,10 @@ if [[ ! -d "$LLVM_SRC" ]]; then
   git clone --depth=1 --filter=blob:none --sparse \
     https://github.com/llvm/llvm-project.git \
     --branch="$LLVM_TAG" "$LLVM_SRC" >"$_out" 2>&1
-  git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake >"$_out" 2>&1
+  git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake third-party >"$_out" 2>&1
 else
   if [[ -d "$LLVM_SRC/.git" ]] && [[ -f "$LLVM_SRC/.git/info/sparse-checkout" ]]; then
-    git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake >"$_out" 2>&1
+    git -C "$LLVM_SRC" sparse-checkout set compiler-rt cmake third-party >"$_out" 2>&1
   fi
 fi
 
@@ -124,6 +124,7 @@ cmake -G Ninja -S "$LLVM_SRC/compiler-rt" -B "$BUILD_DIR" \
   -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
   -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
   -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+  -DCOMPILER_RT_BUILD_ORC=OFF \
   -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON >"$_out" 2>&1
 
 cmake --build "$BUILD_DIR" -j"$JOBS" >"$_out" 2>&1
