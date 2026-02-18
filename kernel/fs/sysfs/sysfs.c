@@ -450,15 +450,15 @@ int sysfs_create_files(struct sysfs_node *parent,
     for (size_t i = 0; i < count; i++) {
         if (!sysfs_create_file(parent, &attrs[i])) {
             /* Rollback previously created files */
+            spin_lock(&sysfs_sb.lock);
             while (i-- > 0) {
-                spin_lock(&sysfs_sb.lock);
                 struct sysfs_node *f = sysfs_find_child(parent, attrs[i].name);
                 if (f) {
                     list_del(&f->sibling);
                     kfree(f);
                 }
-                spin_unlock(&sysfs_sb.lock);
             }
+            spin_unlock(&sysfs_sb.lock);
             return -ENOMEM;
         }
     }
