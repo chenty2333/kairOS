@@ -16,8 +16,6 @@ extern struct process proc_table[CONFIG_MAX_PROCESSES];
 #define SCHED_LATENCY_NS 6000000UL
 #define SCHED_MIN_GRANULARITY_NS 1000000UL
 #define SCHED_WAKEUP_GRANULARITY_NS 2000000UL
-#define SCHED_TRACE_LEN 512
-#define SCHED_TRACE_MASK (SCHED_TRACE_LEN - 1)
 
 static inline uint64_t sched_clock_ns(void) {
     return arch_timer_ticks_to_ns(arch_timer_ticks());
@@ -33,24 +31,6 @@ const int sched_nice_to_weight[40] = {
 struct percpu_data cpu_data[CONFIG_MAX_CPUS];
 static int nr_cpus_online = 1;
 static bool sched_steal_enabled = false;
-static uint64_t sched_trace_head = 0;
-
-struct sched_trace_entry {
-    uint64_t seq;
-    uint64_t ticks;
-    uint32_t cpu;
-    uint16_t type;
-    int32_t pid;
-    int32_t proc_state;
-    int32_t se_cpu;
-    uint32_t se_state;
-    uint8_t on_rq;
-    uint8_t on_cpu;
-    uint64_t arg0;
-    uint64_t arg1;
-};
-
-static struct sched_trace_entry sched_trace_buf[SCHED_TRACE_LEN];
 
 static inline void sched_stat_inc(uint64_t *counter) {
     __atomic_fetch_add(counter, 1, __ATOMIC_RELAXED);
@@ -75,6 +55,7 @@ static const char *sched_trace_event_name(uint16_t type) {
     case SCHED_TRACE_SLEEP: return "sleep";
     case SCHED_TRACE_WAKEUP: return "wakeup";
     case SCHED_TRACE_TRAP: return "trap";
+    case SCHED_TRACE_MIGRATE: return "migrate";
     default: return "unknown";
     }
 }
@@ -105,12 +86,15 @@ static const char *sched_se_state_name(uint32_t state) {
 void sched_trace_event(enum sched_trace_event_type type,
                        const struct process *p,
                        uint64_t arg0, uint64_t arg1) {
-    uint64_t seq = __atomic_add_fetch(&sched_trace_head, 1, __ATOMIC_RELAXED);
-    struct sched_trace_entry *ent = &sched_trace_buf[(seq - 1) & SCHED_TRACE_MASK];
     int cpu = arch_cpu_id();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    struct percpu_data *cd = &cpu_data[cpu];
+    uint32_t idx = cd->trace_head & SCHED_TRACE_PER_CPU_MASK;
+    struct sched_trace_entry *ent = &cd->trace_buf[idx];
 
     ent->ticks = arch_timer_get_ticks();
-    ent->cpu = (cpu >= 0) ? (uint32_t)cpu : 0U;
+    ent->cpu = (uint32_t)cpu;
     ent->type = (uint16_t)type;
     ent->pid = p ? p->pid : -1;
     ent->proc_state = p ? p->state : -1;
@@ -121,37 +105,59 @@ void sched_trace_event(enum sched_trace_event_type type,
     ent->on_cpu = p ? (uint8_t)(__atomic_load_n(&p->se.on_cpu, __ATOMIC_ACQUIRE) ? 1 : 0) : 0;
     ent->arg0 = arg0;
     ent->arg1 = arg1;
-    __atomic_store_n(&ent->seq, seq, __ATOMIC_RELEASE);
+    ent->seq = ++cd->trace_head;
 }
 
 void sched_trace_dump_recent(int max_events) {
     if (max_events <= 0)
         return;
-    if (max_events > SCHED_TRACE_LEN)
-        max_events = SCHED_TRACE_LEN;
 
-    uint64_t head = __atomic_load_n(&sched_trace_head, __ATOMIC_ACQUIRE);
-    if (head == 0) {
-        pr_err("sched trace: empty\n");
-        return;
+    int total = SCHED_TRACE_PER_CPU * nr_cpus_online;
+    if (max_events > total)
+        max_events = total;
+
+    /* Per-CPU cursors for merge-sort output */
+    int pos[CONFIG_MAX_CPUS];
+    int count[CONFIG_MAX_CPUS];
+    for (int c = 0; c < nr_cpus_online; c++) {
+        uint32_t head = cpu_data[c].trace_head;
+        int n = (head < SCHED_TRACE_PER_CPU) ? (int)head : SCHED_TRACE_PER_CPU;
+        count[c] = n;
+        /* Start from oldest entry */
+        pos[c] = (n < SCHED_TRACE_PER_CPU) ? 0 : (int)(head & SCHED_TRACE_PER_CPU_MASK);
     }
 
-    uint64_t start = (head > (uint64_t)max_events) ?
-        (head - (uint64_t)max_events + 1) : 1;
+    pr_err("sched trace: dumping up to %d events (per-cpu, %d cpus)\n",
+           max_events, nr_cpus_online);
 
-    pr_err("sched trace: last %d events (head=%llu)\n",
-           max_events, (unsigned long long)head);
-    for (uint64_t seq = start; seq <= head; seq++) {
-        struct sched_trace_entry *ent = &sched_trace_buf[(seq - 1) & SCHED_TRACE_MASK];
-        uint64_t got = __atomic_load_n(&ent->seq, __ATOMIC_ACQUIRE);
-        if (got != seq)
-            continue;
-        pr_err("  #%llu t=%llu cpu=%u ev=%s pid=%d p=%s se=%s se_cpu=%d rq=%u oncpu=%u a0=%p a1=%p\n",
-               (unsigned long long)seq, (unsigned long long)ent->ticks, ent->cpu,
+    int emitted = 0;
+    while (emitted < max_events) {
+        /* Find CPU with oldest (smallest ticks) entry */
+        int best = -1;
+        uint64_t best_ticks = ~0ULL;
+        for (int c = 0; c < nr_cpus_online; c++) {
+            if (count[c] == 0)
+                continue;
+            struct sched_trace_entry *ent = &cpu_data[c].trace_buf[pos[c]];
+            if (ent->ticks < best_ticks) {
+                best_ticks = ent->ticks;
+                best = c;
+            }
+        }
+        if (best < 0)
+            break;
+
+        struct sched_trace_entry *ent = &cpu_data[best].trace_buf[pos[best]];
+        pr_err("  t=%llu cpu=%u ev=%s pid=%d p=%s se=%s se_cpu=%d rq=%u oncpu=%u a0=%p a1=%p\n",
+               (unsigned long long)ent->ticks, ent->cpu,
                sched_trace_event_name(ent->type), ent->pid,
                sched_proc_state_name(ent->proc_state),
                sched_se_state_name(ent->se_state), ent->se_cpu, ent->on_rq,
                ent->on_cpu, (void *)ent->arg0, (void *)ent->arg1);
+
+        pos[best] = (pos[best] + 1) & SCHED_TRACE_PER_CPU_MASK;
+        count[best]--;
+        emitted++;
     }
 }
 
@@ -203,6 +209,10 @@ static inline void se_mark_blocked(struct sched_entity *se) {
     se_set_state(se, SE_STATE_BLOCKED);
 }
 
+static inline void se_clear_on_rq(struct sched_entity *se) {
+    se->on_rq = false;
+}
+
 #if CONFIG_DEBUG
 static void sched_validate_entity(struct process *p, const char *where) {
     struct sched_entity *se = &p->se;
@@ -224,6 +234,13 @@ static void sched_validate_entity(struct process *p, const char *where) {
         int cpu = sched_violation_cpu(p);
         sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
         panic("sched: invalid running state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
+              where, p->pid, state, se->on_rq, se->on_cpu);
+    }
+    if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE) &&
+        state != SE_STATE_RUNNING) {
+        int cpu = sched_violation_cpu(p);
+        sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
+        panic("sched: on_cpu but not RUNNING at %s pid=%d state=%u on_rq=%d on_cpu=%d",
               where, p->pid, state, se->on_rq, se->on_cpu);
     }
 }
@@ -338,6 +355,7 @@ void sched_enqueue(struct process *p) {
     }
 
     place_entity(rq, &p->se, p->se.vruntime == 0);
+    int prev_cpu = p->se.cpu;
     __enqueue_entity(rq, &p->se);
     se_mark_queued(&p->se, cpu);
     __atomic_store_n(&p->se.on_cpu, false, __ATOMIC_RELEASE);
@@ -345,6 +363,8 @@ void sched_enqueue(struct process *p) {
     update_min_vruntime(rq);
     sched_stat_inc(&cpu_data[cpu].stats.enqueue_count);
     sched_trace_event(SCHED_TRACE_ENQUEUE, p, (uint64_t)cpu, p->se.vruntime);
+    if (cpu != prev_cpu && prev_cpu >= 0)
+        sched_trace_event(SCHED_TRACE_MIGRATE, p, (uint64_t)prev_cpu, (uint64_t)cpu);
     sched_validate_entity(p, "sched_enqueue");
 
     /* Snapshot preemption decision while still holding the lock */
@@ -454,8 +474,7 @@ void schedule(void) {
 
     if (prev && prev != cpu->idle_proc) {
         update_curr(rq);
-        __atomic_store_n(&prev->se.on_cpu, true, __ATOMIC_RELEASE);
-        se_set_state(&prev->se, SE_STATE_RUNNING);
+        se_mark_running(&prev->se);
 
         if (prev->state == PROC_RUNNING) {
             prev->state = PROC_RUNNABLE;
@@ -467,7 +486,7 @@ void schedule(void) {
         } else {
             if (prev->se.on_rq) {
                 rb_erase(&prev->se.sched_node, &rq->tasks_timeline);
-                prev->se.on_rq = false;
+                se_clear_on_rq(&prev->se);
                 rq->nr_running--;
                 sched_stat_inc(&stats->dequeue_count);
             }
@@ -481,7 +500,7 @@ void schedule(void) {
         struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
         next = container_of(se, struct process, se);
         rb_erase(&se->sched_node, &rq->tasks_timeline);
-        se_mark_running(se);
+        se->on_rq = false;          /* removed from rq */
         rq->nr_running--;
         sched_stat_inc(&stats->pick_count);
         sched_trace_event(SCHED_TRACE_PICK, next, (uint64_t)cpu->cpu_id,
@@ -504,7 +523,7 @@ void schedule(void) {
                 struct sched_entity *se = rb_entry(recheck, struct sched_entity, sched_node);
                 next = container_of(se, struct process, se);
                 rb_erase(&se->sched_node, &rq->tasks_timeline);
-                se_mark_running(se);
+                se->on_rq = false;          /* removed from rq */
                 rq->nr_running--;
                 sched_stat_inc(&stats->pick_count);
                 sched_trace_event(SCHED_TRACE_PICK, next,

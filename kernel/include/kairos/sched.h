@@ -67,6 +67,25 @@ enum sched_trace_event_type {
     SCHED_TRACE_SLEEP = 7,
     SCHED_TRACE_WAKEUP = 8,
     SCHED_TRACE_TRAP = 9,
+    SCHED_TRACE_MIGRATE = 10,
+};
+
+#define SCHED_TRACE_PER_CPU 64
+#define SCHED_TRACE_PER_CPU_MASK (SCHED_TRACE_PER_CPU - 1)
+
+struct sched_trace_entry {
+    uint64_t seq;
+    uint64_t ticks;
+    uint32_t cpu;
+    uint16_t type;
+    int32_t pid;
+    int32_t proc_state;
+    int32_t se_cpu;
+    uint32_t se_state;
+    uint8_t on_rq;
+    uint8_t on_cpu;
+    uint64_t arg0;
+    uint64_t arg1;
 };
 
 struct percpu_data {
@@ -82,6 +101,9 @@ struct percpu_data {
     uint64_t ticks;
     bool resched_needed;
     struct sched_cpu_stats stats;
+    /* Per-CPU trace buffer — only written by local CPU with IRQs off */
+    struct sched_trace_entry trace_buf[SCHED_TRACE_PER_CPU];
+    uint32_t trace_head;
 };
 
 extern struct percpu_data cpu_data[];

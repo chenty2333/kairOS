@@ -10,6 +10,7 @@
 #include <kairos/sched.h>
 
 void run_driver_tests(void);
+extern void run_sched_stress_tests(void);
 
 void init_user(void) {
 #if CONFIG_KERNEL_TESTS
@@ -17,6 +18,7 @@ void init_user(void) {
     pr_info("Starting robustness test...\n");
     run_sync_test();
     run_vfork_test();
+    run_sched_stress_tests();
 #if defined(ARCH_riscv64)
     run_crash_test();
 #else

@@ -562,7 +562,19 @@ test: check-tools scripts/run-qemu-test.sh
 
 test-soak: check-tools scripts/run-qemu-test.sh
 	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
-	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) run" TEST_TIMEOUT="$(SOAK_TIMEOUT)" TEST_LOG="$(SOAK_LOG)" TEST_REQUIRE_MARKERS=0 TEST_EXPECT_TIMEOUT=1 ./scripts/run-qemu-test.sh; rc=$$?; \
+	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS)' run" \
+	TEST_TIMEOUT="$(SOAK_TIMEOUT)" TEST_LOG="$(SOAK_LOG)" \
+	TEST_REQUIRE_MARKERS=0 TEST_EXPECT_TIMEOUT=1 ./scripts/run-qemu-test.sh; rc=$$?; \
+	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
+	exit $$rc
+
+test-matrix: check-tools scripts/test-matrix.sh
+	bash scripts/test-matrix.sh
+
+test-debug: check-tools scripts/run-qemu-test.sh
+	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*
+	QEMU_CMD="$(MAKE) --no-print-directory ARCH=$(ARCH) EXTRA_CFLAGS='$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1' run" \
+	TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$(TEST_LOG)" ./scripts/run-qemu-test.sh; rc=$$?; \
 	rm -rf $(BUILD_DIR)/kernel $(BUILD_DIR)/third_party $(KERNEL) $(KERNEL_BIN) $(BUILD_DIR)/.cflags.*; \
 	exit $$rc
 
@@ -590,6 +602,8 @@ help:
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  test     - Run kernel tests"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
+	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
+	@echo "  test-matrix - Run SMP x DEBUG test matrix"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
