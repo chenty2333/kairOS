@@ -19,16 +19,19 @@ struct lock_class_key {
 void lockdep_acquire(struct lock_class_key *key, const char *name);
 void lockdep_release(struct lock_class_key *key);
 
-/* Embed in lock structs for proper acquire/release pairing */
-#define LOCKDEP_KEY_FIELD  struct lock_class_key dep_key;
-#define LOCKDEP_KEY_INIT   .dep_key = {0},
+#define LOCKDEP_KEY_FIELD       struct lock_class_key dep_key;
+#define LOCKDEP_KEY_INIT        .dep_key = {0},
+#define LOCKDEP_ACQUIRE(lock)   lockdep_acquire(&(lock)->dep_key, NULL)
+#define LOCKDEP_RELEASE(lock)   lockdep_release(&(lock)->dep_key)
+#define LOCKDEP_ACQUIRE_NAME(lock, name) lockdep_acquire(&(lock)->dep_key, name)
 
 #else
 
 #define LOCKDEP_KEY_FIELD
 #define LOCKDEP_KEY_INIT
-static inline void lockdep_acquire(void *k, const char *n) { (void)k; (void)n; }
-static inline void lockdep_release(void *k) { (void)k; }
+#define LOCKDEP_ACQUIRE(lock)            ((void)0)
+#define LOCKDEP_RELEASE(lock)            ((void)0)
+#define LOCKDEP_ACQUIRE_NAME(lock, name) ((void)0)
 
 #endif
 

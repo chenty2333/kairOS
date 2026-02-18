@@ -434,13 +434,7 @@ int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
     }
 
     if (flags & CLONE_VFORK) {
-        while (!__atomic_load_n(&p->vfork_done, __ATOMIC_ACQUIRE)) {
-            int rc = proc_sleep_on(&p->vfork_wait, p, true);
-            if (rc == -EINTR &&
-                __atomic_load_n(&p->vfork_done, __ATOMIC_ACQUIRE)) {
-                break;
-            }
-        }
+        wait_for_completion(&p->vfork_completion);
     }
 
     return (int64_t)p->pid;
@@ -507,6 +501,7 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
             return -EBADF;
         strncpy(kpath, f->path, sizeof(kpath) - 1);
         kpath[sizeof(kpath) - 1] = '\0';
+        file_put(f);
     } else {
         if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
             return -EFAULT;
@@ -524,6 +519,7 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
             } else {
                 snprintf(full, sizeof(full), "%s/%s", df->path, kpath);
             }
+            file_put(df);
             strncpy(kpath, full, sizeof(kpath) - 1);
             kpath[sizeof(kpath) - 1] = '\0';
         }

@@ -38,7 +38,6 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->ppid = parent->pid;
     sched_fork(child, parent);
     child->vfork_parent = NULL;
-    child->vfork_done = true;
 
     if (opts) {
         if (opts->tid_set_address)
@@ -47,7 +46,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
             child->tid_address = opts->tid_clear_address;
         if (opts->vfork_parent) {
             child->vfork_parent = opts->vfork_parent;
-            child->vfork_done = false;
+            reinit_completion(&child->vfork_completion);
         }
     }
 

@@ -171,8 +171,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         tf->tf_a0 = 0;
     }
     if (curr->vfork_parent) {
-        __atomic_store_n(&curr->vfork_done, true, __ATOMIC_RELEASE);
-        wait_queue_wakeup_all(&curr->vfork_wait);
+        complete_all(&curr->vfork_completion);
         curr->vfork_parent = NULL;
     }
     ret = 0;

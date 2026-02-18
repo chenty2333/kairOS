@@ -5,6 +5,7 @@
 #ifndef _KAIROS_PROCESS_H
 #define _KAIROS_PROCESS_H
 
+#include <kairos/completion.h>
 #include <kairos/config.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
@@ -107,12 +108,11 @@ struct process {
     void *wait_channel;
     uint64_t sleep_deadline;  /* 0 = no timeout; >0 = tick deadline */
     struct wait_queue exit_wait;
-    struct wait_queue vfork_wait;
+    struct completion vfork_completion;
     struct wait_queue_entry wait_entry;
     struct list_head children, sibling;
     struct process *parent;
     struct process *vfork_parent;
-    bool vfork_done;
     struct arch_context *context;
     uint64_t utime, stime, start_time;
 };

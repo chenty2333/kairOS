@@ -53,8 +53,7 @@ noreturn void proc_exit(int status) {
     pr_info("Process %d exiting: %d\n", p->pid, code);
 
     if (p->vfork_parent) {
-        __atomic_store_n(&p->vfork_done, true, __ATOMIC_RELEASE);
-        wait_queue_wakeup_all(&p->vfork_wait);
+        complete_all(&p->vfork_completion);
         p->vfork_parent = NULL;
     }
 

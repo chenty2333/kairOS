@@ -17,6 +17,7 @@ struct mutex {
     struct wait_queue wq;
     struct process *holder;
     const char *name;
+    LOCKDEP_KEY_FIELD
 };
 
 void mutex_init(struct mutex *m, const char *name);
@@ -36,6 +37,7 @@ struct rwlock {
     struct wait_queue wr_wq;
     struct process *writer;
     const char *name;
+    LOCKDEP_KEY_FIELD
 };
 
 void rwlock_init(struct rwlock *rw, const char *name);
@@ -53,6 +55,7 @@ struct semaphore {
     int count;
     struct wait_queue wq;
     const char *name;
+    LOCKDEP_KEY_FIELD
 };
 
 void sem_init(struct semaphore *s, int count, const char *name);

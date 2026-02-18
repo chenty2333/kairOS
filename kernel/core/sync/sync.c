@@ -97,6 +97,7 @@ void mutex_lock(struct mutex *m) {
         m->locked = true;
         m->holder = NULL;
         spin_unlock(&m->lock);
+        LOCKDEP_ACQUIRE_NAME(m, m->name);
         return;
     }
 
@@ -109,6 +110,7 @@ void mutex_lock(struct mutex *m) {
     m->locked = true;
     m->holder = curr;
     spin_unlock(&m->lock);
+    LOCKDEP_ACQUIRE_NAME(m, m->name);
 }
 
 int mutex_lock_interruptible(struct mutex *m) {
@@ -127,6 +129,7 @@ int mutex_lock_interruptible(struct mutex *m) {
         m->locked = true;
         m->holder = NULL;
         spin_unlock(&m->lock);
+        LOCKDEP_ACQUIRE_NAME(m, m->name);
         return 0;
     }
 
@@ -145,10 +148,15 @@ int mutex_lock_interruptible(struct mutex *m) {
     m->locked = true;
     m->holder = curr;
     spin_unlock(&m->lock);
+    LOCKDEP_ACQUIRE_NAME(m, m->name);
     return 0;
 }
 
 void mutex_unlock(struct mutex *m) {
+    LOCKDEP_RELEASE(m);
+    struct process *curr = proc_current();
+    if (curr && m->holder != curr)
+        WARN_ON(1);
     spin_lock(&m->lock);
     m->locked = false;
     m->holder = NULL;
@@ -165,6 +173,8 @@ bool mutex_trylock(struct mutex *m) {
         success = true;
     }
     spin_unlock(&m->lock);
+    if (success)
+        LOCKDEP_ACQUIRE_NAME(m, m->name);
     return success;
 }
 
@@ -190,6 +200,7 @@ void sem_wait(struct semaphore *s) {
         }
         s->count--;
         spin_unlock(&s->lock);
+        LOCKDEP_ACQUIRE_NAME(s, s->name);
         return;
     }
 
@@ -201,6 +212,7 @@ void sem_wait(struct semaphore *s) {
     }
     s->count--;
     spin_unlock(&s->lock);
+    LOCKDEP_ACQUIRE_NAME(s, s->name);
 }
 
 int sem_wait_interruptible(struct semaphore *s) {
@@ -215,6 +227,7 @@ int sem_wait_interruptible(struct semaphore *s) {
         }
         s->count--;
         spin_unlock(&s->lock);
+        LOCKDEP_ACQUIRE_NAME(s, s->name);
         return 0;
     }
 
@@ -233,10 +246,12 @@ int sem_wait_interruptible(struct semaphore *s) {
     }
     s->count--;
     spin_unlock(&s->lock);
+    LOCKDEP_ACQUIRE_NAME(s, s->name);
     return 0;
 }
 
 void sem_post(struct semaphore *s) {
+    LOCKDEP_RELEASE(s);
     spin_lock(&s->lock);
     s->count++;
     spin_unlock(&s->lock);
@@ -251,6 +266,8 @@ bool sem_trywait(struct semaphore *s) {
         success = true;
     }
     spin_unlock(&s->lock);
+    if (success)
+        LOCKDEP_ACQUIRE_NAME(s, s->name);
     return success;
 }
 
@@ -280,6 +297,7 @@ void rwlock_read_lock(struct rwlock *rw) {
         }
         rw->readers++;
         spin_unlock(&rw->lock);
+        LOCKDEP_ACQUIRE_NAME(rw, rw->name);
         return;
     }
 
@@ -291,6 +309,7 @@ void rwlock_read_lock(struct rwlock *rw) {
     }
     rw->readers++;
     spin_unlock(&rw->lock);
+    LOCKDEP_ACQUIRE_NAME(rw, rw->name);
 }
 
 int rwlock_read_lock_interruptible(struct rwlock *rw) {
@@ -305,6 +324,7 @@ int rwlock_read_lock_interruptible(struct rwlock *rw) {
         }
         rw->readers++;
         spin_unlock(&rw->lock);
+        LOCKDEP_ACQUIRE_NAME(rw, rw->name);
         return 0;
     }
 
@@ -322,12 +342,15 @@ int rwlock_read_lock_interruptible(struct rwlock *rw) {
     }
     rw->readers++;
     spin_unlock(&rw->lock);
+    LOCKDEP_ACQUIRE_NAME(rw, rw->name);
     return 0;
 }
 
 void rwlock_read_unlock(struct rwlock *rw) {
+    LOCKDEP_RELEASE(rw);
     spin_lock(&rw->lock);
     rw->readers--;
+    WARN_ON(rw->readers < 0);
     if (rw->readers == 0 && rw->writers_waiting > 0) {
         spin_unlock(&rw->lock);
         wait_queue_wakeup_one(&rw->wr_wq);
@@ -357,6 +380,7 @@ void rwlock_write_lock(struct rwlock *rw) {
         rw->write_locked = true;
         rw->writer = NULL;
         spin_unlock(&rw->lock);
+        LOCKDEP_ACQUIRE_NAME(rw, rw->name);
         return;
     }
 
@@ -371,6 +395,7 @@ void rwlock_write_lock(struct rwlock *rw) {
     rw->write_locked = true;
     rw->writer = curr;
     spin_unlock(&rw->lock);
+    LOCKDEP_ACQUIRE_NAME(rw, rw->name);
 }
 
 int rwlock_write_lock_interruptible(struct rwlock *rw) {
@@ -393,6 +418,7 @@ int rwlock_write_lock_interruptible(struct rwlock *rw) {
         rw->write_locked = true;
         rw->writer = NULL;
         spin_unlock(&rw->lock);
+        LOCKDEP_ACQUIRE_NAME(rw, rw->name);
         return 0;
     }
 
@@ -418,10 +444,12 @@ int rwlock_write_lock_interruptible(struct rwlock *rw) {
     rw->write_locked = true;
     rw->writer = curr;
     spin_unlock(&rw->lock);
+    LOCKDEP_ACQUIRE_NAME(rw, rw->name);
     return 0;
 }
 
 void rwlock_write_unlock(struct rwlock *rw) {
+    LOCKDEP_RELEASE(rw);
     spin_lock(&rw->lock);
     rw->write_locked = false;
     rw->writer = NULL;
@@ -444,6 +472,8 @@ bool rwlock_write_trylock(struct rwlock *rw) {
         success = true;
     }
     spin_unlock(&rw->lock);
+    if (success)
+        LOCKDEP_ACQUIRE_NAME(rw, rw->name);
     return success;
 }
 
@@ -455,6 +485,7 @@ bool rwlock_read_trylock(struct rwlock *rw) {
     }
     rw->readers++;
     spin_unlock(&rw->lock);
+    LOCKDEP_ACQUIRE_NAME(rw, rw->name);
     return true;
 }
 
@@ -478,6 +509,7 @@ int mutex_lock_timeout(struct mutex *m, uint64_t timeout_ticks) {
         m->locked = true;
         m->holder = NULL;
         spin_unlock(&m->lock);
+        LOCKDEP_ACQUIRE_NAME(m, m->name);
         return 0;
     }
 
@@ -493,5 +525,6 @@ int mutex_lock_timeout(struct mutex *m, uint64_t timeout_ticks) {
     m->locked = true;
     m->holder = curr;
     spin_unlock(&m->lock);
+    LOCKDEP_ACQUIRE_NAME(m, m->name);
     return 0;
 }

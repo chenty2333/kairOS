@@ -20,6 +20,7 @@ static spinlock_t lockdep_lock = SPINLOCK_INIT;
 
 static int held_stacks[CONFIG_MAX_CPUS][LOCKDEP_HELD_MAX];
 static int held_depth[CONFIG_MAX_CPUS];
+static int lockdep_recursion[CONFIG_MAX_CPUS];
 
 static int class_ensure(struct lock_class_key *key) {
     if (key->id != 0)
@@ -38,8 +39,6 @@ static int class_ensure(struct lock_class_key *key) {
 }
 
 static inline void dep_set(int from, int to) {
-    /* Racy RMW across CPUs — acceptable for debug-only heuristic.
-     * Worst case: a dependency edge is silently dropped. */
     dep_matrix[from][to / 8] |= (uint8_t)(1 << (to % 8));
 }
 
@@ -49,9 +48,13 @@ static inline bool dep_test(int from, int to) {
 
 void lockdep_acquire(struct lock_class_key *key, const char *name) {
     int cpu = arch_cpu_id();
+    if (lockdep_recursion[cpu])
+        return;
+    lockdep_recursion[cpu] = 1;
+
     int id = class_ensure(key);
     if (id < 0)
-        return;
+        goto out;
     int depth = held_depth[cpu];
 
     for (int i = 0; i < depth; i++) {
@@ -68,13 +71,19 @@ void lockdep_acquire(struct lock_class_key *key, const char *name) {
         held_stacks[cpu][depth] = id;
         held_depth[cpu] = depth + 1;
     }
+out:
+    lockdep_recursion[cpu] = 0;
 }
 
 void lockdep_release(struct lock_class_key *key) {
     int cpu = arch_cpu_id();
+    if (lockdep_recursion[cpu])
+        return;
+    lockdep_recursion[cpu] = 1;
+
     int id = class_ensure(key);
     if (id < 0)
-        return;
+        goto out;
     int depth = held_depth[cpu];
 
     for (int i = depth - 1; i >= 0; i--) {
@@ -82,9 +91,11 @@ void lockdep_release(struct lock_class_key *key) {
             for (int j = i; j < depth - 1; j++)
                 held_stacks[cpu][j] = held_stacks[cpu][j + 1];
             held_depth[cpu] = depth - 1;
-            return;
+            goto out;
         }
     }
+out:
+    lockdep_recursion[cpu] = 0;
 }
 
 #endif
