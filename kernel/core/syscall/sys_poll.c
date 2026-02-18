@@ -96,8 +96,13 @@ static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
         INIT_LIST_HEAD(&sleep.node);
         if (deadline)
             poll_sleep_arm(&sleep, proc_current(), deadline);
-        (void)proc_sleep_on(NULL, &sleep, true);
+        int rc = proc_sleep_on(NULL, &sleep, true);
         poll_sleep_cancel(&sleep);
+        if (rc == -EINTR) {
+            poll_unregister_waiters(waiters, nfds);
+            kfree(waiters);
+            return -EINTR;
+        }
     } while (1);
 
     kfree(waiters);

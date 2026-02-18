@@ -100,13 +100,9 @@ static void console_handle_input_char(char c, bool *pushed) {
             return;
     }
 
-    if (console_state.termios.c_lflag & ICANON) {
-        char erase = console_state.termios.c_cc[VERASE]
-                         ? (char)console_state.termios.c_cc[VERASE]
-                         : (char)0x7f;
-        char kill = console_state.termios.c_cc[VKILL]
-                        ? (char)console_state.termios.c_cc[VKILL]
-                        : (char)0x15;
+    /* ISIG is independent of ICANON — signal chars are handled in both
+     * canonical and raw modes when ISIG is set. */
+    if (console_state.termios.c_lflag & ISIG) {
         char intr = console_state.termios.c_cc[VINTR]
                         ? (char)console_state.termios.c_cc[VINTR]
                         : (char)0x03;
@@ -114,8 +110,7 @@ static void console_handle_input_char(char c, bool *pushed) {
                         ? (char)console_state.termios.c_cc[VQUIT]
                         : (char)0x1c;
 
-        if ((console_state.termios.c_lflag & ISIG) &&
-            (c == intr || c == quit)) {
+        if (c == intr || c == quit) {
             console_state.canon_len = 0;
             if (console_state.termios.c_lflag & ECHO) {
                 arch_early_putchar('^');
@@ -127,6 +122,15 @@ static void console_handle_input_char(char c, bool *pushed) {
                 signal_send(p->pid, c == intr ? SIGINT : SIGQUIT);
             return;
         }
+    }
+
+    if (console_state.termios.c_lflag & ICANON) {
+        char erase = console_state.termios.c_cc[VERASE]
+                         ? (char)console_state.termios.c_cc[VERASE]
+                         : (char)0x7f;
+        char kill = console_state.termios.c_cc[VKILL]
+                        ? (char)console_state.termios.c_cc[VKILL]
+                        : (char)0x15;
 
         if (c == erase || c == '\b') {
             if (console_state.canon_len > 0) {
@@ -226,12 +230,21 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
         INIT_LIST_HEAD(&waiter.entry.node);
         waiter.entry.proc = p;
         poll_wait_add(&vn->pollers, &waiter);
-        if (console_try_fill()) {
+        /* Re-check ringbuf after registering waiter to close the race
+         * where a timer IRQ pushes data between our empty check above
+         * and the waiter registration — that wake would be lost. */
+        console_try_fill();
+        spin_lock(&console_state.lock);
+        bool has_data = !ringbuf_empty(&console_state.in_rb);
+        spin_unlock(&console_state.lock);
+        if (has_data) {
             poll_wait_remove(&waiter);
             continue;
         }
-        proc_sleep_on(NULL, &waiter, true);
+        int rc = proc_sleep_on(NULL, &waiter, true);
         poll_wait_remove(&waiter);
+        if (rc == -EINTR)
+            return -EINTR;
     }
 }
 
