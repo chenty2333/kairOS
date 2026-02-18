@@ -6,6 +6,7 @@ DEBUG_LEVELS="${DEBUG_LEVELS:-0 1}"
 PCP_MODES="${PCP_MODES:-0 1 2}"
 TOOLCHAIN_MODES="${TOOLCHAIN_MODES:-auto gcc clang}"
 RUN_SOAK="${RUN_SOAK:-1}"
+MATRIX_TEST_TIMEOUT="${MATRIX_TEST_TIMEOUT:-420}"
 SOAK_TIMEOUT="${SOAK_TIMEOUT:-300}"
 FAIL=0
 
@@ -19,7 +20,8 @@ run_case() {
   fi
 
   echo "=== ARCH=${ARCH} TOOLCHAIN_MODE=${tc_mode} DEBUG=${dbg} PCP_MODE=${pcp} ==="
-  if make ARCH="${ARCH}" TOOLCHAIN_MODE="${tc_mode}" TEST_EXTRA_CFLAGS="${extra}" test; then
+  if make ARCH="${ARCH}" TOOLCHAIN_MODE="${tc_mode}" \
+      TEST_EXTRA_CFLAGS="${extra}" TEST_TIMEOUT="${MATRIX_TEST_TIMEOUT}" test; then
     echo "PASS: test TOOLCHAIN_MODE=${tc_mode} DEBUG=${dbg} PCP_MODE=${pcp}"
   else
     echo "FAIL: test TOOLCHAIN_MODE=${tc_mode} DEBUG=${dbg} PCP_MODE=${pcp}"

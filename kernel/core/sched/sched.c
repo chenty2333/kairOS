@@ -293,17 +293,18 @@ static void __enqueue_entity(struct cfs_rq *rq, struct sched_entity *se) {
     rb_insert_color(&se->sched_node, &rq->tasks_timeline);
 }
 
-static void update_curr(struct cfs_rq *rq) {
+static uint64_t update_curr(struct cfs_rq *rq) {
     struct sched_entity *curr_se = rq->curr_se;
-    if (!curr_se) return;
+    if (!curr_se) return 0;
 
     uint64_t now = sched_clock_ns();
     uint64_t delta = (now > curr_se->last_run_time) ? now - curr_se->last_run_time : 0;
-    if (delta == 0) return;
+    if (delta == 0) return 0;
 
     curr_se->vruntime += calc_delta_fair(delta, __weight(curr_se->nice));
     curr_se->last_run_time = now;
     update_min_vruntime(rq);
+    return delta;
 }
 
 static void place_entity(struct cfs_rq *rq, struct sched_entity *se, bool initial) {
@@ -489,7 +490,7 @@ void schedule(void) {
     cpu->resched_needed = false;
 
     if (prev && prev != cpu->idle_proc) {
-        update_curr(rq);
+        (void)update_curr(rq);
         /*
          * Temporarily mark prev as RUNNING so that se_mark_runnable /
          * se_mark_queued below perform a clean state transition.
@@ -627,12 +628,7 @@ void sched_tick(void) {
     if (spin_trylock(&rq->lock)) {
         if (curr && curr != cpu->idle_proc) {
             rq->curr_se = &curr->se;
-            update_curr(rq);
-        }
-        if (curr && curr != cpu->idle_proc) {
-            uint64_t now = sched_clock_ns();
-            uint64_t delta = (now > curr->se.last_run_time)
-                           ? now - curr->se.last_run_time : 0;
+            uint64_t delta = update_curr(rq);
             uint32_t nr = rq->nr_running + 1;
             uint64_t slice = SCHED_LATENCY_NS / nr;
             if (slice < SCHED_MIN_GRANULARITY_NS)

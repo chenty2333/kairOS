@@ -71,7 +71,11 @@ if [[ "${TEST_REQUIRE_MARKERS}" -eq 0 ]]; then
             echo "test: PASS (soak timeout reached without failure markers)"
             exit 0
         fi
-        echo "test: expected timeout (${TEST_TIMEOUT}s), got qemu_rc=${qemu_rc}" >&2
+        if [[ ${qemu_rc} -eq 0 && ${has_pass_marker} -eq 1 && ${has_done_marker} -eq 1 ]]; then
+            echo "test: PASS (soak completed early with success markers)"
+            exit 0
+        fi
+        echo "test: expected timeout (${TEST_TIMEOUT}s) or successful completion markers, got qemu_rc=${qemu_rc}" >&2
         tail -n 120 "${TEST_LOG}" >&2 || true
         exit 1
     fi

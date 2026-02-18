@@ -30,6 +30,9 @@ TARGET="$(kairos_arch_to_musl_target "$ARCH")" || {
   exit 1
 }
 ARCH_CFLAGS="$(kairos_arch_cflags "$ARCH")"
+if [[ "$ARCH" == "aarch64" ]]; then
+  ARCH_CFLAGS="${ARCH_CFLAGS} -D__arm64_clear_cache=__builtin___clear_cache"
+fi
 
 TCC_SRC="$(realpath -m "$TCC_SRC")"
 OUT_DIR="$(realpath -m "$OUT_DIR")"
@@ -47,9 +50,19 @@ fi
 
 # --- Determine the TCC cpu name ---
 case "$ARCH" in
-  riscv64) TCC_CPU="riscv64" ;;
-  x86_64)  TCC_CPU="x86_64"  ;;
-  aarch64) TCC_CPU="aarch64" ;;
+  riscv64)
+    TCC_CPU="riscv64"
+    TCC_LIBTCC1_TARGET="riscv64"
+    ;;
+  x86_64)
+    TCC_CPU="x86_64"
+    TCC_LIBTCC1_TARGET="x86_64"
+    ;;
+  aarch64)
+    # TinyCC uses arm64 as the backend target key in lib/Makefile.
+    TCC_CPU="aarch64"
+    TCC_LIBTCC1_TARGET="arm64"
+    ;;
   *) echo "Unsupported ARCH for TCC: $ARCH" >&2; exit 1 ;;
 esac
 
@@ -84,6 +97,7 @@ fi
 CONFIGURE_ARGS=(
   --cpu="$TCC_CPU"
   --targetos=Linux
+  --config-bcheck=no
   --extra-cflags="-static ${CFLAGS}"
   --extra-ldflags="-static ${LDFLAGS}"
   --prefix=/usr
@@ -123,7 +137,7 @@ fi
 # Setting <target>-libtcc1-usegcc=yes tells TCC's lib/Makefile to use
 # the cross-GCC ($(CC)) and $(AR) instead.
 make -C "$BUILD_DIR" "${make_jobs[@]}" \
-  "${TCC_CPU}-libtcc1-usegcc=yes" \
+  "${TCC_LIBTCC1_TARGET}-libtcc1-usegcc=yes" \
   tcc libtcc1.a >"$_out" 2>&1
 
 # --- Install to staging directory (clean first for idempotency) ---
