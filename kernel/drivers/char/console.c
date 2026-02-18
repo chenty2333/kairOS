@@ -10,8 +10,8 @@
 #include <kairos/process.h>
 #include <kairos/signal.h>
 #include <kairos/spinlock.h>
-#include <kairos/types.h>
 #include <kairos/ringbuf.h>
+#include <kairos/types.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
@@ -19,7 +19,7 @@
 #define CONSOLE_BUF_SIZE 128
 
 struct console_state {
-    spinlock_irq_t lock;
+    spinlock_t lock;
     struct ringbuf in_rb;
     char in_storage[CONSOLE_BUF_SIZE];
     char canon_buf[CONSOLE_BUF_SIZE];
@@ -30,7 +30,7 @@ struct console_state {
 };
 
 static struct console_state console_state = {
-    .lock = {.lock = SPINLOCK_INIT},
+    .lock = SPINLOCK_INIT,
     .winsize = {.ws_row = 24, .ws_col = 80},
     .termios = {
     .c_iflag = ICRNL,
@@ -48,6 +48,17 @@ static struct console_state console_state = {
     },
 };
 
+static inline bool console_lock_irqsave(void) {
+    bool irq_state = arch_irq_save();
+    spin_lock(&console_state.lock);
+    return irq_state;
+}
+
+static inline void console_unlock_irqrestore(bool irq_state) {
+    spin_unlock(&console_state.lock);
+    arch_irq_restore(irq_state);
+}
+
 static void console_state_init_once(void) {
     static bool initialized;
     if (initialized)
@@ -60,9 +71,9 @@ static void console_state_init_once(void) {
 
 void console_attach_vnode(struct vnode *vn) {
     console_state_init_once();
-    spin_lock_irqsave(&console_state.lock);
+    bool irq_state = console_lock_irqsave();
     console_state.vnode = vn;
-    spin_unlock_irqrestore(&console_state.lock);
+    console_unlock_irqrestore(irq_state);
 }
 
 /* Echo helper — called under lock.  Safe with IRQs off: SBI ecall holds no kernel locks. */
@@ -188,10 +199,10 @@ static bool console_try_fill(void) {
         return false;
     bool pushed = false;
     int sig = 0;
-    spin_lock_irqsave(&console_state.lock);
+    bool irq_state = console_lock_irqsave();
     console_handle_input_char((char)ch, &pushed, &sig);
     struct vnode *vn = console_state.vnode;
-    spin_unlock_irqrestore(&console_state.lock);
+    console_unlock_irqrestore(irq_state);
     if (sig) {
         struct process *p = proc_current();
         if (p)
@@ -210,6 +221,64 @@ void console_poll_input(void) {
     }
 }
 
+static int console_wait_for_input(struct vnode *vn, struct process *p) {
+    struct poll_waiter waiter = {0};
+    INIT_LIST_HEAD(&waiter.entry.node);
+    waiter.entry.proc = p;
+
+    bool irq_state = console_lock_irqsave();
+    if (!ringbuf_empty(&console_state.in_rb)) {
+        console_unlock_irqrestore(irq_state);
+        return 0;
+    }
+    console_unlock_irqrestore(irq_state);
+
+    poll_wait_add(&vn->pollers, &waiter);
+
+    console_try_fill();
+    irq_state = console_lock_irqsave();
+    bool has_data = !ringbuf_empty(&console_state.in_rb);
+    console_unlock_irqrestore(irq_state);
+    if (has_data) {
+        poll_wait_remove(&waiter);
+        return 0;
+    }
+
+    proc_lock(p);
+    if (p->sig_pending) {
+        proc_unlock(p);
+        poll_wait_remove(&waiter);
+        return -EINTR;
+    }
+    p->wait_channel = &waiter;
+    p->sleep_deadline = 0;
+    p->state = PROC_SLEEPING;
+    proc_unlock(p);
+
+    /*
+     * Close the add->sleep race: once waiter+sleeping are visible, re-check
+     * input once before yielding.
+     */
+    console_try_fill();
+    irq_state = console_lock_irqsave();
+    has_data = !ringbuf_empty(&console_state.in_rb);
+    console_unlock_irqrestore(irq_state);
+    if (!has_data)
+        proc_yield();
+
+    proc_lock(p);
+    p->wait_channel = NULL;
+    p->sleep_deadline = 0;
+    p->state = PROC_RUNNING;
+    bool interrupted = p->sig_pending;
+    proc_unlock(p);
+
+    poll_wait_remove(&waiter);
+    if (interrupted)
+        return -EINTR;
+    return 0;
+}
+
 ssize_t console_read(struct vnode *vn, void *buf, size_t len,
                      off_t off __attribute__((unused))) {
     if (!vn || !buf)
@@ -220,13 +289,13 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
     console_state_init_once();
     char ch;
     for (;;) {
-        spin_lock_irqsave(&console_state.lock);
+        bool irq_state = console_lock_irqsave();
         if (ringbuf_pop(&console_state.in_rb, &ch)) {
-            spin_unlock_irqrestore(&console_state.lock);
+            console_unlock_irqrestore(irq_state);
             ((char *)buf)[0] = ch;
             return 1;
         }
-        spin_unlock_irqrestore(&console_state.lock);
+        console_unlock_irqrestore(irq_state);
 
         if (console_try_fill())
             continue;
@@ -235,21 +304,7 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
         if (!p)
             return -EAGAIN;
 
-        struct poll_waiter waiter = {0};
-        INIT_LIST_HEAD(&waiter.entry.node);
-        waiter.entry.proc = p;
-        poll_wait_add(&vn->pollers, &waiter);
-        /* Re-check after registering waiter to avoid lost wakeup. */
-        console_try_fill();
-        spin_lock_irqsave(&console_state.lock);
-        bool has_data = !ringbuf_empty(&console_state.in_rb);
-        spin_unlock_irqrestore(&console_state.lock);
-        if (has_data) {
-            poll_wait_remove(&waiter);
-            continue;
-        }
-        int rc = proc_sleep_on(NULL, &waiter, true);
-        poll_wait_remove(&waiter);
+        int rc = console_wait_for_input(vn, p);
         if (rc == -EINTR)
             return -EINTR;
     }
@@ -295,7 +350,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if (copy_from_user(&t, (void *)arg, sizeof(t)) < 0)
             return -EFAULT;
         bool wake = false;
-        spin_lock_irqsave(&console_state.lock);
+        bool irq_state = console_lock_irqsave();
         bool was_empty = ringbuf_empty(&console_state.in_rb);
         if ((console_state.termios.c_lflag & ICANON) &&
             !(t.c_lflag & ICANON) && console_state.canon_len > 0) {
@@ -308,7 +363,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         }
         console_state.termios = t;
         struct vnode *wake_vn = console_state.vnode;
-        spin_unlock_irqrestore(&console_state.lock);
+        console_unlock_irqrestore(irq_state);
         if (wake && wake_vn)
             vfs_poll_wake(wake_vn, POLLIN);
         return 0;
@@ -354,9 +409,9 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if (!arg)
             return -EFAULT;
         int avail = 0;
-        spin_lock_irqsave(&console_state.lock);
+        bool irq_state = console_lock_irqsave();
         avail = (int)ringbuf_len(&console_state.in_rb);
-        spin_unlock_irqrestore(&console_state.lock);
+        console_unlock_irqrestore(irq_state);
         if (copy_to_user((void *)arg, &avail, sizeof(avail)) < 0)
             return -EFAULT;
         return 0;
@@ -373,13 +428,13 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         return 0;
     }
     case TCFLSH: {
-        spin_lock_irqsave(&console_state.lock);
+        bool irq_state = console_lock_irqsave();
         if (arg == 0 || arg == 2) {
             /* Flush input */
             console_flush_input();
         }
         /* arg == 1 or 2: flush output (no output buffer to flush) */
-        spin_unlock_irqrestore(&console_state.lock);
+        console_unlock_irqrestore(irq_state);
         return 0;
     }
     case TCSBRK:
@@ -397,10 +452,10 @@ int console_poll(struct vnode *vn, uint32_t events) {
     uint32_t revents = 0;
     console_state_init_once();
     console_try_fill();
-    spin_lock_irqsave(&console_state.lock);
+    bool irq_state = console_lock_irqsave();
     if (!ringbuf_empty(&console_state.in_rb))
         revents |= POLLIN;
-    spin_unlock_irqrestore(&console_state.lock);
+    console_unlock_irqrestore(irq_state);
     revents |= POLLOUT;
     return (int)(revents & events);
 }

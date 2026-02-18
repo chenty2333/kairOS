@@ -56,6 +56,9 @@ int arch_early_getchar(void) {
 }
 
 int arch_early_getchar_nb(void) {
+    /* Trap/timer context must not risk blocking SBI console calls. */
+    if (!arch_irq_enabled())
+        return uart_getchar_nb();
     long ret = sbi_legacy_call(SBI_CONSOLE_GETCHAR, 0);
     if (ret < 0)
         return uart_getchar_nb();

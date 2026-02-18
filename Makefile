@@ -22,7 +22,9 @@ EXTRA_CFLAGS ?=
 
 # Auto-detect parallelism: use all available cores
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+ifeq ($(MAKELEVEL),0)
 MAKEFLAGS += -j$(NPROC)
+endif
 
 # Build directory
 BUILD_DIR := build/$(ARCH)
@@ -355,19 +357,19 @@ $(KERNEL): $(OBJS) $(LDSCRIPT)
 	$(Q)$(OBJCOPY) -O binary $@ $(KERNEL_BIN)
 
 # Compile lwIP C files (relaxed warnings for third-party code)
-$(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c $(CFLAGS_STAMP)
+$(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c $(CFLAGS_STAMP) | _reset_count
 	@echo "  [$(inc_count)/$(OBJ_TOTAL)] CC $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(LWIP_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Compile C files
-$(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP)
+$(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP) | _reset_count
 	@echo "  [$(inc_count)/$(OBJ_TOTAL)] CC $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 # Assemble .S files
-$(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP)
+$(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
 	@echo "  [$(inc_count)/$(OBJ_TOTAL)] AS $<"
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
