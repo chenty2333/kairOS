@@ -36,7 +36,7 @@ struct trap_frame {
 #define tf_a4 regs[4]
 #define tf_a5 regs[5]
 #define tf_a6 regs[6]
-#define tf_a7 regs[7]
+#define tf_a7 regs[8]   /* AArch64 Linux ABI: syscall number in x8 */
 #define tf_sp sp
 #define sepc elr
 

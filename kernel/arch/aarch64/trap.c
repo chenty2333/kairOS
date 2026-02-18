@@ -34,6 +34,13 @@ struct irq_entry {
 
 static struct irq_entry irq_handlers[MAX_IRQ];
 
+#define AARCH64_SPSR_MODE_MASK 0xf
+#define AARCH64_SPSR_EL0T      0x0
+
+static inline bool aarch64_from_user(const struct trap_frame *tf) {
+    return tf && ((tf->spsr & AARCH64_SPSR_MODE_MASK) == AARCH64_SPSR_EL0T);
+}
+
 struct trap_frame *get_current_trapframe(void) {
     return arch_get_percpu()->current_tf;
 }
@@ -41,12 +48,18 @@ struct trap_frame *get_current_trapframe(void) {
 static void handle_exception(struct trap_frame *tf) {
     uint64_t esr = tf->esr;
     uint64_t ec = (esr >> 26) & 0x3f;
-    bool from_user = (tf->spsr & (1 << 4)) == 0;
+    bool from_user = aarch64_from_user(tf);
 
     /* SVC (syscall) */
     if (ec == 0x15) {
-        tf->tf_a0 = syscall_dispatch(tf->tf_a7, tf->tf_a0, tf->tf_a1, tf->tf_a2,
-                                     tf->tf_a3, tf->tf_a4, tf->tf_a5);
+        uint64_t nr = tf->tf_a7;
+        int64_t ret = syscall_dispatch(nr, tf->tf_a0, tf->tf_a1, tf->tf_a2,
+                                       tf->tf_a3, tf->tf_a4, tf->tf_a5);
+        tf->tf_a0 = ret;
+        if (ret >= 0) {
+            if (nr == LINUX_NR_execve || nr == LINUX_NR_execveat)
+                return; /* execve set ELR to new entry; don't advance */
+        }
         tf->elr += 4;
         return;
     }
@@ -76,8 +89,13 @@ static void handle_exception(struct trap_frame *tf) {
         return;
     }
 
+    uint64_t tpidr_el1 = 0, spsel = 0;
+    __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(tpidr_el1));
+    __asm__ __volatile__("mrs %0, spsel" : "=r"(spsel));
     pr_err("AArch64 exception ec=%lu esr=%p elr=%p far=%p\n", ec,
            (void *)tf->esr, (void *)tf->elr, (void *)tf->far);
+    pr_err("  cpu=%d tpidr_el1=%016lx spsel=%lu\n",
+           arch_cpu_id(), tpidr_el1, spsel & 1);
     arch_dump_regs(NULL);
     arch_backtrace();
     panic("AArch64 exception");
@@ -146,7 +164,7 @@ static int aarch64_handle_event(const struct trap_core_event *ev) {
 }
 
 static bool aarch64_should_deliver_signals(const struct trap_core_event *ev) {
-    return (ev->tf->spsr & (1 << 4)) == 0;
+    return aarch64_from_user(ev->tf);
 }
 
 static const struct trap_core_ops aarch64_trap_ops = {
@@ -158,7 +176,7 @@ void aarch64_trap_dispatch(struct trap_frame *tf) {
     struct trap_core_event ev = {
         .type = aarch64_event_type(tf),
         .tf = tf,
-        .from_user = (tf->spsr & (1 << 4)) == 0,
+        .from_user = aarch64_from_user(tf),
         .code = tf->esr,
         .fault_addr = tf->far,
     };
