@@ -46,11 +46,18 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout) {
 
     mutex_lock(&sem->lock);
     while (sem->count == 0) {
-        if (timeout != 0 && arch_timer_get_ticks() >= deadline) {
-            mutex_unlock(&sem->lock);
-            return SYS_ARCH_TIMEOUT;
+        int rc;
+        if (deadline) {
+            rc = proc_sleep_on_mutex_timeout(&sem->wq, &sem->wq,
+                                             &sem->lock, false, deadline);
+            if (rc == -ETIMEDOUT) {
+                mutex_unlock(&sem->lock);
+                return SYS_ARCH_TIMEOUT;
+            }
+        } else {
+            rc = proc_sleep_on_mutex(&sem->wq, &sem->wq, &sem->lock, false);
         }
-        proc_sleep_on_mutex(&sem->wq, &sem->wq, &sem->lock, false);
+        (void)rc;
     }
     sem->count--;
     mutex_unlock(&sem->lock);
@@ -151,12 +158,19 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout) {
 
     mutex_lock(&mbox->lock);
     while (mbox->count == 0) {
-        if (timeout != 0 && arch_timer_get_ticks() >= deadline) {
-            mutex_unlock(&mbox->lock);
-            return SYS_ARCH_TIMEOUT;
+        int rc;
+        if (deadline) {
+            rc = proc_sleep_on_mutex_timeout(&mbox->not_empty, &mbox->not_empty,
+                                             &mbox->lock, false, deadline);
+            if (rc == -ETIMEDOUT) {
+                mutex_unlock(&mbox->lock);
+                return SYS_ARCH_TIMEOUT;
+            }
+        } else {
+            rc = proc_sleep_on_mutex(&mbox->not_empty, &mbox->not_empty,
+                                     &mbox->lock, false);
         }
-        proc_sleep_on_mutex(&mbox->not_empty, &mbox->not_empty,
-                            &mbox->lock, false);
+        (void)rc;
     }
     void *m = mbox->msgs[mbox->tail];
     mbox->tail = (mbox->tail + 1) % SYS_MBOX_SIZE;
