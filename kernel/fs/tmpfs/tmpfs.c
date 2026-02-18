@@ -403,6 +403,7 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st) {
     struct tmpfs_node *tn = vn->fs_data;
     if (!tn)
         return -EINVAL;
+    mutex_lock(&vn->lock);
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
     st->st_mode = vn->mode;
@@ -416,6 +417,7 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st) {
     st->st_atime = vn->atime;
     st->st_mtime = vn->mtime;
     st->st_ctime = vn->ctime;
+    mutex_unlock(&vn->lock);
     return 0;
 }
 
