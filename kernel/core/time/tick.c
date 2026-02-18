@@ -7,6 +7,7 @@
 #include <kairos/config.h>
 #include <kairos/pollwait.h>
 #include <kairos/printk.h>
+#include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/trap_core.h>
 #include <kairos/tick.h>
@@ -37,8 +38,12 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
     }
 
     sched_tick();
-    if (from_user && sched_need_resched()) {
-        schedule();
+    if (sched_need_resched()) {
+        if (from_user) {
+            schedule();
+        } else if (proc_current() == arch_get_percpu()->idle_proc) {
+            schedule();
+        }
     }
 }
 

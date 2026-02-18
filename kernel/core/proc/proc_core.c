@@ -16,7 +16,6 @@
 
 #include "proc_internal.h"
 
-static struct kmem_cache *proc_cache;
 struct process proc_table[CONFIG_MAX_PROCESSES];
 spinlock_t proc_table_lock = SPINLOCK_INIT;
 pid_t next_pid = 1;
@@ -34,8 +33,7 @@ void proc_init(void) {
         wait_queue_init(&proc_table[i].vfork_wait);
         spin_init(&proc_table[i].lock);
     }
-    proc_cache = kmem_cache_create("process", sizeof(struct process), NULL);
-    pr_info("Process: initialized (cache ready)\n");
+    pr_info("Process: initialized\n");
 }
 
 static void proc_set_name(struct process *p, const char *name) {
@@ -179,7 +177,6 @@ void proc_adopt_child(struct process *parent, struct process *child) {
     child->ppid = parent->pid;
     child->syscall_abi = parent->syscall_abi;
     child->umask = parent->umask;
-    child->tid_address = parent->tid_address;
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->umask = parent->umask;
     spin_lock(&proc_table_lock);

@@ -29,7 +29,11 @@ const int sched_nice_to_weight[40] = {
 };
 
 struct percpu_data cpu_data[CONFIG_MAX_CPUS];
-static int nr_cpus_online = 1;
+static int nr_cpus_online = 1; /* accessed via sched_nr_cpus() / atomic ops */
+
+static inline int sched_nr_cpus(void) {
+    return __atomic_load_n(&nr_cpus_online, __ATOMIC_ACQUIRE);
+}
 static bool sched_steal_enabled = false;
 
 static inline void sched_stat_inc(uint64_t *counter) {
@@ -113,14 +117,15 @@ void sched_trace_dump_recent(int max_events) {
     if (max_events <= 0)
         return;
 
-    int total = SCHED_TRACE_PER_CPU * nr_cpus_online;
+    int online = sched_nr_cpus();
+    int total = SCHED_TRACE_PER_CPU * online;
     if (max_events > total)
         max_events = total;
 
     /* Per-CPU cursors for merge-sort output */
     int pos[CONFIG_MAX_CPUS];
     int count[CONFIG_MAX_CPUS];
-    for (int c = 0; c < nr_cpus_online; c++) {
+    for (int c = 0; c < online; c++) {
         uint32_t head = cpu_data[c].trace_head;
         int n = (head < SCHED_TRACE_PER_CPU) ? (int)head : SCHED_TRACE_PER_CPU;
         count[c] = n;
@@ -129,14 +134,14 @@ void sched_trace_dump_recent(int max_events) {
     }
 
     pr_err("sched trace: dumping up to %d events (per-cpu, %d cpus)\n",
-           max_events, nr_cpus_online);
+           max_events, online);
 
     int emitted = 0;
     while (emitted < max_events) {
         /* Find CPU with oldest (smallest ticks) entry */
         int best = -1;
         uint64_t best_ticks = ~0ULL;
-        for (int c = 0; c < nr_cpus_online; c++) {
+        for (int c = 0; c < online; c++) {
             if (count[c] == 0)
                 continue;
             struct sched_trace_entry *ent = &cpu_data[c].trace_buf[pos[c]];
@@ -342,7 +347,7 @@ void sched_enqueue(struct process *p) {
         return;
 
     /* Find target CPU - currently simple: stay on current or preferred */
-    int cpu = (p->se.cpu >= 0 && p->se.cpu < nr_cpus_online) ? p->se.cpu : arch_cpu_id();
+    int cpu = (p->se.cpu >= 0 && p->se.cpu < sched_nr_cpus()) ? p->se.cpu : arch_cpu_id();
     struct cfs_rq *rq = &cpu_data[cpu].runqueue;
 
     bool state = arch_irq_save();
@@ -350,7 +355,7 @@ void sched_enqueue(struct process *p) {
 
     if (p->se.on_rq) {
         spin_unlock(&rq->lock);
-        se_set_state(&p->se, SE_STATE_QUEUED);
+        se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_QUEUED);
         arch_irq_restore(state);
         return;
     }
@@ -390,7 +395,7 @@ void sched_enqueue(struct process *p) {
 }
 
 void sched_dequeue(struct process *p) {
-    if (!p || !p->se.on_rq) return;
+    if (!p) return;
 
     int cpu = p->se.cpu;
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
@@ -398,6 +403,13 @@ void sched_dequeue(struct process *p) {
     struct cfs_rq *rq = &cpu_data[cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
+
+    /* Re-check under lock: steal may have changed on_rq/cpu concurrently */
+    if (!p->se.on_rq || p->se.cpu != cpu) {
+        spin_unlock(&rq->lock);
+        arch_irq_restore(state);
+        return;
+    }
 
     rb_erase(&p->se.sched_node, &rq->tasks_timeline);
     se_mark_blocked(&p->se);
@@ -417,7 +429,8 @@ void sched_dequeue(struct process *p) {
  */
 static struct process *sched_steal_task(int self_id) {
     struct sched_cpu_stats *self_stats = &cpu_data[self_id].stats;
-    for (int i = 0; i < nr_cpus_online; i++) {
+    int online = sched_nr_cpus();
+    for (int i = 0; i < online; i++) {
         if (i == self_id) continue;
         sched_stat_inc(&self_stats->steal_attempt_count);
 
@@ -518,7 +531,7 @@ void schedule(void) {
                           (uint64_t)rq->nr_running);
     } else {
         /* Local empty - attempt stealing without holding local lock to simplify */
-        bool steal_allowed = sched_steal_is_enabled() && nr_cpus_online > 1;
+        bool steal_allowed = sched_steal_is_enabled() && sched_nr_cpus() > 1;
         if (steal_allowed) {
             spin_unlock(&rq->lock);
             next = sched_steal_task(cpu->cpu_id);
@@ -552,7 +565,7 @@ void schedule(void) {
                           (uint64_t)rq->nr_running);
     }
 
-    if (next == prev && prev->state == PROC_ZOMBIE && prev != cpu->idle_proc) {
+    if (prev && next == prev && prev->state == PROC_ZOMBIE && prev != cpu->idle_proc) {
         pr_err("SCHED: CPU %d trying to re-schedule ZOMBIE PID %d. idle_proc PID %d\n",
                cpu->cpu_id, prev->pid, cpu->idle_proc ? cpu->idle_proc->pid : -1);
         panic("SCHED: Zombie Rescheduling");
@@ -629,13 +642,15 @@ void sched_tick(void) {
         spin_unlock(&rq->lock);
     }
 
-    /* Wake processes whose sleep deadline has expired */
-    uint64_t now_ticks = arch_timer_get_ticks();
-    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        struct process *p = &proc_table[i];
-        uint64_t dl = __atomic_load_n(&p->sleep_deadline, __ATOMIC_ACQUIRE);
-        if (dl != 0 && dl <= now_ticks && p->state == PROC_SLEEPING) {
-            proc_wakeup(p);
+    /* Wake processes whose sleep deadline has expired (CPU 0 only) */
+    if (arch_cpu_id() == 0) {
+        uint64_t now_ticks = arch_timer_get_ticks();
+        for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+            struct process *p = &proc_table[i];
+            uint64_t dl = __atomic_load_n(&p->sleep_deadline, __ATOMIC_ACQUIRE);
+            if (dl != 0 && dl <= now_ticks && p->state == PROC_SLEEPING) {
+                proc_wakeup(p);
+            }
         }
     }
 }
@@ -644,7 +659,9 @@ int sched_setnice(struct process *p, int nice) {
     if (!p) return -1;
     nice = (nice < NICE_MIN) ? NICE_MIN : (nice > NICE_MAX) ? NICE_MAX : nice;
 
-    struct cfs_rq *rq = &cpu_data[p->se.cpu].runqueue;
+    int cpu = p->se.cpu;
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) return -1;
+    struct cfs_rq *rq = &cpu_data[cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
     bool on_rq = p->se.on_rq;
@@ -665,7 +682,7 @@ void sched_set_idle(struct process *p) {
     cpu->idle_proc = p;
     cpu->runqueue.idle = p;
 }
-int sched_cpu_count(void) { return nr_cpus_online; }
+int sched_cpu_count(void) { return sched_nr_cpus(); }
 void sched_set_steal_enabled(bool enabled) {
     __atomic_store_n(&sched_steal_enabled, enabled, __ATOMIC_RELEASE);
 }
@@ -675,7 +692,7 @@ void sched_get_stats(struct sched_stats *out) {
         return;
     memset(out, 0, sizeof(*out));
 
-    int cpu_count = nr_cpus_online;
+    int cpu_count = sched_nr_cpus();
     if (cpu_count < 1)
         cpu_count = 1;
     if (cpu_count > CONFIG_MAX_CPUS)
@@ -699,9 +716,9 @@ void sched_get_stats(struct sched_stats *out) {
 }
 
 void sched_debug_dump_cpu(int cpu_id) {
-    if (cpu_id < 0 || cpu_id >= nr_cpus_online) {
+    if (cpu_id < 0 || cpu_id >= sched_nr_cpus()) {
         pr_warn("sched: debug dump invalid cpu=%d (online=%d)\n",
-                cpu_id, nr_cpus_online);
+                cpu_id, sched_nr_cpus());
         return;
     }
 
@@ -729,8 +746,8 @@ void sched_debug_dump_cpu(int cpu_id) {
 }
 
 void sched_cpu_online(int cpu) {
-    if (cpu >= 0 && cpu < CONFIG_MAX_CPUS && cpu >= nr_cpus_online)
-        nr_cpus_online = cpu + 1;
+    if (cpu >= 0 && cpu < CONFIG_MAX_CPUS && cpu >= sched_nr_cpus())
+        __atomic_store_n(&nr_cpus_online, cpu + 1, __ATOMIC_RELEASE);
 }
 struct percpu_data *sched_cpu_data(int cpu) {
     return (cpu < 0 || cpu >= CONFIG_MAX_CPUS) ? NULL : &cpu_data[cpu];
@@ -740,4 +757,5 @@ void sched_fork(struct process *child, struct process *parent) {
     sched_entity_init(&child->se);
     child->se.vruntime = parent->se.vruntime;
     child->se.nice = parent->se.nice;
+    child->se.cpu = parent->se.cpu;
 }

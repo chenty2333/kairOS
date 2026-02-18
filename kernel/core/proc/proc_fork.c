@@ -75,10 +75,13 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
 
     /* File descriptor table: share or copy */
     if (clone_flags & CLONE_FILES) {
+        fdtable_put(child->fdtable);  /* release proc_alloc's fdtable */
         fdtable_get(parent->fdtable);
         child->fdtable = parent->fdtable;
     } else {
+        struct fdtable *old_fdt = child->fdtable;
         child->fdtable = fdtable_copy(parent->fdtable);
+        fdtable_put(old_fdt);  /* release proc_alloc's fdtable */
         if (!child->fdtable) {
             proc_free(child);
             return NULL;
@@ -87,10 +90,13 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
 
     /* Signal handlers: share or copy */
     if (clone_flags & CLONE_SIGHAND) {
+        sighand_put(child->sighand);  /* release signal_init_process's sighand */
         sighand_get(parent->sighand);
         child->sighand = parent->sighand;
     } else if (parent->sighand) {
+        struct sighand_struct *old_sh = child->sighand;
         child->sighand = sighand_copy(parent->sighand);
+        sighand_put(old_sh);  /* release signal_init_process's sighand */
         if (!child->sighand) {
             proc_free(child);
             return NULL;
