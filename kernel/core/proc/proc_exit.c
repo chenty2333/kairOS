@@ -95,11 +95,10 @@ noreturn void proc_exit(int status) {
         proc_reparent_children(p);
     }
 
-    /* Set ZOMBIE before dequeue: closes the window where a concurrent
-     * wakeup could re-enqueue a BLOCKED task between dequeue and state set. */
+    /* Set ZOMBIE: the running task is not on any runqueue, so no dequeue
+     * is needed.  schedule() -> put_prev_task will handle the transition. */
     p->exit_code = (code << 8);
     proc_set_state_release(p, PROC_ZOMBIE);
-    sched_dequeue(p);
 
     if (p->parent) {
         wait_queue_wakeup_all(&p->parent->exit_wait);

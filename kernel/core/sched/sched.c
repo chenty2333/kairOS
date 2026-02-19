@@ -263,6 +263,8 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq) {
     if (v > cfs_rq->min_vruntime) cfs_rq->min_vruntime = v;
 }
 
+static void se_propagate_min_deadline(struct rb_node *node);
+
 /* Insert entity into RB-tree ordered by vruntime */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se) {
     struct rb_node **link = &cfs_rq->tasks_timeline.rb_node, *parent = NULL;
@@ -275,6 +277,8 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se) {
     }
     rb_link_node(&se->sched_node, parent, link);
     rb_insert_color(&se->sched_node, &cfs_rq->tasks_timeline);
+    se->min_deadline = se->deadline;
+    se_propagate_min_deadline(&se->sched_node);
 }
 
 static uint64_t update_curr(struct cfs_rq *cfs_rq) {
@@ -306,41 +310,98 @@ static inline bool deadline_before(struct sched_entity *a, struct sched_entity *
     return (int64_t)(a->deadline - b->deadline) < 0;
 }
 
-/*
- * pick_eevdf - EEVDF core pick algorithm (O(log n) approximation)
- *
- * Among eligible entities (vruntime <= V), pick the one with the
- * earliest (smallest) deadline.  The RB-tree is sorted by vruntime,
- * so eligible entities cluster on the left side.  We walk the tree
- * pruning ineligible subtrees.
- *
- * NOTE: This left-biased traversal is an approximation — it may miss
- * eligible nodes in right subtrees.  A strict O(log n) optimal pick
- * requires an augmented RB-tree tracking subtree-min-deadline.
- */
-static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq) {
-    struct rb_node *node = cfs_rq->tasks_timeline.rb_node;
-    struct sched_entity *best = NULL;
+/* Augmented RB-tree: subtree-min-deadline propagation */
 
+/* Recompute min_deadline from self + children; return true if changed */
+static inline bool se_update_min_deadline(struct sched_entity *se) {
+    uint64_t min_dl = se->deadline;
+    struct rb_node *left = se->sched_node.rb_left;
+    struct rb_node *right = se->sched_node.rb_right;
+    if (left) {
+        struct sched_entity *l = rb_entry(left, struct sched_entity, sched_node);
+        if (l->min_deadline < min_dl)
+            min_dl = l->min_deadline;
+    }
+    if (right) {
+        struct sched_entity *r = rb_entry(right, struct sched_entity, sched_node);
+        if (r->min_deadline < min_dl)
+            min_dl = r->min_deadline;
+    }
+    if (se->min_deadline == min_dl)
+        return false;
+    se->min_deadline = min_dl;
+    return true;
+}
+
+/* Propagate min_deadline up to root; stops early if unchanged */
+static void se_propagate_min_deadline(struct rb_node *node) {
     while (node) {
         struct sched_entity *se = rb_entry(node, struct sched_entity, sched_node);
+        if (!se_update_min_deadline(se))
+            break;
+        node = rb_parent(node);
+    }
+}
+
+/* rb_erase + min_deadline propagation */
+static void sched_rb_erase(struct sched_entity *se, struct cfs_rq *cfs_rq) {
+    struct rb_node *parent = rb_parent(&se->sched_node);
+    rb_erase(&se->sched_node, &cfs_rq->tasks_timeline);
+    if (parent)
+        se_propagate_min_deadline(parent);
+    else if (cfs_rq->tasks_timeline.rb_node)
+        se_propagate_min_deadline(cfs_rq->tasks_timeline.rb_node);
+}
+
+/*
+ * pick_eevdf — O(log n) exact pick via augmented min_deadline.
+ * Recurses into right subtree only when both sides are worth exploring.
+ */
+static inline bool deadline_before_val(uint64_t a, uint64_t b) {
+    return (int64_t)(a - b) < 0;
+}
+
+static inline bool subtree_has_better(struct rb_node *node,
+                                       struct sched_entity *best) {
+    if (!node) return false;
+    if (!best) return true;
+    struct sched_entity *se = rb_entry(node, struct sched_entity, sched_node);
+    return deadline_before_val(se->min_deadline, best->deadline);
+}
+
+static struct sched_entity *__pick_eevdf(struct cfs_rq *cfs_rq,
+                                          struct rb_node *node,
+                                          struct sched_entity *best) {
+    while (node) {
+        struct sched_entity *se = rb_entry(node, struct sched_entity, sched_node);
+
+        if (best && !deadline_before_val(se->min_deadline, best->deadline))
+            break;
 
         if (entity_eligible(cfs_rq, se)) {
             if (!best || deadline_before(se, best))
                 best = se;
-            /* Left subtree has smaller vruntime, more likely eligible */
-            node = node->rb_left;
+
+            if (subtree_has_better(node->rb_left, best)) {
+                if (subtree_has_better(node->rb_right, best))
+                    best = __pick_eevdf(cfs_rq, node->rb_right, best);
+                node = node->rb_left;
+            } else {
+                node = node->rb_right;
+            }
         } else {
-            /* Not eligible; only right subtree might have eligible nodes
-             * (but actually left has smaller vruntime — we go left to
-             * find eligible ones). Since this node is ineligible
-             * (vruntime > V), all nodes in right subtree are also
-             * ineligible. Go left. */
+            /* Ineligible: right has larger vruntime, go left */
             node = node->rb_left;
         }
     }
+    return best;
+}
 
-    /* If no eligible entity found, fall back to leftmost (smallest vruntime) */
+static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq) {
+    struct sched_entity *best =
+        __pick_eevdf(cfs_rq, cfs_rq->tasks_timeline.rb_node, NULL);
+
+    /* Fallback to leftmost if nothing eligible */
     if (!best) {
         struct rb_node *left = rb_first(&cfs_rq->tasks_timeline);
         if (left)
@@ -424,6 +485,9 @@ void sched_enqueue(struct process *p) {
         return;
     if (!se_try_transition(&p->se, SE_STATE_BLOCKED, SE_STATE_RUNNABLE))
         return;
+
+    /* Unify p->state with se.run_state — callers no longer need to set this */
+    p->state = PROC_RUNNABLE;
 
     /* Assign sched_class if not yet set */
     if (!p->se.sched_class)
@@ -839,7 +903,7 @@ static void fair_dequeue_task(struct rq *rq, struct process *p,
     struct cfs_rq *cfs = &rq->cfs;
     /* Save lag for wakeup restoration */
     p->se.vlag = (int64_t)(cfs->min_vruntime - p->se.vruntime);
-    rb_erase(&p->se.sched_node, &cfs->tasks_timeline);
+    sched_rb_erase(&p->se, cfs);
     cfs->nr_running--;
     update_min_vruntime(cfs);
 }
@@ -852,7 +916,7 @@ static struct process *fair_pick_next_task(struct rq *rq,
     if (!se)
         return NULL;
     struct process *next = container_of(se, struct process, se);
-    rb_erase(&se->sched_node, &cfs->tasks_timeline);
+    sched_rb_erase(se, cfs);
     se_mark_runnable(se);
     cfs->nr_running--;
     rq->nr_running--;
@@ -886,7 +950,7 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
      */
     prev->se.vlag = (int64_t)(cfs->min_vruntime - prev->se.vruntime);
     if (se_is_on_rq(&prev->se)) {
-        rb_erase(&prev->se.sched_node, &cfs->tasks_timeline);
+        sched_rb_erase(&prev->se, cfs);
         cfs->nr_running--;
         rq->nr_running--;
     }
@@ -933,7 +997,7 @@ static void fair_task_fork(struct process *child, struct process *parent) {
 static int fair_set_nice(struct rq *rq, struct process *p, int nice) {
     struct cfs_rq *cfs = &rq->cfs;
     bool on_rq = se_is_on_rq(&p->se);
-    if (on_rq) rb_erase(&p->se.sched_node, &cfs->tasks_timeline);
+    if (on_rq) sched_rb_erase(&p->se, cfs);
     p->se.nice = nice;
     /* Recalculate deadline with new weight */
     uint64_t vslice = calc_vslice(&p->se);
@@ -987,7 +1051,7 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
     if (!best_se)
         return NULL;
 
-    rb_erase(&best_se->sched_node, &cfs->tasks_timeline);
+    sched_rb_erase(best_se, cfs);
     /* Save lag relative to source CPU for destination placement */
     best_se->vlag = (int64_t)(cfs->min_vruntime - best_se->vruntime);
     se_mark_runnable(best_se);

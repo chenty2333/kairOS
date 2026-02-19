@@ -538,7 +538,6 @@ struct process *proc_create(const char *name, const void *elf, size_t size) {
 
     arch_context_init(p->context, entry, sp, false);
     proc_setup_stdio(p);
-    p->state = PROC_RUNNABLE;
 
     pr_info("proc_create: created '%s' (pid %d) entry=%p sp=%p\n", p->name,
             p->pid, (void *)entry, (void *)sp);

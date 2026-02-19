@@ -100,7 +100,6 @@ static struct process *create_user_process(const char *name, const uint8_t *code
 
     arch_context_init(p->context, USER_CODE_ADDR, USER_STACK_TOP - 16, false);
     proc_setup_stdio(p);
-    p->state = PROC_RUNNABLE;
     return p;
 
 fail:
