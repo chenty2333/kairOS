@@ -93,7 +93,7 @@ void sched_trace_event(enum sched_trace_event_type type,
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
         cpu = 0;
     struct percpu_data *cd = &cpu_data[cpu];
-    uint32_t seq = ++cd->trace_head;
+    uint32_t seq = __atomic_fetch_add(&cd->trace_head, 1, __ATOMIC_RELAXED) + 1;
     uint32_t idx = (seq - 1) & SCHED_TRACE_PER_CPU_MASK;
     struct sched_trace_entry *ent = &cd->trace_buf[idx];
 
@@ -105,8 +105,6 @@ void sched_trace_event(enum sched_trace_event_type type,
     ent->se_cpu = p ? p->se.cpu : -1;
     ent->se_state =
         p ? __atomic_load_n(&p->se.run_state, __ATOMIC_ACQUIRE) : 0;
-    ent->on_rq = p ? (uint8_t)(p->se.on_rq ? 1 : 0) : 0;
-    ent->on_cpu = p ? (uint8_t)(__atomic_load_n(&p->se.on_cpu, __ATOMIC_ACQUIRE) ? 1 : 0) : 0;
     ent->arg0 = arg0;
     ent->arg1 = arg1;
     ent->seq = seq;
@@ -153,12 +151,12 @@ void sched_trace_dump_recent(int max_events) {
             break;
 
         struct sched_trace_entry *ent = &cpu_data[best].trace_buf[pos[best]];
-        pr_err("  t=%llu cpu=%u ev=%s pid=%d p=%s se=%s se_cpu=%d rq=%u oncpu=%u a0=%p a1=%p\n",
+        pr_err("  t=%llu cpu=%u ev=%s pid=%d p=%s se=%s se_cpu=%d a0=%p a1=%p\n",
                (unsigned long long)ent->ticks, ent->cpu,
                sched_trace_event_name(ent->type), ent->pid,
                sched_proc_state_name(ent->proc_state),
-               sched_se_state_name(ent->se_state), ent->se_cpu, ent->on_rq,
-               ent->on_cpu, (void *)ent->arg0, (void *)ent->arg1);
+               sched_se_state_name(ent->se_state), ent->se_cpu,
+               (void *)ent->arg0, (void *)ent->arg1);
 
         pos[best] = (pos[best] + 1) & SCHED_TRACE_PER_CPU_MASK;
         count[best]--;
@@ -194,60 +192,29 @@ static inline void se_set_state(struct sched_entity *se, uint32_t state) {
 
 static inline void se_mark_queued(struct sched_entity *se, int cpu_id) {
     se->cpu = cpu_id;
-    se->on_rq = true;
     se_set_state(se, SE_STATE_QUEUED);
 }
 
 static inline void se_mark_running(struct sched_entity *se) {
-    se->on_rq = false;
-    __atomic_store_n(&se->on_cpu, true, __ATOMIC_RELEASE);
     se_set_state(se, SE_STATE_RUNNING);
 }
 
 static inline void se_mark_runnable(struct sched_entity *se) {
-    se->on_rq = false;
     se_set_state(se, SE_STATE_RUNNABLE);
 }
 
 static inline void se_mark_blocked(struct sched_entity *se) {
-    se->on_rq = false;
     se_set_state(se, SE_STATE_BLOCKED);
-}
-
-static inline void se_clear_on_rq(struct sched_entity *se) {
-    se->on_rq = false;
 }
 
 #if CONFIG_DEBUG
 static void sched_validate_entity(struct process *p, const char *where) {
     struct sched_entity *se = &p->se;
     uint32_t state = se_state_load(se);
-
-    if (se->on_rq && state != SE_STATE_QUEUED) {
-        int cpu = sched_violation_cpu(p);
-        sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
-        panic("sched: invalid on_rq state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
-              where, p->pid, state, se->on_rq, se->on_cpu);
-    }
-    if (state == SE_STATE_QUEUED && !se->on_rq) {
-        int cpu = sched_violation_cpu(p);
-        sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
-        panic("sched: invalid queued state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
-              where, p->pid, state, se->on_rq, se->on_cpu);
-    }
-    if (state == SE_STATE_RUNNING && !__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE)) {
-        int cpu = sched_violation_cpu(p);
-        sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
-        panic("sched: invalid running state at %s pid=%d state=%u on_rq=%d on_cpu=%d",
-              where, p->pid, state, se->on_rq, se->on_cpu);
-    }
-    if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE) &&
-        state != SE_STATE_RUNNING) {
-        int cpu = sched_violation_cpu(p);
-        sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
-        panic("sched: on_cpu but not RUNNING at %s pid=%d state=%u on_rq=%d on_cpu=%d",
-              where, p->pid, state, se->on_rq, se->on_cpu);
-    }
+    (void)state;
+    (void)where;
+    /* With on_rq/on_cpu derived from run_state, the old cross-checks are
+     * tautological.  Keep the hook for future invariant checks. */
 }
 #else
 static inline void sched_validate_entity(struct process *p
@@ -331,7 +298,11 @@ void sched_post_switch_cleanup(void) {
     struct percpu_data *cpu = arch_get_percpu();
     if (cpu->prev_task) {
         struct process *prev = cpu->prev_task;
-        __atomic_store_n(&prev->se.on_cpu, false, __ATOMIC_RELEASE);
+        /* prev was RUNNING; now it has finished its context switch.
+         * If it went to sleep/exit, schedule() already set BLOCKED.
+         * If it was re-enqueued, schedule() already set QUEUED.
+         * Nothing to do here for state — the authoritative run_state
+         * was already updated before the context switch. */
         cpu->prev_task = NULL;
         /* Zombie finished context switch — notify waiting parent */
         if (prev->state == PROC_ZOMBIE && prev->parent) {
@@ -353,7 +324,7 @@ void sched_enqueue(struct process *p) {
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
 
-    if (p->se.on_rq) {
+    if (se_is_on_rq(&p->se)) {
         spin_unlock(&rq->lock);
         if (!se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_QUEUED))
             se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_BLOCKED);
@@ -365,7 +336,6 @@ void sched_enqueue(struct process *p) {
     int prev_cpu = p->se.cpu;
     __enqueue_entity(rq, &p->se);
     se_mark_queued(&p->se, cpu);
-    __atomic_store_n(&p->se.on_cpu, false, __ATOMIC_RELEASE);
     rq->nr_running++;
     update_min_vruntime(rq);
     sched_stat_inc(&cpu_data[cpu].stats.enqueue_count);
@@ -405,8 +375,8 @@ void sched_dequeue(struct process *p) {
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
 
-    /* Re-check under lock: steal can change on_rq/cpu concurrently */
-    if (!p->se.on_rq || p->se.cpu != cpu) {
+    /* Re-check under lock: steal can change state/cpu concurrently */
+    if (!se_is_on_rq(&p->se) || p->se.cpu != cpu) {
         spin_unlock(&rq->lock);
         arch_irq_restore(state);
         return;
@@ -453,7 +423,7 @@ static struct process *sched_steal_task(int self_id) {
                     continue;
                 if (se_state_load(se) != SE_STATE_QUEUED)
                     continue;
-                if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE))
+                if (se_is_on_cpu(se))
                     continue;
 
                 rb_erase(&se->sched_node, &remote_rq->tasks_timeline);
@@ -509,9 +479,8 @@ void schedule(void) {
             rq->nr_running++;
             sched_stat_inc(&stats->enqueue_count);
         } else {
-            if (prev->se.on_rq) {
+            if (se_is_on_rq(&prev->se)) {
                 rb_erase(&prev->se.sched_node, &rq->tasks_timeline);
-                se_clear_on_rq(&prev->se);
                 rq->nr_running--;
                 sched_stat_inc(&stats->dequeue_count);
             }
@@ -525,7 +494,7 @@ void schedule(void) {
         struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
         next = container_of(se, struct process, se);
         rb_erase(&se->sched_node, &rq->tasks_timeline);
-        se_clear_on_rq(se);             /* removed from rq */
+        se_mark_runnable(se);           /* removed from rq */
         rq->nr_running--;
         sched_stat_inc(&stats->pick_count);
         sched_trace_event(SCHED_TRACE_PICK, next, (uint64_t)cpu->cpu_id,
@@ -548,7 +517,7 @@ void schedule(void) {
                 struct sched_entity *se = rb_entry(recheck, struct sched_entity, sched_node);
                 next = container_of(se, struct process, se);
                 rb_erase(&se->sched_node, &rq->tasks_timeline);
-                se_clear_on_rq(se);             /* removed from rq */
+                se_mark_runnable(se);           /* removed from rq */
                 rq->nr_running--;
                 sched_stat_inc(&stats->pick_count);
                 sched_trace_event(SCHED_TRACE_PICK, next,
@@ -659,7 +628,7 @@ int sched_setnice(struct process *p, int nice) {
         arch_irq_restore(state);
         return -EAGAIN;
     }
-    bool on_rq = p->se.on_rq;
+    bool on_rq = se_is_on_rq(&p->se);
     if (on_rq) rb_erase(&p->se.sched_node, &rq->tasks_timeline);
     p->se.nice = nice;
     if (on_rq) __enqueue_entity(rq, &p->se);
@@ -721,10 +690,8 @@ void sched_debug_dump_cpu(int cpu_id) {
     sched_get_stats(&snapshot);
     struct percpu_data *cpu = &cpu_data[cpu_id];
     struct sched_cpu_stats *stats = &snapshot.cpu[cpu_id];
-    uint32_t nr_running =
-        __atomic_load_n(&cpu->runqueue.nr_running, __ATOMIC_RELAXED);
-    uint64_t min_vruntime =
-        __atomic_load_n(&cpu->runqueue.min_vruntime, __ATOMIC_RELAXED);
+    uint32_t nr_running = sched_rq_nr_running(cpu_id);
+    uint64_t min_vruntime = sched_rq_min_vruntime(cpu_id);
 
     pr_info("sched: cpu%d rq(nr_running=%u min_vruntime=%llu) ticks=%llu resched=%d\n",
             cpu_id, nr_running, (unsigned long long)min_vruntime,
@@ -746,6 +713,41 @@ void sched_cpu_online(int cpu) {
 }
 struct percpu_data *sched_cpu_data(int cpu) {
     return (cpu < 0 || cpu >= CONFIG_MAX_CPUS) ? NULL : &cpu_data[cpu];
+}
+
+/* --- Public accessor API --- */
+
+bool sched_is_on_cpu(const struct process *p) {
+    return p ? se_is_on_cpu(&p->se) : false;
+}
+
+int sched_entity_cpu(const struct process *p) {
+    return p ? p->se.cpu : -1;
+}
+
+void sched_init_idle_entity(struct process *p, int cpu) {
+    if (!p) return;
+    p->se.nice = 19;
+    p->se.cpu = cpu;
+    se_set_state(&p->se, SE_STATE_RUNNING);
+}
+
+uint32_t sched_rq_nr_running(int cpu) {
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) return 0;
+    return __atomic_load_n(&cpu_data[cpu].runqueue.nr_running, __ATOMIC_RELAXED);
+}
+
+uint64_t sched_rq_min_vruntime(int cpu) {
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) return 0;
+    return __atomic_load_n(&cpu_data[cpu].runqueue.min_vruntime, __ATOMIC_RELAXED);
+}
+
+void sched_debug_dump_process(const struct process *p) {
+    if (!p) return;
+    uint32_t st = __atomic_load_n(&p->se.run_state, __ATOMIC_ACQUIRE);
+    pr_err("  sched: pid=%d se_state=%s cpu=%d vruntime=%llu nice=%d\n",
+           p->pid, sched_se_state_name(st), p->se.cpu,
+           (unsigned long long)p->se.vruntime, p->se.nice);
 }
 
 void sched_fork(struct process *child, struct process *parent) {
