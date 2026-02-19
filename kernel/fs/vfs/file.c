@@ -89,8 +89,13 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
             dentry_put(resolved.dentry);
             return -ELOOP;
         }
-        vnode_get(vn);
     }
+
+    /*
+     * Files keep their own vnode reference independent of dentry lifetime.
+     * This must be done for both existing and newly created paths.
+     */
+    vnode_get(vn);
 
     struct file *file = vfs_file_alloc();
     if (!file) {
@@ -111,6 +116,17 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
         rwlock_write_lock(&vn->lock);
         vn->ops->truncate(vn, 0);
         rwlock_write_unlock(&vn->lock);
+    }
+    if (vn->ops && vn->ops->open_file) {
+        ret = vn->ops->open_file(file);
+        if (ret < 0) {
+            dentry_put(file->dentry);
+            file->dentry = NULL;
+            vnode_put(vn);
+            vfs_file_free(file);
+            dentry_put(resolved.dentry);
+            return ret;
+        }
     }
     *fp = file;
     dentry_put(resolved.dentry);
@@ -154,6 +170,8 @@ int vfs_close(struct file *file) {
         panic("vfs_close: refcount already zero on file '%s'", file->path);
     if (old > 1)
         return 0;
+    if (file->vnode && file->vnode->ops && file->vnode->ops->close_file)
+        file->vnode->ops->close_file(file);
     if (file->vnode && file->vnode->type == VNODE_PIPE) {
         pipe_close_end(file->vnode, file->flags);
     }
@@ -178,6 +196,14 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     if (file->vnode->type == VNODE_PIPE) {
         return pipe_read_file(file, buf, len);
     }
+    if (file->vnode->ops->read_file) {
+        mutex_lock(&file->lock);
+        ssize_t ret = file->vnode->ops->read_file(file, buf, len);
+        if (ret > 0)
+            file->offset += ret;
+        mutex_unlock(&file->lock);
+        return ret;
+    }
     if (!file->vnode->ops->read)
         return -EINVAL;
     rwlock_read_lock(&file->vnode->lock);
@@ -198,6 +224,16 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     if (file->vnode->type == VNODE_PIPE) {
         return pipe_write_file(file, buf, len);
     }
+    if (file->vnode->ops->write_file) {
+        mutex_lock(&file->lock);
+        if (file->flags & O_APPEND)
+            file->offset = file->vnode->size;
+        ssize_t ret = file->vnode->ops->write_file(file, buf, len);
+        if (ret > 0)
+            file->offset += ret;
+        mutex_unlock(&file->lock);
+        return ret;
+    }
     if (!file->vnode->ops->write)
         return -EINVAL;
     rwlock_write_lock(&file->vnode->lock);
@@ -213,7 +249,11 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
 }
 
 int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
-    if (!file || !file->vnode || !file->vnode->ops || !file->vnode->ops->ioctl)
+    if (!file || !file->vnode || !file->vnode->ops)
+        return -ENOTTY;
+    if (file->vnode->ops->ioctl_file)
+        return file->vnode->ops->ioctl_file(file, cmd, arg);
+    if (!file->vnode->ops->ioctl)
         return -ENOTTY;
     return file->vnode->ops->ioctl(file->vnode, cmd, arg);
 }
