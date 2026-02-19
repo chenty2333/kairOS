@@ -18,7 +18,6 @@
 
 struct process proc_table[CONFIG_MAX_PROCESSES];
 spinlock_t proc_table_lock = SPINLOCK_INIT;
-bool proc_table_irq_flags;
 pid_t next_pid = 1;
 struct process *reaper_proc = NULL;
 
@@ -82,7 +81,8 @@ void proc_setup_stdio(struct process *p) {
 
 struct process *proc_alloc(void) {
     struct process *p = NULL;
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
             p = &proc_table[i];
@@ -91,7 +91,7 @@ struct process *proc_alloc(void) {
             break;
         }
     }
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
 
     if (!p) {
         return NULL;
@@ -181,9 +181,10 @@ void proc_adopt_child(struct process *parent, struct process *child) {
     child->syscall_abi = parent->syscall_abi;
     child->umask = parent->umask;
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
     list_add(&child->sibling, &parent->children);
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
     child->cwd_vnode = parent->cwd_vnode;
     if (child->cwd_vnode)
@@ -237,12 +238,13 @@ void proc_free(struct process *p) {
         vfs_mount_ns_put(p->mnt_ns);
         p->mnt_ns = NULL;
     }
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
     if (!list_empty(&p->sibling)) {
         list_del(&p->sibling);
     }
     INIT_LIST_HEAD(&p->sibling);
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
     proc_free_internal(p);
 }
 
@@ -257,21 +259,23 @@ void proc_set_current(struct process *p) {
 struct process *proc_find(pid_t pid) {
     if (pid <= 0)
         return NULL;
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].pid == pid && proc_table[i].state != PROC_UNUSED) {
-            spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+            spin_unlock_irqrestore(&proc_table_lock, flags);
             return &proc_table[i];
         }
     }
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
     return NULL;
 }
 
 pid_t proc_get_nth_pid(int n) {
     int count = 0;
     pid_t pid = -1;
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].state != PROC_UNUSED) {
             if (count == n) {
@@ -281,7 +285,7 @@ pid_t proc_get_nth_pid(int n) {
             count++;
         }
     }
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
     return pid;
 }
 

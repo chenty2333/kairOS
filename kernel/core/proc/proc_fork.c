@@ -51,9 +51,10 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
         }
     }
 
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
     list_add(&child->sibling, &parent->children);
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
 
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
     child->cwd_vnode = parent->cwd_vnode;
@@ -107,9 +108,10 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     if (clone_flags & CLONE_THREAD) {
         child->tgid = parent->tgid;
         child->group_leader = parent->group_leader;
-        spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+        bool tflags;
+        spin_lock_irqsave(&proc_table_lock, &tflags);
         list_add_tail(&child->thread_group, &parent->group_leader->thread_group);
-        spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+        spin_unlock_irqrestore(&proc_table_lock, tflags);
     }
 
     /* Address space: share or clone */
