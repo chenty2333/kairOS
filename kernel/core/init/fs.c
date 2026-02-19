@@ -15,10 +15,13 @@
 #include <kairos/tmpfs.h>
 #include <kairos/sysfs.h>
 
+extern int dev_tty_init(void);
+
 void init_fs(void) {
     binit();
     vfs_init();
     devfs_init();
+    dev_tty_init();  /* register /dev/tty (queued until devfs mounts) */
     procfs_init();
     tmpfs_init();
     sysfs_init();

@@ -669,6 +669,7 @@ int64_t sys_setsid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
         return -EINVAL;
     p->sid = p->pid;
     p->pgid = p->pid;
+    p->ctty = NULL;  /* new session detaches controlling terminal */
     return (int64_t)p->sid;
 }
 
