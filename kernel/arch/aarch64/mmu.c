@@ -28,8 +28,8 @@
 #define AARCH64_PTE_SH_OUTER  (2ULL << 8)
 #define AARCH64_PTE_ATTRIDX(n) ((uint64_t)(n) << 2)
 #define AARCH64_PTE_AP_RW_EL1 (0ULL << 6)
-#define AARCH64_PTE_AP_RO_EL1 (1ULL << 6)
-#define AARCH64_PTE_AP_RW_EL0 (2ULL << 6)
+#define AARCH64_PTE_AP_RW_EL0 (1ULL << 6)
+#define AARCH64_PTE_AP_RO_EL1 (2ULL << 6)
 #define AARCH64_PTE_AP_RO_EL0 (3ULL << 6)
 #define AARCH64_PTE_UXN       (1ULL << 54)
 #define AARCH64_PTE_PXN       (1ULL << 53)
@@ -387,8 +387,17 @@ paddr_t virt_to_phys(void *addr) {
     return (paddr_t)addr;
 }
 
-void *ioremap(paddr_t phys, size_t size __attribute__((unused))) {
-    return phys_to_virt(phys);
+void *ioremap(paddr_t phys, size_t size) {
+    paddr_t base = ALIGN_DOWN(phys, PAGE_SIZE);
+    size_t offset = phys - base;
+    size_t map_size = ALIGN_UP(offset + size, PAGE_SIZE);
+    vaddr_t va = (vaddr_t)phys_to_virt(base);
+
+    mmu_map_region(arch_mmu_get_kernel_pgdir(), va, base, map_size,
+                   PTE_READ | PTE_WRITE | PTE_DEVICE);
+    arch_mmu_flush_tlb();
+
+    return (void *)(va + offset);
 }
 
 void iounmap(void *virt __attribute__((unused))) {}

@@ -354,8 +354,17 @@ paddr_t virt_to_phys(void *addr) {
     return (paddr_t)addr;
 }
 
-void *ioremap(paddr_t phys, size_t size __attribute__((unused))) {
-    return (void *)phys;
+void *ioremap(paddr_t phys, size_t size) {
+    paddr_t base = ALIGN_DOWN(phys, PAGE_SIZE);
+    size_t offset = phys - base;
+    size_t map_size = ALIGN_UP(offset + size, PAGE_SIZE);
+    vaddr_t va = (vaddr_t)phys_to_virt(base);
+
+    mmu_map_region(arch_mmu_get_kernel_pgdir(), va, base, map_size,
+                   PTE_READ | PTE_WRITE | PTE_DEVICE);
+    arch_mmu_flush_tlb();
+
+    return (void *)(va + offset);
 }
 
 void iounmap(void *virt __attribute__((unused))) {}
