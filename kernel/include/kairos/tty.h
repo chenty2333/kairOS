@@ -82,7 +82,7 @@ struct tty_struct {
     pid_t               fg_pgrp;
 
     struct ringbuf      input_rb;
-    uint8_t             input_buf[TTY_INPUT_BUF_SIZE];
+    char                input_buf[TTY_INPUT_BUF_SIZE];
     uint8_t             canon_buf[TTY_CANON_BUF_SIZE];
     uint32_t            canon_len;
     bool                eof_pending;
