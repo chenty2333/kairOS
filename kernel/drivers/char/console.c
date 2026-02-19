@@ -5,18 +5,16 @@
 #include <kairos/arch.h>
 #include <kairos/console.h>
 #include <kairos/poll.h>
+#include <kairos/process.h>
 #include <kairos/tty.h>
 #include <kairos/tty_driver.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
-static bool console_initialized;
-
 void console_attach_vnode(struct vnode *vn) {
     struct tty_struct *tty = console_tty_get();
     if (tty)
         tty->vnode = vn;
-    console_initialized = true;
 }
 
 static int console_try_fill_batch(void) {
@@ -38,8 +36,6 @@ static int console_try_fill_batch(void) {
 }
 
 void console_poll_input(void) {
-    if (!console_initialized)
-        return;
     while (console_try_fill_batch() > 0)
         ;
 }
@@ -52,8 +48,20 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
         return -EINVAL;
     if (len == 0)
         return 0;
-    console_try_fill_batch();
-    return tty_read(tty, (uint8_t *)buf, len, flags);
+
+    /* Pull UART input from read path too, not only timer IRQ path. */
+    uint32_t read_flags = flags | O_NONBLOCK;
+    for (;;) {
+        console_try_fill_batch();
+        ssize_t ret = tty_read(tty, (uint8_t *)buf, len, read_flags);
+        if (ret != -EAGAIN)
+            return ret;
+        if (flags & O_NONBLOCK)
+            return -EAGAIN;
+        if (!proc_current())
+            return -EAGAIN;
+        proc_yield();
+    }
 }
 
 ssize_t console_write(struct vnode *vn, const void *buf, size_t len,

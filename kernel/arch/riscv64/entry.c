@@ -56,13 +56,19 @@ int arch_early_getchar(void) {
 }
 
 int arch_early_getchar_nb(void) {
-    /* Trap/timer context must not risk blocking SBI console calls. */
-    if (!arch_irq_enabled())
-        return uart_getchar_nb();
+    /*
+     * Prefer direct UART MMIO first. Some firmware/boot flows may leave the
+     * SBI console path as the only working RX backend from S-mode, so fall
+     * back to SBI non-blocking getchar when MMIO reports no data.
+     */
+    int ch = uart_getchar_nb();
+    if (ch >= 0)
+        return ch;
+
     long ret = sbi_legacy_call(SBI_CONSOLE_GETCHAR, 0);
-    if (ret < 0)
-        return uart_getchar_nb();
-    return (int)ret;
+    if (ret >= 0)
+        return (int)ret;
+    return -1;
 }
 
 void arch_cpu_halt(void) {
