@@ -262,7 +262,9 @@ struct process *proc_find(pid_t pid) {
     bool flags;
     spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        if (proc_table[i].pid == pid && proc_table[i].state != PROC_UNUSED) {
+        if (proc_table[i].pid == pid &&
+            proc_table[i].state != PROC_UNUSED &&
+            proc_table[i].state != PROC_EMBRYO) {
             spin_unlock_irqrestore(&proc_table_lock, flags);
             return &proc_table[i];
         }
@@ -277,7 +279,8 @@ pid_t proc_get_nth_pid(int n) {
     bool flags;
     spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        if (proc_table[i].state != PROC_UNUSED) {
+        if (proc_table[i].state != PROC_UNUSED &&
+            proc_table[i].state != PROC_EMBRYO) {
             if (count == n) {
                 pid = proc_table[i].pid;
                 break;
