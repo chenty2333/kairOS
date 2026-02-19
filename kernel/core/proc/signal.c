@@ -62,13 +62,12 @@ void signal_init_process(struct process *p) {
     }
 }
 
-int signal_send(pid_t pid, int sig) {
-    if (sig <= 0 || sig > NSIG) return -EINVAL;
-    struct process *p = proc_find(pid);
-    if (!p) return -ESRCH;
-
+/*
+ * Core signal delivery to a known process pointer.
+ * Sets the pending bit and wakes the process if sleeping.
+ */
+static void signal_send_to(struct process *p, int sig) {
     __atomic_fetch_or(&p->sig_pending, (1ULL << (sig - 1)), __ATOMIC_RELEASE);
-    /* Use process lock to synchronize with proc_sleep_on's state transition */
     proc_lock(p);
     if (p->state == PROC_SLEEPING) {
         proc_unlock(p);
@@ -76,21 +75,54 @@ int signal_send(pid_t pid, int sig) {
     } else {
         proc_unlock(p);
     }
+}
+
+int signal_send(pid_t pid, int sig) {
+    if (sig <= 0 || sig > NSIG) return -EINVAL;
+    struct process *p = proc_find(pid);
+    if (!p) return -ESRCH;
+    signal_send_to(p, sig);
     return 0;
 }
 
 int signal_send_pgrp(pid_t pgrp, int sig) {
     if (sig <= 0 || sig > NSIG) return -EINVAL;
     if (pgrp <= 0) return -ESRCH;
-    int sent = 0;
+
+    uint64_t mask = 1ULL << (sig - 1);
+    int count = 0;
+
+    /*
+     * Pass 1: under proc_table_lock, atomically set the pending bit on
+     * every matching process.  This is safe inside the lock — the atomic
+     * OR touches only sig_pending, no sleeping or further locking needed.
+     *
+     * Pass 2: after releasing the lock, wake any sleeping targets.
+     * We re-scan proc_table without the lock; a process that was freed
+     * between the two passes will have state == PROC_UNUSED and be
+     * skipped by proc_wakeup (checks PROC_SLEEPING under proc_lock).
+     */
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         struct process *p = &proc_table[i];
-        if (p->state == PROC_UNUSED || p->pgid != pgrp)
-            continue;
-        signal_send(p->pid, sig);
-        sent++;
+        if (p->state != PROC_UNUSED && p->pgid == pgrp) {
+            __atomic_fetch_or(&p->sig_pending, mask, __ATOMIC_RELEASE);
+            count++;
+        }
     }
-    return sent > 0 ? 0 : -ESRCH;
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+
+    if (count == 0)
+        return -ESRCH;
+
+    /* Wakeup pass — proc_wakeup takes proc_lock internally */
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        struct process *p = &proc_table[i];
+        if (p->state == PROC_SLEEPING && p->pgid == pgrp &&
+            (__atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & mask))
+            proc_wakeup(p);
+    }
+    return 0;
 }
 
 void signal_deliver_pending(void) {

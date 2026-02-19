@@ -246,17 +246,17 @@ static int console_try_fill_batch(void) {
         count++;
     }
     struct vnode *vn = console_state.vnode;
+    pid_t fg = console_state.fg_pgrp;
     console_unlock_irqrestore(irq_state);
 
     if (count == 0)
         return 0;
 
     if (sig_mask) {
-        pid_t pgrp = console_state.fg_pgrp;
-        if (pgrp > 0) {
+        if (fg > 0) {
             for (int s = 1; s < 32; s++) {
                 if (sig_mask & (1U << s))
-                    signal_send_pgrp(pgrp, s);
+                    signal_send_pgrp(fg, s);
             }
         } else {
             /* No fg pgrp set — fall back to current process */
@@ -467,13 +467,19 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         pid_t pgrp;
         if (copy_from_user(&pgrp, (void *)arg, sizeof(pgrp)) < 0)
             return -EFAULT;
+        bool irq_state = console_lock_irqsave();
         console_state.fg_pgrp = pgrp;
+        console_unlock_irqrestore(irq_state);
         return 0;
     }
     case TIOCSCTTY: {
         struct process *p = proc_current();
-        if (p && console_state.fg_pgrp == 0)
-            console_state.fg_pgrp = p->pgid;
+        if (p) {
+            bool irq_state = console_lock_irqsave();
+            if (console_state.fg_pgrp == 0)
+                console_state.fg_pgrp = p->pgid;
+            console_unlock_irqrestore(irq_state);
+        }
         return 0;
     }
     case TIOCGWINSZ: {
