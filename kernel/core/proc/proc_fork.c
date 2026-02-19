@@ -26,6 +26,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->gid = parent->gid;
     child->pgid = parent->pgid;
     child->sid = parent->sid;
+    child->ctty = parent->ctty;
     child->umask = parent->umask;
     child->tid_address = 0;
     child->tid_set_address = 0;

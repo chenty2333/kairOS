@@ -100,6 +100,7 @@ struct process *proc_alloc(void) {
     p->ppid = p->uid = p->gid = 0;
     p->pgid = p->pid;
     p->sid = p->pid;
+    p->ctty = NULL;
     p->umask = 022;
     p->syscall_abi = SYSCALL_ABI_LINUX;
     p->name[0] = '\0';

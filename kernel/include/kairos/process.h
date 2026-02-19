@@ -21,6 +21,7 @@
 struct vnode;
 struct dentry;
 struct mount_ns;
+struct tty_struct;
 
 /* Process exit callback */
 typedef void (*proc_exit_callback_t)(struct process *p);
@@ -72,6 +73,7 @@ enum syscall_abi {
 struct process {
     pid_t pid, ppid;
     pid_t pgid, sid;
+    struct tty_struct *ctty;        /* controlling terminal */
     char name[16];
     uid_t uid;
     gid_t gid;
