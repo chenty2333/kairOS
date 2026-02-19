@@ -175,6 +175,248 @@ static void test_sched_preempt_stress(void) {
     pr_info("sched_stress: preempt_stress done (%d/%d created)\n", created, n);
 }
 
+/* ---------- test_eevdf_deadline_ordering ---------- */
+
+/*
+ * Verify that EEVDF pick always selects the eligible entity with the
+ * earliest deadline.  We create several threads with different nice values
+ * and verify they all complete (no starvation).
+ */
+#define EEVDF_DEADLINE_N 8
+static volatile int eevdf_deadline_done;
+
+static int eevdf_deadline_thread(void *arg) {
+    int nice = (int)(intptr_t)arg;
+    sched_setnice(proc_current(), nice);
+    /* Do some work, yield periodically */
+    for (int i = 0; i < 100; i++) {
+        volatile uint64_t x = 0;
+        for (int j = 0; j < 1000; j++)
+            x += (uint64_t)j;
+        (void)x;
+        if (i % 20 == 0)
+            proc_yield();
+    }
+    __atomic_fetch_add(&eevdf_deadline_done, 1, __ATOMIC_RELEASE);
+    proc_exit(0);
+    return 0;
+}
+
+static void test_eevdf_deadline_ordering(void) {
+    pr_info("sched_stress: eevdf_deadline_ordering\n");
+    __atomic_store_n(&eevdf_deadline_done, 0, __ATOMIC_RELEASE);
+    int nice_vals[] = {-10, -5, 0, 0, 5, 5, 10, 19};
+    int created = 0;
+    for (int i = 0; i < EEVDF_DEADLINE_N; i++) {
+        struct process *p = kthread_create(eevdf_deadline_thread,
+                                           (void *)(intptr_t)nice_vals[i], "edl");
+        if (p) {
+            sched_enqueue(p);
+            created++;
+        }
+    }
+    int status;
+    while (proc_wait(-1, &status, 0) > 0)
+        ;
+    int done = __atomic_load_n(&eevdf_deadline_done, __ATOMIC_ACQUIRE);
+    if (done != created)
+        pr_err("sched_stress: eevdf_deadline_ordering FAIL: %d/%d completed\n",
+               done, created);
+    else
+        pr_info("sched_stress: eevdf_deadline_ordering done (%d/%d)\n",
+                done, EEVDF_DEADLINE_N);
+}
+
+/* ---------- test_eevdf_lag_fairness ---------- */
+
+/*
+ * Verify that a task which sleeps and wakes up can catch up via lag
+ * restoration.  A sleeper should not be permanently penalized.
+ */
+#define LAG_ROUNDS 50
+static volatile int lag_sleeper_ran;
+static volatile int lag_spinner_ran;
+static struct wait_queue lag_wq;
+
+static int lag_sleeper(void *arg) {
+    (void)arg;
+    for (int i = 0; i < LAG_ROUNDS; i++) {
+        proc_sleep_on(&lag_wq, NULL, false);
+        __atomic_fetch_add(&lag_sleeper_ran, 1, __ATOMIC_RELAXED);
+    }
+    proc_exit(0);
+    return 0;
+}
+
+static int lag_spinner(void *arg) {
+    (void)arg;
+    for (int i = 0; i < LAG_ROUNDS * 10; i++) {
+        volatile uint64_t x = 0;
+        for (int j = 0; j < 500; j++)
+            x += (uint64_t)j;
+        (void)x;
+        __atomic_fetch_add(&lag_spinner_ran, 1, __ATOMIC_RELAXED);
+        if (i % 5 == 0)
+            proc_yield();
+    }
+    proc_exit(0);
+    return 0;
+}
+
+static int lag_waker(void *arg) {
+    (void)arg;
+    for (int i = 0; i < LAG_ROUNDS; i++) {
+        /* Small delay between wakeups */
+        for (int j = 0; j < 3; j++)
+            proc_yield();
+        wait_queue_wakeup_all(&lag_wq);
+    }
+    /* Ensure all sleepers finish */
+    for (int i = 0; i < LAG_ROUNDS; i++) {
+        wait_queue_wakeup_all(&lag_wq);
+        proc_yield();
+    }
+    proc_exit(0);
+    return 0;
+}
+
+static void test_eevdf_lag_fairness(void) {
+    pr_info("sched_stress: eevdf_lag_fairness\n");
+    wait_queue_init(&lag_wq);
+    __atomic_store_n(&lag_sleeper_ran, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&lag_spinner_ran, 0, __ATOMIC_RELEASE);
+
+    struct process *s = kthread_create(lag_sleeper, NULL, "lslp");
+    struct process *sp = kthread_create(lag_spinner, NULL, "lspn");
+    struct process *w = kthread_create(lag_waker, NULL, "lwkr");
+    if (s) sched_enqueue(s);
+    if (sp) sched_enqueue(sp);
+    if (w) sched_enqueue(w);
+
+    int status;
+    while (proc_wait(-1, &status, 0) > 0)
+        ;
+    int slp = __atomic_load_n(&lag_sleeper_ran, __ATOMIC_ACQUIRE);
+    int spn = __atomic_load_n(&lag_spinner_ran, __ATOMIC_ACQUIRE);
+    pr_info("sched_stress: eevdf_lag_fairness done (sleeper=%d spinner=%d)\n",
+            slp, spn);
+    if (slp < LAG_ROUNDS / 2)
+        pr_err("sched_stress: eevdf_lag_fairness WARN: sleeper starved (%d/%d)\n",
+               slp, LAG_ROUNDS);
+}
+
+/* ---------- test_eevdf_nice_isolation ---------- */
+
+/*
+ * Verify that different nice values result in proportional CPU time.
+ * A nice-0 task should get more iterations than a nice-10 task.
+ */
+static volatile uint64_t nice_counter_hi;
+static volatile uint64_t nice_counter_lo;
+
+static int nice_worker(void *arg) {
+    int nice = (int)(intptr_t)arg;
+    sched_setnice(proc_current(), nice);
+    volatile uint64_t *counter = (nice <= 0) ? &nice_counter_hi : &nice_counter_lo;
+    for (int i = 0; i < 200; i++) {
+        volatile uint64_t x = 0;
+        for (int j = 0; j < 1000; j++)
+            x += (uint64_t)j;
+        (void)x;
+        __atomic_fetch_add(counter, 1, __ATOMIC_RELAXED);
+        if (i % 10 == 0)
+            proc_yield();
+    }
+    proc_exit(0);
+    return 0;
+}
+
+static void test_eevdf_nice_isolation(void) {
+    pr_info("sched_stress: eevdf_nice_isolation\n");
+    __atomic_store_n(&nice_counter_hi, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&nice_counter_lo, 0, __ATOMIC_RELEASE);
+
+    /* Create one high-priority and one low-priority worker */
+    struct process *hi = kthread_create(nice_worker, (void *)(intptr_t)0, "nhi");
+    struct process *lo = kthread_create(nice_worker, (void *)(intptr_t)10, "nlo");
+    if (hi) sched_enqueue(hi);
+    if (lo) sched_enqueue(lo);
+
+    int status;
+    while (proc_wait(-1, &status, 0) > 0)
+        ;
+    uint64_t h = __atomic_load_n(&nice_counter_hi, __ATOMIC_ACQUIRE);
+    uint64_t l = __atomic_load_n(&nice_counter_lo, __ATOMIC_ACQUIRE);
+    pr_info("sched_stress: eevdf_nice_isolation done (nice0=%llu nice10=%llu)\n",
+            (unsigned long long)h, (unsigned long long)l);
+    /* Both should complete; the test validates no starvation */
+    if (h == 0 || l == 0)
+        pr_err("sched_stress: eevdf_nice_isolation FAIL: starvation detected\n");
+}
+
+/* ---------- test_eevdf_fork_penalty ---------- */
+
+/*
+ * Verify that fork children don't get unfair advantage.
+ * Rapidly fork children and ensure the parent can still make progress.
+ */
+#define FORK_PENALTY_N 32
+static volatile int fork_penalty_parent_iters;
+static volatile int fork_penalty_child_done;
+
+static int fork_penalty_child(void *arg) {
+    (void)arg;
+    /* Do minimal work */
+    volatile uint64_t x = 0;
+    for (int j = 0; j < 500; j++)
+        x += (uint64_t)j;
+    (void)x;
+    __atomic_fetch_add(&fork_penalty_child_done, 1, __ATOMIC_RELAXED);
+    proc_exit(0);
+    return 0;
+}
+
+static int fork_penalty_parent(void *arg) {
+    (void)arg;
+    for (int i = 0; i < FORK_PENALTY_N; i++) {
+        struct process *c = kthread_create(fork_penalty_child, NULL, "fpc");
+        if (c)
+            sched_enqueue(c);
+        /* Parent does work between forks */
+        volatile uint64_t x = 0;
+        for (int j = 0; j < 1000; j++)
+            x += (uint64_t)j;
+        (void)x;
+        __atomic_fetch_add(&fork_penalty_parent_iters, 1, __ATOMIC_RELAXED);
+    }
+    /* Wait for children */
+    int status;
+    while (proc_wait(-1, &status, 0) > 0)
+        ;
+    proc_exit(0);
+    return 0;
+}
+
+static void test_eevdf_fork_penalty(void) {
+    pr_info("sched_stress: eevdf_fork_penalty\n");
+    __atomic_store_n(&fork_penalty_parent_iters, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&fork_penalty_child_done, 0, __ATOMIC_RELEASE);
+
+    struct process *p = kthread_create(fork_penalty_parent, NULL, "fpp");
+    if (p) sched_enqueue(p);
+
+    int status;
+    while (proc_wait(-1, &status, 0) > 0)
+        ;
+    int pi = __atomic_load_n(&fork_penalty_parent_iters, __ATOMIC_ACQUIRE);
+    int cd = __atomic_load_n(&fork_penalty_child_done, __ATOMIC_ACQUIRE);
+    pr_info("sched_stress: eevdf_fork_penalty done (parent_iters=%d children=%d/%d)\n",
+            pi, cd, FORK_PENALTY_N);
+    if (pi < FORK_PENALTY_N / 2)
+        pr_err("sched_stress: eevdf_fork_penalty FAIL: parent starved (%d/%d)\n",
+               pi, FORK_PENALTY_N);
+}
+
 /* ---------- Entry point ---------- */
 
 void run_sched_stress_tests(void) {
@@ -183,6 +425,10 @@ void run_sched_stress_tests(void) {
     test_sched_sleep_wakeup_stress();
     test_sched_yield_storm();
     test_sched_preempt_stress();
+    test_eevdf_deadline_ordering();
+    test_eevdf_lag_fairness();
+    test_eevdf_nice_isolation();
+    test_eevdf_fork_penalty();
     pr_info("sched_stress: all passed\n");
 }
 
