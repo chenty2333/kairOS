@@ -291,7 +291,6 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name) {
         return NULL;
     proc_set_name(p, name);
     arch_context_init(p->context, (vaddr_t)fn, (vaddr_t)arg, true);
-    p->state = PROC_RUNNABLE;
     return p;
 }
 

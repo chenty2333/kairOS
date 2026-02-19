@@ -137,7 +137,6 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
         arch_context_clone(child->context, parent->context);
     }
 
-    child->state = PROC_RUNNABLE;
     sched_enqueue(child);
     return child;
 }
