@@ -297,16 +297,22 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
             return -ESRCH;
         if (p->pid != p->sid)
             return -EPERM;
-        if (p->ctty)
+        if (p->ctty && p->ctty != tty)
             return -EPERM;
-        if (tty->session != 0 && tty->session != p->sid)
-            return -EPERM;
+
+        int ret = 0;
         bool irq_state = arch_irq_save();
         spin_lock(&tty->lock);
-        tty->session = p->sid;
-        tty->fg_pgrp = p->pgid;
+        if (tty->session != 0 && tty->session != p->sid) {
+            ret = -EPERM;
+        } else {
+            tty->session = p->sid;
+            tty->fg_pgrp = p->pgid;
+        }
         spin_unlock(&tty->lock);
         arch_irq_restore(irq_state);
+        if (ret < 0)
+            return ret;
         p->ctty = tty;
         return 0;
     }
