@@ -9,7 +9,6 @@
 
 extern struct process proc_table[CONFIG_MAX_PROCESSES];
 extern spinlock_t proc_table_lock;
-extern bool proc_table_irq_flags;
 extern pid_t next_pid;
 extern struct process *reaper_proc;
 
