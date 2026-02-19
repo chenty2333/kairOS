@@ -129,9 +129,23 @@ int tty_poll(struct tty_struct *tty, uint32_t events) {
 void tty_hangup(struct tty_struct *tty) {
     if (!tty)
         return;
+
+    bool irq_state = arch_irq_save();
+    spin_lock(&tty->lock);
+    if (tty->flags & TTY_HUPPED) {
+        spin_unlock(&tty->lock);
+        arch_irq_restore(irq_state);
+        return;
+    }
     tty->flags |= TTY_HUPPED;
+    spin_unlock(&tty->lock);
+    arch_irq_restore(irq_state);
+
     if (tty->driver && tty->driver->ops && tty->driver->ops->hangup)
         tty->driver->ops->hangup(tty);
+
+    if (tty->vnode)
+        vfs_poll_wake(tty->vnode, POLLIN | POLLERR | POLLHUP);
 }
 
 void tty_detach_ctty(struct process *p) {
