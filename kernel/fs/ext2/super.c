@@ -110,6 +110,20 @@ int ext2_statfs(struct mount *mnt, struct kstatfs *st) {
 
 int ext2_unmount(struct mount *mnt) {
     struct ext2_mount *e = mnt->fs_data;
+    if (!e)
+        return 0;
+    if (e->magic != EXT2_MOUNT_MAGIC)
+        return -EIO;
+
+    /*
+     * mnt->root and mnt->root_dentry hold the baseline root references.
+     * Refcount above that means extra live users; refuse unmount.
+     */
+    if (mnt->root && atomic_read(&mnt->root->refcount) > 2)
+        return -EBUSY;
+    if (atomic_read(&e->refcount) > 2)
+        return -EBUSY;
+
     mnt->fs_data = NULL;
     ext2_mount_put(e);
     return 0;

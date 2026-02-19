@@ -501,16 +501,26 @@ int vfs_umount(const char *tgt) {
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
         if (strcmp(mnt->mountpoint, tgt) == 0) {
+            spin_unlock(&vfs_lock);
+
+            if (mnt->ops->unmount && !(mnt->mflags & MOUNT_F_BIND)) {
+                int ret = mnt->ops->unmount(mnt);
+                if (ret < 0) {
+                    vfs_mount_global_unlock();
+                    return ret;
+                }
+            }
+
+            spin_lock(&vfs_lock);
             list_del(&mnt->list);
             if (mnt == root_mount)
                 root_mount = NULL;
             spin_unlock(&vfs_lock);
+
             if (mnt == init_mnt_ns.root) {
                 init_mnt_ns.root = NULL;
                 init_mnt_ns.root_dentry = NULL;
             }
-            if (mnt->ops->unmount && !(mnt->mflags & MOUNT_F_BIND))
-                mnt->ops->unmount(mnt);
             if (mnt->root_dentry) {
                 dentry_drop(mnt->root_dentry);
                 mnt->root_dentry = NULL;
