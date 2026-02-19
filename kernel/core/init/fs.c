@@ -16,12 +16,14 @@
 #include <kairos/sysfs.h>
 
 extern int dev_tty_init(void);
+extern int pty_driver_init(void);
 
 void init_fs(void) {
     binit();
     vfs_init();
     devfs_init();
-    dev_tty_init();  /* register /dev/tty (queued until devfs mounts) */
+    dev_tty_init();      /* register /dev/tty (queued until devfs mounts) */
+    pty_driver_init();   /* register /dev/ptmx + /dev/pts/N */
     procfs_init();
     tmpfs_init();
     sysfs_init();
