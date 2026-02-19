@@ -95,10 +95,11 @@ noreturn void proc_exit(int status) {
         proc_reparent_children(p);
     }
 
-    sched_dequeue(p);
-    /* Encode for waitpid/WIFEXITED semantics (like Linux) */
+    /* Set ZOMBIE before dequeue: closes the window where a concurrent
+     * wakeup could re-enqueue a BLOCKED task between dequeue and state set. */
     p->exit_code = (code << 8);
     proc_set_state_release(p, PROC_ZOMBIE);
+    sched_dequeue(p);
 
     if (p->parent) {
         wait_queue_wakeup_all(&p->parent->exit_wait);
