@@ -976,11 +976,11 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
         struct process *cand = container_of(se, struct process, se);
         if (cfs->curr_se == se)
             continue;
+        /* Defensive: proc_state and se.run_state lack atomic coupling,
+         * so check both to avoid stealing a task mid-transition. */
         if (cand->state != PROC_RUNNABLE)
             continue;
         if (se_state_load(se) != SE_STATE_QUEUED)
-            continue;
-        if (se_is_on_cpu(se))
             continue;
 
         /* Pick candidate with largest deadline (least urgent) */
