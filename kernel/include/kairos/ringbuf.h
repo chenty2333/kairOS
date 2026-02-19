@@ -15,6 +15,7 @@ struct ringbuf {
 };
 
 void ringbuf_init(struct ringbuf *rb, char *storage, uint32_t size);
+void ringbuf_reset(struct ringbuf *rb);
 bool ringbuf_empty(const struct ringbuf *rb);
 bool ringbuf_full(const struct ringbuf *rb);
 size_t ringbuf_len(const struct ringbuf *rb);

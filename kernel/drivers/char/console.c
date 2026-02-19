@@ -27,6 +27,7 @@ struct console_state {
     uint32_t canon_len;
     bool eof_pending;
     struct vnode *vnode;
+    pid_t fg_pgrp;              /* foreground process group */
     struct winsize winsize;
     struct termios termios;
 };
@@ -108,8 +109,7 @@ static bool console_canon_commit(void) {
 }
 
 static void console_flush_input(void) {
-    console_state.in_rb.head = 0;
-    console_state.in_rb.tail = 0;
+    ringbuf_reset(&console_state.in_rb);
     console_state.canon_len = 0;
     console_state.eof_pending = false;
 }
@@ -252,11 +252,20 @@ static int console_try_fill_batch(void) {
         return 0;
 
     if (sig_mask) {
-        struct process *p = proc_current();
-        if (p) {
+        pid_t pgrp = console_state.fg_pgrp;
+        if (pgrp > 0) {
             for (int s = 1; s < 32; s++) {
                 if (sig_mask & (1U << s))
-                    signal_send(p->pid, s);
+                    signal_send_pgrp(pgrp, s);
+            }
+        } else {
+            /* No fg pgrp set — fall back to current process */
+            struct process *p = proc_current();
+            if (p) {
+                for (int s = 1; s < 32; s++) {
+                    if (sig_mask & (1U << s))
+                        signal_send(p->pid, s);
+                }
             }
         }
     }
@@ -412,7 +421,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         return 0;
     }
     case TCSETS:
-    case TCSETSW:
+    case TCSETSW:  /* No output buffer, so drain is a no-op — same as TCSETS */
     case TCSETSF: {
         if (!arg)
             return -EFAULT;
@@ -447,10 +456,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
     case TIOCGPGRP: {
         if (!arg)
             return -EFAULT;
-        pid_t pgrp = 0;
-        struct process *p = proc_current();
-        if (p)
-            pgrp = p->pid;
+        pid_t pgrp = console_state.fg_pgrp;
         if (copy_to_user((void *)arg, &pgrp, sizeof(pgrp)) < 0)
             return -EFAULT;
         return 0;
@@ -461,10 +467,15 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         pid_t pgrp;
         if (copy_from_user(&pgrp, (void *)arg, sizeof(pgrp)) < 0)
             return -EFAULT;
+        console_state.fg_pgrp = pgrp;
         return 0;
     }
-    case TIOCSCTTY:
+    case TIOCSCTTY: {
+        struct process *p = proc_current();
+        if (p && console_state.fg_pgrp == 0)
+            console_state.fg_pgrp = p->pgid;
         return 0;
+    }
     case TIOCGWINSZ: {
         if (!arg)
             return -EFAULT;

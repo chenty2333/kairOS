@@ -13,6 +13,13 @@ void ringbuf_init(struct ringbuf *rb, char *storage, uint32_t size) {
     rb->tail = 0;
 }
 
+void ringbuf_reset(struct ringbuf *rb) {
+    if (!rb)
+        return;
+    rb->head = 0;
+    rb->tail = 0;
+}
+
 bool ringbuf_empty(const struct ringbuf *rb) {
     return !rb || rb->head == rb->tail;
 }

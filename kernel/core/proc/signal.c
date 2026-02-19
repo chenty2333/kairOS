@@ -14,6 +14,8 @@
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
 
+#include "proc_internal.h"
+
 #define NS_PER_SEC 1000000000ULL
 
 /* sighand helpers */
@@ -75,6 +77,20 @@ int signal_send(pid_t pid, int sig) {
         proc_unlock(p);
     }
     return 0;
+}
+
+int signal_send_pgrp(pid_t pgrp, int sig) {
+    if (sig <= 0 || sig > NSIG) return -EINVAL;
+    if (pgrp <= 0) return -ESRCH;
+    int sent = 0;
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        struct process *p = &proc_table[i];
+        if (p->state == PROC_UNUSED || p->pgid != pgrp)
+            continue;
+        signal_send(p->pid, sig);
+        sent++;
+    }
+    return sent > 0 ? 0 : -ESRCH;
 }
 
 void signal_deliver_pending(void) {
@@ -282,7 +298,19 @@ int64_t sys_sigreturn(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)signal_send((pid_t)pid, (int)sig);
+    pid_t target = (pid_t)pid;
+    int s = (int)sig;
+    if (target > 0)
+        return (int64_t)signal_send(target, s);
+    if (target == 0) {
+        /* Send to caller's process group */
+        struct process *cur = proc_current();
+        return cur ? (int64_t)signal_send_pgrp(cur->pgid, s) : -ESRCH;
+    }
+    if (target == -1)
+        return -ESRCH;  /* kill(-1) not supported yet */
+    /* target < -1: send to process group -target */
+    return (int64_t)signal_send_pgrp(-target, s);
 }
 
 int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
