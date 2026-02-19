@@ -481,7 +481,7 @@ else
 endif
 
 QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_MEDIA_FLAGS) $(QEMU_DISK_FLAGS)
-ifeq ($(shell test -r /dev/tty && echo yes),yes)
+ifeq ($(shell tty -s && test -r /dev/tty && echo yes),yes)
 QEMU_STDIN := </dev/tty
 else
 QEMU_STDIN :=
