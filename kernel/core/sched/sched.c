@@ -2,7 +2,7 @@
  * kernel/core/sched/sched.c - Scheduler core with sched_class dispatch
  *
  * The core scheduler (schedule, sched_tick, sched_enqueue, sched_dequeue)
- * dispatches through struct sched_class function pointers.  The CFS
+ * dispatches through struct sched_class function pointers.  The EEVDF
  * implementation lives in fair_sched_class at the bottom of this file.
  */
 
@@ -34,8 +34,7 @@ const int sched_nice_to_weight[40] = {
 struct percpu_data cpu_data[CONFIG_MAX_CPUS];
 static int nr_cpus_online = 1;
 
-/* Spinlock preemption control — defined here where percpu_data is visible.
- * When CONFIG_DEBUG_LOCKS is on, sync.c provides these instead. */
+/* Spinlock preemption control — sync.c provides these when CONFIG_DEBUG_LOCKS is on. */
 #if !CONFIG_DEBUG_LOCKS
 void __spin_preempt_disable(void) {
     struct percpu_data *cpu = arch_get_percpu();
@@ -294,29 +293,30 @@ static uint64_t update_curr(struct cfs_rq *cfs_rq) {
 
 /* --- EEVDF helpers --- */
 
-/* Compute the virtual slice: how much vruntime one wall-clock slice costs */
 static inline uint64_t calc_vslice(struct sched_entity *se) {
     uint64_t slice = se->slice ? se->slice : SCHED_SLICE_NS;
     return calc_delta_fair(slice, __weight(se->nice));
 }
 
-/* Entity is eligible when its vruntime <= system virtual time (min_vruntime) */
 static inline bool entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se) {
     return (int64_t)(se->vruntime - cfs_rq->min_vruntime) <= 0;
 }
 
-/* Compare deadlines: true if a's deadline is strictly before b's */
 static inline bool deadline_before(struct sched_entity *a, struct sched_entity *b) {
     return (int64_t)(a->deadline - b->deadline) < 0;
 }
 
 /*
- * pick_eevdf - EEVDF core pick algorithm
+ * pick_eevdf - EEVDF core pick algorithm (O(log n) approximation)
  *
  * Among eligible entities (vruntime <= V), pick the one with the
  * earliest (smallest) deadline.  The RB-tree is sorted by vruntime,
  * so eligible entities cluster on the left side.  We walk the tree
  * pruning ineligible subtrees.
+ *
+ * NOTE: This left-biased traversal is an approximation — it may miss
+ * eligible nodes in right subtrees.  A strict O(log n) optimal pick
+ * requires an augmented RB-tree tracking subtree-min-deadline.
  */
 static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq) {
     struct rb_node *node = cfs_rq->tasks_timeline.rb_node;
@@ -410,11 +410,7 @@ void sched_post_switch_cleanup(void) {
     struct percpu_data *cpu = arch_get_percpu();
     if (cpu->prev_task) {
         struct process *prev = cpu->prev_task;
-        /* prev was RUNNING; now it has finished its context switch.
-         * If it went to sleep/exit, schedule() already set BLOCKED.
-         * If it was re-enqueued, schedule() already set QUEUED.
-         * Nothing to do here for state — the authoritative run_state
-         * was already updated before the context switch. */
+        /* State already updated before context switch; nothing to do. */
         cpu->prev_task = NULL;
         /* Zombie finished context switch — notify waiting parent */
         if (prev->state == PROC_ZOMBIE && prev->parent) {
@@ -501,12 +497,10 @@ void sched_dequeue(struct process *p) {
 }
 
 /**
- * sched_steal_task - Try to steal from other CPUs (EEVDF-aware)
+ * sched_steal_task - Try to steal a task from another CPU.
  *
- * Improvements over naive scan:
- * - Randomize start CPU to avoid thundering herd
- * - Lockless nr_running > 1 check before trylock
- * - Dispatch through sched_class->steal_task (which picks by largest deadline)
+ * Randomizes start CPU, does lockless nr_running pre-check, and
+ * dispatches through sched_class->steal_task.
  */
 static struct process *sched_steal_task(int self_id) {
     struct sched_cpu_stats *self_stats = &cpu_data[self_id].stats;
@@ -524,7 +518,7 @@ static struct process *sched_steal_task(int self_id) {
 
         /* Lockless pre-check: skip if remote has <= 1 task */
         if (__atomic_load_n(&cpu_data[i].runqueue.cfs.nr_running,
-                            __ATOMIC_RELAXED) <= 0)
+                            __ATOMIC_RELAXED) <= 1)
             continue;
 
         struct rq *remote_rq = &cpu_data[i].runqueue;
@@ -561,8 +555,7 @@ void schedule(void) {
         if (cls)
             cls->put_prev_task(rq, prev);
         else {
-            /* Fallback: manually handle prev without class */
-            se_mark_running(&prev->se);
+            /* No sched_class — block or re-enqueue manually */
             if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
                 prev->state = PROC_RUNNABLE;
                 se_mark_blocked(&prev->se);
@@ -902,6 +895,8 @@ static void fair_task_tick(struct rq *rq, struct process *p) {
     }
 
     /* Also check minimum granularity */
+    if (cfs->nr_running == 0)
+        return;
     uint32_t nr = cfs->nr_running + 1;
     uint64_t gran = SCHED_LATENCY_NS / nr;
     if (gran < SCHED_MIN_GRANULARITY_NS)

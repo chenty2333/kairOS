@@ -1,7 +1,7 @@
 /**
  * kernel/include/kairos/sched_class.h - Pluggable scheduler class interface
  *
- * Each scheduling policy (CFS/EEVDF, RT, deadline, ...) implements this
+ * Each scheduling policy (EEVDF, RT, deadline, ...) implements this
  * interface.  The core scheduler dispatches through function pointers,
  * iterating classes by priority (lower number = higher priority).
  */
@@ -54,7 +54,7 @@ struct sched_class {
 /* Dequeue flags */
 #define DEQUEUE_SLEEP   0x01
 
-/* The fair (CFS/EEVDF) scheduling class — defined in sched.c */
+/* The fair (EEVDF) scheduling class — defined in sched.c */
 extern const struct sched_class fair_sched_class;
 
 #endif /* _KAIROS_SCHED_CLASS_H */
