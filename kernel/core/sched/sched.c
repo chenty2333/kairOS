@@ -1,5 +1,9 @@
 /**
- * kernel/core/sched/sched.c - Scalable CFS Implementation with Per-CPU Locks
+ * kernel/core/sched/sched.c - Scheduler core with sched_class dispatch
+ *
+ * The core scheduler (schedule, sched_tick, sched_enqueue, sched_dequeue)
+ * dispatches through struct sched_class function pointers.  The CFS
+ * implementation lives in fair_sched_class at the bottom of this file.
  */
 
 #include <kairos/arch.h>
@@ -8,6 +12,7 @@
 #include <kairos/process.h>
 #include <kairos/rbtree.h>
 #include <kairos/sched.h>
+#include <kairos/sched_class.h>
 #include <kairos/string.h>
 
 /* CFS Scheduler Tunables */
@@ -234,8 +239,7 @@ static uint64_t calc_delta_fair(uint64_t delta, int weight) {
 
 static void update_min_vruntime(struct cfs_rq *rq) {
     uint64_t v = rq->min_vruntime;
-    if (rq->curr_se && (!rq->idle || rq->curr_se != &rq->idle->se) &&
-        rq->curr_se->vruntime > v)
+    if (rq->curr_se && rq->curr_se->vruntime > v)
         v = rq->curr_se->vruntime;
     struct rb_node *left = rb_first(&rq->tasks_timeline);
     if (left) {
@@ -288,8 +292,15 @@ void sched_init_cpu(int cpu) {
     struct percpu_data *d = &cpu_data[cpu];
     memset(d, 0, sizeof(*d));
     d->cpu_id = cpu;
-    d->runqueue.tasks_timeline = RB_ROOT;
-    spin_init(&d->runqueue.lock);
+    struct rq *rq = &d->runqueue;
+    spin_init(&rq->lock);
+    rq->cfs.tasks_timeline = RB_ROOT;
+    rq->cfs.nr_running = 0;
+    rq->cfs.min_vruntime = 0;
+    rq->cfs.curr_se = NULL;
+    rq->nr_running = 0;
+    rq->idle = NULL;
+    rq->curr_class = &fair_sched_class;
     spin_init(&d->ipi_call_lock);
     d->prev_task = NULL;
 }
@@ -317,9 +328,13 @@ void sched_enqueue(struct process *p) {
     if (!se_try_transition(&p->se, SE_STATE_BLOCKED, SE_STATE_RUNNABLE))
         return;
 
+    /* Assign sched_class if not yet set */
+    if (!p->se.sched_class)
+        p->se.sched_class = &fair_sched_class;
+
     /* Find target CPU - currently simple: stay on current or preferred */
     int cpu = (p->se.cpu >= 0 && p->se.cpu < sched_nr_cpus()) ? p->se.cpu : arch_cpu_id();
-    struct cfs_rq *rq = &cpu_data[cpu].runqueue;
+    struct rq *rq = &cpu_data[cpu].runqueue;
 
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
@@ -332,34 +347,23 @@ void sched_enqueue(struct process *p) {
         return;
     }
 
-    place_entity(rq, &p->se, p->se.vruntime == 0);
-    int prev_cpu = p->se.cpu;
-    __enqueue_entity(rq, &p->se);
-    se_mark_queued(&p->se, cpu);
-    rq->nr_running++;
-    update_min_vruntime(rq);
+    p->se.sched_class->enqueue_task(rq, p, ENQUEUE_WAKEUP);
     sched_stat_inc(&cpu_data[cpu].stats.enqueue_count);
     sched_trace_event(SCHED_TRACE_ENQUEUE, p, (uint64_t)cpu, p->se.vruntime);
+    int prev_cpu = p->se.cpu;
+    se_mark_queued(&p->se, cpu);
+    rq->nr_running++;
     if (cpu != prev_cpu && prev_cpu >= 0)
         sched_trace_event(SCHED_TRACE_MIGRATE, p, (uint64_t)prev_cpu, (uint64_t)cpu);
     sched_validate_entity(p, "sched_enqueue");
 
-    /* Snapshot preemption decision while still holding the lock */
-    struct sched_entity *curr_se = rq->curr_se;
-    bool need_resched = false;
-    if (curr_se && curr_se != &p->se) {
-        if (p->se.vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr_se->vruntime) {
-            need_resched = true;
-        }
-    }
+    /* Check preemption via class */
+    p->se.sched_class->check_preempt_curr(rq, p);
+    bool need_resched = cpu_data[cpu].resched_needed;
 
     spin_unlock(&rq->lock);
 
-    if (need_resched) {
-        cpu_data[cpu].resched_needed = true;
-    }
-
-    if (cpu != arch_cpu_id())
+    if (need_resched && cpu != arch_cpu_id())
         arch_send_ipi(cpu, IPI_RESCHEDULE);
 
     arch_irq_restore(state);
@@ -371,7 +375,7 @@ void sched_dequeue(struct process *p) {
     int cpu = p->se.cpu;
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
         return;
-    struct cfs_rq *rq = &cpu_data[cpu].runqueue;
+    struct rq *rq = &cpu_data[cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
 
@@ -382,10 +386,10 @@ void sched_dequeue(struct process *p) {
         return;
     }
 
-    rb_erase(&p->se.sched_node, &rq->tasks_timeline);
+    if (p->se.sched_class)
+        p->se.sched_class->dequeue_task(rq, p, DEQUEUE_SLEEP);
     se_mark_blocked(&p->se);
     rq->nr_running--;
-    update_min_vruntime(rq);
     sched_stat_inc(&cpu_data[cpu].stats.dequeue_count);
     sched_trace_event(SCHED_TRACE_DEQUEUE, p, (uint64_t)cpu, 0);
     sched_validate_entity(p, "sched_dequeue");
@@ -396,7 +400,7 @@ void sched_dequeue(struct process *p) {
 
 /**
  * sched_steal_task - Try to steal from other CPUs
- * Uses strict locking order (ascending CPU ID) to prevent deadlocks.
+ * Iterates remote runqueues, dispatching through sched_class->steal_task.
  */
 static struct process *sched_steal_task(int self_id) {
     struct sched_cpu_stats *self_stats = &cpu_data[self_id].stats;
@@ -405,37 +409,15 @@ static struct process *sched_steal_task(int self_id) {
         if (i == self_id) continue;
         sched_stat_inc(&self_stats->steal_attempt_count);
 
-        struct cfs_rq *remote_rq = &cpu_data[i].runqueue;
+        struct rq *remote_rq = &cpu_data[i].runqueue;
 
         /* Attempt to lock remote queue without deadlocking */
         if (!spin_trylock(&remote_rq->lock)) continue;
 
         struct process *p = NULL;
-        if (remote_rq->nr_running > 0) {
-            for (struct rb_node *node = rb_first(&remote_rq->tasks_timeline);
-                 node; node = rb_next(node)) {
-                struct sched_entity *se =
-                    rb_entry(node, struct sched_entity, sched_node);
-                struct process *cand = container_of(se, struct process, se);
-                if (remote_rq->curr_se == se)
-                    continue;
-                if (cand->state != PROC_RUNNABLE)
-                    continue;
-                if (se_state_load(se) != SE_STATE_QUEUED)
-                    continue;
-                if (se_is_on_cpu(se))
-                    continue;
+        if (fair_sched_class.steal_task)
+            p = fair_sched_class.steal_task(remote_rq, self_id);
 
-                rb_erase(&se->sched_node, &remote_rq->tasks_timeline);
-                se_mark_runnable(se);
-                se->cpu = self_id;
-                remote_rq->nr_running--;
-                update_min_vruntime(remote_rq);
-                sched_validate_entity(cand, "sched_steal_task");
-                p = cand;
-                break;
-            }
-        }
         spin_unlock(&remote_rq->lock);
         if (p) {
             sched_stat_inc(&self_stats->steal_success_count);
@@ -451,85 +433,55 @@ void schedule(void) {
     struct percpu_data *cpu = arch_get_percpu();
     struct sched_cpu_stats *stats = &cpu->stats;
     struct process *prev = proc_current(), *next;
-    struct cfs_rq *rq = &cpu->runqueue;
+    struct rq *rq = &cpu->runqueue;
     bool state = arch_irq_save();
 
     spin_lock(&rq->lock);
     cpu->resched_needed = false;
 
+    /* Put prev task back via its sched_class */
     if (prev && prev != cpu->idle_proc) {
-        (void)update_curr(rq);
-        /*
-         * Temporarily mark prev as RUNNING so that se_mark_runnable /
-         * se_mark_queued below perform a clean state transition.
-         * This is invisible to other CPUs because we hold rq->lock.
-         */
-        se_mark_running(&prev->se);
-
-        /*
-         * A wakeup can race with sleep/yield just before schedule(), leaving
-         * current as RUNNABLE. Treat it like RUNNING and enqueue instead of
-         * misclassifying it as blocked.
-         */
-        if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
-            prev->state = PROC_RUNNABLE;
-            se_mark_runnable(&prev->se);
-            __enqueue_entity(rq, &prev->se);
-            se_mark_queued(&prev->se, cpu->cpu_id);
-            rq->nr_running++;
-            sched_stat_inc(&stats->enqueue_count);
-        } else {
-            if (se_is_on_rq(&prev->se)) {
-                rb_erase(&prev->se.sched_node, &rq->tasks_timeline);
-                rq->nr_running--;
-                sched_stat_inc(&stats->dequeue_count);
+        const struct sched_class *cls = prev->se.sched_class;
+        if (cls)
+            cls->put_prev_task(rq, prev);
+        else {
+            /* Fallback: manually handle prev without class */
+            se_mark_running(&prev->se);
+            if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
+                prev->state = PROC_RUNNABLE;
+                se_mark_blocked(&prev->se);
+            } else {
+                se_mark_blocked(&prev->se);
             }
-            se_mark_blocked(&prev->se);
         }
         sched_validate_entity(prev, "schedule-prev");
     }
 
-    struct rb_node *left = rb_first(&rq->tasks_timeline);
-    if (left) {
-        struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
-        next = container_of(se, struct process, se);
-        rb_erase(&se->sched_node, &rq->tasks_timeline);
-        se_mark_runnable(se);           /* removed from rq */
-        rq->nr_running--;
-        sched_stat_inc(&stats->pick_count);
-        sched_trace_event(SCHED_TRACE_PICK, next, (uint64_t)cpu->cpu_id,
-                          (uint64_t)rq->nr_running);
-    } else {
-        /* Local empty - attempt stealing without holding local lock to simplify */
+    /* Pick next task: iterate sched_classes by priority */
+    next = fair_sched_class.pick_next_task(rq, prev);
+
+    if (!next) {
+        /* Local empty — attempt stealing */
         bool steal_allowed = sched_steal_is_enabled() && sched_nr_cpus() > 1;
         if (steal_allowed) {
             spin_unlock(&rq->lock);
             next = sched_steal_task(cpu->cpu_id);
             spin_lock(&rq->lock);
-        } else {
-            next = NULL;
         }
 
-        /* Re-check local queue: tasks may have been enqueued while lock was dropped */
-        if (!next) {
-            struct rb_node *recheck = rb_first(&rq->tasks_timeline);
-            if (recheck) {
-                struct sched_entity *se = rb_entry(recheck, struct sched_entity, sched_node);
-                next = container_of(se, struct process, se);
-                rb_erase(&se->sched_node, &rq->tasks_timeline);
-                se_mark_runnable(se);           /* removed from rq */
-                rq->nr_running--;
-                sched_stat_inc(&stats->pick_count);
-                sched_trace_event(SCHED_TRACE_PICK, next,
-                                  (uint64_t)cpu->cpu_id,
-                                  (uint64_t)rq->nr_running);
-            } else {
-                next = cpu->idle_proc;
-            }
-        }
+        /* Re-check local queue after dropping lock */
+        if (!next)
+            next = fair_sched_class.pick_next_task(rq, prev);
+
+        if (!next)
+            next = cpu->idle_proc;
     }
 
-    if (next == cpu->idle_proc) {
+    if (next != cpu->idle_proc) {
+        sched_stat_inc(&stats->pick_count);
+        sched_trace_event(SCHED_TRACE_PICK, next, (uint64_t)cpu->cpu_id,
+                          (uint64_t)rq->nr_running);
+    } else {
         sched_stat_inc(&stats->idle_pick_count);
         sched_trace_event(SCHED_TRACE_IDLE, next, (uint64_t)cpu->cpu_id,
                           (uint64_t)rq->nr_running);
@@ -547,7 +499,7 @@ void schedule(void) {
                           (uint64_t)(prev ? prev->pid : -1),
                           (uint64_t)(next ? next->pid : -1));
         next->se.last_run_time = sched_clock_ns();
-        rq->curr_se = &next->se;
+        rq->cfs.curr_se = &next->se;
         next->state = PROC_RUNNING;
         se_mark_running(&next->se);
         __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
@@ -579,7 +531,7 @@ void schedule(void) {
     } else {
         next->state = PROC_RUNNING;
         se_mark_running(&next->se);
-        rq->curr_se = &next->se;
+        rq->cfs.curr_se = &next->se;
         if (cpu->prev_task) sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
         arch_irq_restore(state);
@@ -588,20 +540,15 @@ void schedule(void) {
 
 void sched_tick(void) {
     struct percpu_data *cpu = arch_get_percpu();
-    struct cfs_rq *rq = &cpu->runqueue;
+    struct rq *rq = &cpu->runqueue;
     struct process *curr = proc_current();
 
     cpu->ticks++;
     if (spin_trylock(&rq->lock)) {
         if (curr && curr != cpu->idle_proc) {
-            rq->curr_se = &curr->se;
-            uint64_t delta = update_curr(rq);
-            uint32_t nr = rq->nr_running + 1;
-            uint64_t slice = SCHED_LATENCY_NS / nr;
-            if (slice < SCHED_MIN_GRANULARITY_NS)
-                slice = SCHED_MIN_GRANULARITY_NS;
-            if (delta >= slice)
-                cpu->resched_needed = true;
+            const struct sched_class *cls = curr->se.sched_class;
+            if (cls)
+                cls->task_tick(rq, curr);
         } else if (rq->nr_running > 0) {
             cpu->resched_needed = true;
         }
@@ -619,7 +566,7 @@ int sched_setnice(struct process *p, int nice) {
 
     int cpu = p->se.cpu;
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) return -1;
-    struct cfs_rq *rq = &cpu_data[cpu].runqueue;
+    struct rq *rq = &cpu_data[cpu].runqueue;
     bool state = arch_irq_save();
     spin_lock(&rq->lock);
     /* Re-check: steal can move this task between lock acquire */
@@ -628,10 +575,13 @@ int sched_setnice(struct process *p, int nice) {
         arch_irq_restore(state);
         return -EAGAIN;
     }
-    bool on_rq = se_is_on_rq(&p->se);
-    if (on_rq) rb_erase(&p->se.sched_node, &rq->tasks_timeline);
+    if (p->se.sched_class && p->se.sched_class->set_nice) {
+        int ret = p->se.sched_class->set_nice(rq, p, nice);
+        spin_unlock(&rq->lock);
+        arch_irq_restore(state);
+        return ret;
+    }
     p->se.nice = nice;
-    if (on_rq) __enqueue_entity(rq, &p->se);
     spin_unlock(&rq->lock);
     arch_irq_restore(state);
     return 0;
@@ -639,7 +589,7 @@ int sched_setnice(struct process *p, int nice) {
 
 int sched_getnice(struct process *p) { return p ? p->se.nice : 0; }
 int sched_cpu_id(void) { return arch_cpu_id(); }
-struct cfs_rq *sched_cpu_rq(void) { return this_rq; }
+struct rq *sched_cpu_rq(void) { return this_rq; }
 bool sched_need_resched(void) { return arch_get_percpu()->resched_needed; }
 void sched_set_idle(struct process *p) {
     struct percpu_data *cpu = arch_get_percpu();
@@ -729,17 +679,18 @@ void sched_init_idle_entity(struct process *p, int cpu) {
     if (!p) return;
     p->se.nice = 19;
     p->se.cpu = cpu;
+    p->se.sched_class = &fair_sched_class;
     se_set_state(&p->se, SE_STATE_RUNNING);
 }
 
 uint32_t sched_rq_nr_running(int cpu) {
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) return 0;
-    return __atomic_load_n(&cpu_data[cpu].runqueue.nr_running, __ATOMIC_RELAXED);
+    return __atomic_load_n(&cpu_data[cpu].runqueue.cfs.nr_running, __ATOMIC_RELAXED);
 }
 
 uint64_t sched_rq_min_vruntime(int cpu) {
     if (cpu < 0 || cpu >= CONFIG_MAX_CPUS) return 0;
-    return __atomic_load_n(&cpu_data[cpu].runqueue.min_vruntime, __ATOMIC_RELAXED);
+    return __atomic_load_n(&cpu_data[cpu].runqueue.cfs.min_vruntime, __ATOMIC_RELAXED);
 }
 
 void sched_debug_dump_process(const struct process *p) {
@@ -750,9 +701,161 @@ void sched_debug_dump_process(const struct process *p) {
            (unsigned long long)p->se.vruntime, p->se.nice);
 }
 
+/* ================================================================== */
+/*  fair_sched_class — CFS implementation behind sched_class          */
+/* ================================================================== */
+
+static void fair_enqueue_task(struct rq *rq, struct process *p, int flags) {
+    struct cfs_rq *cfs = &rq->cfs;
+    place_entity(cfs, &p->se, (flags & ENQUEUE_FORK) || p->se.vruntime == 0);
+    __enqueue_entity(cfs, &p->se);
+    cfs->nr_running++;
+    update_min_vruntime(cfs);
+}
+
+static void fair_dequeue_task(struct rq *rq, struct process *p,
+                              int flags __attribute__((unused))) {
+    struct cfs_rq *cfs = &rq->cfs;
+    rb_erase(&p->se.sched_node, &cfs->tasks_timeline);
+    cfs->nr_running--;
+    update_min_vruntime(cfs);
+}
+
+static struct process *fair_pick_next_task(struct rq *rq,
+                                           struct process *prev
+                                           __attribute__((unused))) {
+    struct cfs_rq *cfs = &rq->cfs;
+    struct rb_node *left = rb_first(&cfs->tasks_timeline);
+    if (!left)
+        return NULL;
+    struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
+    struct process *next = container_of(se, struct process, se);
+    rb_erase(&se->sched_node, &cfs->tasks_timeline);
+    se_mark_runnable(se);
+    cfs->nr_running--;
+    rq->nr_running--;
+    return next;
+}
+
+static void fair_put_prev_task(struct rq *rq, struct process *prev) {
+    struct cfs_rq *cfs = &rq->cfs;
+    (void)update_curr(cfs);
+
+    /*
+     * Temporarily mark prev as RUNNING so that se_mark_runnable /
+     * se_mark_queued below perform a clean state transition.
+     * This is invisible to other CPUs because we hold rq->lock.
+     */
+    se_mark_running(&prev->se);
+
+    if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
+        prev->state = PROC_RUNNABLE;
+        se_mark_runnable(&prev->se);
+        __enqueue_entity(cfs, &prev->se);
+        se_mark_queued(&prev->se, prev->se.cpu);
+        cfs->nr_running++;
+        rq->nr_running++;
+    } else {
+        if (se_is_on_rq(&prev->se)) {
+            rb_erase(&prev->se.sched_node, &cfs->tasks_timeline);
+            cfs->nr_running--;
+            rq->nr_running--;
+        }
+        se_mark_blocked(&prev->se);
+    }
+}
+
+static void fair_task_tick(struct rq *rq, struct process *p) {
+    struct cfs_rq *cfs = &rq->cfs;
+    struct percpu_data *cpu = &cpu_data[rq->cfs.curr_se ? rq->cfs.curr_se->cpu : 0];
+
+    cfs->curr_se = &p->se;
+    uint64_t delta = update_curr(cfs);
+    uint32_t nr = cfs->nr_running + 1;
+    uint64_t slice = SCHED_LATENCY_NS / nr;
+    if (slice < SCHED_MIN_GRANULARITY_NS)
+        slice = SCHED_MIN_GRANULARITY_NS;
+    if (delta >= slice)
+        cpu->resched_needed = true;
+}
+
+static void fair_task_fork(struct process *child, struct process *parent) {
+    child->se.vruntime = parent->se.vruntime;
+    child->se.nice = parent->se.nice;
+    child->se.cpu = parent->se.cpu;
+    child->se.sched_class = &fair_sched_class;
+}
+
+static int fair_set_nice(struct rq *rq, struct process *p, int nice) {
+    struct cfs_rq *cfs = &rq->cfs;
+    bool on_rq = se_is_on_rq(&p->se);
+    if (on_rq) rb_erase(&p->se.sched_node, &cfs->tasks_timeline);
+    p->se.nice = nice;
+    if (on_rq) __enqueue_entity(cfs, &p->se);
+    return 0;
+}
+
+static void fair_check_preempt_curr(struct rq *rq, struct process *p) {
+    struct cfs_rq *cfs = &rq->cfs;
+    struct sched_entity *curr_se = cfs->curr_se;
+    if (curr_se && curr_se != &p->se) {
+        if (p->se.vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr_se->vruntime) {
+            /* Find the percpu_data for this rq */
+            int cpu_id = p->se.cpu;
+            if (cpu_id >= 0 && cpu_id < CONFIG_MAX_CPUS)
+                cpu_data[cpu_id].resched_needed = true;
+        }
+    }
+}
+
+static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
+    struct cfs_rq *cfs = &rq->cfs;
+    if (cfs->nr_running == 0)
+        return NULL;
+
+    for (struct rb_node *node = rb_first(&cfs->tasks_timeline);
+         node; node = rb_next(node)) {
+        struct sched_entity *se =
+            rb_entry(node, struct sched_entity, sched_node);
+        struct process *cand = container_of(se, struct process, se);
+        if (cfs->curr_se == se)
+            continue;
+        if (cand->state != PROC_RUNNABLE)
+            continue;
+        if (se_state_load(se) != SE_STATE_QUEUED)
+            continue;
+        if (se_is_on_cpu(se))
+            continue;
+
+        rb_erase(&se->sched_node, &cfs->tasks_timeline);
+        se_mark_runnable(se);
+        se->cpu = dst_cpu;
+        cfs->nr_running--;
+        rq->nr_running--;
+        update_min_vruntime(cfs);
+        sched_validate_entity(cand, "fair_steal_task");
+        return cand;
+    }
+    return NULL;
+}
+
+const struct sched_class fair_sched_class = {
+    .enqueue_task       = fair_enqueue_task,
+    .dequeue_task       = fair_dequeue_task,
+    .pick_next_task     = fair_pick_next_task,
+    .put_prev_task      = fair_put_prev_task,
+    .task_tick          = fair_task_tick,
+    .task_fork          = fair_task_fork,
+    .set_nice           = fair_set_nice,
+    .check_preempt_curr = fair_check_preempt_curr,
+    .steal_task         = fair_steal_task,
+    .priority           = 100,  /* fair class — lowest priority */
+};
+
 void sched_fork(struct process *child, struct process *parent) {
     sched_entity_init(&child->se);
     child->se.vruntime = parent->se.vruntime;
     child->se.nice = parent->se.nice;
     child->se.cpu = parent->se.cpu;
+    child->se.sched_class = &fair_sched_class;
 }
