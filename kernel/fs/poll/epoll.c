@@ -20,12 +20,12 @@ struct epoll_item {
     uint32_t revents;
     struct epoll_instance *ep;
     struct file *file;
-    struct vnode *vn;
     struct poll_watch watch;
     atomic_t refcount;
     bool ready;
     bool dispatching;
     bool deleted;
+    bool initializing;
     struct list_head list;
     struct list_head ready_node;
     struct wait_queue detach_wait;
@@ -122,6 +122,14 @@ static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
 }
 
 static void epoll_item_detach(struct epoll_item *item) {
+    /*
+     * ADD completes watch registration after dropping ep->lock.
+     * Wait until that phase finishes before unwatching to avoid
+     * unwatch-before-watch reordering.
+     */
+    while (__atomic_load_n(&item->initializing, __ATOMIC_ACQUIRE)) {
+        proc_yield();
+    }
     vfs_poll_unwatch(&item->watch);
     while (epoll_item_refs(item) > 1) {
         proc_sleep_on(&item->detach_wait, item, false);
@@ -250,11 +258,11 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->revents = 0;
         item->ep = ep;
         item->file = target;
-        item->vn = target->vnode;
         atomic_init(&item->refcount, 1);
         item->ready = false;
         item->dispatching = false;
         item->deleted = false;
+        item->initializing = true;
         item->watch.head = NULL;
         item->watch.prepare = epoll_item_prepare;
         item->watch.notify = epoll_item_notify;
@@ -263,6 +271,8 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         INIT_LIST_HEAD(&item->list);
         INIT_LIST_HEAD(&item->ready_node);
         wait_queue_init(&item->detach_wait);
+        file_get(item->file);
+        epoll_item_get(item);
         list_add_tail(&item->list, &ep->items);
         break;
     case EPOLL_CTL_MOD:
@@ -275,6 +285,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->events = events;
         item->data = data;
         __atomic_store_n(&item->watch.events, events, __ATOMIC_RELEASE);
+        epoll_item_get(item);
         break;
     case EPOLL_CTL_DEL:
         if (!item) {
@@ -300,11 +311,12 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     mutex_unlock(&ep->lock);
 
     if (op == EPOLL_CTL_ADD) {
-        file_get(item->file);
-        vfs_poll_watch(item->vn, &item->watch, item->events);
+        vfs_poll_watch(item->file->vnode, &item->watch, item->events);
         uint32_t revents = (uint32_t)vfs_poll(item->file, item->events);
+        __atomic_store_n(&item->initializing, false, __ATOMIC_RELEASE);
         if (revents)
             epoll_mark_ready(item, revents);
+        epoll_item_put(item);
         file_put(target);
         file_put(ep_file);
         return 0;
@@ -314,6 +326,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         uint32_t revents = (uint32_t)vfs_poll(item->file, item->events);
         if (revents)
             epoll_mark_ready(item, revents);
+        epoll_item_put(item);
         file_put(target);
         file_put(ep_file);
         return 0;
