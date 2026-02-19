@@ -343,14 +343,18 @@ static void se_propagate_min_deadline(struct rb_node *node) {
     }
 }
 
-/* rb_erase + min_deadline propagation */
+static void se_recompute_min_deadline(struct rb_node *node) {
+    if (!node)
+        return;
+    se_recompute_min_deadline(node->rb_left);
+    se_recompute_min_deadline(node->rb_right);
+    se_update_min_deadline(rb_entry(node, struct sched_entity, sched_node));
+}
+
+/* rb_erase + post-order min_deadline recompute */
 static void sched_rb_erase(struct sched_entity *se, struct cfs_rq *cfs_rq) {
-    struct rb_node *parent = rb_parent(&se->sched_node);
     rb_erase(&se->sched_node, &cfs_rq->tasks_timeline);
-    if (parent)
-        se_propagate_min_deadline(parent);
-    else if (cfs_rq->tasks_timeline.rb_node)
-        se_propagate_min_deadline(cfs_rq->tasks_timeline.rb_node);
+    se_recompute_min_deadline(cfs_rq->tasks_timeline.rb_node);
 }
 
 /*
