@@ -392,7 +392,8 @@ $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
 
 # Common QEMU flags
 QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4
-QEMU_FLAGS += -serial stdio -monitor none
+# Use QEMU stdio multiplexer for robust interactive input in -nographic mode.
+QEMU_FLAGS += -serial mon:stdio
 QEMU_UEFI_NOISE_FILTER := ./scripts/impl/filter-uefi-noise.sh
 
 ifeq ($(ARCH),aarch64)
@@ -480,6 +481,11 @@ else
 endif
 
 QEMU_RUN_FLAGS := $(QEMU_FLAGS) $(QEMU_MEDIA_FLAGS) $(QEMU_DISK_FLAGS)
+ifeq ($(shell test -r /dev/tty && echo yes),yes)
+QEMU_STDIN := </dev/tty
+else
+QEMU_STDIN :=
+endif
 
 check-disk:
 	@if [ -f "$(DISK_IMG)" ]; then \
@@ -502,17 +508,17 @@ run: $(RUN_DEPS)
 	@$(MAKE) --no-print-directory check-disk
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
-	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
+	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
 else
-	$(Q)$(QEMU) $(QEMU_RUN_FLAGS)
+	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)
 endif
 
 run-e1000: $(RUN_DEPS)
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, e1000)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
-	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
+	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
 else
-	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0
+	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)
 endif
 
 # Create bootable ISO (x86_64 only for now)
@@ -527,7 +533,7 @@ run-iso: iso
 debug: $(RUN_DEPS)
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, GDB :1234)"
 	@echo "  In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
-	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -s -S
+	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -s -S $(QEMU_STDIN)
 
 # ============================================================
 #                    Utility Targets
