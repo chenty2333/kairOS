@@ -111,6 +111,7 @@ struct file {
     struct dentry *dentry;
     off_t offset;
     uint32_t flags;
+    void *private_data;
     atomic_t refcount;
     char path[CONFIG_PATH_MAX];
     struct mutex lock;
@@ -206,6 +207,12 @@ struct file_ops {
     int (*truncate)(struct vnode *vn, off_t length);
     int (*poll)(struct vnode *vn, uint32_t events);
     int (*fsync)(struct vnode *vn, int datasync);
+    int (*open_file)(struct file *file);
+    int (*close_file)(struct file *file);
+    ssize_t (*read_file)(struct file *file, void *buf, size_t len);
+    ssize_t (*write_file)(struct file *file, const void *buf, size_t len);
+    int (*ioctl_file)(struct file *file, uint64_t cmd, uint64_t arg);
+    int (*poll_file)(struct file *file, uint32_t events);
 };
 
 struct poll_waiter;

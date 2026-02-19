@@ -21,6 +21,8 @@ int vfs_poll(struct file *file, uint32_t events) {
         return POLLNVAL;
     if (file->vnode->type == VNODE_PIPE)
         return pipe_poll_file(file, events);
+    if (file->vnode->ops && file->vnode->ops->poll_file)
+        return file->vnode->ops->poll_file(file, events);
     return vfs_poll_vnode(file->vnode, events);
 }
 

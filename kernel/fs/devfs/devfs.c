@@ -67,6 +67,13 @@ static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset);
 static int devfs_dev_poll(struct vnode *vn, uint32_t events);
 static int devfs_dir_poll(struct vnode *vn, uint32_t events);
 static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg);
+static int devfs_dev_open_file(struct file *file);
+static int devfs_dev_close_file(struct file *file);
+static ssize_t devfs_dev_read_file(struct file *file, void *buf, size_t len);
+static ssize_t devfs_dev_write_file(struct file *file, const void *buf,
+                                    size_t len);
+static int devfs_dev_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg);
+static int devfs_dev_poll_file(struct file *file, uint32_t events);
 
 static struct file_ops devfs_dev_ops = {
     .read = devfs_dev_read,
@@ -74,6 +81,12 @@ static struct file_ops devfs_dev_ops = {
     .close = devfs_dev_close,
     .ioctl = devfs_dev_ioctl,
     .poll = devfs_dev_poll,
+    .open_file = devfs_dev_open_file,
+    .close_file = devfs_dev_close_file,
+    .read_file = devfs_dev_read_file,
+    .write_file = devfs_dev_write_file,
+    .ioctl_file = devfs_dev_ioctl_file,
+    .poll_file = devfs_dev_poll_file,
 };
 
 static struct file_ops devfs_dir_ops = {
@@ -276,6 +289,73 @@ static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
 
 static int devfs_dev_close(struct vnode *vn __attribute__((unused))) {
     return 0;
+}
+
+static int devfs_dev_open_file(struct file *file) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    struct devfs_node *node = file->vnode->fs_data;
+    if (!node)
+        return -EINVAL;
+    if (node->dev_type == DEVFS_CUSTOM && node->ops && node->ops->open_file)
+        return node->ops->open_file(file);
+    return 0;
+}
+
+static int devfs_dev_close_file(struct file *file) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    struct devfs_node *node = file->vnode->fs_data;
+    if (!node)
+        return -EINVAL;
+    if (node->dev_type == DEVFS_CUSTOM && node->ops && node->ops->close_file)
+        return node->ops->close_file(file);
+    return 0;
+}
+
+static ssize_t devfs_dev_read_file(struct file *file, void *buf, size_t len) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    struct devfs_node *node = file->vnode->fs_data;
+    if (!node)
+        return -EINVAL;
+    if (node->dev_type == DEVFS_CUSTOM && node->ops && node->ops->read_file)
+        return node->ops->read_file(file, buf, len);
+    return devfs_dev_read(file->vnode, buf, len, file->offset, file->flags);
+}
+
+static ssize_t devfs_dev_write_file(struct file *file, const void *buf,
+                                    size_t len) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    struct devfs_node *node = file->vnode->fs_data;
+    if (!node)
+        return -EINVAL;
+    if (node->dev_type == DEVFS_CUSTOM && node->ops && node->ops->write_file)
+        return node->ops->write_file(file, buf, len);
+    return devfs_dev_write(file->vnode, buf, len, file->offset, file->flags);
+}
+
+static int devfs_dev_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    struct devfs_node *node = file->vnode->fs_data;
+    if (!node)
+        return -EINVAL;
+    if (node->dev_type == DEVFS_CUSTOM && node->ops && node->ops->ioctl_file)
+        return node->ops->ioctl_file(file, cmd, arg);
+    return devfs_dev_ioctl(file->vnode, cmd, arg);
+}
+
+static int devfs_dev_poll_file(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+    struct devfs_node *node = file->vnode->fs_data;
+    if (!node)
+        return POLLNVAL;
+    if (node->dev_type == DEVFS_CUSTOM && node->ops && node->ops->poll_file)
+        return node->ops->poll_file(file, events);
+    return devfs_dev_poll(file->vnode, events);
 }
 
 static int devfs_dev_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
