@@ -15,10 +15,10 @@
 #include <kairos/sched_class.h>
 #include <kairos/string.h>
 
-/* CFS Scheduler Tunables */
-#define SCHED_LATENCY_NS 6000000UL
-#define SCHED_MIN_GRANULARITY_NS 1000000UL
-#define SCHED_WAKEUP_GRANULARITY_NS 2000000UL
+/* EEVDF Scheduler Tunables */
+#define SCHED_SLICE_NS          3000000UL   /* 3ms default time slice */
+#define SCHED_LATENCY_NS        6000000UL   /* 6ms scheduling latency target */
+#define SCHED_MIN_GRANULARITY_NS 500000UL   /* 0.5ms minimum granularity */
 
 static inline uint64_t sched_clock_ns(void) {
     return arch_timer_ticks_to_ns(arch_timer_ticks());
@@ -237,20 +237,21 @@ static uint64_t calc_delta_fair(uint64_t delta, int weight) {
     return (delta * NICE_0_WEIGHT) / (weight > 0 ? weight : NICE_0_WEIGHT);
 }
 
-static void update_min_vruntime(struct cfs_rq *rq) {
-    uint64_t v = rq->min_vruntime;
-    if (rq->curr_se && rq->curr_se->vruntime > v)
-        v = rq->curr_se->vruntime;
-    struct rb_node *left = rb_first(&rq->tasks_timeline);
+static void update_min_vruntime(struct cfs_rq *cfs_rq) {
+    uint64_t v = cfs_rq->min_vruntime;
+    if (cfs_rq->curr_se && cfs_rq->curr_se->vruntime > v)
+        v = cfs_rq->curr_se->vruntime;
+    struct rb_node *left = rb_first(&cfs_rq->tasks_timeline);
     if (left) {
         struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
         if (se->vruntime < v) v = se->vruntime;
     }
-    if (v > rq->min_vruntime) rq->min_vruntime = v;
+    if (v > cfs_rq->min_vruntime) cfs_rq->min_vruntime = v;
 }
 
-static void __enqueue_entity(struct cfs_rq *rq, struct sched_entity *se) {
-    struct rb_node **link = &rq->tasks_timeline.rb_node, *parent = NULL;
+/* Insert entity into RB-tree ordered by vruntime */
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se) {
+    struct rb_node **link = &cfs_rq->tasks_timeline.rb_node, *parent = NULL;
     while (*link) {
         parent = *link;
         if (se->vruntime < rb_entry(parent, struct sched_entity, sched_node)->vruntime)
@@ -259,11 +260,11 @@ static void __enqueue_entity(struct cfs_rq *rq, struct sched_entity *se) {
             link = &parent->rb_right;
     }
     rb_link_node(&se->sched_node, parent, link);
-    rb_insert_color(&se->sched_node, &rq->tasks_timeline);
+    rb_insert_color(&se->sched_node, &cfs_rq->tasks_timeline);
 }
 
-static uint64_t update_curr(struct cfs_rq *rq) {
-    struct sched_entity *curr_se = rq->curr_se;
+static uint64_t update_curr(struct cfs_rq *cfs_rq) {
+    struct sched_entity *curr_se = cfs_rq->curr_se;
     if (!curr_se) return 0;
 
     uint64_t now = sched_clock_ns();
@@ -272,14 +273,99 @@ static uint64_t update_curr(struct cfs_rq *rq) {
 
     curr_se->vruntime += calc_delta_fair(delta, __weight(curr_se->nice));
     curr_se->last_run_time = now;
-    update_min_vruntime(rq);
+    update_min_vruntime(cfs_rq);
     return delta;
 }
 
-static void place_entity(struct cfs_rq *rq, struct sched_entity *se, bool initial) {
-    uint64_t v = rq->min_vruntime;
-    if (initial) v += calc_delta_fair(SCHED_LATENCY_NS, __weight(se->nice));
-    if (se->vruntime < v) se->vruntime = v;
+/* --- EEVDF helpers --- */
+
+/* Compute the virtual slice: how much vruntime one wall-clock slice costs */
+static inline uint64_t calc_vslice(struct sched_entity *se) {
+    uint64_t slice = se->slice ? se->slice : SCHED_SLICE_NS;
+    return calc_delta_fair(slice, __weight(se->nice));
+}
+
+/* Entity is eligible when its vruntime <= system virtual time (min_vruntime) */
+static inline bool entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se) {
+    return (int64_t)(se->vruntime - cfs_rq->min_vruntime) <= 0;
+}
+
+/* Compare deadlines: true if a's deadline is strictly before b's */
+static inline bool deadline_before(struct sched_entity *a, struct sched_entity *b) {
+    return (int64_t)(a->deadline - b->deadline) < 0;
+}
+
+/*
+ * pick_eevdf - EEVDF core pick algorithm
+ *
+ * Among eligible entities (vruntime <= V), pick the one with the
+ * earliest (smallest) deadline.  The RB-tree is sorted by vruntime,
+ * so eligible entities cluster on the left side.  We walk the tree
+ * pruning ineligible subtrees.
+ */
+static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq) {
+    struct rb_node *node = cfs_rq->tasks_timeline.rb_node;
+    struct sched_entity *best = NULL;
+
+    while (node) {
+        struct sched_entity *se = rb_entry(node, struct sched_entity, sched_node);
+
+        if (entity_eligible(cfs_rq, se)) {
+            if (!best || deadline_before(se, best))
+                best = se;
+            /* Left subtree has smaller vruntime, more likely eligible */
+            node = node->rb_left;
+        } else {
+            /* Not eligible; only right subtree might have eligible nodes
+             * (but actually left has smaller vruntime — we go left to
+             * find eligible ones). Since this node is ineligible
+             * (vruntime > V), all nodes in right subtree are also
+             * ineligible. Go left. */
+            node = node->rb_left;
+        }
+    }
+
+    /* If no eligible entity found, fall back to leftmost (smallest vruntime) */
+    if (!best) {
+        struct rb_node *left = rb_first(&cfs_rq->tasks_timeline);
+        if (left)
+            best = rb_entry(left, struct sched_entity, sched_node);
+    }
+
+    return best;
+}
+
+/*
+ * place_entity_eevdf - Set vruntime and deadline when entity enters the queue
+ *
+ * On wakeup: restore lag (se->vruntime = V - vlag), clamped to one vslice.
+ * On initial/fork: set vruntime to min_vruntime + vslice (fork penalty).
+ */
+static void place_entity_eevdf(struct cfs_rq *cfs_rq, struct sched_entity *se,
+                                int flags) {
+    uint64_t vslice = calc_vslice(se);
+    uint64_t V = cfs_rq->min_vruntime;
+
+    if (flags & ENQUEUE_WAKEUP) {
+        /* Restore lag: vruntime = V - vlag */
+        int64_t lag = se->vlag;
+        se->vruntime = V - lag;
+        /* Clamp: don't let lag exceed one vslice */
+        if ((int64_t)(V - se->vruntime) > (int64_t)vslice)
+            se->vruntime = V - vslice;
+        /* Don't go below min_vruntime - vslice */
+        if ((int64_t)(se->vruntime - V) > (int64_t)vslice)
+            se->vruntime = V;
+    } else {
+        /* Initial placement or fork: slight penalty to prevent fork bombs */
+        if (se->vruntime < V)
+            se->vruntime = V;
+    }
+
+    /* Set deadline */
+    se->deadline = se->vruntime + vslice;
+    if (!se->slice)
+        se->slice = SCHED_SLICE_NS;
 }
 
 void sched_init(void) {
@@ -696,18 +782,22 @@ uint64_t sched_rq_min_vruntime(int cpu) {
 void sched_debug_dump_process(const struct process *p) {
     if (!p) return;
     uint32_t st = __atomic_load_n(&p->se.run_state, __ATOMIC_ACQUIRE);
-    pr_err("  sched: pid=%d se_state=%s cpu=%d vruntime=%llu nice=%d\n",
+    pr_err("  sched: pid=%d se_state=%s cpu=%d vruntime=%llu deadline=%llu vlag=%lld nice=%d\n",
            p->pid, sched_se_state_name(st), p->se.cpu,
-           (unsigned long long)p->se.vruntime, p->se.nice);
+           (unsigned long long)p->se.vruntime,
+           (unsigned long long)p->se.deadline,
+           (long long)p->se.vlag, p->se.nice);
 }
 
 /* ================================================================== */
-/*  fair_sched_class — CFS implementation behind sched_class          */
+/*  fair_sched_class — EEVDF implementation behind sched_class        */
 /* ================================================================== */
 
 static void fair_enqueue_task(struct rq *rq, struct process *p, int flags) {
     struct cfs_rq *cfs = &rq->cfs;
-    place_entity(cfs, &p->se, (flags & ENQUEUE_FORK) || p->se.vruntime == 0);
+    if (!p->se.slice)
+        p->se.slice = SCHED_SLICE_NS;
+    place_entity_eevdf(cfs, &p->se, flags);
     __enqueue_entity(cfs, &p->se);
     cfs->nr_running++;
     update_min_vruntime(cfs);
@@ -716,6 +806,8 @@ static void fair_enqueue_task(struct rq *rq, struct process *p, int flags) {
 static void fair_dequeue_task(struct rq *rq, struct process *p,
                               int flags __attribute__((unused))) {
     struct cfs_rq *cfs = &rq->cfs;
+    /* Save lag for wakeup restoration */
+    p->se.vlag = (int64_t)(cfs->min_vruntime - p->se.vruntime);
     rb_erase(&p->se.sched_node, &cfs->tasks_timeline);
     cfs->nr_running--;
     update_min_vruntime(cfs);
@@ -725,10 +817,9 @@ static struct process *fair_pick_next_task(struct rq *rq,
                                            struct process *prev
                                            __attribute__((unused))) {
     struct cfs_rq *cfs = &rq->cfs;
-    struct rb_node *left = rb_first(&cfs->tasks_timeline);
-    if (!left)
+    struct sched_entity *se = pick_eevdf(cfs);
+    if (!se)
         return NULL;
-    struct sched_entity *se = rb_entry(left, struct sched_entity, sched_node);
     struct process *next = container_of(se, struct process, se);
     rb_erase(&se->sched_node, &cfs->tasks_timeline);
     se_mark_runnable(se);
@@ -741,21 +832,23 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
     struct cfs_rq *cfs = &rq->cfs;
     (void)update_curr(cfs);
 
-    /*
-     * Temporarily mark prev as RUNNING so that se_mark_runnable /
-     * se_mark_queued below perform a clean state transition.
-     * This is invisible to other CPUs because we hold rq->lock.
-     */
     se_mark_running(&prev->se);
 
     if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
         prev->state = PROC_RUNNABLE;
         se_mark_runnable(&prev->se);
+        /* Refresh deadline if slice expired */
+        if ((int64_t)(prev->se.vruntime - prev->se.deadline) >= 0) {
+            uint64_t vslice = calc_vslice(&prev->se);
+            prev->se.deadline = prev->se.vruntime + vslice;
+        }
         __enqueue_entity(cfs, &prev->se);
         se_mark_queued(&prev->se, prev->se.cpu);
         cfs->nr_running++;
         rq->nr_running++;
     } else {
+        /* Save lag before blocking */
+        prev->se.vlag = (int64_t)(cfs->min_vruntime - prev->se.vruntime);
         if (se_is_on_rq(&prev->se)) {
             rb_erase(&prev->se.sched_node, &cfs->tasks_timeline);
             cfs->nr_running--;
@@ -767,15 +860,25 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
 
 static void fair_task_tick(struct rq *rq, struct process *p) {
     struct cfs_rq *cfs = &rq->cfs;
-    struct percpu_data *cpu = &cpu_data[rq->cfs.curr_se ? rq->cfs.curr_se->cpu : 0];
+    int cpu_id = p->se.cpu;
+    struct percpu_data *cpu = (cpu_id >= 0 && cpu_id < CONFIG_MAX_CPUS)
+                              ? &cpu_data[cpu_id] : arch_get_percpu();
 
     cfs->curr_se = &p->se;
     uint64_t delta = update_curr(cfs);
+
+    /* Check if current has exceeded its slice */
+    if ((int64_t)(p->se.vruntime - p->se.deadline) >= 0) {
+        cpu->resched_needed = true;
+        return;
+    }
+
+    /* Also check minimum granularity */
     uint32_t nr = cfs->nr_running + 1;
-    uint64_t slice = SCHED_LATENCY_NS / nr;
-    if (slice < SCHED_MIN_GRANULARITY_NS)
-        slice = SCHED_MIN_GRANULARITY_NS;
-    if (delta >= slice)
+    uint64_t gran = SCHED_LATENCY_NS / nr;
+    if (gran < SCHED_MIN_GRANULARITY_NS)
+        gran = SCHED_MIN_GRANULARITY_NS;
+    if (delta >= gran)
         cpu->resched_needed = true;
 }
 
@@ -783,6 +886,10 @@ static void fair_task_fork(struct process *child, struct process *parent) {
     child->se.vruntime = parent->se.vruntime;
     child->se.nice = parent->se.nice;
     child->se.cpu = parent->se.cpu;
+    child->se.slice = SCHED_SLICE_NS;
+    child->se.vlag = 0;  /* no lag advantage for new forks */
+    child->se.deadline = child->se.vruntime + calc_delta_fair(SCHED_SLICE_NS,
+                         __weight(child->se.nice));
     child->se.sched_class = &fair_sched_class;
 }
 
@@ -791,6 +898,9 @@ static int fair_set_nice(struct rq *rq, struct process *p, int nice) {
     bool on_rq = se_is_on_rq(&p->se);
     if (on_rq) rb_erase(&p->se.sched_node, &cfs->tasks_timeline);
     p->se.nice = nice;
+    /* Recalculate deadline with new weight */
+    uint64_t vslice = calc_vslice(&p->se);
+    p->se.deadline = p->se.vruntime + vslice;
     if (on_rq) __enqueue_entity(cfs, &p->se);
     return 0;
 }
@@ -798,13 +908,14 @@ static int fair_set_nice(struct rq *rq, struct process *p, int nice) {
 static void fair_check_preempt_curr(struct rq *rq, struct process *p) {
     struct cfs_rq *cfs = &rq->cfs;
     struct sched_entity *curr_se = cfs->curr_se;
-    if (curr_se && curr_se != &p->se) {
-        if (p->se.vruntime + SCHED_WAKEUP_GRANULARITY_NS < curr_se->vruntime) {
-            /* Find the percpu_data for this rq */
-            int cpu_id = p->se.cpu;
-            if (cpu_id >= 0 && cpu_id < CONFIG_MAX_CPUS)
-                cpu_data[cpu_id].resched_needed = true;
-        }
+    if (!curr_se || curr_se == &p->se)
+        return;
+
+    /* EEVDF preemption: if new task is eligible and has earlier deadline */
+    if (entity_eligible(cfs, &p->se) && deadline_before(&p->se, curr_se)) {
+        int cpu_id = p->se.cpu;
+        if (cpu_id >= 0 && cpu_id < CONFIG_MAX_CPUS)
+            cpu_data[cpu_id].resched_needed = true;
     }
 }
 
@@ -828,6 +939,8 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
             continue;
 
         rb_erase(&se->sched_node, &cfs->tasks_timeline);
+        /* Save lag relative to source CPU */
+        se->vlag = (int64_t)(cfs->min_vruntime - se->vruntime);
         se_mark_runnable(se);
         se->cpu = dst_cpu;
         cfs->nr_running--;
@@ -849,13 +962,12 @@ const struct sched_class fair_sched_class = {
     .set_nice           = fair_set_nice,
     .check_preempt_curr = fair_check_preempt_curr,
     .steal_task         = fair_steal_task,
-    .priority           = 100,  /* fair class — lowest priority */
+    .priority           = 100,
 };
 
 void sched_fork(struct process *child, struct process *parent) {
     sched_entity_init(&child->se);
-    child->se.vruntime = parent->se.vruntime;
-    child->se.nice = parent->se.nice;
-    child->se.cpu = parent->se.cpu;
     child->se.sched_class = &fair_sched_class;
+    if (fair_sched_class.task_fork)
+        fair_sched_class.task_fork(child, parent);
 }
