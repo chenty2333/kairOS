@@ -88,17 +88,19 @@ int signal_send_pgrp(pid_t pgrp, int sig) {
 
     uint64_t mask = 1ULL << (sig - 1);
     int count = 0;
+    bool flags;
 
     /* Set pending bits under lock; wakeup after release. */
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    spin_lock_irqsave(&proc_table_lock, &flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         struct process *p = &proc_table[i];
-        if (p->state != PROC_UNUSED && p->pgid == pgrp) {
+        if (p->state != PROC_UNUSED && p->state != PROC_EMBRYO &&
+            p->pgid == pgrp) {
             __atomic_fetch_or(&p->sig_pending, mask, __ATOMIC_RELEASE);
             count++;
         }
     }
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
 
     if (count == 0)
         return -ESRCH;
