@@ -500,19 +500,33 @@ void sched_dequeue(struct process *p) {
 }
 
 /**
- * sched_steal_task - Try to steal from other CPUs
- * Iterates remote runqueues, dispatching through sched_class->steal_task.
+ * sched_steal_task - Try to steal from other CPUs (EEVDF-aware)
+ *
+ * Improvements over naive scan:
+ * - Randomize start CPU to avoid thundering herd
+ * - Lockless nr_running > 1 check before trylock
+ * - Dispatch through sched_class->steal_task (which picks by largest deadline)
  */
 static struct process *sched_steal_task(int self_id) {
     struct sched_cpu_stats *self_stats = &cpu_data[self_id].stats;
     int online = sched_nr_cpus();
-    for (int i = 0; i < online; i++) {
+    if (online <= 1)
+        return NULL;
+
+    /* Start from a pseudo-random CPU to spread steal pressure */
+    uint32_t start = (uint32_t)(cpu_data[self_id].ticks) % (uint32_t)online;
+
+    for (int j = 0; j < online; j++) {
+        int i = (int)((start + (uint32_t)j) % (uint32_t)online);
         if (i == self_id) continue;
         sched_stat_inc(&self_stats->steal_attempt_count);
 
-        struct rq *remote_rq = &cpu_data[i].runqueue;
+        /* Lockless pre-check: skip if remote has <= 1 task */
+        if (__atomic_load_n(&cpu_data[i].runqueue.cfs.nr_running,
+                            __ATOMIC_RELAXED) <= 0)
+            continue;
 
-        /* Attempt to lock remote queue without deadlocking */
+        struct rq *remote_rq = &cpu_data[i].runqueue;
         if (!spin_trylock(&remote_rq->lock)) continue;
 
         struct process *p = NULL;
@@ -939,6 +953,14 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
     if (cfs->nr_running == 0)
         return NULL;
 
+    /*
+     * EEVDF steal strategy: pick the task with the LARGEST deadline
+     * (least urgent), minimizing impact on the source CPU's latency.
+     * Walk the entire tree to find the best candidate.
+     */
+    struct sched_entity *best_se = NULL;
+    struct process *best = NULL;
+
     for (struct rb_node *node = rb_first(&cfs->tasks_timeline);
          node; node = rb_next(node)) {
         struct sched_entity *se =
@@ -953,18 +975,26 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
         if (se_is_on_cpu(se))
             continue;
 
-        rb_erase(&se->sched_node, &cfs->tasks_timeline);
-        /* Save lag relative to source CPU */
-        se->vlag = (int64_t)(cfs->min_vruntime - se->vruntime);
-        se_mark_runnable(se);
-        se->cpu = dst_cpu;
-        cfs->nr_running--;
-        rq->nr_running--;
-        update_min_vruntime(cfs);
-        sched_validate_entity(cand, "fair_steal_task");
-        return cand;
+        /* Pick candidate with largest deadline (least urgent) */
+        if (!best_se || (int64_t)(se->deadline - best_se->deadline) > 0) {
+            best_se = se;
+            best = cand;
+        }
     }
-    return NULL;
+
+    if (!best_se)
+        return NULL;
+
+    rb_erase(&best_se->sched_node, &cfs->tasks_timeline);
+    /* Save lag relative to source CPU for destination placement */
+    best_se->vlag = (int64_t)(cfs->min_vruntime - best_se->vruntime);
+    se_mark_runnable(best_se);
+    best_se->cpu = dst_cpu;
+    cfs->nr_running--;
+    rq->nr_running--;
+    update_min_vruntime(cfs);
+    sched_validate_entity(best, "fair_steal_task");
+    return best;
 }
 
 const struct sched_class fair_sched_class = {
