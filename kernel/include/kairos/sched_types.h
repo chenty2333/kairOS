@@ -21,6 +21,8 @@ enum sched_entity_state {
     SE_STATE_RUNNING  = 3,
 };
 
+struct sched_class;
+
 struct sched_entity {
     /*
      * Scheduling state machine:
@@ -35,6 +37,7 @@ struct sched_entity {
     int nice;
     int cpu;
     struct rb_node sched_node;
+    const struct sched_class *sched_class;
 };
 
 /* Derive on_rq / on_cpu from the authoritative run_state */
@@ -52,6 +55,7 @@ static inline void sched_entity_init(struct sched_entity *se) {
     se->last_run_time = 0;
     se->nice = 0;
     se->cpu = -1;
+    se->sched_class = NULL;  /* assigned at fork/enqueue time */
 }
 
 #endif

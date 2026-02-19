@@ -1,5 +1,5 @@
 /**
- * kernel/include/kairos/sched.h - CFS Scheduler
+ * kernel/include/kairos/sched.h - Scheduler
  */
 
 #ifndef _KAIROS_SCHED_H
@@ -9,6 +9,7 @@
 #include <kairos/config.h>
 #include <kairos/list.h>
 #include <kairos/rbtree.h>
+#include <kairos/sched_class.h>
 #include <kairos/sched_types.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
@@ -28,13 +29,23 @@ uint32_t sched_rq_nr_running(int cpu);
 uint64_t sched_rq_min_vruntime(int cpu);
 void sched_debug_dump_process(const struct process *p);
 
+/* CFS/EEVDF sub-runqueue */
 struct cfs_rq {
     struct rb_root tasks_timeline;
     uint64_t min_vruntime;
     uint32_t nr_running;
     struct sched_entity *curr_se;
-    struct process *idle;
+};
+
+/* Generic per-CPU runqueue */
+struct rq {
     spinlock_t lock;
+    uint32_t nr_running;          /* total across all classes */
+    struct process *idle;
+    const struct sched_class *curr_class;
+
+    /* Per-class sub-runqueues */
+    struct cfs_rq cfs;
 };
 
 void sched_init(void);
@@ -96,7 +107,7 @@ struct sched_trace_entry {
 
 struct percpu_data {
     int cpu_id;
-    struct cfs_rq runqueue;
+    struct rq runqueue;
     struct process *curr_proc, *idle_proc;
     struct process *prev_task; /* Task that just switched out */
     struct trap_frame *current_tf;
@@ -110,7 +121,7 @@ struct percpu_data {
     /* Per-CPU trace buffer — only written by local CPU with IRQs off */
     struct sched_trace_entry trace_buf[SCHED_TRACE_PER_CPU];
     uint32_t trace_head;
-    int preempt_count;          /* >0 means preemption disabled (debug only) */
+    int preempt_count;          /* >0 means preemption disabled */
 };
 
 extern struct percpu_data cpu_data[];
@@ -119,6 +130,7 @@ static inline struct percpu_data *arch_get_percpu(void) {
 }
 
 #define this_rq (&arch_get_percpu()->runqueue)
+#define this_cfs_rq (&arch_get_percpu()->runqueue.cfs)
 bool sched_need_resched(void);
 void sched_set_idle(struct process *p);
 int sched_cpu_count(void);
