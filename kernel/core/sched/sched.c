@@ -34,6 +34,21 @@ const int sched_nice_to_weight[40] = {
 struct percpu_data cpu_data[CONFIG_MAX_CPUS];
 static int nr_cpus_online = 1;
 
+/* Spinlock preemption control — defined here where percpu_data is visible.
+ * When CONFIG_DEBUG_LOCKS is on, sync.c provides these instead. */
+#if !CONFIG_DEBUG_LOCKS
+void __spin_preempt_disable(void) {
+    struct percpu_data *cpu = arch_get_percpu();
+    cpu->preempt_count++;
+    __asm__ volatile("" ::: "memory");
+}
+
+void __spin_preempt_enable(void) {
+    __asm__ volatile("" ::: "memory");
+    arch_get_percpu()->preempt_count--;
+}
+#endif
+
 static inline int sched_nr_cpus(void) {
     return __atomic_load_n(&nr_cpus_online, __ATOMIC_ACQUIRE);
 }

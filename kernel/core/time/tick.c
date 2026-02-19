@@ -6,6 +6,7 @@
 #include <kairos/console.h>
 #include <kairos/config.h>
 #include <kairos/pollwait.h>
+#include <kairos/preempt.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -42,7 +43,9 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
         if (from_user) {
             schedule();
         } else if (proc_current() == arch_get_percpu()->idle_proc) {
-            /* idle only — needs preempt_count for other kthreads */
+            schedule();
+        } else if (!in_atomic()) {
+            /* Kernel preemption: safe to reschedule when preempt_count == 0 */
             schedule();
         }
     }

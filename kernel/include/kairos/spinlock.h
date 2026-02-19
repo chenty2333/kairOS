@@ -28,13 +28,13 @@ static inline void spin_init(spinlock_t *lock) {
     SPIN_DEBUG_ON_UNLOCK(lock);
 }
 
-#if CONFIG_DEBUG_LOCKS
+/*
+ * Preemption control for spinlocks.
+ * CONFIG_DEBUG_LOCKS: defined in sync.c with extra checks.
+ * Otherwise: defined in sched.c with minimal overhead.
+ */
 void __spin_preempt_disable(void);
 void __spin_preempt_enable(void);
-#else
-#define __spin_preempt_disable() ((void)0)
-#define __spin_preempt_enable()  ((void)0)
-#endif
 
 static inline void spin_lock(spinlock_t *lock) {
     __spin_preempt_disable();
