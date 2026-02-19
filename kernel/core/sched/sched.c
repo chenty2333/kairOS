@@ -856,8 +856,8 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
     (void)update_curr(cfs);
 
     if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
+        /* Still runnable — re-enqueue onto RB-tree for next pick */
         prev->state = PROC_RUNNABLE;
-        se_mark_runnable(&prev->se);
         /* Refresh deadline if slice expired */
         if ((int64_t)(prev->se.vruntime - prev->se.deadline) >= 0) {
             uint64_t vslice = calc_vslice(&prev->se);
@@ -868,15 +868,21 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
         cfs->nr_running++;
         rq->nr_running++;
         update_min_vruntime(cfs);
-        /* Save lag before blocking */
-        prev->se.vlag = (int64_t)(cfs->min_vruntime - prev->se.vruntime);
-        if (se_is_on_rq(&prev->se)) {
-            rb_erase(&prev->se.sched_node, &cfs->tasks_timeline);
-            cfs->nr_running--;
-            rq->nr_running--;
-        }
-        se_mark_blocked(&prev->se);
+        return;
     }
+
+    /*
+     * Non-runnable (sleeping/zombie): save lag for wakeup placement.
+     * The running task was removed from the tree by pick_next_task,
+     * so se_is_on_rq should be false here — the check is defensive.
+     */
+    prev->se.vlag = (int64_t)(cfs->min_vruntime - prev->se.vruntime);
+    if (se_is_on_rq(&prev->se)) {
+        rb_erase(&prev->se.sched_node, &cfs->tasks_timeline);
+        cfs->nr_running--;
+        rq->nr_running--;
+    }
+    se_mark_blocked(&prev->se);
 }
 
 static void fair_task_tick(struct rq *rq, struct process *p) {
