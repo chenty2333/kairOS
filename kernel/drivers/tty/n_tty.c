@@ -239,8 +239,13 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
         spin_lock(&tty->lock);
         size_t got = 0;
         char ch;
-        while (got < count && ringbuf_pop(&tty->input_rb, &ch))
+        bool is_canon = tty->termios.c_lflag & ICANON;
+        while (got < count && ringbuf_pop(&tty->input_rb, &ch)) {
             buf[got++] = (uint8_t)ch;
+            /* In canonical mode, return at most one line */
+            if (is_canon && ch == '\n')
+                break;
+        }
         bool eof = false;
         if (got == 0 && tty->eof_pending) {
             tty->eof_pending = false;
