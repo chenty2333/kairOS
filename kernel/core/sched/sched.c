@@ -555,15 +555,13 @@ void schedule(void) {
         if (cls)
             cls->put_prev_task(rq, prev);
         else {
-            /* No sched_class — block or re-enqueue manually */
-            if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
-                prev->state = PROC_RUNNABLE;
-                se_mark_blocked(&prev->se);
-            } else {
-                se_mark_blocked(&prev->se);
-            }
+            se_mark_blocked(&prev->se);
         }
         sched_validate_entity(prev, "schedule-prev");
+    } else if (prev == cpu->idle_proc) {
+        /* Idle was running — clear curr_se so update_min_vruntime
+         * doesn't consider idle's stale vruntime. */
+        rq->cfs.curr_se = NULL;
     }
 
     /* Pick next task: iterate sched_classes by priority */
