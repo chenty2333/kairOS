@@ -20,7 +20,7 @@ struct fdtable *fdtable_alloc(void) {
     if (!fdt)
         return NULL;
     mutex_init(&fdt->lock, "fdtable");
-    fdt->refcount = 1;
+    atomic_init(&fdt->refcount, 1);
     return fdt;
 }
 
@@ -31,7 +31,7 @@ struct fdtable *fdtable_copy(struct fdtable *src) {
     if (!fdt)
         return NULL;
     mutex_init(&fdt->lock, "fdtable");
-    fdt->refcount = 1;
+    atomic_init(&fdt->refcount, 1);
     mutex_lock(&src->lock);
     for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
         struct file *f = src->files[i];
@@ -47,13 +47,13 @@ struct fdtable *fdtable_copy(struct fdtable *src) {
 
 void fdtable_get(struct fdtable *fdt) {
     if (fdt)
-        __atomic_fetch_add(&fdt->refcount, 1, __ATOMIC_RELAXED);
+        atomic_inc(&fdt->refcount);
 }
 
 void fdtable_put(struct fdtable *fdt) {
     if (!fdt)
         return;
-    if (__atomic_sub_fetch(&fdt->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
+    if (atomic_dec_return(&fdt->refcount) == 0) {
         for (int i = 0; i < CONFIG_MAX_FILES_PER_PROC; i++) {
             if (fdt->files[i]) {
                 vfs_close(fdt->files[i]);

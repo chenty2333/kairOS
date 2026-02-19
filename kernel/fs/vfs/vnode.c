@@ -73,7 +73,7 @@ void vnode_put(struct vnode *vn) {
         return;
     uint32_t old = atomic_fetch_sub(&vn->refcount, 1);
     if (old == 0)
-        panic("vnode_put: refcount underflow on vnode ino=%lu",
+        panic("vnode_put: refcount already zero on vnode ino=%lu",
               (unsigned long)vn->ino);
     if (old == 1) {
         struct vnode *parent = vn->parent;

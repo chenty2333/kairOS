@@ -23,7 +23,7 @@ struct sighand_struct *sighand_alloc(void) {
     if (!sh)
         return NULL;
     spin_init(&sh->lock);
-    sh->refcount = 1;
+    atomic_init(&sh->refcount, 1);
     return sh;
 }
 
@@ -32,7 +32,7 @@ struct sighand_struct *sighand_copy(struct sighand_struct *src) {
     if (!sh)
         return NULL;
     spin_init(&sh->lock);
-    sh->refcount = 1;
+    atomic_init(&sh->refcount, 1);
     if (src) {
         spin_lock(&src->lock);
         memcpy(sh->actions, src->actions, sizeof(sh->actions));
@@ -43,13 +43,13 @@ struct sighand_struct *sighand_copy(struct sighand_struct *src) {
 
 void sighand_get(struct sighand_struct *sh) {
     if (sh)
-        __atomic_fetch_add(&sh->refcount, 1, __ATOMIC_RELAXED);
+        atomic_inc(&sh->refcount);
 }
 
 void sighand_put(struct sighand_struct *sh) {
     if (!sh)
         return;
-    if (__atomic_sub_fetch(&sh->refcount, 1, __ATOMIC_ACQ_REL) == 0)
+    if (atomic_dec_return(&sh->refcount) == 0)
         kfree(sh);
 }
 

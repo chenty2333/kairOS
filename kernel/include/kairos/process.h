@@ -5,6 +5,7 @@
 #ifndef _KAIROS_PROCESS_H
 #define _KAIROS_PROCESS_H
 
+#include <kairos/atomic.h>
 #include <kairos/completion.h>
 #include <kairos/config.h>
 #include <kairos/list.h>
@@ -33,7 +34,7 @@ struct fdtable {
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
     uint32_t fd_flags[CONFIG_MAX_FILES_PER_PROC];
     struct mutex lock;
-    uint32_t refcount;
+    atomic_t refcount;
 };
 
 struct fdtable *fdtable_alloc(void);
@@ -44,7 +45,7 @@ void fdtable_put(struct fdtable *fdt);
 /* Shared signal handler table */
 struct sighand_struct {
     struct sigaction actions[CONFIG_NSIG];
-    uint32_t refcount;
+    atomic_t refcount;
     spinlock_t lock;
 };
 
@@ -79,6 +80,7 @@ struct process {
     enum proc_state state;
     int exit_code;
     spinlock_t lock;
+    bool irq_flags;         /* saved IRQ state for proc_lock/proc_unlock */
 
     /* Scheduling */
     struct sched_entity se;

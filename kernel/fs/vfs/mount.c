@@ -200,10 +200,9 @@ void vfs_mount_hold(struct mount *mnt) {
 void vfs_mount_put(struct mount *mnt) {
     if (!mnt)
         return;
-    uint32_t old = atomic_read(&mnt->refcount);
+    uint32_t old = atomic_fetch_sub(&mnt->refcount, 1);
     if (old == 0)
-        panic("vfs_mount_put: refcount underflow");
-    atomic_fetch_sub(&mnt->refcount, 1);
+        panic("vfs_mount_put: refcount already zero");
 }
 
 void vfs_mount_global_lock(void) {

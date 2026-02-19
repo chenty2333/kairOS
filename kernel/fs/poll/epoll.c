@@ -21,7 +21,7 @@ struct epoll_item {
     struct epoll_instance *ep;
     struct vnode *vn;
     struct poll_watch watch;
-    int refcount;
+    atomic_t refcount;
     bool ready;
     bool dispatching;
     bool deleted;
@@ -38,14 +38,14 @@ struct epoll_instance {
     bool closing;
 };
 
-static struct epoll_instance *epoll_from_fd(int epfd) {
+static struct epoll_instance *epoll_from_fd(int epfd, struct file **filep) {
     struct file *file = fd_get(proc_current(), epfd);
     if (!file || !file->vnode || file->vnode->type != VNODE_EPOLL) {
         if (file) file_put(file);
         return NULL;
     }
     struct epoll_instance *ep = (struct epoll_instance *)file->vnode->fs_data;
-    file_put(file);
+    *filep = file;
     return ep;
 }
 
@@ -59,22 +59,22 @@ static struct epoll_item *epoll_find(struct epoll_instance *ep, int fd) {
 }
 
 static inline void epoll_item_get(struct epoll_item *item) {
-    __atomic_add_fetch(&item->refcount, 1, __ATOMIC_ACQ_REL);
+    atomic_inc(&item->refcount);
 }
 
-static inline int epoll_item_refs(struct epoll_item *item) {
-    return __atomic_load_n(&item->refcount, __ATOMIC_ACQUIRE);
+static inline uint32_t epoll_item_refs(struct epoll_item *item) {
+    return atomic_read(&item->refcount);
 }
 
 static void epoll_item_put(struct epoll_item *item) {
     if (!item)
         return;
-    int old = __atomic_sub_fetch(&item->refcount, 1, __ATOMIC_ACQ_REL);
-    if (old == 1) {
+    uint32_t old = atomic_fetch_sub(&item->refcount, 1);
+    if (old == 2) {
         /* Last external ref dropped — wake detach waiter */
         wait_queue_wakeup_all(&item->detach_wait);
     }
-    if (old == 0) {
+    if (old == 1) {
         vnode_put(item->vn);
         kfree(item);
     }
@@ -206,16 +206,19 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     if (epfd == fd)
         return -EINVAL;
 
-    struct epoll_instance *ep = epoll_from_fd(epfd);
+    struct file *ep_file = NULL;
+    struct epoll_instance *ep = epoll_from_fd(epfd, &ep_file);
     if (!ep)
         return -EBADF;
 
     struct file *target = fd_get(proc_current(), fd);
     if (!target) {
+        file_put(ep_file);
         return -EBADF;
     }
     if (!target->vnode || target->vnode->type == VNODE_EPOLL) {
         file_put(target);
+        file_put(ep_file);
         return -EINVAL;
     }
 
@@ -230,12 +233,14 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         if (item) {
             mutex_unlock(&ep->lock);
             file_put(target);
+            file_put(ep_file);
             return -EEXIST;
         }
         item = kzalloc(sizeof(*item));
         if (!item) {
             mutex_unlock(&ep->lock);
             file_put(target);
+            file_put(ep_file);
             return -ENOMEM;
         }
         item->fd = fd;
@@ -244,7 +249,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->revents = 0;
         item->ep = ep;
         item->vn = target->vnode;
-        item->refcount = 1;
+        atomic_init(&item->refcount, 1);
         item->ready = false;
         item->dispatching = false;
         item->deleted = false;
@@ -262,6 +267,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         if (!item) {
             mutex_unlock(&ep->lock);
             file_put(target);
+            file_put(ep_file);
             return -ENOENT;
         }
         item->events = events;
@@ -272,6 +278,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         if (!item) {
             mutex_unlock(&ep->lock);
             file_put(target);
+            file_put(ep_file);
             return -ENOENT;
         }
         list_del(&item->list);
@@ -284,6 +291,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     default:
         mutex_unlock(&ep->lock);
         file_put(target);
+        file_put(ep_file);
         return -EINVAL;
     }
 
@@ -296,6 +304,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         if (revents)
             epoll_mark_ready(item, revents);
         file_put(target);
+        file_put(ep_file);
         return 0;
     }
 
@@ -304,6 +313,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         if (revents)
             epoll_mark_ready(item, revents);
         file_put(target);
+        file_put(ep_file);
         return 0;
     }
 
@@ -312,6 +322,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         epoll_item_put(item);
     }
     file_put(target);
+    file_put(ep_file);
     return 0;
 }
 
@@ -319,7 +330,8 @@ ssize_t epoll_snapshot(int epfd, struct epoll_snapshot_item *items, size_t max) 
     if (!items || max == 0)
         return -EINVAL;
 
-    struct epoll_instance *ep = epoll_from_fd(epfd);
+    struct file *ep_file = NULL;
+    struct epoll_instance *ep = epoll_from_fd(epfd, &ep_file);
     if (!ep)
         return -EBADF;
 
@@ -335,6 +347,7 @@ ssize_t epoll_snapshot(int epfd, struct epoll_snapshot_item *items, size_t max) 
         count++;
     }
     mutex_unlock(&ep->lock);
+    file_put(ep_file);
     return (ssize_t)count;
 }
 
@@ -456,7 +469,8 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
     if (!events || maxevents == 0)
         return -EINVAL;
 
-    struct epoll_instance *ep = epoll_from_fd(epfd);
+    struct file *ep_file = NULL;
+    struct epoll_instance *ep = epoll_from_fd(epfd, &ep_file);
     if (!ep)
         return -EBADF;
 
@@ -469,20 +483,27 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         deadline = start + delta;
     }
 
+    int ret;
     while (1) {
         int ready = epoll_collect_ready(ep, events, maxevents);
-        if (ready != 0 || timeout_ms == 0)
-            return ready;
+        if (ready != 0 || timeout_ms == 0) {
+            ret = ready;
+            goto out;
+        }
 
         /* Rescan once before blocking to cover non-event-driven vnodes. */
         epoll_rescan(ep);
         ready = epoll_collect_ready(ep, events, maxevents);
-        if (ready)
-            return ready;
+        if (ready) {
+            ret = ready;
+            goto out;
+        }
 
         uint64_t now = arch_timer_get_ticks();
-        if (deadline && now >= deadline)
-            return 0;
+        if (deadline && now >= deadline) {
+            ret = 0;
+            goto out;
+        }
 
         struct process *curr = proc_current();
         struct poll_waiter waiter = {0};
@@ -493,7 +514,8 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         ready = epoll_collect_ready(ep, events, maxevents);
         if (ready) {
             poll_wait_remove(&waiter);
-            return ready;
+            ret = ready;
+            goto out;
         }
 
         /* One more rescan after registering the waiter to close the race. */
@@ -501,7 +523,8 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         ready = epoll_collect_ready(ep, events, maxevents);
         if (ready) {
             poll_wait_remove(&waiter);
-            return ready;
+            ret = ready;
+            goto out;
         }
 
         struct poll_sleep sleep = {0};
@@ -512,4 +535,7 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         poll_sleep_cancel(&sleep);
         poll_wait_remove(&waiter);
     }
+out:
+    file_put(ep_file);
+    return ret;
 }

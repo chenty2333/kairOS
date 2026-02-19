@@ -81,6 +81,7 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
             return -ENODEV;
         }
         vn = f->vnode;
+        vnode_get(vn);
         file_put(f);
     } else if (off != 0) {
         return -EINVAL;
@@ -95,14 +96,17 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     vaddr_t start = fixed ? (vaddr_t)addr : 0;
     if (fixed) {
         int uret = mm_munmap(p->mm, start, (size_t)len);
-        if (uret < 0)
+        if (uret < 0) {
+            if (vn) vnode_put(vn);
             return (int64_t)uret;
+        }
     }
     if (flags & MAP_GROWSDOWN)
         map_flags |= VM_STACK;
     vaddr_t res = 0;
     int ret = mm_mmap(p->mm, start, (size_t)len, vm_flags, map_flags, vn,
                       offset, fixed, &res);
+    if (vn) vnode_put(vn);
     if (ret < 0)
         return (int64_t)ret;
 

@@ -151,7 +151,7 @@ int vfs_close(struct file *file) {
         return -EINVAL;
     uint32_t old = atomic_fetch_sub(&file->refcount, 1);
     if (old == 0)
-        panic("vfs_close: refcount underflow on file '%s'", file->path);
+        panic("vfs_close: refcount already zero on file '%s'", file->path);
     if (old > 1)
         return 0;
     if (file->vnode && file->vnode->type == VNODE_PIPE) {
