@@ -318,16 +318,6 @@ int pipe_poll_file(struct file *file, uint32_t events) {
     return (int)revents;
 }
 
-int pipe_poll_vnode(struct vnode *vn, uint32_t events) {
-    if (!vn || vn->type != VNODE_PIPE)
-        return POLLNVAL;
-    struct pipe *p = vn->fs_data;
-    mutex_lock(&p->lock);
-    uint32_t revents = pipe_poll_events_locked(p) & events;
-    mutex_unlock(&p->lock);
-    return (int)revents;
-}
-
 void pipe_poll_register_file(struct file *file, struct poll_waiter *waiter,
                              uint32_t events) {
     (void)events;
