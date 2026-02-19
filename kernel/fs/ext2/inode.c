@@ -55,6 +55,8 @@ struct vnode *ext2_cache_get(struct ext2_mount *mnt, ino_t ino) {
     mutex_lock(&mnt->icache_lock);
     struct ext2_inode_data *id;
     list_for_each_entry(id, &mnt->inode_cache, cache_node) {
+        if (id->magic != EXT2_INODE_DATA_MAGIC)
+            continue;
         if (id->ino == ino && id->vn) {
             vnode_get(id->vn);
             mutex_unlock(&mnt->icache_lock);

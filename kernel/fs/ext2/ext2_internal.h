@@ -15,6 +15,8 @@
 #define EXT2_IO_BLOCK_SIZE 4096
 #define EXT2_ROOT_INO 2
 #define EXT2_NAME_LEN 255
+#define EXT2_MOUNT_MAGIC 0x45585432U
+#define EXT2_INODE_DATA_MAGIC 0x49444E32U
 
 /* Inode modes */
 #define EXT2_S_IFIFO 0x1000
@@ -84,6 +86,8 @@ struct ext2_dirent {
 } __packed;
 
 struct ext2_mount {
+    uint32_t magic;
+    atomic_t refcount;
     struct blkdev *dev;
     struct ext2_superblock *sb;
     struct ext2_group_desc *gdt;
@@ -96,12 +100,36 @@ struct ext2_mount {
 };
 
 struct ext2_inode_data {
+    uint32_t magic;
     ino_t ino;
     struct ext2_inode inode;
     struct ext2_mount *mnt;
     struct vnode *vn;
     struct list_head cache_node;
 };
+
+static inline int ext2_vnode_ctx(struct vnode *vn,
+                                 struct ext2_inode_data **id_out,
+                                 struct ext2_mount **mnt_out) {
+    if (!vn || !id_out || !mnt_out)
+        return -EINVAL;
+
+    struct ext2_inode_data *id = (struct ext2_inode_data *)vn->fs_data;
+    if (!id || (uintptr_t)id < CONFIG_PAGE_SIZE)
+        return -EIO;
+    if (id->magic != EXT2_INODE_DATA_MAGIC)
+        return -EIO;
+
+    struct ext2_mount *mnt = id->mnt;
+    if (!mnt || (uintptr_t)mnt < CONFIG_PAGE_SIZE)
+        return -EIO;
+    if (mnt->magic != EXT2_MOUNT_MAGIC)
+        return -EIO;
+
+    *id_out = id;
+    *mnt_out = mnt;
+    return 0;
+}
 
 struct ext2_path {
     int depth;
@@ -120,6 +148,8 @@ int ext2_free_block(struct ext2_mount *mnt, uint32_t bnum);
 int ext2_write_gd(struct ext2_mount *mnt, uint32_t bg);
 int ext2_alloc_inode(struct ext2_mount *mnt, ino_t *out);
 int ext2_free_inode(struct ext2_mount *mnt, ino_t ino);
+void ext2_mount_get(struct ext2_mount *mnt);
+void ext2_mount_put(struct ext2_mount *mnt);
 int ext2_get_block(struct ext2_mount *mnt, struct ext2_inode_data *id,
                    uint32_t idx, uint32_t *out, int create);
 int ext2_truncate_blocks(struct ext2_mount *mnt, ino_t ino,

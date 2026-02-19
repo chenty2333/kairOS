@@ -315,11 +315,11 @@ static void ext2_trunc_indirect(struct ext2_mount *mnt, uint32_t bnum,
 }
 
 int ext2_vnode_truncate(struct vnode *vn, off_t length) {
-    struct ext2_inode_data *id = vn->fs_data;
-    if (!id) {
-        return -EINVAL;
-    }
-    struct ext2_mount *mnt = id->mnt;
+    struct ext2_inode_data *id = NULL;
+    struct ext2_mount *mnt = NULL;
+    int vctx = ext2_vnode_ctx(vn, &id, &mnt);
+    if (vctx < 0)
+        return vctx;
 
     if (length < 0) {
         return -EINVAL;

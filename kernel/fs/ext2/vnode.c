@@ -12,8 +12,11 @@
 static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
                                off_t offset,
                                uint32_t flags __attribute__((unused))) {
-    struct ext2_inode_data *id = vn->fs_data;
-    struct ext2_mount *mnt = id->mnt;
+    struct ext2_inode_data *id = NULL;
+    struct ext2_mount *mnt = NULL;
+    int vctx = ext2_vnode_ctx(vn, &id, &mnt);
+    if (vctx < 0)
+        return vctx;
     if (vn->type == VNODE_SYMLINK && id->inode.i_blocks == 0 &&
         id->inode.i_size <= sizeof(id->inode.i_block)) {
         if (offset >= (off_t)id->inode.i_size)
@@ -57,8 +60,13 @@ static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
 ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
                          off_t offset,
                          uint32_t flags __attribute__((unused))) {
-    struct ext2_inode_data *id = vn->fs_data;
-    struct ext2_mount *mnt = id->mnt;
+    struct ext2_inode_data *id = NULL;
+    struct ext2_mount *mnt = NULL;
+    int vctx = ext2_vnode_ctx(vn, &id, &mnt);
+    if (vctx < 0) {
+        pr_err("ext2: write with invalid vnode context\n");
+        return vctx;
+    }
     size_t written = 0;
 
     while (written < len) {
@@ -90,8 +98,11 @@ ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
 }
 
 int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent, off_t *offset) {
-    struct ext2_inode_data *id = vn->fs_data;
-    struct ext2_mount *mnt = id->mnt;
+    struct ext2_inode_data *id = NULL;
+    struct ext2_mount *mnt = NULL;
+    int vctx = ext2_vnode_ctx(vn, &id, &mnt);
+    if (vctx < 0)
+        return vctx;
     while (*offset < (off_t)id->inode.i_size) {
         uint32_t bidx = *offset / mnt->block_size;
         uint32_t boff = *offset % mnt->block_size;
@@ -136,17 +147,29 @@ int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent, off_t *offset) {
 }
 
 static int ext2_vnode_close(struct vnode *vn) {
-    struct ext2_inode_data *id = vn->fs_data;
-    if (id && id->mnt) {
-        mutex_lock(&id->mnt->icache_lock);
+    struct ext2_inode_data *id =
+        vn ? (struct ext2_inode_data *)vn->fs_data : NULL;
+    struct ext2_mount *mnt = NULL;
+
+    if (id && (uintptr_t)id >= CONFIG_PAGE_SIZE &&
+        id->magic == EXT2_INODE_DATA_MAGIC) {
+        mnt = id->mnt;
+    }
+
+    if (id && mnt && (uintptr_t)mnt >= CONFIG_PAGE_SIZE &&
+        mnt->magic == EXT2_MOUNT_MAGIC) {
+        mutex_lock(&mnt->icache_lock);
         if (!list_empty(&id->cache_node)) {
             list_del(&id->cache_node);
             INIT_LIST_HEAD(&id->cache_node);
         }
-        mutex_unlock(&id->mnt->icache_lock);
+        mutex_unlock(&mnt->icache_lock);
     }
+    if (id)
+        id->magic = 0;
     kfree(id);
     kfree(vn);
+    ext2_mount_put(mnt);
     return 0;
 }
 
@@ -174,11 +197,21 @@ struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
 
     struct ext2_inode_data *id = kmalloc(sizeof(*id));
     struct vnode *vn = kmalloc(sizeof(*vn));
-    if (!id || !vn || ext2_read_inode(mnt, ino, &id->inode) < 0) {
+    if (!id || !vn) {
         kfree(id);
         kfree(vn);
         return NULL;
     }
+
+    ext2_mount_get(mnt);
+    if (ext2_read_inode(mnt, ino, &id->inode) < 0) {
+        ext2_mount_put(mnt);
+        kfree(id);
+        kfree(vn);
+        return NULL;
+    }
+
+    id->magic = EXT2_INODE_DATA_MAGIC;
     id->ino = ino;
     id->mnt = mnt;
     uint32_t fmt = id->inode.i_mode & 0xF000;

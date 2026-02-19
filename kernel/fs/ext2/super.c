@@ -8,10 +8,36 @@
 
 #include "ext2_internal.h"
 
+static void ext2_mount_destroy(struct ext2_mount *mnt) {
+    if (!mnt)
+        return;
+    mnt->magic = 0;
+    kfree(mnt->gdt);
+    kfree(mnt->sb);
+    kfree(mnt);
+}
+
+void ext2_mount_get(struct ext2_mount *mnt) {
+    if (mnt)
+        atomic_inc(&mnt->refcount);
+}
+
+void ext2_mount_put(struct ext2_mount *mnt) {
+    if (!mnt)
+        return;
+    uint32_t old = atomic_fetch_sub(&mnt->refcount, 1);
+    if (old == 0)
+        panic("ext2_mount_put: refcount underflow");
+    if (old == 1)
+        ext2_mount_destroy(mnt);
+}
+
 int ext2_mount(struct mount *mnt) {
     struct ext2_mount *e = kzalloc(sizeof(*e));
     if (!e)
         return -ENOMEM;
+    e->magic = EXT2_MOUNT_MAGIC;
+    atomic_init(&e->refcount, 1);
     e->dev = mnt->dev;
     mutex_init(&e->lock, "ext2_mount");
     mutex_init(&e->icache_lock, "ext2_icache");
@@ -84,10 +110,7 @@ int ext2_statfs(struct mount *mnt, struct kstatfs *st) {
 
 int ext2_unmount(struct mount *mnt) {
     struct ext2_mount *e = mnt->fs_data;
-    if (e) {
-        kfree(e->gdt);
-        kfree(e->sb);
-        kfree(e);
-    }
+    mnt->fs_data = NULL;
+    ext2_mount_put(e);
     return 0;
 }
