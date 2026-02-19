@@ -52,7 +52,7 @@ export PATH="/bin:/sbin:/usr/bin:/usr/sbin"
 export HISTFILE="/root/.ash_history"
 export HISTSIZE=200
 
-if [ "${TERM:-dumb}" = "dumb" ]; then
+if test "${TERM:-dumb}" = "dumb"; then
   PS1='[\w] $ '
 else
   PS1='\[\033[1;36m\][\w]\[\033[0m\] \$ '
@@ -60,10 +60,14 @@ fi
 export PS1
 
 if ls --color=auto / >/dev/null 2>&1; then
-  alias ls='ls --color=auto'
+  if command -v alias >/dev/null 2>&1; then
+    alias ls='ls --color=auto'
+  fi
 fi
-alias ll='ls -alF'
-alias la='ls -A'
+if command -v alias >/dev/null 2>&1; then
+  alias ll='ls -alF'
+  alias la='ls -A'
+fi
 EOF
 }
 
