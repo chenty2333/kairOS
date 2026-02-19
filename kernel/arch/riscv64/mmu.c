@@ -360,8 +360,11 @@ void *ioremap(paddr_t phys, size_t size) {
     size_t map_size = ALIGN_UP(offset + size, PAGE_SIZE);
     vaddr_t va = (vaddr_t)phys_to_virt(base);
 
-    mmu_map_region(arch_mmu_get_kernel_pgdir(), va, base, map_size,
-                   PTE_READ | PTE_WRITE | PTE_DEVICE);
+    if (mmu_map_region(arch_mmu_get_kernel_pgdir(), va, base, map_size,
+                       PTE_READ | PTE_WRITE | PTE_DEVICE) < 0) {
+        pr_err("ioremap: failed to map %p size %zu\n", (void *)phys, size);
+        return NULL;
+    }
     arch_mmu_flush_tlb();
 
     return (void *)(va + offset);
