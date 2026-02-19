@@ -77,17 +77,17 @@ static void dump_trap_frame(struct trap_frame *tf, bool from_user) {
            (void *)tf->tf_a4, (void *)tf->tf_a5, (void *)tf->tf_a6,
            (void *)tf->tf_a7);
     if (p) {
-        pr_err("  proc_state=%s se_state=%s se_cpu=%d on_rq=%d on_cpu=%d wait=%p sleep_deadline=%llu\n",
+        pr_err("  proc_state=%s se_state=%s se_cpu=%d wait=%p sleep_deadline=%llu\n",
                proc_state_name(p->state), se_state_name(p->se.run_state),
-               p->se.cpu, p->se.on_rq, p->se.on_cpu, p->wait_channel,
+               sched_entity_cpu(p), p->wait_channel,
                (unsigned long long)p->sleep_deadline);
     }
     struct percpu_data *cpu = arch_get_percpu();
     if (cpu) {
         struct process *curr = cpu->curr_proc;
         pr_err("  rq_nr_running=%u rq_min_vruntime=%llu curr_pid=%d curr_name=%s resched=%d ticks=%llu\n",
-               cpu->runqueue.nr_running,
-               (unsigned long long)cpu->runqueue.min_vruntime,
+               sched_rq_nr_running(cpu->cpu_id),
+               (unsigned long long)sched_rq_min_vruntime(cpu->cpu_id),
                curr ? curr->pid : -1, curr ? curr->name : "-",
                cpu->resched_needed, (unsigned long long)cpu->ticks);
     }
@@ -160,9 +160,9 @@ static void handle_exception(struct trap_frame *tf) {
            (void *)tf->stval);
     sched_trace_event(SCHED_TRACE_TRAP, cur, cause, tf->sepc);
     sched_debug_dump_cpu(arch_cpu_id());
-    if (cur && cur->se.cpu >= 0 && cur->se.cpu < sched_cpu_count() &&
-        cur->se.cpu != arch_cpu_id())
-        sched_debug_dump_cpu(cur->se.cpu);
+    if (cur && sched_entity_cpu(cur) >= 0 && sched_entity_cpu(cur) < sched_cpu_count() &&
+        sched_entity_cpu(cur) != arch_cpu_id())
+        sched_debug_dump_cpu(sched_entity_cpu(cur));
     sched_trace_dump_recent(64);
     panic(from_user ? "User exception" : "Kernel exception");
 }

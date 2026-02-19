@@ -20,7 +20,7 @@ static bool proc_wait_find_reapable(struct process *parent, pid_t pid,
         if (pid > 0 && child->pid != pid)
             continue;
         if (child->state == PROC_ZOMBIE) {
-            if (__atomic_load_n(&child->se.on_cpu, __ATOMIC_ACQUIRE))
+            if (sched_is_on_cpu(child))
                 continue;
             child->state = PROC_REAPING;
             list_del(&child->sibling);

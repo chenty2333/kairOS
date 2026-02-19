@@ -30,7 +30,6 @@
  * Scheduler Configuration
  */
 #define CONFIG_HZ 100          /* Timer ticks per second */
-#define CONFIG_TIMESLICE_MS 10 /* Default timeslice */
 #define CONFIG_MAX_CPUS 16
 
 /*

@@ -20,6 +20,14 @@
 struct process;
 extern const int sched_nice_to_weight[40];
 
+/* --- Public accessor API (hides scheduler internals) --- */
+bool sched_is_on_cpu(const struct process *p);
+int  sched_entity_cpu(const struct process *p);
+void sched_init_idle_entity(struct process *p, int cpu);
+uint32_t sched_rq_nr_running(int cpu);
+uint64_t sched_rq_min_vruntime(int cpu);
+void sched_debug_dump_process(const struct process *p);
+
 struct cfs_rq {
     struct rb_root tasks_timeline;
     uint64_t min_vruntime;
@@ -82,8 +90,6 @@ struct sched_trace_entry {
     int32_t proc_state;
     int32_t se_cpu;
     uint32_t se_state;
-    uint8_t on_rq;
-    uint8_t on_cpu;
     uint64_t arg0;
     uint64_t arg1;
 };

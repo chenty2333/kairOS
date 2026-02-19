@@ -308,20 +308,16 @@ struct process *proc_idle_init(void) {
     if (!p)
         panic("idle alloc fail");
     proc_set_name(p, "idle");
-    p->se.nice = 19;
     if (!p->context)
         panic("idle ctx missing");
     arch_context_init(p->context, (vaddr_t)idle_thread, 0, true);
     /*
      * Bootstrap: idle is initialized before the scheduler is fully ready.
-     * Direct writes to run_state/on_cpu/on_rq are intentional — the per-CPU
-     * locks and state that se_mark_running() depends on are not yet established.
-     * Do NOT "fix" these into helper calls.
+     * Use the accessor API to set up the sched_entity without depending
+     * on per-CPU locks that aren't established yet.
      */
     p->state = PROC_RUNNING;
-    p->se.run_state = SE_STATE_RUNNING;
-    p->se.on_cpu = true;
-    p->se.on_rq = false;
+    sched_init_idle_entity(p, arch_cpu_id());
     struct percpu_data *cpu = arch_get_percpu();
     cpu->idle_proc = p;
     cpu->curr_proc = p;

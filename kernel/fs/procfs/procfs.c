@@ -204,9 +204,9 @@ static int gen_sched(pid_t pid __attribute__((unused)),
                     stats.cpu_count, stats.steal_enabled ? 1U : 0U);
 
     for (uint32_t i = 0; i < stats.cpu_count && (size_t)len < bufsz; i++) {
+        uint32_t nr_running = sched_rq_nr_running((int)i);
+        uint64_t min_vruntime = sched_rq_min_vruntime((int)i);
         struct percpu_data *cd = sched_cpu_data((int)i);
-        uint32_t nr_running = cd ? cd->runqueue.nr_running : 0;
-        uint64_t min_vruntime = cd ? cd->runqueue.min_vruntime : 0;
         uint64_t ticks = cd ? cd->ticks : 0;
         struct sched_cpu_stats *cpu = &stats.cpu[i];
         len += snprintf(
