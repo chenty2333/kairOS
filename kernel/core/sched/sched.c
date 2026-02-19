@@ -441,9 +441,10 @@ void sched_enqueue(struct process *p) {
     spin_lock(&rq->lock);
 
     if (se_is_on_rq(&p->se)) {
+        pr_err("BUG: sched_enqueue: pid=%d on rq after BLOCKED->RUNNABLE\n",
+               p->pid);
         spin_unlock(&rq->lock);
-        if (!se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_QUEUED))
-            se_try_transition(&p->se, SE_STATE_RUNNABLE, SE_STATE_BLOCKED);
+        se_set_state(&p->se, SE_STATE_BLOCKED);
         arch_irq_restore(state);
         return;
     }
