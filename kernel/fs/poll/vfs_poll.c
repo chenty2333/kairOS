@@ -6,15 +6,6 @@
 #include <kairos/pipe.h>
 #include <kairos/vfs.h>
 
-int vfs_poll_vnode(struct vnode *vn, uint32_t events) {
-    if (!vn)
-        return POLLNVAL;
-    if (vn->type == VNODE_PIPE)
-        return pipe_poll_vnode(vn, events);
-    /* vnode-only callers (epoll watch) — no file available */
-    return events & (POLLIN | POLLOUT);
-}
-
 int vfs_poll(struct file *file, uint32_t events) {
     if (!file || !file->vnode)
         return POLLNVAL;

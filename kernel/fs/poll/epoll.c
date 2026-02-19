@@ -19,6 +19,7 @@ struct epoll_item {
     uint64_t data;
     uint32_t revents;
     struct epoll_instance *ep;
+    struct file *file;
     struct vnode *vn;
     struct poll_watch watch;
     atomic_t refcount;
@@ -75,7 +76,7 @@ static void epoll_item_put(struct epoll_item *item) {
         wait_queue_wakeup_all(&item->detach_wait);
     }
     if (old == 1) {
-        vnode_put(item->vn);
+        file_put(item->file);
         kfree(item);
     }
 }
@@ -114,7 +115,7 @@ static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
         epoll_item_put(item);
         return;
     }
-    uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, mask);
+    uint32_t revents = (uint32_t)vfs_poll(item->file, mask);
     if (revents)
         epoll_mark_ready(item, revents);
     epoll_item_put(item);
@@ -248,6 +249,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->data = data;
         item->revents = 0;
         item->ep = ep;
+        item->file = target;
         item->vn = target->vnode;
         atomic_init(&item->refcount, 1);
         item->ready = false;
@@ -298,9 +300,9 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     mutex_unlock(&ep->lock);
 
     if (op == EPOLL_CTL_ADD) {
-        vnode_get(item->vn);
+        file_get(item->file);
         vfs_poll_watch(item->vn, &item->watch, item->events);
-        uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
+        uint32_t revents = (uint32_t)vfs_poll(item->file, item->events);
         if (revents)
             epoll_mark_ready(item, revents);
         file_put(target);
@@ -309,7 +311,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     }
 
     if (op == EPOLL_CTL_MOD) {
-        uint32_t revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
+        uint32_t revents = (uint32_t)vfs_poll(item->file, item->events);
         if (revents)
             epoll_mark_ready(item, revents);
         file_put(target);
@@ -378,7 +380,7 @@ static int epoll_collect_ready(struct epoll_instance *ep,
         list_del(&item->ready_node);
         uint32_t revents = 0;
         if (!item->deleted && item->ep)
-            revents = (uint32_t)vfs_poll_vnode(item->vn, item->events);
+            revents = (uint32_t)vfs_poll(item->file, item->events);
 
         if (revents && out < (int)maxevents) {
             events[out].events = revents;
@@ -452,7 +454,7 @@ static void epoll_rescan(struct epoll_instance *ep) {
             item = items[i];
             if (!item->deleted && item->ep) {
                 uint32_t revents =
-                    (uint32_t)vfs_poll_vnode(item->vn, item->events);
+                    (uint32_t)vfs_poll(item->file, item->events);
                 if (revents)
                     epoll_mark_ready(item, revents);
             }

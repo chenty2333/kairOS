@@ -233,6 +233,7 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
                      mode_t mode, struct file **fp);
 int vfs_close(struct file *file);
 void file_put(struct file *file);
+static inline void file_get(struct file *f) { atomic_inc(&f->refcount); }
 struct file *vfs_file_alloc(void);
 void vfs_file_free(struct file *file);
 void vfs_dump_mounts(void);
@@ -255,7 +256,6 @@ int vfs_bind_mount(struct dentry *source, struct dentry *target,
 ssize_t vfs_read(struct file *file, void *buf, size_t len);
 ssize_t vfs_write(struct file *file, const void *buf, size_t len);
 int vfs_poll(struct file *file, uint32_t events);
-int vfs_poll_vnode(struct vnode *vn, uint32_t events);
 int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg);
 void vfs_poll_register(struct file *file, struct poll_waiter *waiter,
                        uint32_t events);

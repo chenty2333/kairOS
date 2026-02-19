@@ -119,10 +119,6 @@ int fd_close(struct process *p, int fd) {
     return vfs_close(file);
 }
 
-static inline void file_get(struct file *file) {
-    atomic_inc(&file->refcount);
-}
-
 int fd_dup(struct process *p, int oldfd) {
     struct file *file;
     if (!p || !p->fdtable)
