@@ -1,11 +1,5 @@
 /**
  * kernel/include/kairos/sched_types.h - Scheduler entity types (EEVDF)
- *
- * Defines struct sched_entity, which encapsulates all per-process scheduling
- * state.  The scheduler operates on sched_entity pointers internally;
- * public APIs still accept struct process *.
- *
- * on_rq / on_cpu are derived from run_state — no redundant bools.
  */
 
 #ifndef _KAIROS_SCHED_TYPES_H

@@ -29,7 +29,7 @@ uint32_t sched_rq_nr_running(int cpu);
 uint64_t sched_rq_min_vruntime(int cpu);
 void sched_debug_dump_process(const struct process *p);
 
-/* CFS/EEVDF sub-runqueue */
+/* EEVDF sub-runqueue */
 struct cfs_rq {
     struct rb_root tasks_timeline;
     uint64_t min_vruntime;
