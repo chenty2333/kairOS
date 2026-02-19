@@ -217,8 +217,7 @@ static void console_handle_input_char(char c, bool *pushed, uint32_t *sig_mask) 
         return;
     }
 
-    /* Raw mode: drop new chars when full (overwrite=false) to preserve
-     * oldest unread data, consistent with canonical mode behavior. */
+    /* Raw mode: drop when full to preserve oldest unread data. */
     ringbuf_push(&console_state.in_rb, c, false);
     console_echo_char(c);
     if (pushed)
@@ -259,7 +258,6 @@ static int console_try_fill_batch(void) {
                     signal_send_pgrp(fg, s);
             }
         } else {
-            /* No fg pgrp set — fall back to current process */
             struct process *p = proc_current();
             if (p) {
                 for (int s = 1; s < 32; s++) {
@@ -434,7 +432,7 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         if ((console_state.termios.c_lflag & ICANON) &&
             !(t.c_lflag & ICANON) && console_state.canon_len > 0) {
             if (!console_canon_commit()) {
-                /* Mode switch: force-flush, overwrite old ringbuf data */
+                /* Force-flush canon_buf on mode switch */
                 for (uint32_t i = 0; i < console_state.canon_len; i++)
                     ringbuf_push(&console_state.in_rb,
                                  console_state.canon_buf[i], true);

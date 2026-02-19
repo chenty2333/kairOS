@@ -62,10 +62,7 @@ void signal_init_process(struct process *p) {
     }
 }
 
-/*
- * Core signal delivery to a known process pointer.
- * Sets the pending bit and wakes the process if sleeping.
- */
+/* Deliver signal to a known process — set pending bit and wake if sleeping. */
 static void signal_send_to(struct process *p, int sig) {
     __atomic_fetch_or(&p->sig_pending, (1ULL << (sig - 1)), __ATOMIC_RELEASE);
     proc_lock(p);
@@ -92,16 +89,7 @@ int signal_send_pgrp(pid_t pgrp, int sig) {
     uint64_t mask = 1ULL << (sig - 1);
     int count = 0;
 
-    /*
-     * Pass 1: under proc_table_lock, atomically set the pending bit on
-     * every matching process.  This is safe inside the lock — the atomic
-     * OR touches only sig_pending, no sleeping or further locking needed.
-     *
-     * Pass 2: after releasing the lock, wake any sleeping targets.
-     * We re-scan proc_table without the lock; a process that was freed
-     * between the two passes will have state == PROC_UNUSED and be
-     * skipped by proc_wakeup (checks PROC_SLEEPING under proc_lock).
-     */
+    /* Set pending bits under lock; wakeup after release. */
     spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         struct process *p = &proc_table[i];
@@ -115,7 +103,6 @@ int signal_send_pgrp(pid_t pgrp, int sig) {
     if (count == 0)
         return -ESRCH;
 
-    /* Wakeup pass — proc_wakeup takes proc_lock internally */
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         struct process *p = &proc_table[i];
         if (p->state == PROC_SLEEPING && p->pgid == pgrp &&
@@ -335,13 +322,11 @@ int64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
     if (target > 0)
         return (int64_t)signal_send(target, s);
     if (target == 0) {
-        /* Send to caller's process group */
         struct process *cur = proc_current();
         return cur ? (int64_t)signal_send_pgrp(cur->pgid, s) : -ESRCH;
     }
     if (target == -1)
-        return -ESRCH;  /* kill(-1) not supported yet */
-    /* target < -1: send to process group -target */
+        return -ESRCH;
     return (int64_t)signal_send_pgrp(-target, s);
 }
 
