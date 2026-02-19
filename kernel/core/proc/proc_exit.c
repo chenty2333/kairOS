@@ -31,7 +31,7 @@ static void proc_reparent_children(struct process *p) {
         return;
 
     bool wake_reaper = false;
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     struct process *child, *tmp;
     list_for_each_entry_safe(child, tmp, &p->children, sibling) {
         list_del(&child->sibling);
@@ -41,7 +41,7 @@ static void proc_reparent_children(struct process *p) {
         if (child->state == PROC_ZOMBIE)
             wake_reaper = true;
     }
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     if (wake_reaper)
         wait_queue_wakeup_all(&reaper->exit_wait);
 }
@@ -83,12 +83,12 @@ noreturn void proc_exit(int status) {
 
     /* Remove from thread group if a non-leader thread */
     if (is_thread) {
-        spin_lock(&proc_table_lock);
+        spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
         if (!list_empty(&p->thread_group)) {
             list_del(&p->thread_group);
             INIT_LIST_HEAD(&p->thread_group);
         }
-        spin_unlock(&proc_table_lock);
+        spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     }
 
     if (!is_thread) {

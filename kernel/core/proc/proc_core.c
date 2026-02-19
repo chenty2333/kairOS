@@ -18,6 +18,7 @@
 
 struct process proc_table[CONFIG_MAX_PROCESSES];
 spinlock_t proc_table_lock = SPINLOCK_INIT;
+bool proc_table_irq_flags;
 pid_t next_pid = 1;
 struct process *reaper_proc = NULL;
 
@@ -81,7 +82,7 @@ void proc_setup_stdio(struct process *p) {
 
 struct process *proc_alloc(void) {
     struct process *p = NULL;
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
             p = &proc_table[i];
@@ -90,7 +91,7 @@ struct process *proc_alloc(void) {
             break;
         }
     }
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
 
     if (!p) {
         return NULL;
@@ -179,9 +180,9 @@ void proc_adopt_child(struct process *parent, struct process *child) {
     child->syscall_abi = parent->syscall_abi;
     child->umask = parent->umask;
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     list_add(&child->sibling, &parent->children);
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     memcpy(child->cwd, parent->cwd, CONFIG_PATH_MAX);
     child->cwd_vnode = parent->cwd_vnode;
     if (child->cwd_vnode)
@@ -235,12 +236,12 @@ void proc_free(struct process *p) {
         vfs_mount_ns_put(p->mnt_ns);
         p->mnt_ns = NULL;
     }
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     if (!list_empty(&p->sibling)) {
         list_del(&p->sibling);
     }
     INIT_LIST_HEAD(&p->sibling);
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     proc_free_internal(p);
 }
 
@@ -255,14 +256,14 @@ void proc_set_current(struct process *p) {
 struct process *proc_find(pid_t pid) {
     if (pid <= 0)
         return NULL;
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].pid == pid && proc_table[i].state != PROC_UNUSED) {
-            spin_unlock(&proc_table_lock);
+            spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
             return &proc_table[i];
         }
     }
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     return NULL;
 }
 
@@ -313,13 +314,17 @@ struct process *proc_idle_init(void) {
 void proc_lock(struct process *p) {
     if (!p)
         return;
+    bool flags = arch_irq_save();
     spin_lock(&p->lock);
+    p->irq_flags = flags;
 }
 
 void proc_unlock(struct process *p) {
     if (!p)
         return;
+    bool flags = p->irq_flags;
     spin_unlock(&p->lock);
+    arch_irq_restore(flags);
 }
 
 int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {

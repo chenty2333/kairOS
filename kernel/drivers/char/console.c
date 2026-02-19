@@ -96,8 +96,7 @@ static void console_echo_char(char c) {
 }
 
 static bool console_canon_commit(void) {
-    size_t used = ringbuf_len(&console_state.in_rb);
-    size_t avail = (CONSOLE_BUF_SIZE - 1) - used;  /* ringbuf uses 1 slot as sentinel */
+    size_t avail = ringbuf_avail(&console_state.in_rb);
     if (avail < console_state.canon_len) {
         arch_early_putchar('\a');  /* BEL - no room, keep canon_buf for retry */
         return false;
@@ -218,7 +217,8 @@ static void console_handle_input_char(char c, bool *pushed, uint32_t *sig_mask) 
         return;
     }
 
-    /* Raw mode */
+    /* Raw mode: drop new chars when full (overwrite=false) to preserve
+     * oldest unread data, consistent with canonical mode behavior. */
     ringbuf_push(&console_state.in_rb, c, false);
     console_echo_char(c);
     if (pushed)
@@ -424,7 +424,13 @@ int console_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
         bool was_empty = ringbuf_empty(&console_state.in_rb);
         if ((console_state.termios.c_lflag & ICANON) &&
             !(t.c_lflag & ICANON) && console_state.canon_len > 0) {
-            console_canon_commit();
+            if (!console_canon_commit()) {
+                /* Mode switch: force-flush, overwrite old ringbuf data */
+                for (uint32_t i = 0; i < console_state.canon_len; i++)
+                    ringbuf_push(&console_state.in_rb,
+                                 console_state.canon_buf[i], true);
+                console_state.canon_len = 0;
+            }
             wake = was_empty && !ringbuf_empty(&console_state.in_rb);
         }
         if (cmd == TCSETSF) {

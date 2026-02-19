@@ -31,6 +31,12 @@ size_t ringbuf_len(const struct ringbuf *rb) {
     return rb->size - rb->tail + rb->head;
 }
 
+size_t ringbuf_avail(const struct ringbuf *rb) {
+    if (!rb || rb->size == 0)
+        return 0;
+    return (rb->size - 1) - ringbuf_len(rb);
+}
+
 bool ringbuf_push(struct ringbuf *rb, char c, bool overwrite) {
     if (!rb || !rb->buf || rb->size == 0)
         return false;

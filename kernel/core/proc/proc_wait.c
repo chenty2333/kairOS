@@ -14,7 +14,7 @@ static bool proc_wait_find_reapable(struct process *parent, pid_t pid,
     struct process *child, *tmp;
     struct process *reap = NULL;
 
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     list_for_each_entry_safe(child, tmp, &parent->children, sibling) {
         found = true;
         if (pid > 0 && child->pid != pid)
@@ -28,7 +28,7 @@ static bool proc_wait_find_reapable(struct process *parent, pid_t pid,
             break;
         }
     }
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
 
     if (out_reap)
         *out_reap = reap;

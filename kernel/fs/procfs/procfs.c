@@ -23,6 +23,7 @@
 /* Internal proc_table access */
 extern struct process proc_table[CONFIG_MAX_PROCESSES];
 extern spinlock_t proc_table_lock;
+extern bool proc_table_irq_flags;
 
 #define PROC_SUPER_MAGIC 0x9FA0
 #define PROCFS_BUF_SIZE  4096
@@ -289,15 +290,15 @@ static const char *proc_state_char(enum proc_state s) {
 static struct process *pid_to_proc(pid_t pid) {
     if (pid <= 0)
         return NULL;
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].state != PROC_UNUSED &&
             proc_table[i].pid == pid) {
-            spin_unlock(&proc_table_lock);
+            spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
             return &proc_table[i];
         }
     }
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     return NULL;
 }
 
@@ -531,7 +532,7 @@ static struct procfs_entry *procfs_create_pid_dir(struct procfs_mount *pm,
 static pid_t procfs_get_nth_pid(int n) {
     int count = 0;
     pid_t pid = -1;
-    spin_lock(&proc_table_lock);
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         if (proc_table[i].state != PROC_UNUSED) {
             if (count == n) {
@@ -541,7 +542,7 @@ static pid_t procfs_get_nth_pid(int n) {
             count++;
         }
     }
-    spin_unlock(&proc_table_lock);
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
     return pid;
 }
 
