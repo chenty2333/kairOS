@@ -157,6 +157,7 @@ struct process *proc_start_init(void);
 void proc_yield(void);
 int proc_exec(const char *path, char *const argv[], char *const envp[]);
 void proc_wakeup(struct process *p);
+void proc_wake_expired_sleepers(uint64_t now_ticks);
 void signal_init_process(struct process *p);
 void proc_setup_stdio(struct process *p);
 void proc_fork_child_setup(void);

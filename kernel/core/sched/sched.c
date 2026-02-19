@@ -10,8 +10,6 @@
 #include <kairos/sched.h>
 #include <kairos/string.h>
 
-extern struct process proc_table[CONFIG_MAX_PROCESSES];
-
 /* CFS Scheduler Tunables */
 #define SCHED_LATENCY_NS 6000000UL
 #define SCHED_MIN_GRANULARITY_NS 1000000UL
@@ -642,16 +640,8 @@ void sched_tick(void) {
     }
 
     /* Wake processes whose sleep deadline has expired (CPU 0 only) */
-    if (arch_cpu_id() == 0) {
-        uint64_t now_ticks = arch_timer_get_ticks();
-        for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-            struct process *p = &proc_table[i];
-            uint64_t dl = __atomic_load_n(&p->sleep_deadline, __ATOMIC_ACQUIRE);
-            if (dl != 0 && dl <= now_ticks && p->state == PROC_SLEEPING) {
-                proc_wakeup(p);
-            }
-        }
-    }
+    if (arch_cpu_id() == 0)
+        proc_wake_expired_sleepers(arch_timer_get_ticks());
 }
 
 int sched_setnice(struct process *p, int nice) {

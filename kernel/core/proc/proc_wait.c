@@ -128,3 +128,12 @@ void proc_wakeup(struct process *p) {
     proc_unlock(p);
     sched_enqueue(p);
 }
+
+void proc_wake_expired_sleepers(uint64_t now_ticks) {
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        struct process *p = &proc_table[i];
+        uint64_t dl = __atomic_load_n(&p->sleep_deadline, __ATOMIC_ACQUIRE);
+        if (dl != 0 && dl <= now_ticks && p->state == PROC_SLEEPING)
+            proc_wakeup(p);
+    }
+}
