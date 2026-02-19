@@ -134,6 +134,25 @@ void tty_hangup(struct tty_struct *tty) {
         tty->driver->ops->hangup(tty);
 }
 
+void tty_detach_ctty(struct process *p) {
+    if (!p || !p->ctty)
+        return;
+
+    struct tty_struct *tty = p->ctty;
+    p->ctty = NULL;
+    if (p->pid != p->sid)
+        return;
+
+    bool irq_state = arch_irq_save();
+    spin_lock(&tty->lock);
+    if (tty->session == p->sid) {
+        tty->session = 0;
+        tty->fg_pgrp = 0;
+    }
+    spin_unlock(&tty->lock);
+    arch_irq_restore(irq_state);
+}
+
 void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count) {
     if (!tty || !tty->ldisc.ops || !tty->ldisc.ops->receive_buf)
         return;
@@ -281,15 +300,7 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
         struct process *p = proc_current();
         if (!p || p->ctty != tty)
             return -ENOTTY;
-        p->ctty = NULL;
-        if (p->pid == p->sid) {
-            bool irq_state = arch_irq_save();
-            spin_lock(&tty->lock);
-            tty->session = 0;
-            tty->fg_pgrp = 0;
-            spin_unlock(&tty->lock);
-            arch_irq_restore(irq_state);
-        }
+        tty_detach_ctty(p);
         return 0;
     }
     case TIOCGWINSZ: {

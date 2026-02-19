@@ -11,6 +11,7 @@
 #include <kairos/signal.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
+#include <kairos/tty.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
@@ -667,9 +668,9 @@ int64_t sys_setsid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
+    tty_detach_ctty(p);
     p->sid = p->pid;
     p->pgid = p->pid;
-    p->ctty = NULL;  /* new session detaches controlling terminal */
     return (int64_t)p->sid;
 }
 

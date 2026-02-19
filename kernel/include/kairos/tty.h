@@ -22,6 +22,7 @@ struct tty_struct;
 struct tty_driver;
 struct tty_port;
 struct vnode;
+struct process;
 
 struct tty_ldisc_ops {
     int     (*open)(struct tty_struct *tty);
@@ -106,6 +107,7 @@ ssize_t tty_write(struct tty_struct *tty, const uint8_t *buf, size_t count,
                   uint32_t flags);
 int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg);
 int tty_poll(struct tty_struct *tty, uint32_t events);
+void tty_detach_ctty(struct process *p);
 
 void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count);
 void tty_port_init(struct tty_port *port, const struct tty_port_ops *ops);
