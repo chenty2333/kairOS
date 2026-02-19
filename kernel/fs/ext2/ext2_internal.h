@@ -135,7 +135,7 @@ int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
 int ext2_vnode_poll(struct vnode *vn, uint32_t events);
 int ext2_vnode_truncate(struct vnode *vn, off_t length);
 ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
-                         off_t offset);
+                         off_t offset, uint32_t flags);
 int ext2_vnode_readdir(struct vnode *vn, struct dirent *ent, off_t *offset);
 
 struct vnode *ext2_lookup(struct vnode *dir, const char *name);

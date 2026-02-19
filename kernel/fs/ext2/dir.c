@@ -136,7 +136,7 @@ int ext2_symlink(struct vnode *dir, const char *name, const char *target) {
     struct vnode *vn = ext2_create_vnode(did->mnt, nino);
     if (!vn)
         return -EIO;
-    ssize_t wr = ext2_vnode_write(vn, target, tlen, 0);
+    ssize_t wr = ext2_vnode_write(vn, target, tlen, 0, 0);
     vnode_put(vn);
     if (wr < 0 || (size_t)wr != tlen)
         return -EIO;

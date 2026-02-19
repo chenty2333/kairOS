@@ -30,23 +30,25 @@ int sock_register_family(int domain, const struct proto_ops *stream_ops,
 
 /* Socket vnode file_ops */
 static ssize_t socket_vnode_read(struct vnode *vn, void *buf, size_t len,
-                                 off_t off) {
+                                 off_t off, uint32_t flags) {
     (void)off;
     struct socket *sock = sock_from_vnode(vn);
     if (!sock || !sock->ops || !sock->ops->recvfrom) {
         return -EOPNOTSUPP;
     }
-    return sock->ops->recvfrom(sock, buf, len, 0, NULL, NULL);
+    int msg_flags = (flags & O_NONBLOCK) ? MSG_DONTWAIT : 0;
+    return sock->ops->recvfrom(sock, buf, len, msg_flags, NULL, NULL);
 }
 
 static ssize_t socket_vnode_write(struct vnode *vn, const void *buf,
-                                  size_t len, off_t off) {
+                                  size_t len, off_t off, uint32_t flags) {
     (void)off;
     struct socket *sock = sock_from_vnode(vn);
     if (!sock || !sock->ops || !sock->ops->sendto) {
         return -EOPNOTSUPP;
     }
-    return sock->ops->sendto(sock, buf, len, 0, NULL, 0);
+    int msg_flags = (flags & O_NONBLOCK) ? MSG_DONTWAIT : 0;
+    return sock->ops->sendto(sock, buf, len, msg_flags, NULL, 0);
 }
 
 static int socket_vnode_close(struct vnode *vn) {

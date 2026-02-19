@@ -75,7 +75,7 @@ static bool initramfs_mounted;
 static struct vnode *initramfs_lookup(struct vnode *dir, const char *name);
 static int initramfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off);
 static ssize_t initramfs_read(struct vnode *vn, void *buf, size_t len,
-                              off_t off);
+                              off_t off, uint32_t flags);
 static int initramfs_mkdir(struct vnode *dir, const char *name, mode_t mode);
 static int initramfs_close(struct vnode *vn);
 static int initramfs_dir_poll(struct vnode *vn, uint32_t events);
@@ -570,7 +570,8 @@ static int initramfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off) {
 }
 
 static ssize_t initramfs_read(struct vnode *vn, void *buf, size_t len,
-                              off_t off) {
+                              off_t off,
+                              uint32_t flags __attribute__((unused))) {
     if (!vn || !buf)
         return -EINVAL;
     struct initramfs_node *node = vn->fs_data;

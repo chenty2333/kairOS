@@ -10,7 +10,8 @@
 #include "ext2_internal.h"
 
 static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
-                               off_t offset) {
+                               off_t offset,
+                               uint32_t flags __attribute__((unused))) {
     struct ext2_inode_data *id = vn->fs_data;
     struct ext2_mount *mnt = id->mnt;
     if (vn->type == VNODE_SYMLINK && id->inode.i_blocks == 0 &&
@@ -54,7 +55,8 @@ static ssize_t ext2_vnode_read(struct vnode *vn, void *buf, size_t len,
 }
 
 ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
-                         off_t offset) {
+                         off_t offset,
+                         uint32_t flags __attribute__((unused))) {
     struct ext2_inode_data *id = vn->fs_data;
     struct ext2_mount *mnt = id->mnt;
     size_t written = 0;

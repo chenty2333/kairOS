@@ -189,7 +189,8 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
                 vma->vnode,
                 (uint8_t *)kva + (read_start - page_start),
                 to_read,
-                file_off);
+                file_off,
+                0);
             if (rd < 0) {
                 pr_err("mm: fault addr=%p vnode read failed off=%ld ret=%ld\n",
                        (void *)addr, (long)file_off, (long)rd);

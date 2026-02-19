@@ -288,7 +288,7 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                     return total ? (int64_t)total : -EFAULT;
                 }
                 rwlock_write_lock(&f->vnode->lock);
-                ssize_t n = f->vnode->ops->write(f->vnode, kbuf, chunk, off);
+                ssize_t n = f->vnode->ops->write(f->vnode, kbuf, chunk, off, f->flags);
                 rwlock_write_unlock(&f->vnode->lock);
                 if (n < 0) {
                     file_put(f);
@@ -303,7 +303,7 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                     break;
             } else {
                 rwlock_read_lock(&f->vnode->lock);
-                ssize_t n = f->vnode->ops->read(f->vnode, kbuf, chunk, off);
+                ssize_t n = f->vnode->ops->read(f->vnode, kbuf, chunk, off, f->flags);
                 rwlock_read_unlock(&f->vnode->lock);
                 if (n < 0) {
                     file_put(f);

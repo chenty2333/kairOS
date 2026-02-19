@@ -56,11 +56,11 @@ static struct sysfs_node *sysfs_kernel_node;
 static struct vnode *sysfs_lookup(struct vnode *dir, const char *name);
 static int sysfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off);
 static ssize_t sysfs_file_read(struct vnode *vn, void *buf, size_t len,
-                                off_t off);
+                                off_t off, uint32_t flags);
 static ssize_t sysfs_file_write(struct vnode *vn, const void *buf, size_t len,
-                                 off_t off);
+                                 off_t off, uint32_t flags);
 static ssize_t sysfs_link_read(struct vnode *vn, void *buf, size_t len,
-                                off_t off);
+                                off_t off, uint32_t flags);
 static int sysfs_close(struct vnode *vn);
 static int sysfs_dir_poll(struct vnode *vn, uint32_t events);
 static int sysfs_file_poll(struct vnode *vn, uint32_t events);
@@ -183,7 +183,8 @@ static void sysfs_free_node(struct sysfs_node *sn) {
 /* ------------------------------------------------------------------ */
 
 static ssize_t sysfs_file_read(struct vnode *vn, void *buf, size_t len,
-                                off_t off) {
+                                off_t off,
+                                uint32_t flags __attribute__((unused))) {
     struct sysfs_node *sn = vn->fs_data;
     if (!sn || sn->type != SYSFS_FILE || !sn->attr || !sn->attr->show)
         return -EINVAL;
@@ -212,7 +213,8 @@ static ssize_t sysfs_file_read(struct vnode *vn, void *buf, size_t len,
 }
 
 static ssize_t sysfs_file_write(struct vnode *vn, const void *buf, size_t len,
-                                 off_t off __attribute__((unused))) {
+                                 off_t off __attribute__((unused)),
+                                 uint32_t flags __attribute__((unused))) {
     struct sysfs_node *sn = vn->fs_data;
     if (!sn || sn->type != SYSFS_FILE || !sn->attr || !sn->attr->store)
         return -EPERM;
@@ -249,7 +251,8 @@ static int sysfs_build_path(struct sysfs_node *node, char *buf, size_t bufsz) {
 }
 
 static ssize_t sysfs_link_read(struct vnode *vn, void *buf, size_t len,
-                                off_t off) {
+                                off_t off,
+                                uint32_t flags __attribute__((unused))) {
     struct sysfs_node *sn = vn->fs_data;
     if (!sn || sn->type != SYSFS_LINK || !sn->link_target)
         return -EINVAL;

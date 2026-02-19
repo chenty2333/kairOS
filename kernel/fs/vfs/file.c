@@ -182,7 +182,7 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
         return -EINVAL;
     rwlock_read_lock(&file->vnode->lock);
     mutex_lock(&file->lock);
-    ssize_t ret = file->vnode->ops->read(file->vnode, buf, len, file->offset);
+    ssize_t ret = file->vnode->ops->read(file->vnode, buf, len, file->offset, file->flags);
     if (ret > 0)
         file->offset += ret;
     mutex_unlock(&file->lock);
@@ -204,7 +204,7 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     mutex_lock(&file->lock);
     if (file->flags & O_APPEND)
         file->offset = file->vnode->size;
-    ssize_t ret = file->vnode->ops->write(file->vnode, buf, len, file->offset);
+    ssize_t ret = file->vnode->ops->write(file->vnode, buf, len, file->offset, file->flags);
     if (ret > 0)
         file->offset += ret;
     mutex_unlock(&file->lock);

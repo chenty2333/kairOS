@@ -70,13 +70,14 @@ static int tmpfs_utimes_op(struct vnode *vn, const struct timespec *atime,
                            const struct timespec *mtime);
 
 static int tmpfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off);
-static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off);
+static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off,
+                          uint32_t flags);
 static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
-                           off_t off);
+                           off_t off, uint32_t flags);
 static int tmpfs_truncate(struct vnode *vn, off_t length);
 static int tmpfs_stat(struct vnode *vn, struct stat *st);
 static ssize_t tmpfs_symlink_read(struct vnode *vn, void *buf, size_t len,
-                                  off_t off);
+                                  off_t off, uint32_t flags);
 static int tmpfs_close(struct vnode *vn);
 static int tmpfs_dir_poll(struct vnode *vn, uint32_t events);
 static int tmpfs_file_poll(struct vnode *vn, uint32_t events);
@@ -230,7 +231,8 @@ static void tmpfs_remove_child(struct tmpfs_node *tn) {
 /*  File read/write                                                    */
 /* ------------------------------------------------------------------ */
 
-static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off) {
+static ssize_t tmpfs_read(struct vnode *vn, void *buf, size_t len, off_t off,
+                          uint32_t flags __attribute__((unused))) {
     struct tmpfs_node *tn = vn->fs_data;
     if (!tn)
         return -EINVAL;
@@ -287,7 +289,8 @@ static int tmpfs_ensure_pages(struct tmpfs_node *tn, size_t need_cap) {
 }
 
 static ssize_t tmpfs_write(struct vnode *vn, const void *buf, size_t len,
-                           off_t off) {
+                           off_t off,
+                           uint32_t flags __attribute__((unused))) {
     struct tmpfs_node *tn = vn->fs_data;
     struct tmpfs_mount *tm = vn->mount->fs_data;
     if (!tn || !tm)
@@ -407,7 +410,8 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st) {
 }
 
 static ssize_t tmpfs_symlink_read(struct vnode *vn, void *buf, size_t len,
-                                  off_t off) {
+                                  off_t off,
+                                  uint32_t flags __attribute__((unused))) {
     struct tmpfs_node *tn = vn->fs_data;
     if (!tn || !tn->symlink_target)
         return -EINVAL;

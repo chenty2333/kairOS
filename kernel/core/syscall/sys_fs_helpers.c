@@ -121,7 +121,7 @@ ssize_t sysfs_readlink_from_vnode(struct vnode *vn, char *buf, size_t bufsz) {
         rwlock_read_unlock(&vn->lock);
         return 0;
     }
-    ssize_t ret = vn->ops->read(vn, buf, want, 0);
+    ssize_t ret = vn->ops->read(vn, buf, want, 0, 0);
     rwlock_read_unlock(&vn->lock);
     return ret;
 }

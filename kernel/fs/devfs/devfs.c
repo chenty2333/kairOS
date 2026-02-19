@@ -59,9 +59,9 @@ static spinlock_t devfs_global_lock = SPINLOCK_INIT;
 
 static struct vnode *devfs_lookup(struct vnode *dir, const char *name);
 static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
-                              off_t offset);
+                              off_t offset, uint32_t flags);
 static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
-                               off_t offset);
+                               off_t offset, uint32_t flags);
 static int devfs_dev_close(struct vnode *vn);
 static int devfs_readdir(struct vnode *vn, struct dirent *ent, off_t *offset);
 static int devfs_dev_poll(struct vnode *vn, uint32_t events);
@@ -230,7 +230,8 @@ static struct vnode *devfs_lookup(struct vnode *dir, const char *name) {
 }
 
 static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
-                              off_t off __attribute__((unused))) {
+                              off_t off __attribute__((unused)),
+                              uint32_t flags) {
     struct devfs_node *node = vn->fs_data;
     if (!node || !buf)
         return -EINVAL;
@@ -241,7 +242,7 @@ static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
     switch (node->dev_type) {
     case DEVFS_CUSTOM:
         if (node->ops && node->ops->read)
-            return node->ops->read(vn, buf, len, off);
+            return node->ops->read(vn, buf, len, off, flags);
         return -ENOSYS;
     case DEVFS_NULL:
         return 0;
@@ -249,26 +250,27 @@ static ssize_t devfs_dev_read(struct vnode *vn, void *buf, size_t len,
         memset(buf, 0, len);
         return (ssize_t)len;
     case DEVFS_CONSOLE:
-        return console_read(vn, buf, len, 0);
+        return console_read(vn, buf, len, 0, flags);
     default:
         return -ENOSYS;
     }
 }
 
 static ssize_t devfs_dev_write(struct vnode *vn, const void *buf, size_t len,
-                               off_t off __attribute__((unused))) {
+                               off_t off __attribute__((unused)),
+                               uint32_t flags) {
     struct devfs_node *node = vn->fs_data;
     if (!node || !buf)
         return -EINVAL;
 
     if (node->dev_type == DEVFS_CUSTOM) {
         if (node->ops && node->ops->write)
-            return node->ops->write(vn, buf, len, off);
+            return node->ops->write(vn, buf, len, off, flags);
         return -ENOSYS;
     }
 
     if (node->dev_type == DEVFS_CONSOLE)
-        return console_write(vn, buf, len, off);
+        return console_write(vn, buf, len, off, flags);
     return (ssize_t)len;
 }
 

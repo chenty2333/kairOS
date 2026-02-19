@@ -43,6 +43,7 @@ struct winsize {
 #define ECHO   0000010
 #define ECHOE  0000020
 #define ECHOK  0000040
+#define ECHOCTL 0001000
 
 /* termios c_cc indexes (subset) */
 #define VINTR  0

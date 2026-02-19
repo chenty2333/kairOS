@@ -35,6 +35,9 @@ struct vnode;
 #define SHUT_WR   1
 #define SHUT_RDWR 2
 
+/* Message flags */
+#define MSG_DONTWAIT 0x40
+
 /* Socket options levels */
 #define SOL_SOCKET 1
 

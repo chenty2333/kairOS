@@ -197,8 +197,8 @@ struct vfs_ops {
 };
 
 struct file_ops {
-    ssize_t (*read)(struct vnode *vn, void *buf, size_t len, off_t off);
-    ssize_t (*write)(struct vnode *vn, const void *buf, size_t len, off_t off);
+    ssize_t (*read)(struct vnode *vn, void *buf, size_t len, off_t off, uint32_t flags);
+    ssize_t (*write)(struct vnode *vn, const void *buf, size_t len, off_t off, uint32_t flags);
     int (*readdir)(struct vnode *vn, struct dirent *ent, off_t *off);
     int (*close)(struct vnode *vn);
     int (*ioctl)(struct vnode *vn, uint64_t cmd, uint64_t arg);

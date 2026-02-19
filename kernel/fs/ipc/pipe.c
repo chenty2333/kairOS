@@ -171,14 +171,16 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
     return written;
 }
 
-static ssize_t pipe_read(struct vnode *vn, void *buf, size_t len, off_t off) {
+static ssize_t pipe_read(struct vnode *vn, void *buf, size_t len, off_t off,
+                         uint32_t flags) {
     (void)off;
-    return pipe_read_internal(vn->fs_data, buf, len, false);
+    return pipe_read_internal(vn->fs_data, buf, len, (flags & O_NONBLOCK) != 0);
 }
 
-static ssize_t pipe_write(struct vnode *vn, const void *buf, size_t len, off_t off) {
+static ssize_t pipe_write(struct vnode *vn, const void *buf, size_t len, off_t off,
+                          uint32_t flags) {
     (void)off;
-    return pipe_write_internal(vn->fs_data, buf, len, false);
+    return pipe_write_internal(vn->fs_data, buf, len, (flags & O_NONBLOCK) != 0);
 }
 
 static int pipe_close(struct vnode *vn) {

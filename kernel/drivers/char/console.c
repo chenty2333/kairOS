@@ -38,7 +38,7 @@ static struct console_state console_state = {
     .termios = {
     .c_iflag = ICRNL,
     .c_oflag = OPOST | ONLCR,
-    .c_lflag = ISIG | ICANON | ECHO,
+    .c_lflag = ISIG | ICANON | ECHO | ECHOCTL,
     .c_cc = {
         [VINTR] = 3,   /* ^C */
         [VQUIT] = 28,  /* ^\ */
@@ -47,6 +47,7 @@ static struct console_state console_state = {
         [VEOF] = 4,    /* ^D */
         [VTIME] = 0,
         [VMIN] = 1,
+        [VSUSP] = 26,  /* ^Z */
     },
     },
 };
@@ -89,11 +90,25 @@ void console_attach_vnode(struct vnode *vn) {
 static void console_echo_char(char c) {
     if (!(console_state.termios.c_lflag & ECHO))
         return;
+    if ((console_state.termios.c_lflag & ECHOCTL) &&
+        (unsigned char)c < 0x20 && c != '\n' && c != '\t') {
+        arch_early_putchar('^');
+        arch_early_putchar(c + '@');
+        return;
+    }
     if ((console_state.termios.c_oflag & OPOST) &&
         (console_state.termios.c_oflag & ONLCR) && c == '\n') {
         arch_early_putchar('\r');
     }
     arch_early_putchar(c);
+}
+
+/* Return the display width of a character as echoed by console_echo_char. */
+static int console_echo_width(char c) {
+    if ((console_state.termios.c_lflag & ECHOCTL) &&
+        (unsigned char)c < 0x20 && c != '\n' && c != '\t')
+        return 2;  /* ^X */
+    return 1;
 }
 
 static bool console_canon_commit(void) {
@@ -143,11 +158,28 @@ static void console_handle_input_char(char c, bool *pushed, uint32_t *sig_mask) 
         if (c == intr || c == quit) {
             console_state.canon_len = 0;
             if (console_state.termios.c_lflag & ECHO) {
-                arch_early_putchar('^');
-                arch_early_putchar(c == intr ? 'C' : '\\');
+                if (console_state.termios.c_lflag & ECHOCTL) {
+                    arch_early_putchar('^');
+                    arch_early_putchar(c + '@');
+                }
                 console_echo_char('\n');
             }
             *sig_mask |= (1U << ((c == intr) ? SIGINT : SIGQUIT));
+            return;
+        }
+
+        char susp = console_state.termios.c_cc[VSUSP]
+                        ? (char)console_state.termios.c_cc[VSUSP]
+                        : (char)0x1a;
+        if (c == susp) {
+            if (console_state.termios.c_lflag & ECHO) {
+                if (console_state.termios.c_lflag & ECHOCTL) {
+                    arch_early_putchar('^');
+                    arch_early_putchar(c + '@');
+                }
+                console_echo_char('\n');
+            }
+            *sig_mask |= (1U << SIGTSTP);
             return;
         }
     }
@@ -177,11 +209,14 @@ static void console_handle_input_char(char c, bool *pushed, uint32_t *sig_mask) 
 
         if (c == erase || c == '\b') {
             if (console_state.canon_len > 0) {
-                console_state.canon_len--;
+                char erased = console_state.canon_buf[--console_state.canon_len];
                 if (console_state.termios.c_lflag & ECHO) {
-                    arch_early_putchar('\b');
-                    arch_early_putchar(' ');
-                    arch_early_putchar('\b');
+                    int cols = console_echo_width(erased);
+                    for (int i = 0; i < cols; i++) {
+                        arch_early_putchar('\b');
+                        arch_early_putchar(' ');
+                        arch_early_putchar('\b');
+                    }
                 }
             }
             return;
@@ -190,10 +225,13 @@ static void console_handle_input_char(char c, bool *pushed, uint32_t *sig_mask) 
         if (c == kill) {
             if (console_state.termios.c_lflag & ECHO) {
                 while (console_state.canon_len > 0) {
-                    arch_early_putchar('\b');
-                    arch_early_putchar(' ');
-                    arch_early_putchar('\b');
-                    console_state.canon_len--;
+                    char erased = console_state.canon_buf[--console_state.canon_len];
+                    int cols = console_echo_width(erased);
+                    for (int i = 0; i < cols; i++) {
+                        arch_early_putchar('\b');
+                        arch_early_putchar(' ');
+                        arch_early_putchar('\b');
+                    }
                 }
             } else {
                 console_state.canon_len = 0;
@@ -341,7 +379,8 @@ static int console_wait_for_input(struct vnode *vn, struct process *p) {
 }
 
 ssize_t console_read(struct vnode *vn, void *buf, size_t len,
-                     off_t off __attribute__((unused))) {
+                     off_t off __attribute__((unused)),
+                     uint32_t flags) {
     if (!vn || !buf)
         return -EINVAL;
     if (len == 0)
@@ -369,6 +408,8 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
             return (ssize_t)got;
         if (eof)
             return 0;
+        if (flags & O_NONBLOCK)
+            return -EAGAIN;
 
         struct process *p = proc_current();
         if (!p)
@@ -383,7 +424,8 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
 #define CONSOLE_WRITE_CHUNK 64
 
 ssize_t console_write(struct vnode *vn, const void *buf, size_t len,
-                      off_t off __attribute__((unused))) {
+                      off_t off __attribute__((unused)),
+                      uint32_t flags __attribute__((unused))) {
     if (!vn || !buf)
         return -EINVAL;
     console_state_init_once();

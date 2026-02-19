@@ -241,7 +241,7 @@ static int vnode_read_exact(struct vnode *vn, void *buf, size_t len,
         pr_err("ELF: vnode read unsupported\n");
         return -EINVAL;
     }
-    ssize_t rd = vn->ops->read(vn, buf, len, offset);
+    ssize_t rd = vn->ops->read(vn, buf, len, offset, 0);
     if (rd < 0) {
         pr_err("ELF: vnode read failed (off=%ld)\n", (long)offset);
         return (int)rd;

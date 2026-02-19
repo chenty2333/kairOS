@@ -56,9 +56,10 @@ struct procfs_mount {
 /* Forward declarations */
 static struct vnode *procfs_lookup(struct vnode *dir, const char *name);
 static int procfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off);
-static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len, off_t off);
+static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len, off_t off,
+                           uint32_t flags);
 static ssize_t procfs_self_read(struct vnode *vn, void *buf, size_t len,
-                                off_t off);
+                                off_t off, uint32_t flags);
 static int procfs_dir_poll(struct vnode *vn, uint32_t events);
 static int procfs_file_poll(struct vnode *vn, uint32_t events);
 static int procfs_close(struct vnode *vn);
@@ -399,7 +400,8 @@ static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz) {
 /* ------------------------------------------------------------------ */
 
 static ssize_t procfs_self_read(struct vnode *vn __attribute__((unused)),
-                                void *buf, size_t len, off_t off) {
+                                void *buf, size_t len, off_t off,
+                                uint32_t flags __attribute__((unused))) {
     struct process *cur = proc_current();
     pid_t pid = cur ? cur->pid : 1;
     char tmp[16];
@@ -418,7 +420,8 @@ static ssize_t procfs_self_read(struct vnode *vn __attribute__((unused)),
 /* ------------------------------------------------------------------ */
 
 static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len,
-                           off_t off) {
+                           off_t off,
+                           uint32_t flags __attribute__((unused))) {
     struct procfs_entry *ent = vn->fs_data;
     if (!ent || !ent->generate)
         return -EINVAL;
