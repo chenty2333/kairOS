@@ -54,7 +54,11 @@ static void poll_register_waiters(struct pollfd *fds, struct poll_waiter *waiter
 
     for (size_t i = 0; i < nfds; i++) {
         waiters[i].entry.proc = curr;
-        if (fds[i].fd < 0 || fds[i].revents)
+        /*
+         * Ignore user-provided revents bits when arming waiters. Those bits
+         * are output-only and may contain stale data from previous polls.
+         */
+        if (fds[i].fd < 0)
             continue;
         struct file *f = fd_get(curr, fds[i].fd);
         if (!f)
