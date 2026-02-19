@@ -1,5 +1,5 @@
 /**
- * kernel/include/kairos/sched_types.h - Scheduler entity types
+ * kernel/include/kairos/sched_types.h - Scheduler entity types (EEVDF)
  *
  * Defines struct sched_entity, which encapsulates all per-process scheduling
  * state.  The scheduler operates on sched_entity pointers internally;
@@ -32,8 +32,14 @@ struct sched_entity {
      * RUNNING  -> currently executing on a CPU
      */
     uint32_t run_state;
-    uint64_t vruntime;
-    uint64_t last_run_time;
+
+    /* EEVDF core fields */
+    uint64_t vruntime;       /* virtual runtime (key for RB-tree ordering) */
+    uint64_t deadline;       /* virtual deadline = vruntime + vslice */
+    int64_t  vlag;           /* lag = V - vruntime at dequeue (positive = owed CPU) */
+    uint64_t slice;          /* requested time slice in ns */
+
+    uint64_t last_run_time;  /* wall-clock timestamp of last pick (ns) */
     int nice;
     int cpu;
     struct rb_node sched_node;
@@ -52,10 +58,13 @@ static inline bool se_is_on_cpu(const struct sched_entity *se) {
 static inline void sched_entity_init(struct sched_entity *se) {
     se->run_state = SE_STATE_BLOCKED;
     se->vruntime = 0;
+    se->deadline = 0;
+    se->vlag = 0;
+    se->slice = 0;  /* will be set to SCHED_SLICE_NS at enqueue */
     se->last_run_time = 0;
     se->nice = 0;
     se->cpu = -1;
-    se->sched_class = NULL;  /* assigned at fork/enqueue time */
+    se->sched_class = NULL;
 }
 
 #endif
