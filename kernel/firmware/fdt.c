@@ -435,6 +435,54 @@ static void fdt_handle_virtio_mmio(const struct fdt_node_ctx *ctx) {
     }
 }
 
+static void fdt_handle_pci_ecam(const struct fdt_node_ctx *ctx) {
+    if (!ctx)
+        return;
+    if (!fdt_compat_has(ctx->compatible, ctx->compatible_len,
+                        "pci-host-ecam-generic"))
+        return;
+    if (!ctx->reg || ctx->reg_len < (ctx->address_cells + ctx->size_cells) * 4)
+        return;
+
+    paddr_t base = 0;
+    size_t size = 0;
+    if (fdt_read_reg(ctx->reg, ctx->reg_len, ctx->address_cells,
+                     ctx->size_cells, &base, &size))
+        return;
+
+    /* Default INTx IRQ base for QEMU virt: PLIC IRQ 32 */
+    uint32_t irq_base = ctx->irq ? fdt_be32(*ctx->irq) : 32;
+
+    struct fw_device_desc *desc = kzalloc(sizeof(*desc));
+    struct resource *res = kzalloc(2 * sizeof(*res));
+    if (!desc || !res) {
+        kfree(desc);
+        kfree(res);
+        return;
+    }
+
+    strncpy(desc->name, ctx->name, sizeof(desc->name) - 1);
+    strncpy(desc->compatible, "pci-host-ecam-generic",
+            sizeof(desc->compatible) - 1);
+
+    /* Resource 0: ECAM MMIO region */
+    res[0].start = base;
+    res[0].end = base + size - 1;
+    res[0].flags = IORESOURCE_MEM;
+
+    /* Resource 1: IRQ base for INTx swizzle */
+    res[1].start = (uint64_t)irq_base;
+    res[1].end = (uint64_t)(irq_base + 3);
+    res[1].flags = IORESOURCE_IRQ;
+
+    desc->resources = res;
+    desc->num_resources = 2;
+
+    pr_info("fdt: found pci-host-ecam-generic @ %p size 0x%lx irq_base %u\n",
+            (void *)base, (unsigned long)size, irq_base);
+    fw_register_desc(desc);
+}
+
 int fdt_scan_devices(const void *fdt) {
     struct fdt_view view;
     if (fdt_init_view(fdt, &view))
@@ -479,6 +527,7 @@ int fdt_scan_devices(const void *fdt) {
         }
         case FDT_END_NODE:
             fdt_handle_virtio_mmio(&ctx);
+            fdt_handle_pci_ecam(&ctx);
             ctx.compatible = NULL;
             ctx.compatible_len = 0;
             ctx.reg = NULL;
