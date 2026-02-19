@@ -862,8 +862,6 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
     struct cfs_rq *cfs = &rq->cfs;
     (void)update_curr(cfs);
 
-    se_mark_running(&prev->se);
-
     if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
         prev->state = PROC_RUNNABLE;
         se_mark_runnable(&prev->se);
@@ -876,7 +874,7 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
         se_mark_queued(&prev->se, prev->se.cpu);
         cfs->nr_running++;
         rq->nr_running++;
-    } else {
+        update_min_vruntime(cfs);
         /* Save lag before blocking */
         prev->se.vlag = (int64_t)(cfs->min_vruntime - prev->se.vruntime);
         if (se_is_on_rq(&prev->se)) {
