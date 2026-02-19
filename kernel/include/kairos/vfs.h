@@ -198,21 +198,22 @@ struct vfs_ops {
 };
 
 struct file_ops {
+    /* vnode-level (ELF loader, mmap, readlink, preadv, vnode_put) */
     ssize_t (*read)(struct vnode *vn, void *buf, size_t len, off_t off, uint32_t flags);
     ssize_t (*write)(struct vnode *vn, const void *buf, size_t len, off_t off, uint32_t flags);
     int (*readdir)(struct vnode *vn, struct dirent *ent, off_t *off);
     int (*close)(struct vnode *vn);
-    int (*ioctl)(struct vnode *vn, uint64_t cmd, uint64_t arg);
     int (*stat)(struct vnode *vn, struct stat *st);
     int (*truncate)(struct vnode *vn, off_t length);
-    int (*poll)(struct vnode *vn, uint32_t events);
     int (*fsync)(struct vnode *vn, int datasync);
-    int (*open_file)(struct file *file);
-    int (*close_file)(struct file *file);
-    ssize_t (*read_file)(struct file *file, void *buf, size_t len);
-    ssize_t (*write_file)(struct file *file, const void *buf, size_t len);
-    int (*ioctl_file)(struct file *file, uint64_t cmd, uint64_t arg);
-    int (*poll_file)(struct file *file, uint32_t events);
+
+    /* file-level */
+    int (*open)(struct file *file);
+    void (*release)(struct file *file);
+    ssize_t (*fread)(struct file *file, void *buf, size_t len);
+    ssize_t (*fwrite)(struct file *file, const void *buf, size_t len);
+    int (*ioctl)(struct file *file, uint64_t cmd, uint64_t arg);
+    int (*poll)(struct file *file, uint32_t events);
 };
 
 struct poll_waiter;

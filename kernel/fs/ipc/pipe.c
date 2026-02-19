@@ -259,8 +259,9 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     return 0;
 }
 
-void pipe_close_end(struct vnode *vn, uint32_t flags) {
-    struct pipe *p = vn->fs_data;
+void pipe_close_end(struct file *file) {
+    struct pipe *p = file->vnode->fs_data;
+    uint32_t flags = file->flags;
     int readers, writers;
     bool dec_reader = false;
     bool dec_writer = false;

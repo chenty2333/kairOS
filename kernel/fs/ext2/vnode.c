@@ -173,9 +173,10 @@ static int ext2_vnode_close(struct vnode *vn) {
     return 0;
 }
 
-int ext2_vnode_poll(struct vnode *vn, uint32_t events) {
-    if (!vn)
+int ext2_vnode_poll(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
         return POLLNVAL;
+    struct vnode *vn = file->vnode;
 
     uint32_t revents = (vn->type == VNODE_DIR) ? POLLIN : (POLLIN | POLLOUT);
     return (int)(revents & events);

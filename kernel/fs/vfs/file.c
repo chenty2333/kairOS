@@ -117,8 +117,8 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
         vn->ops->truncate(vn, 0);
         rwlock_write_unlock(&vn->lock);
     }
-    if (vn->ops && vn->ops->open_file) {
-        ret = vn->ops->open_file(file);
+    if (vn->ops && vn->ops->open) {
+        ret = vn->ops->open(file);
         if (ret < 0) {
             dentry_put(file->dentry);
             file->dentry = NULL;
@@ -170,10 +170,10 @@ int vfs_close(struct file *file) {
         panic("vfs_close: refcount already zero on file '%s'", file->path);
     if (old > 1)
         return 0;
-    if (file->vnode && file->vnode->ops && file->vnode->ops->close_file)
-        file->vnode->ops->close_file(file);
+    if (file->vnode && file->vnode->ops && file->vnode->ops->release)
+        file->vnode->ops->release(file);
     if (file->vnode && file->vnode->type == VNODE_PIPE) {
-        pipe_close_end(file->vnode, file->flags);
+        pipe_close_end(file);
     }
     if (file->dentry) {
         dentry_put(file->dentry);
@@ -196,9 +196,9 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     if (file->vnode->type == VNODE_PIPE) {
         return pipe_read_file(file, buf, len);
     }
-    if (file->vnode->ops->read_file) {
+    if (file->vnode->ops->fread) {
         mutex_lock(&file->lock);
-        ssize_t ret = file->vnode->ops->read_file(file, buf, len);
+        ssize_t ret = file->vnode->ops->fread(file, buf, len);
         if (ret > 0)
             file->offset += ret;
         mutex_unlock(&file->lock);
@@ -224,11 +224,11 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     if (file->vnode->type == VNODE_PIPE) {
         return pipe_write_file(file, buf, len);
     }
-    if (file->vnode->ops->write_file) {
+    if (file->vnode->ops->fwrite) {
         mutex_lock(&file->lock);
         if (file->flags & O_APPEND)
             file->offset = file->vnode->size;
-        ssize_t ret = file->vnode->ops->write_file(file, buf, len);
+        ssize_t ret = file->vnode->ops->fwrite(file, buf, len);
         if (ret > 0)
             file->offset += ret;
         mutex_unlock(&file->lock);
@@ -251,11 +251,9 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
 int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
     if (!file || !file->vnode || !file->vnode->ops)
         return -ENOTTY;
-    if (file->vnode->ops->ioctl_file)
-        return file->vnode->ops->ioctl_file(file, cmd, arg);
     if (!file->vnode->ops->ioctl)
         return -ENOTTY;
-    return file->vnode->ops->ioctl(file->vnode, cmd, arg);
+    return file->vnode->ops->ioctl(file, cmd, arg);
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {

@@ -245,9 +245,9 @@ static int drm_lite_present(struct drm_lite_device *ldev,
     return 0;
 }
 
-static int drm_lite_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
+static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
     struct drm_lite_device *ldev =
-        (struct drm_lite_device *)devfs_get_priv(vn);
+        (struct drm_lite_device *)devfs_get_priv(file->vnode);
     if (!ldev)
         return -ENODEV;
 

@@ -434,7 +434,7 @@ static const struct tty_ldisc_ops pty_master_ldisc_ops = {
 
 /* ── /dev/ptmx ───────────────────────────────────────────────────── */
 
-static int ptmx_open_file(struct file *file) {
+static int ptmx_open(struct file *file) {
     if (!file || !file->vnode)
         return -EINVAL;
     if (file->private_data)
@@ -476,10 +476,10 @@ static int ptmx_open_file(struct file *file) {
     return 0;
 }
 
-static int ptmx_close_file(struct file *file) {
+static void ptmx_release(struct file *file) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
     if (!ctx)
-        return 0;
+        return;
 
     struct pty_pair *pair = ctx->pair;
     file->private_data = NULL;
@@ -507,31 +507,30 @@ static int ptmx_close_file(struct file *file) {
 
     pty_pair_try_detach_if_unused(pair);
     pty_pair_put(pair);
-    return 0;
 }
 
-static ssize_t ptmx_read_file(struct file *file, void *buf, size_t len) {
+static ssize_t ptmx_fread(struct file *file, void *buf, size_t len) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
     if (!ctx || !ctx->pair->master)
         return -EIO;
     return tty_read(ctx->pair->master, (uint8_t *)buf, len, file->flags);
 }
 
-static ssize_t ptmx_write_file(struct file *file, const void *buf, size_t len) {
+static ssize_t ptmx_fwrite(struct file *file, const void *buf, size_t len) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
     if (!ctx || !ctx->pair->master)
         return -EIO;
     return tty_write(ctx->pair->master, (const uint8_t *)buf, len, file->flags);
 }
 
-static int ptmx_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg) {
+static int ptmx_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
     if (!ctx || !ctx->pair->master)
         return -EIO;
     return tty_ioctl(ctx->pair->master, cmd, arg);
 }
 
-static int ptmx_poll_file(struct file *file, uint32_t events) {
+static int ptmx_poll(struct file *file, uint32_t events) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
     if (!ctx || !ctx->pair->master)
         return POLLNVAL;
@@ -539,12 +538,12 @@ static int ptmx_poll_file(struct file *file, uint32_t events) {
 }
 
 static struct file_ops ptmx_ops = {
-    .open_file = ptmx_open_file,
-    .close_file = ptmx_close_file,
-    .read_file = ptmx_read_file,
-    .write_file = ptmx_write_file,
-    .ioctl_file = ptmx_ioctl_file,
-    .poll_file = ptmx_poll_file,
+    .open = ptmx_open,
+    .release = ptmx_release,
+    .fread = ptmx_fread,
+    .fwrite = ptmx_fwrite,
+    .ioctl = ptmx_ioctl,
+    .poll = ptmx_poll,
 };
 
 /* ── /dev/pts/N ──────────────────────────────────────────────────── */
@@ -558,7 +557,7 @@ static int pts_index_from_vnode(struct vnode *vn) {
     return (int)idx;
 }
 
-static int pts_open_file(struct file *file) {
+static int pts_open(struct file *file) {
     if (!file || !file->vnode)
         return -EINVAL;
 
@@ -616,10 +615,10 @@ static int pts_open_file(struct file *file) {
     return 0;
 }
 
-static int pts_close_file(struct file *file) {
+static void pts_release(struct file *file) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
     if (!ctx)
-        return 0;
+        return;
 
     struct pty_pair *pair = ctx->pair;
     file->private_data = NULL;
@@ -647,31 +646,30 @@ static int pts_close_file(struct file *file) {
 
     pty_pair_try_detach_if_unused(pair);
     pty_pair_put(pair);
-    return 0;
 }
 
-static ssize_t pts_read_file(struct file *file, void *buf, size_t len) {
+static ssize_t pts_fread(struct file *file, void *buf, size_t len) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
     if (!ctx || !ctx->pair->slave)
         return -EIO;
     return tty_read(ctx->pair->slave, (uint8_t *)buf, len, file->flags);
 }
 
-static ssize_t pts_write_file(struct file *file, const void *buf, size_t len) {
+static ssize_t pts_fwrite(struct file *file, const void *buf, size_t len) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
     if (!ctx || !ctx->pair->slave)
         return -EIO;
     return tty_write(ctx->pair->slave, (const uint8_t *)buf, len, file->flags);
 }
 
-static int pts_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg) {
+static int pts_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
     if (!ctx || !ctx->pair->slave)
         return -EIO;
     return tty_ioctl(ctx->pair->slave, cmd, arg);
 }
 
-static int pts_poll_file(struct file *file, uint32_t events) {
+static int pts_poll(struct file *file, uint32_t events) {
     struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
     if (!ctx || !ctx->pair->slave)
         return POLLNVAL;
@@ -679,12 +677,12 @@ static int pts_poll_file(struct file *file, uint32_t events) {
 }
 
 static struct file_ops pts_ops = {
-    .open_file = pts_open_file,
-    .close_file = pts_close_file,
-    .read_file = pts_read_file,
-    .write_file = pts_write_file,
-    .ioctl_file = pts_ioctl_file,
-    .poll_file = pts_poll_file,
+    .open = pts_open,
+    .release = pts_release,
+    .fread = pts_fread,
+    .fwrite = pts_fwrite,
+    .ioctl = pts_ioctl,
+    .poll = pts_poll,
 };
 
 /* ── Init ────────────────────────────────────────────────────────── */

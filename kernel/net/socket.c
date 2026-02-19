@@ -63,8 +63,8 @@ static int socket_vnode_close(struct vnode *vn) {
     return 0;
 }
 
-static int socket_vnode_poll(struct vnode *vn, uint32_t events) {
-    struct socket *sock = sock_from_vnode(vn);
+static int socket_vnode_poll(struct file *file, uint32_t events) {
+    struct socket *sock = sock_from_vnode(file->vnode);
     if (!sock || !sock->ops || !sock->ops->poll) {
         return 0;
     }

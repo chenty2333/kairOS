@@ -60,8 +60,8 @@ static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len, off_t off,
                            uint32_t flags);
 static ssize_t procfs_self_read(struct vnode *vn, void *buf, size_t len,
                                 off_t off, uint32_t flags);
-static int procfs_dir_poll(struct vnode *vn, uint32_t events);
-static int procfs_file_poll(struct vnode *vn, uint32_t events);
+static int procfs_dir_poll(struct file *file, uint32_t events);
+static int procfs_file_poll(struct file *file, uint32_t events);
 static int procfs_close(struct vnode *vn);
 
 /* Generator functions */
@@ -453,12 +453,12 @@ static int procfs_close(struct vnode *vn __attribute__((unused))) {
     return 0;
 }
 
-static int procfs_dir_poll(struct vnode *vn __attribute__((unused)),
+static int procfs_dir_poll(struct file *file __attribute__((unused)),
                            uint32_t events) {
     return (int)(events & (POLLIN | POLLOUT));
 }
 
-static int procfs_file_poll(struct vnode *vn __attribute__((unused)),
+static int procfs_file_poll(struct file *file __attribute__((unused)),
                             uint32_t events) {
     return (int)(events & (POLLIN | POLLOUT));
 }

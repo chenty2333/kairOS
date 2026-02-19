@@ -79,8 +79,8 @@ static int tmpfs_stat(struct vnode *vn, struct stat *st);
 static ssize_t tmpfs_symlink_read(struct vnode *vn, void *buf, size_t len,
                                   off_t off, uint32_t flags);
 static int tmpfs_close(struct vnode *vn);
-static int tmpfs_dir_poll(struct vnode *vn, uint32_t events);
-static int tmpfs_file_poll(struct vnode *vn, uint32_t events);
+static int tmpfs_dir_poll(struct file *file, uint32_t events);
+static int tmpfs_file_poll(struct file *file, uint32_t events);
 static int tmpfs_fsync(struct vnode *vn, int datasync);
 static time_t tmpfs_now(void);
 
@@ -429,12 +429,12 @@ static int tmpfs_close(struct vnode *vn __attribute__((unused))) {
     return 0;
 }
 
-static int tmpfs_dir_poll(struct vnode *vn __attribute__((unused)),
+static int tmpfs_dir_poll(struct file *file __attribute__((unused)),
                           uint32_t events) {
     return (int)(events & (POLLIN | POLLOUT));
 }
 
-static int tmpfs_file_poll(struct vnode *vn __attribute__((unused)),
+static int tmpfs_file_poll(struct file *file __attribute__((unused)),
                            uint32_t events) {
     return (int)(events & (POLLIN | POLLOUT));
 }

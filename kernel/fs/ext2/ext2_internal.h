@@ -162,7 +162,7 @@ int64_t ext2_remove_dirent(struct ext2_mount *mnt, ino_t dino,
 int ext2_dir_is_empty(struct ext2_mount *mnt, ino_t ino);
 int ext2_add_dirent(struct ext2_mount *mnt, ino_t dino, const char *name,
                     ino_t ino, uint8_t type);
-int ext2_vnode_poll(struct vnode *vn, uint32_t events);
+int ext2_vnode_poll(struct file *file, uint32_t events);
 int ext2_vnode_truncate(struct vnode *vn, off_t length);
 ssize_t ext2_vnode_write(struct vnode *vn, const void *buf, size_t len,
                          off_t offset, uint32_t flags);

@@ -11,8 +11,7 @@ int vfs_poll_vnode(struct vnode *vn, uint32_t events) {
         return POLLNVAL;
     if (vn->type == VNODE_PIPE)
         return pipe_poll_vnode(vn, events);
-    if (vn->ops->poll)
-        return vn->ops->poll(vn, events);
+    /* vnode-only callers (epoll watch) — no file available */
     return events & (POLLIN | POLLOUT);
 }
 
@@ -21,9 +20,9 @@ int vfs_poll(struct file *file, uint32_t events) {
         return POLLNVAL;
     if (file->vnode->type == VNODE_PIPE)
         return pipe_poll_file(file, events);
-    if (file->vnode->ops && file->vnode->ops->poll_file)
-        return file->vnode->ops->poll_file(file, events);
-    return vfs_poll_vnode(file->vnode, events);
+    if (file->vnode->ops && file->vnode->ops->poll)
+        return file->vnode->ops->poll(file, events);
+    return events & (POLLIN | POLLOUT);
 }
 
 void vfs_poll_register(struct file *file, struct poll_waiter *waiter,

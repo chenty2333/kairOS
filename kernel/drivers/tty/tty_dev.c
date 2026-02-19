@@ -34,16 +34,16 @@ static ssize_t dev_tty_write(struct vnode *vn, const void *buf, size_t len,
     return tty_write(tty, (const uint8_t *)buf, len, flags);
 }
 
-static int dev_tty_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
-    (void)vn;
+static int dev_tty_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
+    (void)file;
     struct tty_struct *tty = dev_tty_resolve();
     if (!tty)
         return -ENXIO;
     return tty_ioctl(tty, cmd, arg);
 }
 
-static int dev_tty_poll(struct vnode *vn, uint32_t events) {
-    (void)vn;
+static int dev_tty_poll(struct file *file, uint32_t events) {
+    (void)file;
     struct tty_struct *tty = dev_tty_resolve();
     if (!tty)
         return POLLNVAL;
