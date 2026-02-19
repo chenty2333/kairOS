@@ -3,6 +3,7 @@
  */
 
 #include <kairos/mm.h>
+#include <kairos/devfs.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
 #include <kairos/printk.h>
@@ -16,17 +17,18 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
-extern int devfs_register_node(const char *path, struct file_ops *ops,
-                               void *priv);
-extern int devfs_register_dir(const char *path);
-extern void *devfs_get_priv(struct vnode *vn);
-
 #define PTY_MAX 64
 
 static struct tty_struct *pty_masters[PTY_MAX];
 static struct tty_struct *pty_slaves[PTY_MAX];
 static bool pty_allocated[PTY_MAX];
+static uint16_t pty_master_files[PTY_MAX];
+static uint16_t pty_slave_files[PTY_MAX];
 static spinlock_t pty_lock = SPINLOCK_INIT;
+
+struct ptmx_file_ctx {
+    int idx;
+};
 
 static int pty_master_open(struct tty_struct *tty) {
     (void)tty;
@@ -275,6 +277,8 @@ static int pty_alloc_pair(struct tty_struct **master_out,
     for (int i = 0; i < PTY_MAX; i++) {
         if (!pty_allocated[i]) {
             pty_allocated[i] = true;
+            pty_master_files[i] = 0;
+            pty_slave_files[i] = 0;
             idx = i;
             break;
         }
@@ -306,23 +310,31 @@ static int pty_alloc_pair(struct tty_struct **master_out,
     master->flags |= TTY_PTY_MASTER;
     master->ldisc.ops = &pty_master_ldisc_ops;
 
+    spin_lock(&pty_lock);
     pty_masters[idx] = master;
     pty_slaves[idx] = slave;
+    spin_unlock(&pty_lock);
 
     *master_out = master;
     *slave_out = slave;
     return idx;
 }
 
-static void pty_free_pair(int idx) {
+static void pty_try_free_pair(int idx) {
     if (idx < 0 || idx >= PTY_MAX)
         return;
 
     spin_lock(&pty_lock);
+    if (!pty_allocated[idx] || pty_master_files[idx] || pty_slave_files[idx]) {
+        spin_unlock(&pty_lock);
+        return;
+    }
     struct tty_struct *master = pty_masters[idx];
     struct tty_struct *slave = pty_slaves[idx];
     pty_masters[idx] = NULL;
     pty_slaves[idx] = NULL;
+    pty_master_files[idx] = 0;
+    pty_slave_files[idx] = 0;
     pty_allocated[idx] = false;
     spin_unlock(&pty_lock);
 
@@ -338,104 +350,129 @@ static void pty_free_pair(int idx) {
 
 /* ── /dev/ptmx ───────────────────────────────────────────────────── */
 
-/*
- * Track per-vnode PTY index. Since each open of /dev/ptmx shares the same
- * vnode, we use a small table mapping vnode → idx. Protected by pty_lock.
- */
-#define PTMX_OPEN_MAX 16
-static struct { struct vnode *vn; int idx; } ptmx_map[PTMX_OPEN_MAX];
-
-static int ptmx_lookup(struct vnode *vn) {
-    for (int i = 0; i < PTMX_OPEN_MAX; i++) {
-        if (ptmx_map[i].vn == vn)
-            return ptmx_map[i].idx;
-    }
-    return -1;
+static int ptmx_index_from_file(struct file *file) {
+    if (!file || !file->private_data)
+        return -ENXIO;
+    struct ptmx_file_ctx *ctx = (struct ptmx_file_ctx *)file->private_data;
+    if (ctx->idx < 0 || ctx->idx >= PTY_MAX)
+        return -ENXIO;
+    return ctx->idx;
 }
 
-static int ptmx_ensure_alloc(struct vnode *vn) {
-    spin_lock(&pty_lock);
-    int idx = ptmx_lookup(vn);
-    spin_unlock(&pty_lock);
-    if (idx >= 0 && idx < PTY_MAX && pty_masters[idx])
-        return idx;
-
+static int ptmx_open_file(struct file *file) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    if (file->private_data)
+        return 0;
     struct tty_struct *master, *slave;
-    idx = pty_alloc_pair(&master, &slave);
+    int idx = pty_alloc_pair(&master, &slave);
     if (idx < 0)
         return idx;
+    (void)slave;
+
+    struct ptmx_file_ctx *ctx = kzalloc(sizeof(*ctx));
+    if (!ctx) {
+        pty_try_free_pair(idx);
+        return -ENOMEM;
+    }
+
+    if (tty_open(master) < 0) {
+        kfree(ctx);
+        pty_try_free_pair(idx);
+        return -EIO;
+    }
+    master->vnode = file->vnode;
 
     spin_lock(&pty_lock);
-    for (int i = 0; i < PTMX_OPEN_MAX; i++) {
-        if (!ptmx_map[i].vn) {
-            ptmx_map[i].vn = vn;
-            ptmx_map[i].idx = idx;
-            break;
-        }
-    }
+    pty_master_files[idx]++;
     spin_unlock(&pty_lock);
 
-    master->vnode = vn;
-    tty_open(master);
-    tty_open(slave);
-    return idx;
-}
-
-static ssize_t ptmx_read(struct vnode *vn, void *buf, size_t len,
-                           off_t off, uint32_t flags) {
-    (void)off;
-    int idx = ptmx_ensure_alloc(vn);
-    if (idx < 0)
-        return idx;
-    return tty_read(pty_masters[idx], (uint8_t *)buf, len, flags);
-}
-
-static ssize_t ptmx_write(struct vnode *vn, const void *buf, size_t len,
-                            off_t off, uint32_t flags) {
-    (void)off;
-    int idx = ptmx_ensure_alloc(vn);
-    if (idx < 0)
-        return idx;
-    return tty_write(pty_masters[idx], (const uint8_t *)buf, len, flags);
-}
-
-static int ptmx_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
-    int idx = ptmx_ensure_alloc(vn);
-    if (idx < 0)
-        return idx;
-    return tty_ioctl(pty_masters[idx], cmd, arg);
-}
-
-static int ptmx_poll(struct vnode *vn, uint32_t events) {
-    int idx = ptmx_ensure_alloc(vn);
-    if (idx < 0)
-        return POLLNVAL;
-    return tty_poll(pty_masters[idx], events);
-}
-
-static int ptmx_close(struct vnode *vn) {
-    spin_lock(&pty_lock);
-    int idx = ptmx_lookup(vn);
-    for (int i = 0; i < PTMX_OPEN_MAX; i++) {
-        if (ptmx_map[i].vn == vn) {
-            ptmx_map[i].vn = NULL;
-            ptmx_map[i].idx = 0;
-            break;
-        }
-    }
-    spin_unlock(&pty_lock);
-
-    if (idx >= 0 && idx < PTY_MAX)
-        pty_free_pair(idx);
+    ctx->idx = idx;
+    file->private_data = ctx;
     return 0;
 }
 
+static int ptmx_close_file(struct file *file) {
+    int idx = ptmx_index_from_file(file);
+    if (idx < 0)
+        return 0;
+
+    struct ptmx_file_ctx *ctx = (struct ptmx_file_ctx *)file->private_data;
+    file->private_data = NULL;
+    kfree(ctx);
+
+    struct tty_struct *master = NULL;
+    struct tty_struct *slave = NULL;
+    bool drop_master = false;
+    bool last_master = false;
+
+    spin_lock(&pty_lock);
+    if (pty_allocated[idx]) {
+        master = pty_masters[idx];
+        slave = pty_slaves[idx];
+        if (pty_master_files[idx] > 0) {
+            pty_master_files[idx]--;
+            drop_master = true;
+        }
+        last_master = (pty_master_files[idx] == 0);
+    }
+    spin_unlock(&pty_lock);
+
+    if (drop_master && master)
+        tty_close(master);
+    if (last_master && slave)
+        tty_hangup(slave);
+    pty_try_free_pair(idx);
+    return 0;
+}
+
+static ssize_t ptmx_read_file(struct file *file, void *buf, size_t len) {
+    int idx = ptmx_index_from_file(file);
+    if (idx < 0)
+        return idx;
+    struct tty_struct *master = pty_masters[idx];
+    if (!master)
+        return -EIO;
+    return tty_read(master, (uint8_t *)buf, len, file->flags);
+}
+
+static ssize_t ptmx_write_file(struct file *file, const void *buf, size_t len) {
+    int idx = ptmx_index_from_file(file);
+    if (idx < 0)
+        return idx;
+    struct tty_struct *master = pty_masters[idx];
+    if (!master)
+        return -EIO;
+    return tty_write(master, (const uint8_t *)buf, len, file->flags);
+}
+
+static int ptmx_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg) {
+    int idx = ptmx_index_from_file(file);
+    if (idx < 0)
+        return idx;
+    struct tty_struct *master = pty_masters[idx];
+    if (!master)
+        return -EIO;
+    return tty_ioctl(master, cmd, arg);
+}
+
+static int ptmx_poll_file(struct file *file, uint32_t events) {
+    int idx = ptmx_index_from_file(file);
+    if (idx < 0)
+        return POLLNVAL;
+    struct tty_struct *master = pty_masters[idx];
+    if (!master)
+        return POLLNVAL;
+    return tty_poll(master, events);
+}
+
 static struct file_ops ptmx_ops = {
-    .read  = ptmx_read,
-    .write = ptmx_write,
-    .ioctl = ptmx_ioctl,
-    .poll  = ptmx_poll,
-    .close = ptmx_close,
+    .open_file = ptmx_open_file,
+    .close_file = ptmx_close_file,
+    .read_file = ptmx_read_file,
+    .write_file = ptmx_write_file,
+    .ioctl_file = ptmx_ioctl_file,
+    .poll_file = ptmx_poll_file,
 };
 
 /* ── /dev/pts/N ──────────────────────────────────────────────────── */
@@ -447,6 +484,59 @@ static int pts_index_from_vnode(struct vnode *vn) {
     if (idx < 0 || idx >= PTY_MAX)
         return -1;
     return (int)idx;
+}
+
+static int pts_open_file(struct file *file) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    int idx = pts_index_from_vnode(file->vnode);
+    if (idx < 0)
+        return -ENXIO;
+
+    struct tty_struct *slave = NULL;
+    spin_lock(&pty_lock);
+    if (pty_allocated[idx]) {
+        slave = pty_slaves[idx];
+        pty_slave_files[idx]++;
+    }
+    spin_unlock(&pty_lock);
+    if (!slave)
+        return -ENXIO;
+
+    if (tty_open(slave) < 0) {
+        spin_lock(&pty_lock);
+        if (pty_slave_files[idx] > 0)
+            pty_slave_files[idx]--;
+        spin_unlock(&pty_lock);
+        return -EIO;
+    }
+    if (!slave->vnode)
+        slave->vnode = file->vnode;
+    return 0;
+}
+
+static int pts_close_file(struct file *file) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    int idx = pts_index_from_vnode(file->vnode);
+    if (idx < 0)
+        return -ENXIO;
+
+    struct tty_struct *slave = NULL;
+    bool drop_slave = false;
+    spin_lock(&pty_lock);
+    if (pty_allocated[idx]) {
+        slave = pty_slaves[idx];
+        if (pty_slave_files[idx] > 0) {
+            pty_slave_files[idx]--;
+            drop_slave = true;
+        }
+    }
+    spin_unlock(&pty_lock);
+    if (drop_slave && slave)
+        tty_close(slave);
+    pty_try_free_pair(idx);
+    return 0;
 }
 
 static ssize_t pts_read(struct vnode *vn, void *buf, size_t len,
@@ -484,17 +574,13 @@ static int pts_poll(struct vnode *vn, uint32_t events) {
     return tty_poll(pty_slaves[idx], events);
 }
 
-static int pts_close(struct vnode *vn) {
-    (void)vn;
-    return 0;
-}
-
 static struct file_ops pts_ops = {
     .read  = pts_read,
     .write = pts_write,
     .ioctl = pts_ioctl,
     .poll  = pts_poll,
-    .close = pts_close,
+    .open_file = pts_open_file,
+    .close_file = pts_close_file,
 };
 
 /* ── Init ────────────────────────────────────────────────────────── */
