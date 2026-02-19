@@ -17,13 +17,15 @@
 
 extern int dev_tty_init(void);
 extern int pty_driver_init(void);
+extern int console_tty_driver_init(void);
 
 void init_fs(void) {
     binit();
     vfs_init();
     devfs_init();
-    dev_tty_init();      /* register /dev/tty (queued until devfs mounts) */
-    pty_driver_init();   /* register /dev/ptmx + /dev/pts/N */
+    console_tty_driver_init();
+    dev_tty_init();
+    pty_driver_init();
     procfs_init();
     tmpfs_init();
     sysfs_init();

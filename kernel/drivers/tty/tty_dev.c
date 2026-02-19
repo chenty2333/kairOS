@@ -1,8 +1,5 @@
 /**
  * kernel/drivers/tty/tty_dev.c - /dev/tty device
- *
- * Resolves to the current process's controlling terminal.
- * Returns -ENXIO when the process has no ctty.
  */
 
 #include <kairos/poll.h>
@@ -10,6 +7,9 @@
 #include <kairos/tty.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
+
+extern int devfs_register_node(const char *path, struct file_ops *ops,
+                               void *priv);
 
 static struct tty_struct *dev_tty_resolve(void) {
     struct process *p = proc_current();
@@ -64,7 +64,5 @@ static struct file_ops dev_tty_ops = {
 };
 
 int dev_tty_init(void) {
-    extern int devfs_register_node(const char *path, struct file_ops *ops,
-                                   void *priv);
     return devfs_register_node("/dev/tty", &dev_tty_ops, NULL);
 }

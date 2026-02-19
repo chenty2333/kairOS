@@ -1,8 +1,5 @@
 /**
  * kernel/drivers/tty/n_tty.c - N_TTY line discipline
- *
- * Canonical/raw input processing, echo, OPOST output.
- * Extracted from the monolithic console.c implementation.
  */
 
 #include <kairos/arch.h>
@@ -16,7 +13,7 @@
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
-/* ── Echo helpers ────────────────────────────────────────────────── */
+/* ── Echo helpers ─────────────────────────────────────────────────── */
 
 static void n_tty_echo_char(struct tty_struct *tty, char c) {
     if (!(tty->termios.c_lflag & ECHO))
@@ -58,7 +55,7 @@ static void n_tty_erase_char(struct tty_struct *tty, char erased) {
     }
 }
 
-/* ── Canon buffer helpers (called under tty->lock) ───────────────── */
+/* ── Canon buffer helpers (called under tty->lock) ────────────────── */
 
 static bool n_tty_canon_commit(struct tty_struct *tty) {
     size_t avail = ringbuf_avail(&tty->input_rb);
@@ -101,16 +98,8 @@ static void n_tty_handle_char(struct tty_struct *tty, char c,
 
         if (c == intr || c == quit) {
             tty->canon_len = 0;
-            if (tty->termios.c_lflag & ECHO) {
-                if (tty->termios.c_lflag & ECHOCTL) {
-                    if (tty->driver && tty->driver->ops &&
-                        tty->driver->ops->put_char) {
-                        tty->driver->ops->put_char(tty, '^');
-                        tty->driver->ops->put_char(tty, c + '@');
-                    }
-                }
-                n_tty_echo_char(tty, '\n');
-            }
+            n_tty_echo_char(tty, c);
+            n_tty_echo_char(tty, '\n');
             *sig_mask |= (1U << ((c == intr) ? SIGINT : SIGQUIT));
             return;
         }
@@ -118,16 +107,8 @@ static void n_tty_handle_char(struct tty_struct *tty, char c,
         char susp = tty->termios.c_cc[VSUSP]
                         ? (char)tty->termios.c_cc[VSUSP] : (char)0x1a;
         if (c == susp) {
-            if (tty->termios.c_lflag & ECHO) {
-                if (tty->termios.c_lflag & ECHOCTL) {
-                    if (tty->driver && tty->driver->ops &&
-                        tty->driver->ops->put_char) {
-                        tty->driver->ops->put_char(tty, '^');
-                        tty->driver->ops->put_char(tty, c + '@');
-                    }
-                }
-                n_tty_echo_char(tty, '\n');
-            }
+            n_tty_echo_char(tty, c);
+            n_tty_echo_char(tty, '\n');
             *sig_mask |= (1U << SIGTSTP);
             return;
         }
@@ -196,7 +177,7 @@ static void n_tty_handle_char(struct tty_struct *tty, char c,
     if (pushed) *pushed = true;
 }
 
-/* ── Ldisc ops ───────────────────────────────────────────────────── */
+/* ── Ldisc ops ────────────────────────────────────────────────────── */
 
 static int n_tty_open(struct tty_struct *tty) {
     tty->canon_len = 0;
@@ -217,14 +198,6 @@ static void n_tty_receive_buf(struct tty_struct *tty, const uint8_t *buf,
         n_tty_handle_char(tty, (char)buf[i], pushed, sig_mask);
 }
 
-/*
- * n_tty_read — blocking/non-blocking read from the input ringbuf.
- *
- * In ICANON mode, waits for a complete line (committed by receive_buf).
- * In raw mode, returns available data (VMIN=1, VTIME=0 simplified).
- * O_NONBLOCK: returns -EAGAIN when no data is available.
- * Signals: returns -EINTR when interrupted.
- */
 static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
                            uint32_t flags) {
     if (!tty || !buf)
@@ -268,7 +241,6 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
         if (!vn)
             return -EIO;
 
-        /* Poll-wait based blocking (from console_wait_for_input) */
         struct poll_waiter waiter = {0};
         INIT_LIST_HEAD(&waiter.entry.node);
         waiter.entry.proc = p;
@@ -328,9 +300,6 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
     }
 }
 
-/*
- * n_tty_write — OPOST processing, then delegate to driver.
- */
 static ssize_t n_tty_write(struct tty_struct *tty, const uint8_t *buf,
                             size_t count, uint32_t flags) {
     (void)flags;
@@ -345,13 +314,27 @@ static ssize_t n_tty_write(struct tty_struct *tty, const uint8_t *buf,
     if (!do_opost)
         return tty->driver->ops->write(tty, buf, count);
 
-    /* OPOST with ONLCR: expand \n to \r\n via put_char for simplicity */
+    /* OPOST with ONLCR: expand \n to \r\n, batch through driver->write */
+    uint8_t tmp[128];
+    size_t ti = 0;
     for (size_t i = 0; i < count; i++) {
-        if (buf[i] == '\n' && tty->driver->ops->put_char)
-            tty->driver->ops->put_char(tty, '\r');
-        if (tty->driver->ops->put_char)
-            tty->driver->ops->put_char(tty, buf[i]);
+        if (buf[i] == '\n') {
+            if (ti + 2 > sizeof(tmp)) {
+                tty->driver->ops->write(tty, tmp, ti);
+                ti = 0;
+            }
+            tmp[ti++] = '\r';
+            tmp[ti++] = '\n';
+        } else {
+            if (ti + 1 > sizeof(tmp)) {
+                tty->driver->ops->write(tty, tmp, ti);
+                ti = 0;
+            }
+            tmp[ti++] = buf[i];
+        }
     }
+    if (ti > 0)
+        tty->driver->ops->write(tty, tmp, ti);
     return (ssize_t)count;
 }
 
@@ -375,7 +358,7 @@ static void n_tty_flush(struct tty_struct *tty) {
     arch_irq_restore(irq_state);
 }
 
-/* ── Ops table and init ──────────────────────────────────────────── */
+/* ── Ops table ────────────────────────────────────────────────────── */
 
 const struct tty_ldisc_ops n_tty_ops = {
     .open         = n_tty_open,

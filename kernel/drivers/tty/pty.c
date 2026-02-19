@@ -1,15 +1,5 @@
 /**
  * kernel/drivers/tty/pty.c - Pseudo-terminal (PTY) implementation
- *
- * Architecture:
- *   master tty_struct <──link──> slave tty_struct
- *     driver = pty_master_driver     driver = pty_slave_driver
- *     ldisc  = (none/passthrough)    ldisc  = N_TTY
- *     write  → slave.receive_buf     write  → master.input_rb
- *     read   ← master.input_rb      read   ← slave.input_rb (via N_TTY)
- *
- * /dev/ptmx open → allocate master/slave pair, return master fd
- * /dev/pts/N     → slave device
  */
 
 #include <kairos/mm.h>
@@ -26,19 +16,17 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
-/* ── Configuration ───────────────────────────────────────────────── */
+extern int devfs_register_node(const char *path, struct file_ops *ops,
+                               void *priv);
+extern int devfs_register_dir(const char *path);
+extern void *devfs_get_priv(struct vnode *vn);
 
-#define PTY_MAX         64
-#define PTY_OUTPUT_SIZE 4096  /* master input_rb = slave output buffer */
-
-/* ── Static PTY pool ─────────────────────────────────────────────── */
+#define PTY_MAX 64
 
 static struct tty_struct *pty_masters[PTY_MAX];
 static struct tty_struct *pty_slaves[PTY_MAX];
 static bool pty_allocated[PTY_MAX];
 static spinlock_t pty_lock = SPINLOCK_INIT;
-
-/* ── Master driver ops ───────────────────────────────────────────── */
 
 static int pty_master_open(struct tty_struct *tty) {
     (void)tty;
@@ -49,10 +37,6 @@ static void pty_master_close(struct tty_struct *tty) {
     (void)tty;
 }
 
-/*
- * Master write → feed into slave's N_TTY receive_buf.
- * This is the "keyboard input" path for the slave.
- */
 static ssize_t pty_master_write(struct tty_struct *tty, const uint8_t *buf,
                                  size_t count) {
     struct tty_struct *slave = tty->link;
@@ -83,8 +67,6 @@ static const struct tty_driver_ops pty_master_ops = {
     .hangup  = pty_master_hangup,
 };
 
-/* ── Slave driver ops ────────────────────────────────────────────── */
-
 static int pty_slave_open(struct tty_struct *tty) {
     (void)tty;
     return 0;
@@ -94,10 +76,7 @@ static void pty_slave_close(struct tty_struct *tty) {
     (void)tty;
 }
 
-/*
- * Slave write (after N_TTY OPOST) → push to master's input_rb.
- * This is the "screen output" path — master reads this.
- */
+/* Slave write → push to master's input_rb (screen output path) */
 static ssize_t pty_slave_write(struct tty_struct *tty, const uint8_t *buf,
                                 size_t count) {
     struct tty_struct *master = tty->link;
@@ -107,7 +86,7 @@ static ssize_t pty_slave_write(struct tty_struct *tty, const uint8_t *buf,
     bool irq_state = arch_irq_save();
     spin_lock(&master->lock);
     for (size_t i = 0; i < count; i++)
-        ringbuf_push(&master->input_rb, (char)buf[i], false);
+        ringbuf_push(&master->input_rb, (char)buf[i], true);
     spin_unlock(&master->lock);
     arch_irq_restore(irq_state);
 
@@ -143,7 +122,6 @@ struct tty_driver pty_master_driver = {
     .minor_start = 2,
     .num         = PTY_MAX,
     .ops         = &pty_master_ops,
-    .ttys        = pty_masters,
 };
 
 struct tty_driver pty_slave_driver = {
@@ -152,10 +130,9 @@ struct tty_driver pty_slave_driver = {
     .minor_start = 0,
     .num         = PTY_MAX,
     .ops         = &pty_slave_ops,
-    .ttys        = pty_slaves,
 };
 
-/* ── Master ldisc: passthrough (no line editing on master side) ─── */
+/* Master ldisc: passthrough (no line editing on master side) */
 
 static int pty_master_ldisc_open(struct tty_struct *tty) {
     (void)tty;
@@ -167,8 +144,7 @@ static void pty_master_ldisc_close(struct tty_struct *tty) {
 }
 
 /*
- * Master read: read from master's input_rb (slave's output).
- * Blocking/non-blocking semantics.
+ * Master read: blocking/non-blocking from master's input_rb (slave output).
  */
 static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
                                       size_t count, uint32_t flags) {
@@ -238,7 +214,14 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
         p->state = PROC_SLEEPING;
         proc_unlock(p);
 
-        proc_yield();
+        /* Final re-check before yield */
+        irq_state = arch_irq_save();
+        spin_lock(&tty->lock);
+        has_data = !ringbuf_empty(&tty->input_rb);
+        spin_unlock(&tty->lock);
+        arch_irq_restore(irq_state);
+        if (!has_data)
+            proc_yield();
 
         proc_lock(p);
         p->wait_channel = NULL;
@@ -253,9 +236,6 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
     }
 }
 
-/*
- * Master write: feed data into slave's N_TTY (same as driver write).
- */
 static ssize_t pty_master_ldisc_write(struct tty_struct *tty,
                                        const uint8_t *buf, size_t count,
                                        uint32_t flags) {
@@ -321,15 +301,10 @@ static int pty_alloc_pair(struct tty_struct **master_out,
         return -ENOMEM;
     }
 
-    /* Link the pair */
     master->link = slave;
     slave->link = master;
     master->flags |= TTY_PTY_MASTER;
-
-    /* Master uses passthrough ldisc (no line editing) */
     master->ldisc.ops = &pty_master_ldisc_ops;
-
-    /* Slave uses N_TTY (already set by tty_alloc) */
 
     pty_masters[idx] = master;
     pty_slaves[idx] = slave;
@@ -361,29 +336,45 @@ static void pty_free_pair(int idx) {
     }
 }
 
-/* ── /dev/ptmx — open allocates a new PTY pair ───────────────────── */
+/* ── /dev/ptmx ───────────────────────────────────────────────────── */
 
 /*
- * /dev/ptmx — opening allocates a new PTY pair.
- *
- * Since file_ops has no open callback, we allocate lazily on first
- * ioctl/read/write. A global last_ptmx_idx tracks the most recent
- * allocation (sufficient for single-threaded userspace).
+ * Track per-vnode PTY index. Since each open of /dev/ptmx shares the same
+ * vnode, we use a small table mapping vnode → idx. Protected by pty_lock.
  */
+#define PTMX_OPEN_MAX 16
+static struct { struct vnode *vn; int idx; } ptmx_map[PTMX_OPEN_MAX];
 
-static int last_ptmx_idx = -1;
+static int ptmx_lookup(struct vnode *vn) {
+    for (int i = 0; i < PTMX_OPEN_MAX; i++) {
+        if (ptmx_map[i].vn == vn)
+            return ptmx_map[i].idx;
+    }
+    return -1;
+}
 
 static int ptmx_ensure_alloc(struct vnode *vn) {
-    if (last_ptmx_idx >= 0 && last_ptmx_idx < PTY_MAX &&
-        pty_masters[last_ptmx_idx])
-        return last_ptmx_idx;
+    spin_lock(&pty_lock);
+    int idx = ptmx_lookup(vn);
+    spin_unlock(&pty_lock);
+    if (idx >= 0 && idx < PTY_MAX && pty_masters[idx])
+        return idx;
 
     struct tty_struct *master, *slave;
-    int idx = pty_alloc_pair(&master, &slave);
+    idx = pty_alloc_pair(&master, &slave);
     if (idx < 0)
         return idx;
 
-    last_ptmx_idx = idx;
+    spin_lock(&pty_lock);
+    for (int i = 0; i < PTMX_OPEN_MAX; i++) {
+        if (!ptmx_map[i].vn) {
+            ptmx_map[i].vn = vn;
+            ptmx_map[i].idx = idx;
+            break;
+        }
+    }
+    spin_unlock(&pty_lock);
+
     master->vnode = vn;
     tty_open(master);
     tty_open(slave);
@@ -423,12 +414,19 @@ static int ptmx_poll(struct vnode *vn, uint32_t events) {
 }
 
 static int ptmx_close(struct vnode *vn) {
-    (void)vn;
-    int idx = last_ptmx_idx;
-    if (idx >= 0 && idx < PTY_MAX) {
-        pty_free_pair(idx);
-        last_ptmx_idx = -1;
+    spin_lock(&pty_lock);
+    int idx = ptmx_lookup(vn);
+    for (int i = 0; i < PTMX_OPEN_MAX; i++) {
+        if (ptmx_map[i].vn == vn) {
+            ptmx_map[i].vn = NULL;
+            ptmx_map[i].idx = 0;
+            break;
+        }
     }
+    spin_unlock(&pty_lock);
+
+    if (idx >= 0 && idx < PTY_MAX)
+        pty_free_pair(idx);
     return 0;
 }
 
@@ -440,12 +438,11 @@ static struct file_ops ptmx_ops = {
     .close = ptmx_close,
 };
 
-/* ── /dev/pts/N — slave device ops ───────────────────────────────── */
+/* ── /dev/pts/N ──────────────────────────────────────────────────── */
 
 static int pts_index_from_vnode(struct vnode *vn) {
     if (!vn)
         return -1;
-    extern void *devfs_get_priv(struct vnode *vn);
     intptr_t idx = (intptr_t)devfs_get_priv(vn);
     if (idx < 0 || idx >= PTY_MAX)
         return -1;
@@ -500,13 +497,9 @@ static struct file_ops pts_ops = {
     .close = pts_close,
 };
 
-/* ── PTY init ────────────────────────────────────────────────────── */
+/* ── Init ────────────────────────────────────────────────────────── */
 
 int pty_driver_init(void) {
-    extern int devfs_register_node(const char *path, struct file_ops *ops,
-                                   void *priv);
-    extern int devfs_register_dir(const char *path);
-
     tty_register_driver(&pty_master_driver);
     tty_register_driver(&pty_slave_driver);
 

@@ -7,11 +7,9 @@
 
 struct tty_driver;
 
-/* Console TTY driver */
 extern struct tty_driver console_tty_driver;
 int console_tty_driver_init(void);
 
-/* PTY drivers (Step 7) */
 extern struct tty_driver pty_master_driver;
 extern struct tty_driver pty_slave_driver;
 int pty_driver_init(void);

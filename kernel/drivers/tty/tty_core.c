@@ -15,8 +15,6 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
-/* ── Driver registry ─────────────────────────────────────────────── */
-
 static struct tty_driver *tty_drivers[TTY_MAX_DRIVERS];
 static int tty_driver_count;
 
@@ -36,7 +34,7 @@ void tty_unregister_driver(struct tty_driver *driver) {
     }
 }
 
-/* ── tty_struct lifecycle ────────────────────────────────────────── */
+/* --- */
 
 struct tty_struct *tty_alloc(struct tty_driver *driver, int index) {
     struct tty_struct *tty = kzalloc(sizeof(*tty));
@@ -44,40 +42,28 @@ struct tty_struct *tty_alloc(struct tty_driver *driver, int index) {
         return NULL;
 
     tty->index = index;
-    tty->flags = 0;
     tty->driver = driver;
-    tty->link = NULL;
-    tty->port = NULL;
-    tty->vc = NULL;
-    tty->vnode = NULL;
-    tty->count = 0;
-    tty->driver_data = NULL;
 
     spin_init(&tty->lock);
     ringbuf_init(&tty->input_rb, tty->input_buf, TTY_INPUT_BUF_SIZE);
-    tty->canon_len = 0;
-    tty->eof_pending = false;
 
-    /* Default termios */
+    /* termios needs explicit non-zero defaults */
     memset(&tty->termios, 0, sizeof(tty->termios));
     tty->termios.c_iflag = ICRNL;
     tty->termios.c_oflag = OPOST | ONLCR;
     tty->termios.c_lflag = ISIG | ICANON | ECHO | ECHOCTL;
-    tty->termios.c_cc[VINTR]  = 3;     /* ^C */
-    tty->termios.c_cc[VQUIT]  = 28;    /* ^\ */
-    tty->termios.c_cc[VERASE] = 127;   /* DEL */
-    tty->termios.c_cc[VKILL]  = 21;    /* ^U */
-    tty->termios.c_cc[VEOF]   = 4;     /* ^D */
+    tty->termios.c_cc[VINTR]  = 3;
+    tty->termios.c_cc[VQUIT]  = 28;
+    tty->termios.c_cc[VERASE] = 127;
+    tty->termios.c_cc[VKILL]  = 21;
+    tty->termios.c_cc[VEOF]   = 4;
     tty->termios.c_cc[VTIME]  = 0;
     tty->termios.c_cc[VMIN]   = 1;
-    tty->termios.c_cc[VSUSP]  = 26;    /* ^Z */
+    tty->termios.c_cc[VSUSP]  = 26;
 
     tty->winsize.ws_row = 24;
     tty->winsize.ws_col = 80;
-    tty->session = 0;
-    tty->fg_pgrp = 0;
 
-    /* Install N_TTY line discipline */
     n_tty_init(tty);
 
     return tty;
@@ -118,7 +104,7 @@ void tty_close(struct tty_struct *tty) {
     }
 }
 
-/* ── Data path (delegated to ldisc) ──────────────────────────────── */
+/* --- */
 
 ssize_t tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
                  uint32_t flags) {
@@ -163,7 +149,6 @@ void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count) {
     spin_unlock(&tty->lock);
     arch_irq_restore(irq_state);
 
-    /* Deliver deferred signals outside the lock */
     if (sig_mask) {
         if (fg > 0) {
             for (int s = 1; s < 32; s++) {
@@ -184,12 +169,7 @@ void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count) {
         vfs_poll_wake(vn, POLLIN);
 }
 
-void tty_wakeup_readers(struct tty_struct *tty) {
-    if (tty && tty->vnode)
-        vfs_poll_wake(tty->vnode, POLLIN);
-}
-
-/* ── Port init ───────────────────────────────────────────────────── */
+/* --- */
 
 void tty_port_init(struct tty_port *port, const struct tty_port_ops *ops) {
     if (!port)
@@ -198,7 +178,7 @@ void tty_port_init(struct tty_port *port, const struct tty_port_ops *ops) {
     port->ops = ops;
 }
 
-/* ── ioctl dispatch ──────────────────────────────────────────────── */
+/* --- */
 
 int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
     if (!tty)
@@ -251,7 +231,6 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
         struct vnode *wake_vn = tty->vnode;
         spin_unlock(&tty->lock);
         arch_irq_restore(irq_state);
-        /* Notify driver of termios change */
         if (tty->driver && tty->driver->ops && tty->driver->ops->set_termios)
             tty->driver->ops->set_termios(tty, &old);
         if (wake && wake_vn)
@@ -283,13 +262,10 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
         struct process *p = proc_current();
         if (!p)
             return -ESRCH;
-        /* Must be session leader */
         if (p->pid != p->sid)
             return -EPERM;
-        /* Must not already have a ctty */
         if (p->ctty)
             return -EPERM;
-        /* TTY must not belong to another session */
         if (tty->session != 0 && tty->session != p->sid)
             return -EPERM;
         bool irq_state = arch_irq_save();
@@ -306,7 +282,6 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
         if (!p || p->ctty != tty)
             return -ENOTTY;
         p->ctty = NULL;
-        /* Session leader: release the terminal */
         if (p->pid == p->sid) {
             bool irq_state = arch_irq_save();
             spin_lock(&tty->lock);
@@ -355,16 +330,10 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
         return 0;
     }
     case TCFLSH: {
-        bool irq_state = arch_irq_save();
-        spin_lock(&tty->lock);
         if (arg == 0 || arg == 2) {
-            ringbuf_reset(&tty->input_rb);
-            tty->canon_len = 0;
-            tty->eof_pending = false;
+            if (tty->ldisc.ops && tty->ldisc.ops->flush_buffer)
+                tty->ldisc.ops->flush_buffer(tty);
         }
-        /* arg == 1 or 2: flush output (no output buffer) */
-        spin_unlock(&tty->lock);
-        arch_irq_restore(irq_state);
         return 0;
     }
     case TCSBRK:

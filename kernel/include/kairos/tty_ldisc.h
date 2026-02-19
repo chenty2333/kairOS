@@ -8,10 +8,6 @@
 struct tty_struct;
 struct tty_ldisc_ops;
 
-/* Line discipline numbers */
-#define N_TTY   0
-
-/* N_TTY line discipline */
 extern const struct tty_ldisc_ops n_tty_ops;
 void n_tty_init(struct tty_struct *tty);
 
