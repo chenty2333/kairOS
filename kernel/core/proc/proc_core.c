@@ -267,6 +267,23 @@ struct process *proc_find(pid_t pid) {
     return NULL;
 }
 
+pid_t proc_get_nth_pid(int n) {
+    int count = 0;
+    pid_t pid = -1;
+    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        if (proc_table[i].state != PROC_UNUSED) {
+            if (count == n) {
+                pid = proc_table[i].pid;
+                break;
+            }
+            count++;
+        }
+    }
+    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
+    return pid;
+}
+
 struct process *kthread_create(int (*fn)(void *), void *arg, const char *name) {
     struct process *p = proc_alloc();
     if (!p)

@@ -20,11 +20,6 @@
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 
-/* Internal proc_table access */
-extern struct process proc_table[CONFIG_MAX_PROCESSES];
-extern spinlock_t proc_table_lock;
-extern bool proc_table_irq_flags;
-
 #define PROC_SUPER_MAGIC 0x9FA0
 #define PROCFS_BUF_SIZE  4096
 
@@ -287,19 +282,8 @@ static const char *proc_state_char(enum proc_state s) {
     }
 }
 
-static struct process *pid_to_proc(pid_t pid) {
-    if (pid <= 0)
-        return NULL;
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
-    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        if (proc_table[i].state != PROC_UNUSED &&
-            proc_table[i].pid == pid) {
-            spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
-            return &proc_table[i];
-        }
-    }
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
-    return NULL;
+static inline struct process *pid_to_proc(pid_t pid) {
+    return proc_find(pid);
 }
 
 static void procfs_calc_vsz_rss(const struct process *p, uint64_t *vsz_bytes,
@@ -530,20 +514,7 @@ static struct procfs_entry *procfs_create_pid_dir(struct procfs_mount *pm,
 
 /* Get the nth active PID (0-indexed) */
 static pid_t procfs_get_nth_pid(int n) {
-    int count = 0;
-    pid_t pid = -1;
-    spin_lock_irqsave(&proc_table_lock, &proc_table_irq_flags);
-    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        if (proc_table[i].state != PROC_UNUSED) {
-            if (count == n) {
-                pid = proc_table[i].pid;
-                break;
-            }
-            count++;
-        }
-    }
-    spin_unlock_irqrestore(&proc_table_lock, proc_table_irq_flags);
-    return pid;
+    return proc_get_nth_pid(n);
 }
 
 /* Static entries in root */

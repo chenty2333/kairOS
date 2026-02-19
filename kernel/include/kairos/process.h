@@ -141,6 +141,7 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts);
 noreturn void proc_exit(int status);
 pid_t proc_wait(pid_t pid, int *status, int options);
 struct process *proc_find(pid_t pid);
+pid_t proc_get_nth_pid(int n);
 struct process *proc_current(void);
 void proc_set_current(struct process *p);
 void proc_lock(struct process *p);
