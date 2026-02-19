@@ -574,13 +574,23 @@ void schedule(void) {
         bool steal_allowed = sched_steal_is_enabled() && sched_nr_cpus() > 1;
         if (steal_allowed) {
             spin_unlock(&rq->lock);
-            next = sched_steal_task(cpu->cpu_id);
+            struct process *stolen = sched_steal_task(cpu->cpu_id);
             spin_lock(&rq->lock);
+
+            if (stolen) {
+                /* Adapt stolen task to local vruntime domain and enqueue */
+                struct cfs_rq *cfs = &rq->cfs;
+                place_entity_eevdf(cfs, &stolen->se, ENQUEUE_WAKEUP);
+                __enqueue_entity(cfs, &stolen->se);
+                se_mark_queued(&stolen->se, cpu->cpu_id);
+                cfs->nr_running++;
+                rq->nr_running++;
+                update_min_vruntime(cfs);
+            }
         }
 
-        /* Re-check local queue after dropping lock */
-        if (!next)
-            next = fair_sched_class.pick_next_task(rq, prev);
+        /* Pick from local queue (now includes any stolen task) */
+        next = fair_sched_class.pick_next_task(rq, prev);
 
         if (!next)
             next = cpu->idle_proc;
