@@ -962,32 +962,26 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
         return NULL;
 
     /*
-     * EEVDF steal strategy: pick the task with the LARGEST deadline
-     * (least urgent), minimizing impact on the source CPU's latency.
-     * Walk the entire tree to find the best candidate.
+     * Steal strategy: take the rightmost node (largest vruntime) —
+     * the task that has consumed the most virtual CPU time and is
+     * therefore least owed.  rb_last is O(log n); we walk left via
+     * rb_prev only if the rightmost fails the state check.
      */
     struct sched_entity *best_se = NULL;
     struct process *best = NULL;
 
-    for (struct rb_node *node = rb_first(&cfs->tasks_timeline);
-         node; node = rb_next(node)) {
+    for (struct rb_node *node = rb_last(&cfs->tasks_timeline);
+         node; node = rb_prev(node)) {
         struct sched_entity *se =
             rb_entry(node, struct sched_entity, sched_node);
         struct process *cand = container_of(se, struct process, se);
-        if (cfs->curr_se == se)
-            continue;
-        /* Defensive: proc_state and se.run_state lack atomic coupling,
-         * so check both to avoid stealing a task mid-transition. */
         if (cand->state != PROC_RUNNABLE)
             continue;
         if (se_state_load(se) != SE_STATE_QUEUED)
             continue;
-
-        /* Pick candidate with largest deadline (least urgent) */
-        if (!best_se || (int64_t)(se->deadline - best_se->deadline) > 0) {
-            best_se = se;
-            best = cand;
-        }
+        best_se = se;
+        best = cand;
+        break;
     }
 
     if (!best_se)
