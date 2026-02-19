@@ -49,19 +49,9 @@ ssize_t console_read(struct vnode *vn, void *buf, size_t len,
     if (len == 0)
         return 0;
 
-    /* Pull UART input from read path too, not only timer IRQ path. */
-    uint32_t read_flags = flags | O_NONBLOCK;
-    for (;;) {
-        console_try_fill_batch();
-        ssize_t ret = tty_read(tty, (uint8_t *)buf, len, read_flags);
-        if (ret != -EAGAIN)
-            return ret;
-        if (flags & O_NONBLOCK)
-            return -EAGAIN;
-        if (!proc_current())
-            return -EAGAIN;
-        proc_yield();
-    }
+    /* Pull UART input from read path too, then preserve tty ldisc semantics. */
+    console_try_fill_batch();
+    return tty_read(tty, (uint8_t *)buf, len, flags);
 }
 
 ssize_t console_write(struct vnode *vn, const void *buf, size_t len,
