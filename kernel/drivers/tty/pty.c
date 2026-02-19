@@ -2,8 +2,9 @@
  * kernel/drivers/tty/pty.c - Pseudo-terminal (PTY) implementation
  */
 
-#include <kairos/mm.h>
+#include <kairos/atomic.h>
 #include <kairos/devfs.h>
+#include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
 #include <kairos/printk.h>
@@ -19,16 +20,180 @@
 
 #define PTY_MAX 64
 
-static struct tty_struct *pty_masters[PTY_MAX];
-static struct tty_struct *pty_slaves[PTY_MAX];
-static bool pty_allocated[PTY_MAX];
-static uint16_t pty_master_files[PTY_MAX];
-static uint16_t pty_slave_files[PTY_MAX];
-static spinlock_t pty_lock = SPINLOCK_INIT;
-
-struct ptmx_file_ctx {
-    int idx;
+enum pty_endpoint {
+    PTY_ENDPOINT_MASTER = 1,
+    PTY_ENDPOINT_SLAVE = 2,
 };
+
+struct pty_pair {
+    int idx;
+    atomic_t refcount; /* slot + opened files */
+    spinlock_t lock;
+    bool live;
+
+    uint16_t master_files;
+    uint16_t slave_files;
+
+    struct tty_struct *master;
+    struct tty_struct *slave;
+};
+
+struct pty_file_ctx {
+    struct pty_pair *pair;
+    enum pty_endpoint endpoint;
+};
+
+static struct pty_pair *pty_slots[PTY_MAX];
+static spinlock_t pty_lock = SPINLOCK_INIT;
+static const struct tty_ldisc_ops pty_master_ldisc_ops;
+extern struct tty_driver pty_master_driver;
+
+static void pty_pair_get(struct pty_pair *pair) {
+    if (pair)
+        atomic_inc(&pair->refcount);
+}
+
+static void pty_pair_destroy(struct pty_pair *pair) {
+    if (!pair)
+        return;
+
+    struct tty_struct *master = pair->master;
+    struct tty_struct *slave = pair->slave;
+    pair->master = NULL;
+    pair->slave = NULL;
+
+    if (master) {
+        master->link = NULL;
+        tty_free(master);
+    }
+    if (slave) {
+        slave->link = NULL;
+        tty_free(slave);
+    }
+
+    kfree(pair);
+}
+
+static void pty_pair_put(struct pty_pair *pair) {
+    if (!pair)
+        return;
+
+    uint32_t refs = atomic_dec_return(&pair->refcount);
+    if (refs == 0)
+        pty_pair_destroy(pair);
+}
+
+static struct pty_pair *pty_slot_get(int idx) {
+    if (idx < 0 || idx >= PTY_MAX)
+        return NULL;
+
+    struct pty_pair *pair = NULL;
+    spin_lock(&pty_lock);
+    pair = pty_slots[idx];
+    if (pair)
+        pty_pair_get(pair);
+    spin_unlock(&pty_lock);
+    return pair;
+}
+
+static void pty_slot_detach(struct pty_pair *pair) {
+    if (!pair || pair->idx < 0 || pair->idx >= PTY_MAX)
+        return;
+
+    bool detached = false;
+    spin_lock(&pty_lock);
+    if (pty_slots[pair->idx] == pair) {
+        pty_slots[pair->idx] = NULL;
+        detached = true;
+    }
+    spin_unlock(&pty_lock);
+
+    if (detached)
+        pty_pair_put(pair); /* drop slot reference */
+}
+
+static int pty_pair_create(struct pty_pair **out_pair) {
+    if (!out_pair)
+        return -EINVAL;
+
+    struct pty_pair *pair = kzalloc(sizeof(*pair));
+    if (!pair)
+        return -ENOMEM;
+
+    spin_init(&pair->lock);
+    atomic_init(&pair->refcount, 1); /* slot reference */
+    pair->idx = -1;
+    pair->live = true;
+
+    spin_lock(&pty_lock);
+    for (int i = 0; i < PTY_MAX; i++) {
+        if (!pty_slots[i]) {
+            pty_slots[i] = pair;
+            pair->idx = i;
+            break;
+        }
+    }
+    spin_unlock(&pty_lock);
+
+    if (pair->idx < 0) {
+        kfree(pair);
+        return -ENOSPC;
+    }
+
+    pair->master = tty_alloc(&pty_master_driver, pair->idx);
+    if (!pair->master) {
+        spin_lock(&pair->lock);
+        pair->live = false;
+        spin_unlock(&pair->lock);
+        pty_slot_detach(pair);
+        return -ENOMEM;
+    }
+
+    pair->slave = tty_alloc(&pty_slave_driver, pair->idx);
+    if (!pair->slave) {
+        spin_lock(&pair->lock);
+        pair->live = false;
+        spin_unlock(&pair->lock);
+        pty_slot_detach(pair);
+        return -ENOMEM;
+    }
+
+    pair->master->link = pair->slave;
+    pair->slave->link = pair->master;
+    pair->master->flags |= TTY_PTY_MASTER;
+    pair->master->ldisc.ops = &pty_master_ldisc_ops;
+
+    *out_pair = pair;
+    return 0;
+}
+
+static struct pty_file_ctx *pty_file_ctx_get(struct file *file,
+                                              enum pty_endpoint endpoint) {
+    if (!file || !file->private_data)
+        return NULL;
+
+    struct pty_file_ctx *ctx = (struct pty_file_ctx *)file->private_data;
+    if (!ctx->pair || ctx->endpoint != endpoint)
+        return NULL;
+
+    return ctx;
+}
+
+static int pty_pair_try_detach_if_unused(struct pty_pair *pair) {
+    bool detach = false;
+
+    spin_lock(&pair->lock);
+    if (pair->live && pair->master_files == 0 && pair->slave_files == 0) {
+        pair->live = false;
+        detach = true;
+    }
+    spin_unlock(&pair->lock);
+
+    if (detach)
+        pty_slot_detach(pair);
+
+    return detach ? 1 : 0;
+}
 
 static int pty_master_open(struct tty_struct *tty) {
     (void)tty;
@@ -40,7 +205,7 @@ static void pty_master_close(struct tty_struct *tty) {
 }
 
 static ssize_t pty_master_write(struct tty_struct *tty, const uint8_t *buf,
-                                 size_t count) {
+                                size_t count) {
     struct tty_struct *slave = tty->link;
     if (!slave)
         return -EIO;
@@ -62,11 +227,11 @@ static void pty_master_hangup(struct tty_struct *tty) {
 }
 
 static const struct tty_driver_ops pty_master_ops = {
-    .open    = pty_master_open,
-    .close   = pty_master_close,
-    .write   = pty_master_write,
+    .open = pty_master_open,
+    .close = pty_master_close,
+    .write = pty_master_write,
     .put_char = pty_master_put_char,
-    .hangup  = pty_master_hangup,
+    .hangup = pty_master_hangup,
 };
 
 static int pty_slave_open(struct tty_struct *tty) {
@@ -80,7 +245,7 @@ static void pty_slave_close(struct tty_struct *tty) {
 
 /* Slave write → push to master's input_rb (screen output path) */
 static ssize_t pty_slave_write(struct tty_struct *tty, const uint8_t *buf,
-                                size_t count) {
+                               size_t count) {
     struct tty_struct *master = tty->link;
     if (!master)
         return -EIO;
@@ -109,29 +274,29 @@ static void pty_slave_hangup(struct tty_struct *tty) {
 }
 
 static const struct tty_driver_ops pty_slave_ops = {
-    .open    = pty_slave_open,
-    .close   = pty_slave_close,
-    .write   = pty_slave_write,
+    .open = pty_slave_open,
+    .close = pty_slave_close,
+    .write = pty_slave_write,
     .put_char = pty_slave_put_char,
-    .hangup  = pty_slave_hangup,
+    .hangup = pty_slave_hangup,
 };
 
 /* ── Driver structs ──────────────────────────────────────────────── */
 
 struct tty_driver pty_master_driver = {
-    .name        = "ptm",
-    .major       = 5,
+    .name = "ptm",
+    .major = 5,
     .minor_start = 2,
-    .num         = PTY_MAX,
-    .ops         = &pty_master_ops,
+    .num = PTY_MAX,
+    .ops = &pty_master_ops,
 };
 
 struct tty_driver pty_slave_driver = {
-    .name        = "pts",
-    .major       = 136,
+    .name = "pts",
+    .major = 136,
     .minor_start = 0,
-    .num         = PTY_MAX,
-    .ops         = &pty_slave_ops,
+    .num = PTY_MAX,
+    .ops = &pty_slave_ops,
 };
 
 /* Master ldisc: passthrough (no line editing on master side) */
@@ -149,7 +314,7 @@ static void pty_master_ldisc_close(struct tty_struct *tty) {
  * Master read: blocking/non-blocking from master's input_rb (slave output).
  */
 static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
-                                      size_t count, uint32_t flags) {
+                                     size_t count, uint32_t flags) {
     if (!tty || !buf)
         return -EINVAL;
     if (count == 0)
@@ -170,7 +335,7 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
         if (got > 0)
             return (ssize_t)got;
         if (tty->link && (tty->link->flags & TTY_HUPPED))
-            return 0;  /* slave hung up → EOF */
+            return 0; /* slave hung up → EOF */
         if (flags & O_NONBLOCK)
             return -EAGAIN;
 
@@ -239,8 +404,8 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
 }
 
 static ssize_t pty_master_ldisc_write(struct tty_struct *tty,
-                                       const uint8_t *buf, size_t count,
-                                       uint32_t flags) {
+                                      const uint8_t *buf, size_t count,
+                                      uint32_t flags) {
     (void)flags;
     if (!tty || !tty->driver || !tty->driver->ops || !tty->driver->ops->write)
         return -EIO;
@@ -260,144 +425,63 @@ static int pty_master_ldisc_poll(struct tty_struct *tty, uint32_t events) {
 }
 
 static const struct tty_ldisc_ops pty_master_ldisc_ops = {
-    .open         = pty_master_ldisc_open,
-    .close        = pty_master_ldisc_close,
-    .read         = pty_master_ldisc_read,
-    .write        = pty_master_ldisc_write,
-    .poll         = pty_master_ldisc_poll,
+    .open = pty_master_ldisc_open,
+    .close = pty_master_ldisc_close,
+    .read = pty_master_ldisc_read,
+    .write = pty_master_ldisc_write,
+    .poll = pty_master_ldisc_poll,
 };
 
-/* ── PTY pair allocation ─────────────────────────────────────────── */
-
-static int pty_alloc_pair(struct tty_struct **master_out,
-                           struct tty_struct **slave_out) {
-    int idx = -1;
-
-    spin_lock(&pty_lock);
-    for (int i = 0; i < PTY_MAX; i++) {
-        if (!pty_allocated[i]) {
-            pty_allocated[i] = true;
-            pty_master_files[i] = 0;
-            pty_slave_files[i] = 0;
-            idx = i;
-            break;
-        }
-    }
-    spin_unlock(&pty_lock);
-
-    if (idx < 0)
-        return -ENOSPC;
-
-    struct tty_struct *master = tty_alloc(&pty_master_driver, idx);
-    if (!master) {
-        spin_lock(&pty_lock);
-        pty_allocated[idx] = false;
-        spin_unlock(&pty_lock);
-        return -ENOMEM;
-    }
-
-    struct tty_struct *slave = tty_alloc(&pty_slave_driver, idx);
-    if (!slave) {
-        tty_free(master);
-        spin_lock(&pty_lock);
-        pty_allocated[idx] = false;
-        spin_unlock(&pty_lock);
-        return -ENOMEM;
-    }
-
-    master->link = slave;
-    slave->link = master;
-    master->flags |= TTY_PTY_MASTER;
-    master->ldisc.ops = &pty_master_ldisc_ops;
-
-    spin_lock(&pty_lock);
-    pty_masters[idx] = master;
-    pty_slaves[idx] = slave;
-    spin_unlock(&pty_lock);
-
-    *master_out = master;
-    *slave_out = slave;
-    return idx;
-}
-
-static void pty_try_free_pair(int idx) {
-    if (idx < 0 || idx >= PTY_MAX)
-        return;
-
-    spin_lock(&pty_lock);
-    if (!pty_allocated[idx] || pty_master_files[idx] || pty_slave_files[idx]) {
-        spin_unlock(&pty_lock);
-        return;
-    }
-    struct tty_struct *master = pty_masters[idx];
-    struct tty_struct *slave = pty_slaves[idx];
-    pty_masters[idx] = NULL;
-    pty_slaves[idx] = NULL;
-    pty_master_files[idx] = 0;
-    pty_slave_files[idx] = 0;
-    pty_allocated[idx] = false;
-    spin_unlock(&pty_lock);
-
-    if (master) {
-        master->link = NULL;
-        tty_free(master);
-    }
-    if (slave) {
-        slave->link = NULL;
-        tty_free(slave);
-    }
-}
-
 /* ── /dev/ptmx ───────────────────────────────────────────────────── */
-
-static int ptmx_index_from_file(struct file *file) {
-    if (!file || !file->private_data)
-        return -ENXIO;
-    struct ptmx_file_ctx *ctx = (struct ptmx_file_ctx *)file->private_data;
-    if (ctx->idx < 0 || ctx->idx >= PTY_MAX)
-        return -ENXIO;
-    return ctx->idx;
-}
 
 static int ptmx_open_file(struct file *file) {
     if (!file || !file->vnode)
         return -EINVAL;
     if (file->private_data)
         return 0;
-    struct tty_struct *master, *slave;
-    int idx = pty_alloc_pair(&master, &slave);
-    if (idx < 0)
-        return idx;
-    (void)slave;
 
-    struct ptmx_file_ctx *ctx = kzalloc(sizeof(*ctx));
+    struct pty_pair *pair = NULL;
+    int ret = pty_pair_create(&pair);
+    if (ret < 0)
+        return ret;
+
+    struct pty_file_ctx *ctx = kzalloc(sizeof(*ctx));
     if (!ctx) {
-        pty_try_free_pair(idx);
+        spin_lock(&pair->lock);
+        pair->live = false;
+        spin_unlock(&pair->lock);
+        pty_slot_detach(pair);
         return -ENOMEM;
     }
 
-    if (tty_open(master) < 0) {
+    if (tty_open(pair->master) < 0) {
         kfree(ctx);
-        pty_try_free_pair(idx);
+        spin_lock(&pair->lock);
+        pair->live = false;
+        spin_unlock(&pair->lock);
+        pty_slot_detach(pair);
         return -EIO;
     }
-    master->vnode = file->vnode;
 
-    spin_lock(&pty_lock);
-    pty_master_files[idx]++;
-    spin_unlock(&pty_lock);
+    pair->master->vnode = file->vnode;
 
-    ctx->idx = idx;
+    pty_pair_get(pair); /* file reference */
+    spin_lock(&pair->lock);
+    pair->master_files++;
+    spin_unlock(&pair->lock);
+
+    ctx->pair = pair;
+    ctx->endpoint = PTY_ENDPOINT_MASTER;
     file->private_data = ctx;
     return 0;
 }
 
 static int ptmx_close_file(struct file *file) {
-    int idx = ptmx_index_from_file(file);
-    if (idx < 0)
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
+    if (!ctx)
         return 0;
 
-    struct ptmx_file_ctx *ctx = (struct ptmx_file_ctx *)file->private_data;
+    struct pty_pair *pair = ctx->pair;
     file->private_data = NULL;
     kfree(ctx);
 
@@ -406,64 +490,52 @@ static int ptmx_close_file(struct file *file) {
     bool drop_master = false;
     bool last_master = false;
 
-    spin_lock(&pty_lock);
-    if (pty_allocated[idx]) {
-        master = pty_masters[idx];
-        slave = pty_slaves[idx];
-        if (pty_master_files[idx] > 0) {
-            pty_master_files[idx]--;
-            drop_master = true;
-        }
-        last_master = (pty_master_files[idx] == 0);
+    spin_lock(&pair->lock);
+    master = pair->master;
+    slave = pair->slave;
+    if (pair->master_files > 0) {
+        pair->master_files--;
+        drop_master = true;
     }
-    spin_unlock(&pty_lock);
+    last_master = (pair->master_files == 0);
+    spin_unlock(&pair->lock);
 
     if (drop_master && master)
         tty_close(master);
     if (last_master && slave)
         tty_hangup(slave);
-    pty_try_free_pair(idx);
+
+    pty_pair_try_detach_if_unused(pair);
+    pty_pair_put(pair);
     return 0;
 }
 
 static ssize_t ptmx_read_file(struct file *file, void *buf, size_t len) {
-    int idx = ptmx_index_from_file(file);
-    if (idx < 0)
-        return idx;
-    struct tty_struct *master = pty_masters[idx];
-    if (!master)
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
+    if (!ctx || !ctx->pair->master)
         return -EIO;
-    return tty_read(master, (uint8_t *)buf, len, file->flags);
+    return tty_read(ctx->pair->master, (uint8_t *)buf, len, file->flags);
 }
 
 static ssize_t ptmx_write_file(struct file *file, const void *buf, size_t len) {
-    int idx = ptmx_index_from_file(file);
-    if (idx < 0)
-        return idx;
-    struct tty_struct *master = pty_masters[idx];
-    if (!master)
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
+    if (!ctx || !ctx->pair->master)
         return -EIO;
-    return tty_write(master, (const uint8_t *)buf, len, file->flags);
+    return tty_write(ctx->pair->master, (const uint8_t *)buf, len, file->flags);
 }
 
 static int ptmx_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg) {
-    int idx = ptmx_index_from_file(file);
-    if (idx < 0)
-        return idx;
-    struct tty_struct *master = pty_masters[idx];
-    if (!master)
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
+    if (!ctx || !ctx->pair->master)
         return -EIO;
-    return tty_ioctl(master, cmd, arg);
+    return tty_ioctl(ctx->pair->master, cmd, arg);
 }
 
 static int ptmx_poll_file(struct file *file, uint32_t events) {
-    int idx = ptmx_index_from_file(file);
-    if (idx < 0)
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_MASTER);
+    if (!ctx || !ctx->pair->master)
         return POLLNVAL;
-    struct tty_struct *master = pty_masters[idx];
-    if (!master)
-        return POLLNVAL;
-    return tty_poll(master, events);
+    return tty_poll(ctx->pair->master, events);
 }
 
 static struct file_ops ptmx_ops = {
@@ -489,98 +561,130 @@ static int pts_index_from_vnode(struct vnode *vn) {
 static int pts_open_file(struct file *file) {
     if (!file || !file->vnode)
         return -EINVAL;
+
     int idx = pts_index_from_vnode(file->vnode);
     if (idx < 0)
         return -ENXIO;
 
-    struct tty_struct *slave = NULL;
-    spin_lock(&pty_lock);
-    if (pty_allocated[idx]) {
-        slave = pty_slaves[idx];
-        pty_slave_files[idx]++;
-    }
-    spin_unlock(&pty_lock);
-    if (!slave)
+    struct pty_pair *pair = pty_slot_get(idx);
+    if (!pair)
         return -ENXIO;
 
+    struct pty_file_ctx *ctx = kzalloc(sizeof(*ctx));
+    if (!ctx) {
+        pty_pair_put(pair);
+        return -ENOMEM;
+    }
+
+    struct tty_struct *slave = NULL;
+    spin_lock(&pair->lock);
+    if (pair->live && pair->slave) {
+        pair->slave_files++;
+        slave = pair->slave;
+    }
+    spin_unlock(&pair->lock);
+
+    if (!slave) {
+        kfree(ctx);
+        pty_pair_put(pair);
+        return -ENXIO;
+    }
+
     if (tty_open(slave) < 0) {
-        spin_lock(&pty_lock);
-        if (pty_slave_files[idx] > 0)
-            pty_slave_files[idx]--;
-        spin_unlock(&pty_lock);
+        bool detach = false;
+        spin_lock(&pair->lock);
+        if (pair->slave_files > 0)
+            pair->slave_files--;
+        if (pair->live && pair->master_files == 0 && pair->slave_files == 0) {
+            pair->live = false;
+            detach = true;
+        }
+        spin_unlock(&pair->lock);
+        if (detach)
+            pty_slot_detach(pair);
+        kfree(ctx);
+        pty_pair_put(pair);
         return -EIO;
     }
+
     if (!slave->vnode)
         slave->vnode = file->vnode;
+
+    ctx->pair = pair; /* slot_get ref becomes file ref */
+    ctx->endpoint = PTY_ENDPOINT_SLAVE;
+    file->private_data = ctx;
     return 0;
 }
 
 static int pts_close_file(struct file *file) {
-    if (!file || !file->vnode)
-        return -EINVAL;
-    int idx = pts_index_from_vnode(file->vnode);
-    if (idx < 0)
-        return -ENXIO;
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
+    if (!ctx)
+        return 0;
+
+    struct pty_pair *pair = ctx->pair;
+    file->private_data = NULL;
+    kfree(ctx);
 
     struct tty_struct *slave = NULL;
+    struct tty_struct *master = NULL;
     bool drop_slave = false;
-    spin_lock(&pty_lock);
-    if (pty_allocated[idx]) {
-        slave = pty_slaves[idx];
-        if (pty_slave_files[idx] > 0) {
-            pty_slave_files[idx]--;
-            drop_slave = true;
-        }
+    bool last_slave = false;
+
+    spin_lock(&pair->lock);
+    slave = pair->slave;
+    master = pair->master;
+    if (pair->slave_files > 0) {
+        pair->slave_files--;
+        drop_slave = true;
     }
-    spin_unlock(&pty_lock);
+    last_slave = (pair->slave_files == 0);
+    spin_unlock(&pair->lock);
+
     if (drop_slave && slave)
         tty_close(slave);
-    pty_try_free_pair(idx);
+    if (last_slave && master)
+        tty_hangup(master);
+
+    pty_pair_try_detach_if_unused(pair);
+    pty_pair_put(pair);
     return 0;
 }
 
-static ssize_t pts_read(struct vnode *vn, void *buf, size_t len,
-                         off_t off, uint32_t flags) {
-    (void)off;
-    int idx = pts_index_from_vnode(vn);
-    if (idx < 0 || !pty_slaves[idx])
+static ssize_t pts_read_file(struct file *file, void *buf, size_t len) {
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
+    if (!ctx || !ctx->pair->slave)
         return -EIO;
-    struct tty_struct *slave = pty_slaves[idx];
-    if (!slave->vnode)
-        slave->vnode = vn;
-    return tty_read(slave, (uint8_t *)buf, len, flags);
+    return tty_read(ctx->pair->slave, (uint8_t *)buf, len, file->flags);
 }
 
-static ssize_t pts_write(struct vnode *vn, const void *buf, size_t len,
-                          off_t off, uint32_t flags) {
-    (void)off;
-    int idx = pts_index_from_vnode(vn);
-    if (idx < 0 || !pty_slaves[idx])
+static ssize_t pts_write_file(struct file *file, const void *buf, size_t len) {
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
+    if (!ctx || !ctx->pair->slave)
         return -EIO;
-    return tty_write(pty_slaves[idx], (const uint8_t *)buf, len, flags);
+    return tty_write(ctx->pair->slave, (const uint8_t *)buf, len, file->flags);
 }
 
-static int pts_ioctl(struct vnode *vn, uint64_t cmd, uint64_t arg) {
-    int idx = pts_index_from_vnode(vn);
-    if (idx < 0 || !pty_slaves[idx])
+static int pts_ioctl_file(struct file *file, uint64_t cmd, uint64_t arg) {
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
+    if (!ctx || !ctx->pair->slave)
         return -EIO;
-    return tty_ioctl(pty_slaves[idx], cmd, arg);
+    return tty_ioctl(ctx->pair->slave, cmd, arg);
 }
 
-static int pts_poll(struct vnode *vn, uint32_t events) {
-    int idx = pts_index_from_vnode(vn);
-    if (idx < 0 || !pty_slaves[idx])
+static int pts_poll_file(struct file *file, uint32_t events) {
+    struct pty_file_ctx *ctx = pty_file_ctx_get(file, PTY_ENDPOINT_SLAVE);
+    if (!ctx || !ctx->pair->slave)
         return POLLNVAL;
-    return tty_poll(pty_slaves[idx], events);
+    return tty_poll(ctx->pair->slave, events);
 }
 
 static struct file_ops pts_ops = {
-    .read  = pts_read,
-    .write = pts_write,
-    .ioctl = pts_ioctl,
-    .poll  = pts_poll,
     .open_file = pts_open_file,
     .close_file = pts_close_file,
+    .read_file = pts_read_file,
+    .write_file = pts_write_file,
+    .ioctl_file = pts_ioctl_file,
+    .poll_file = pts_poll_file,
 };
 
 /* ── Init ────────────────────────────────────────────────────────── */
