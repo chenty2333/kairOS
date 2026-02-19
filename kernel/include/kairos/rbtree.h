@@ -2,7 +2,6 @@
  * kairos/rbtree.h - Red-Black Tree
  *
  * Based on Linux kernel implementation.
- * Used by CFS scheduler for O(log n) process management.
  */
 
 #ifndef _KAIROS_RBTREE_H
