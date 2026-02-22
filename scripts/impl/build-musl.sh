@@ -62,7 +62,10 @@ fi
 # This keeps TOOLCHAIN_MODE=auto usable when clang is selected.
 if [[ "${MUSL_STATIC_ONLY:-0}" != "1" && "$KAIROS_TC_KIND" == "clang" ]]; then
   RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
-  _rt_builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' | head -n1 || true)"
+  _rt_builtins=""
+  if [[ -d "$RT_RESOURCE_DIR" ]]; then
+    _rt_builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' | head -n1 || true)"
+  fi
   if [[ -z "$_rt_builtins" ]]; then
     [[ "$QUIET" != "1" ]] && echo "compiler-rt builtins missing; building compiler-rt..."
     env TOOLCHAIN_MODE=clang QUIET="$QUIET" SYSROOT="$SYSROOT" \
