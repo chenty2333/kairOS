@@ -74,6 +74,11 @@ int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);
 int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags);
 int arch_mmu_unmap(paddr_t table, vaddr_t va);
 paddr_t arch_mmu_translate(paddr_t table, vaddr_t va);
+/*
+ * Generic PTE encoding shared with core MM:
+ * - low 10 bits: HAL PTE_* flags
+ * - upper bits:  (phys_addr >> PAGE_SHIFT) << 10
+ */
 uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va);
 int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte);
 void arch_mmu_switch(paddr_t table);

@@ -397,22 +397,35 @@ int mm_mremap(struct mm_struct *mm, vaddr_t old_addr, size_t old_len,
         return ret;
     }
 
-    /* Transfer PTEs: remap physical pages from old VA to new VA */
+    /* Re-validate and transfer PTEs while holding mm lock to avoid races. */
+    mutex_lock(&mm->lock);
+    vma = mm_find_vma(mm, old_addr);
+    if (!vma || vma->start != old_addr || vma->end < old_end) {
+        mutex_unlock(&mm->lock);
+        mm_munmap(mm, res, new_len);
+        return -EFAULT;
+    }
+
+    uint64_t low_mask = (1UL << 10) - 1;
     for (vaddr_t va = old_addr; va < old_end; va += CONFIG_PAGE_SIZE) {
         paddr_t pa = arch_mmu_translate(mm->pgdir, va);
         if (!pa) {
             continue;
         }
         uint64_t pte = arch_mmu_get_pte(mm->pgdir, va);
-        uint64_t pte_flags = pte & ((1UL << 10) - 1);
-        arch_mmu_unmap(mm->pgdir, va);
+        uint64_t pte_flags = pte & low_mask;
         vaddr_t dest = res + (va - old_addr);
-        arch_mmu_map(mm->pgdir, dest, pa, pte_flags);
+        ret = arch_mmu_map(mm->pgdir, dest, pa, pte_flags);
+        if (ret < 0) {
+            mutex_unlock(&mm->lock);
+            mm_munmap(mm, res, new_len);
+            return ret;
+        }
+        arch_mmu_unmap(mm->pgdir, va);
     }
     arch_mmu_flush_tlb_all();
 
     /* Remove old VMA without freeing physical pages */
-    mutex_lock(&mm->lock);
     vma = mm_find_vma(mm, old_addr);
     if (vma && vma->start == old_addr) {
         remove_vma(mm, vma);
@@ -477,12 +490,16 @@ int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
             mid->end = end;
             mid->flags = mid_flags;
             mid->offset += (addr - vma->start);
+            if (mid->vnode)
+                vnode_get(mid->vnode);
             INIT_LIST_HEAD(&mid->list);
             memset(&mid->rb_node, 0, sizeof(mid->rb_node));
 
             *tail = *vma;
             tail->start = end;
             tail->offset += (end - vma->start);
+            if (tail->vnode)
+                vnode_get(tail->vnode);
             INIT_LIST_HEAD(&tail->list);
             memset(&tail->rb_node, 0, sizeof(tail->rb_node));
 
@@ -504,6 +521,8 @@ int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
             mid->start = addr;
             mid->flags = mid_flags;
             mid->offset += (addr - vma->start);
+            if (mid->vnode)
+                vnode_get(mid->vnode);
             INIT_LIST_HEAD(&mid->list);
             memset(&mid->rb_node, 0, sizeof(mid->rb_node));
 
@@ -522,6 +541,8 @@ int mm_mprotect(struct mm_struct *mm, vaddr_t addr, size_t len,
         *mid = *vma;
         mid->end = end;
         mid->flags = mid_flags;
+        if (mid->vnode)
+            vnode_get(mid->vnode);
         INIT_LIST_HEAD(&mid->list);
         memset(&mid->rb_node, 0, sizeof(mid->rb_node));
 

@@ -177,6 +177,25 @@ static uint64_t flags_to_pte(uint64_t f) {
     return p;
 }
 
+static uint64_t pte_to_flags(uint64_t pte) {
+    if (!(pte & PTE_V))
+        return 0;
+    uint64_t f = PTE_VALID;
+    if (pte & PTE_R)
+        f |= PTE_READ;
+    if (pte & PTE_W)
+        f |= PTE_WRITE;
+    if (pte & PTE_X)
+        f |= PTE_EXEC;
+    if (pte & PTE_U)
+        f |= PTE_USER;
+    if (pte & PTE_G)
+        f |= PTE_GLOBAL;
+    if (pte & PTE_RSW0)
+        f |= PTE_COW;
+    return f;
+}
+
 /* --- Public Interface --- */
 
 void arch_mmu_init(const struct boot_info *bi) {
@@ -289,14 +308,23 @@ paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
 
 uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
     uint64_t *pte = walk_pgtable(table, va, false);
-    return pte ? *pte : 0;
+    if (!pte || !(*pte & PTE_V))
+        return 0;
+    paddr_t pa = (paddr_t)pte_to_pa(*pte);
+    return ((pa >> PAGE_SHIFT) << 10) | pte_to_flags(*pte);
 }
 
 int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte) {
     uint64_t *entry = walk_pgtable(table, va, false);
     if (!entry)
         return -ENOENT;
-    *entry = pte;
+    paddr_t pa = (paddr_t)((pte >> 10) << PAGE_SHIFT);
+    uint64_t flags = pte & ((1ULL << 10) - 1);
+    if (!(flags & PTE_VALID)) {
+        *entry = 0;
+        return 0;
+    }
+    *entry = pa_to_pte(pa) | flags_to_pte(flags);
     return 0;
 }
 

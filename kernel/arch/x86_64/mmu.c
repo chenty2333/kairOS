@@ -18,6 +18,7 @@
 #define PTE_W (1ULL << 1)
 #define PTE_U (1ULL << 2)
 #define PTE_G (1ULL << 8)
+#define PTE_SW_COW (1ULL << 9) /* software-defined bit for COW */
 #define PTE_PCD (1ULL << 4)  /* Page Cache Disable */
 #define PTE_NX (1ULL << 63)
 #define PTE_ADDR_MASK 0x000ffffffffff000ULL
@@ -66,11 +67,32 @@ static uint64_t flags_to_pte(uint64_t f) {
         p |= PTE_U;
     if (f & PTE_GLOBAL)
         p |= PTE_G;
+    if (f & PTE_COW)
+        p |= PTE_SW_COW;
     if (!(f & PTE_EXEC))
         p |= PTE_NX;
     if (f & PTE_DEVICE)
         p |= PTE_PCD;
     return p;
+}
+
+static uint64_t pte_to_flags(uint64_t pte) {
+    if (!(pte & PTE_P))
+        return 0;
+    uint64_t f = PTE_VALID | PTE_READ;
+    if (pte & PTE_W)
+        f |= PTE_WRITE;
+    if (pte & PTE_U)
+        f |= PTE_USER;
+    if (pte & PTE_G)
+        f |= PTE_GLOBAL;
+    if (pte & PTE_SW_COW)
+        f |= PTE_COW;
+    if (!(pte & PTE_NX))
+        f |= PTE_EXEC;
+    if (pte & PTE_PCD)
+        f |= PTE_DEVICE;
+    return f;
 }
 
 void arch_mmu_init(const struct boot_info *bi) {
@@ -170,14 +192,23 @@ paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
 
 uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
     uint64_t *pte = walk_pgtable(table, va, false);
-    return pte ? *pte : 0;
+    if (!pte || !(*pte & PTE_P))
+        return 0;
+    paddr_t pa = (paddr_t)(*pte & PTE_ADDR_MASK);
+    return ((pa >> PAGE_SHIFT) << 10) | pte_to_flags(*pte);
 }
 
 int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte) {
     uint64_t *entry = walk_pgtable(table, va, false);
     if (!entry)
         return -ENOENT;
-    *entry = pte;
+    paddr_t pa = (paddr_t)(((pte >> 10) << PAGE_SHIFT) & PTE_ADDR_MASK);
+    uint64_t flags = pte & ((1ULL << 10) - 1);
+    if (!(flags & PTE_VALID)) {
+        *entry = 0;
+        return 0;
+    }
+    *entry = pa | flags_to_pte(flags);
     return 0;
 }
 

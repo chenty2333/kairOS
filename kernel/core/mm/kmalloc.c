@@ -190,3 +190,33 @@ void *kzalloc(size_t size) {
         memset(ptr, 0, size);
     return ptr;
 }
+
+void *kmalloc_aligned(size_t size, size_t align) {
+    if (!size)
+        return NULL;
+    if (align < sizeof(void *))
+        align = sizeof(void *);
+    if ((align & (align - 1)) != 0)
+        return NULL;
+    if (align <= sizeof(void *))
+        return kmalloc(size);
+
+    size_t total = size + align - 1 + sizeof(void *);
+    void *raw = kmalloc(total);
+    if (!raw)
+        return NULL;
+
+    uintptr_t base = (uintptr_t)raw + sizeof(void *);
+    uintptr_t aligned = ALIGN_UP(base, align);
+    ((void **)aligned)[-1] = raw;
+    return (void *)aligned;
+}
+
+void kfree_aligned(void *ptr) {
+    if (!ptr)
+        return;
+    void *raw = ((void **)ptr)[-1];
+    if (!raw)
+        raw = ptr;
+    kfree(raw);
+}

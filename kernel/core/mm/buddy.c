@@ -477,6 +477,73 @@ static void __free_pages(struct page *page, unsigned int order) {
     list_add(&page->list, &free_lists[order]);
 }
 
+/* Reserve a single free PFN by splitting the containing buddy block. */
+static bool reserve_free_pfn_locked(size_t target_pfn) {
+    struct page *block = NULL;
+    unsigned int order = 0;
+
+    for (unsigned int o = 0; o < MAX_ORDER; o++) {
+        struct list_head *pos;
+        list_for_each(pos, &free_lists[o]) {
+            struct page *cand = list_entry(pos, struct page, list);
+            size_t start = page_to_pfn(cand);
+            size_t span = 1UL << o;
+            if (target_pfn >= start && target_pfn < start + span) {
+                block = cand;
+                order = o;
+                break;
+            }
+        }
+        if (block)
+            break;
+    }
+
+    if (!block)
+        return false;
+
+    list_del(&block->list);
+    num_free_pages -= (1UL << order);
+    size_t block_pfn = page_to_pfn(block);
+    for (size_t i = 0; i < (1UL << order); i++) {
+        size_t pfn = block_pfn + i;
+        if (pfn != target_pfn && (pfn_to_page(pfn)->flags & PG_RESERVED)) {
+            list_add(&block->list, &free_lists[order]);
+            num_free_pages += (1UL << order);
+            return false;
+        }
+    }
+
+    while (order > 0) {
+        order--;
+        size_t right_pfn = block_pfn + (1UL << order);
+        bool take_right = target_pfn >= right_pfn;
+        struct page *right = pfn_to_page(right_pfn);
+        struct page *free_half = take_right ? block : right;
+        struct page *keep_half = take_right ? right : block;
+
+        free_half->order = order;
+        free_half->refcount = 0;
+        free_half->pcp_home_cpu = -1;
+        free_half->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB | PG_PCP | PG_RESERVED);
+        pmm_dbg_set_state(free_half, PMM_DBG_BUDDY_FREE, -1);
+        list_add(&free_half->list, &free_lists[order]);
+        num_free_pages += (1UL << order);
+
+        block = keep_half;
+        if (take_right)
+            block_pfn = right_pfn;
+    }
+
+    block->order = 0;
+    block->refcount = 0;
+    block->flags |= PG_RESERVED;
+    block->flags &= ~PG_PCP;
+    block->pcp_home_cpu = -1;
+    INIT_LIST_HEAD(&block->list);
+    pmm_dbg_set_state(block, PMM_DBG_RESERVED, -1);
+    return true;
+}
+
 /* --- Public API --- */
 
 struct page *alloc_pages(unsigned int order) {
@@ -568,6 +635,13 @@ void free_pages(struct page *page, unsigned int order) {
     page->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB);
     page->refcount = 0;
     page->order = order;
+    if (page->flags & PG_RESERVED) {
+        page->pcp_home_cpu = -1;
+        INIT_LIST_HEAD(&page->list);
+        pmm_dbg_set_state(page, PMM_DBG_RESERVED, cpu);
+        arch_irq_restore(irq);
+        return;
+    }
 
     if (order == 0) {
         bool queued_to_pcp = false;
@@ -877,10 +951,22 @@ void pmm_reserve_range(paddr_t start, paddr_t end) {
     end = MIN(ALIGN_UP(end, PAGE_SIZE), mem_end);
     
     bool irq = arch_irq_save();
+    spin_lock(&pcp_lock);
     spin_lock(&buddy_lock);
+    int ncpus = pmm_active_cpus();
+    for (int i = 0; i < ncpus; i++) {
+        pcp_flush_cpu_locked(i);
+        spin_lock(&remote_free_queues[i].lock);
+        pmm_remote_free_flush_cpu_locked(i);
+        spin_unlock(&remote_free_queues[i].lock);
+    }
     for (paddr_t a = start; a < end; a += PAGE_SIZE) {
         struct page *p = phys_to_page(a);
         if (p) {
+            if (!(p->flags & PG_RESERVED) && p->refcount == 0 &&
+                !(p->flags & (PG_PCP | PG_SLAB))) {
+                reserve_free_pfn_locked(page_to_pfn(p));
+            }
             p->flags |= PG_RESERVED;
             p->flags &= ~PG_PCP;
             p->pcp_home_cpu = -1;
@@ -888,6 +974,7 @@ void pmm_reserve_range(paddr_t start, paddr_t end) {
         }
     }
     spin_unlock(&buddy_lock);
+    spin_unlock(&pcp_lock);
     arch_irq_restore(irq);
 }
 
