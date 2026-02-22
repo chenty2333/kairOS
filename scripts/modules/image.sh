@@ -27,6 +27,7 @@ kairos_image_stage_rootfs() {
     local stage="$1"
             kairos_exec_script_env "image" \
                 ARCH="${KAIROS_ARCH}" \
+                BUILD_ROOT="${KAIROS_BUILD_ROOT}" \
                 QUIET="${KAIROS_QUIET}" \
                 JOBS="${KAIROS_JOBS}" \
                 ROOTFS_ONLY=1 \
@@ -62,7 +63,7 @@ kairos_image_dispatch() {
             kairos_image_stage_rootfs "base"
             kairos_image_stage_rootfs "init"
             kairos_image_stage_rootfs "busybox"
-            if [[ -x "${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}/tcc/bin/tcc" ]]; then
+            if [[ -x "${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/tcc/bin/tcc" ]]; then
                 kairos_image_stage_rootfs "tcc"
             fi
             ;;

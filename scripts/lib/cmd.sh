@@ -16,7 +16,7 @@ kairos_run_tagged() {
     local tag="$1"
     shift
 
-    local log_dir="${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}/logs"
+    local log_dir="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/logs"
     local log_file="${log_dir}/${tag}.log"
     mkdir -p "$log_dir"
     : >"$log_file"
@@ -44,6 +44,7 @@ kairos_exec_script() {
     shift 2
     kairos_run_tagged "$tag" env \
         ARCH="${KAIROS_ARCH}" \
+        BUILD_ROOT="${KAIROS_BUILD_ROOT}" \
         QUIET="${KAIROS_QUIET}" \
         JOBS="${KAIROS_JOBS}" \
         "$script" "$@"

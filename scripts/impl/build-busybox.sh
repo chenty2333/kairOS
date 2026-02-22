@@ -18,9 +18,10 @@ source "${ROOT_DIR}/scripts/lib/common.sh"
 source "${ROOT_DIR}/scripts/lib/toolchain.sh"
 
 BUSYBOX_SRC="${BUSYBOX_SRC:-$ROOT_DIR/third_party/busybox}"
-OUT_DIR="${OUT_DIR:-$ROOT_DIR/build/${ARCH}/busybox}"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build}"
+OUT_DIR="${OUT_DIR:-$BUILD_ROOT/${ARCH}/busybox}"
 DEFCONFIG="${DEFCONFIG:-$ROOT_DIR/tools/busybox/kairos_defconfig}"
-SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
+SYSROOT="${SYSROOT:-$BUILD_ROOT/${ARCH}/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 USE_GCC="${USE_GCC:-0}"
 

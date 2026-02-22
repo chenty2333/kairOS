@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ARCH="${ARCH:-riscv64}"
+BASE_BUILD_ROOT="${BUILD_ROOT:-build/matrix}"
 DEBUG_LEVELS="${DEBUG_LEVELS:-0 1}"
 PCP_MODES="${PCP_MODES:-0 1 2}"
 TOOLCHAIN_MODES="${TOOLCHAIN_MODES:-auto gcc clang}"
@@ -20,7 +21,9 @@ run_case() {
   fi
 
   echo "=== ARCH=${ARCH} TOOLCHAIN_MODE=${tc_mode} DEBUG=${dbg} PCP_MODE=${pcp} ==="
+  local case_build_root="${BASE_BUILD_ROOT}/${ARCH}-${tc_mode}-dbg${dbg}-pcp${pcp}"
   if make ARCH="${ARCH}" TOOLCHAIN_MODE="${tc_mode}" \
+      BUILD_ROOT="${case_build_root}" \
       TEST_EXTRA_CFLAGS="${extra}" TEST_TIMEOUT="${MATRIX_TEST_TIMEOUT}" test; then
     echo "PASS: test TOOLCHAIN_MODE=${tc_mode} DEBUG=${dbg} PCP_MODE=${pcp}"
   else
@@ -31,6 +34,7 @@ run_case() {
   if [[ "${RUN_SOAK}" == "1" && "$pcp" == "2" && "$dbg" == "0" ]]; then
     echo "=== SOAK ARCH=${ARCH} TOOLCHAIN_MODE=${tc_mode} PCP_MODE=${pcp} TIMEOUT=${SOAK_TIMEOUT}s ==="
     if make ARCH="${ARCH}" TOOLCHAIN_MODE="${tc_mode}" \
+        BUILD_ROOT="${case_build_root}" \
         SOAK_EXTRA_CFLAGS="${extra}" SOAK_TIMEOUT="${SOAK_TIMEOUT}" test-soak; then
       echo "PASS: soak TOOLCHAIN_MODE=${tc_mode} PCP_MODE=${pcp}"
     else

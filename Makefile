@@ -27,7 +27,8 @@ MAKEFLAGS += -j$(NPROC)
 endif
 
 # Build directory
-BUILD_DIR := build/$(ARCH)
+BUILD_ROOT ?= build
+BUILD_DIR := $(BUILD_ROOT)/$(ARCH)
 
 # Output files
 KERNEL := $(BUILD_DIR)/kairos.elf
@@ -45,7 +46,7 @@ else
   QUIET_ENV :=
 endif
 
-KAIROS_CMD := ./scripts/kairos.sh --arch $(ARCH) --jobs $(NPROC)
+KAIROS_CMD := ./scripts/kairos.sh --arch $(ARCH) --build-root $(BUILD_ROOT) --jobs $(NPROC)
 ifeq ($(V),0)
   KAIROS_CMD += --quiet
 else
@@ -254,7 +255,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean distclean run debug iso test user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean distclean run debug iso test test-isolated user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -283,12 +284,12 @@ $(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) $(KAIROS_DEPS)
 	@touch $@
 
 $(USER_INIT): $(MUSL_STAMP) user/init/main.c user/Makefile
-	$(Q)$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) V=$(V)
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) USE_GCC=$(USE_GCC) V=$(V)
 
 initramfs: $(INITRAMFS_STAMP)
 
 $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
-	$(Q)$(MAKE) -C user ARCH=$(ARCH) USE_GCC=$(USE_GCC) V=$(V) initramfs
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
@@ -586,6 +587,10 @@ SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
 
 test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
+
+TEST_RUN_ID ?= $(shell date +%s%N)
+test-isolated:
+	$(Q)$(MAKE) --no-print-directory ARCH=$(ARCH) BUILD_ROOT=build/runs/$(TEST_RUN_ID) TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
 
 test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)$(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"

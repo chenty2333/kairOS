@@ -78,13 +78,14 @@ kairos_tc_prepare_libgcc_compat() {
     local arch="$1"
     local sysroot="$2"
     local lib_dir="${sysroot}/lib"
+    local build_root="${KAIROS_BUILD_ROOT:-${BUILD_ROOT:-${KAIROS_ROOT_DIR}/build}}"
 
     [[ -d "$lib_dir" ]] || return 0
     if [[ -f "${lib_dir}/libgcc.a" && -f "${lib_dir}/libgcc_eh.a" ]]; then
         return 0
     fi
 
-    local rt_resource_dir="${COMPILER_RT_RESOURCE_DIR:-${KAIROS_ROOT_DIR}/build/${arch}/compiler-rt/resource}"
+    local rt_resource_dir="${COMPILER_RT_RESOURCE_DIR:-${build_root}/${arch}/compiler-rt/resource}"
     local builtins=""
     if [[ -d "$rt_resource_dir" ]]; then
         builtins="$(find "$rt_resource_dir" -name 'libclang_rt.builtins*.a' | head -n1 || true)"

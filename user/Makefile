@@ -2,7 +2,8 @@ ARCH ?= riscv64
 USE_GCC ?= 0
 V ?= 0
 ROOT_DIR := $(abspath ..)
-SYSROOT ?= $(ROOT_DIR)/build/$(ARCH)/sysroot
+BUILD_ROOT ?= $(ROOT_DIR)/build
+SYSROOT ?= $(BUILD_ROOT)/$(ARCH)/sysroot
 TOOLCHAIN_PREFIX ?= $(ARCH)-linux-musl-
 ifeq ($(ARCH),riscv64)
 TARGET_TRIPLE := riscv64-linux-musl
@@ -26,7 +27,7 @@ else
   CC := clang --target=$(TARGET_TRIPLE) -fuse-ld=lld
 endif
 
-OUT_DIR := $(ROOT_DIR)/build/$(ARCH)/user
+OUT_DIR := $(BUILD_ROOT)/$(ARCH)/user
 INIT := $(OUT_DIR)/init
 INITRAMFS := $(OUT_DIR)/initramfs/init
 DOOM := $(OUT_DIR)/doom
@@ -45,9 +46,9 @@ LDFLAGS += -march=rv64gc -mabi=lp64
 endif
 
 ifeq ($(USE_GCC),0)
-RTLIB_DIR := $(ROOT_DIR)/build/$(ARCH)/compiler-rt/lib
+RTLIB_DIR := $(BUILD_ROOT)/$(ARCH)/compiler-rt/lib
 RTLIB_FLAGS := -rtlib=compiler-rt -unwindlib=none
-RT_RESOURCE_DIR := $(ROOT_DIR)/build/$(ARCH)/compiler-rt/resource
+RT_RESOURCE_DIR := $(BUILD_ROOT)/$(ARCH)/compiler-rt/resource
 RT_RESOURCE_FLAGS := -resource-dir=$(RT_RESOURCE_DIR)
 CFLAGS += $(RTLIB_FLAGS)
 CFLAGS += $(RT_RESOURCE_FLAGS)

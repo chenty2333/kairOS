@@ -57,7 +57,7 @@ kairos_doctor() {
 }
 
 kairos_run_clean_kernel_artifacts() {
-    local build_dir="${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}"
+    local build_dir="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}"
     rm -rf "${build_dir}/kernel" "${build_dir}/third_party" \
         "${build_dir}/kairos.elf" "${build_dir}/kairos.bin" \
         "${build_dir}/.cflags."*
@@ -71,8 +71,9 @@ kairos_run_test_once() {
     local expect_timeout="$5"
 
     local qemu_cmd
-    printf -v qemu_cmd 'make --no-print-directory -j1 ARCH=%q EXTRA_CFLAGS=%q run' \
-        "${KAIROS_ARCH}" "${extra_cflags}"
+    printf -v qemu_cmd \
+        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q run' \
+        "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
     kairos_run_clean_kernel_artifacts
 
     local rc=0
@@ -141,21 +142,21 @@ kairos_run_dispatch() {
         test)
             extra="$default_extra"
             timeout_s="${TEST_TIMEOUT:-180}"
-            log_path="${TEST_LOG:-${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}/test.log}"
+            log_path="${TEST_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/test.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
             ;;
         test-soak)
             extra="${SOAK_EXTRA_CFLAGS:--DCONFIG_PMM_PCP_MODE=2}"
             timeout_s="${SOAK_TIMEOUT:-600}"
-            log_path="${SOAK_LOG:-${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}/soak.log}"
+            log_path="${SOAK_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/soak.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_once "$extra" "$timeout_s" "$log_path" 0 1
             ;;
         test-debug)
             extra="${default_extra} -DCONFIG_DEBUG=1"
             timeout_s="${TEST_TIMEOUT:-180}"
-            log_path="${TEST_LOG:-${KAIROS_ROOT_DIR}/build/${KAIROS_ARCH}/test.log}"
+            log_path="${TEST_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/test.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
             ;;
@@ -164,6 +165,7 @@ kairos_run_dispatch() {
                 cd "${KAIROS_ROOT_DIR}"
                 kairos_exec_script_env "test-matrix" \
                     ARCH="${KAIROS_ARCH}" \
+                    BUILD_ROOT="${KAIROS_BUILD_ROOT}" \
                     CPUS="${CPUS:-1 2 4}" \
                     DEBUG_LEVELS="${DEBUG_LEVELS:-0 1}" \
                     bash "${KAIROS_ROOT_DIR}/scripts/test-matrix.sh"
