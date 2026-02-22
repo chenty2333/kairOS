@@ -268,15 +268,20 @@ static void se_recompute_min_deadline(struct rb_node *node);
 /* Insert entity into RB-tree ordered by vruntime */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se) {
     struct rb_node **link = &cfs_rq->tasks_timeline.rb_node, *parent = NULL;
+    bool rightmost = true;
     while (*link) {
         parent = *link;
-        if (se->vruntime < rb_entry(parent, struct sched_entity, sched_node)->vruntime)
+        if (se->vruntime < rb_entry(parent, struct sched_entity, sched_node)->vruntime) {
             link = &parent->rb_left;
-        else
+            rightmost = false;
+        } else {
             link = &parent->rb_right;
+        }
     }
     rb_link_node(&se->sched_node, parent, link);
     rb_insert_color(&se->sched_node, &cfs_rq->tasks_timeline);
+    if (rightmost)
+        cfs_rq->rb_rightmost = &se->sched_node;
     se->min_deadline = se->deadline;
     se_recompute_min_deadline(cfs_rq->tasks_timeline.rb_node);
 }
@@ -341,8 +346,10 @@ static void se_recompute_min_deadline(struct rb_node *node) {
     se_update_min_deadline(rb_entry(node, struct sched_entity, sched_node));
 }
 
-/* rb_erase + post-order min_deadline recompute */
+/* rb_erase + post-order min_deadline recompute + rightmost maintenance */
 static void sched_rb_erase(struct sched_entity *se, struct cfs_rq *cfs_rq) {
+    if (cfs_rq->rb_rightmost == &se->sched_node)
+        cfs_rq->rb_rightmost = rb_prev(&se->sched_node);
     rb_erase(&se->sched_node, &cfs_rq->tasks_timeline);
     se_recompute_min_deadline(cfs_rq->tasks_timeline.rb_node);
 }
@@ -451,6 +458,7 @@ void sched_init_cpu(int cpu) {
     struct rq *rq = &d->runqueue;
     spin_init(&rq->lock);
     rq->cfs.tasks_timeline = RB_ROOT;
+    rq->cfs.rb_rightmost = NULL;
     rq->cfs.nr_running = 0;
     rq->cfs.min_vruntime = 0;
     rq->cfs.curr_se = NULL;
@@ -489,6 +497,25 @@ void sched_enqueue(struct process *p) {
 
     /* Find target CPU - currently simple: stay on current or preferred */
     int cpu = (p->se.cpu >= 0 && p->se.cpu < sched_nr_cpus()) ? p->se.cpu : arch_cpu_id();
+
+    /* Push migration: if preferred CPU is busy, try to find an idle one */
+    if (sched_steal_is_enabled() && sched_nr_cpus() > 1) {
+        uint32_t nr = __atomic_load_n(&cpu_data[cpu].runqueue.nr_running,
+                                       __ATOMIC_RELAXED);
+        if (nr > 0) {
+            int online = sched_nr_cpus();
+            for (int i = 0; i < online; i++) {
+                if (i == cpu) continue;
+                if (__atomic_load_n(&cpu_data[i].runqueue.nr_running,
+                                     __ATOMIC_RELAXED) == 0) {
+                    cpu = i;
+                    p->se.cpu = cpu;
+                    break;
+                }
+            }
+        }
+    }
+
     struct rq *rq = &cpu_data[cpu].runqueue;
 
     bool state = arch_irq_save();
@@ -1022,13 +1049,13 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
     /*
      * Steal strategy: take the rightmost node (largest vruntime) —
      * the task that has consumed the most virtual CPU time and is
-     * therefore least owed.  rb_last is O(log n); we walk left via
-     * rb_prev only if the rightmost fails the state check.
+     * therefore least owed.  rb_rightmost is cached O(1); we walk
+     * left via rb_prev only if the rightmost fails the state check.
      */
     struct sched_entity *best_se = NULL;
     struct process *best = NULL;
 
-    for (struct rb_node *node = rb_last(&cfs->tasks_timeline);
+    for (struct rb_node *node = cfs->rb_rightmost;
          node; node = rb_prev(node)) {
         struct sched_entity *se =
             rb_entry(node, struct sched_entity, sched_node);

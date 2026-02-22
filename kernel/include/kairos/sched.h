@@ -32,6 +32,7 @@ void sched_debug_dump_process(const struct process *p);
 /* EEVDF sub-runqueue */
 struct cfs_rq {
     struct rb_root tasks_timeline;
+    struct rb_node *rb_rightmost;   /* cached rightmost node for O(1) steal */
     uint64_t min_vruntime;
     uint32_t nr_running;
     struct sched_entity *curr_se;
