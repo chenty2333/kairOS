@@ -263,7 +263,7 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq) {
     if (v > cfs_rq->min_vruntime) cfs_rq->min_vruntime = v;
 }
 
-static void se_propagate_min_deadline(struct rb_node *node);
+static void se_recompute_min_deadline(struct rb_node *node);
 
 /* Insert entity into RB-tree ordered by vruntime */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se) {
@@ -278,7 +278,7 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se) {
     rb_link_node(&se->sched_node, parent, link);
     rb_insert_color(&se->sched_node, &cfs_rq->tasks_timeline);
     se->min_deadline = se->deadline;
-    se_propagate_min_deadline(&se->sched_node);
+    se_recompute_min_deadline(cfs_rq->tasks_timeline.rb_node);
 }
 
 static uint64_t update_curr(struct cfs_rq *cfs_rq) {
@@ -331,16 +331,6 @@ static inline bool se_update_min_deadline(struct sched_entity *se) {
         return false;
     se->min_deadline = min_dl;
     return true;
-}
-
-/* Propagate min_deadline up to root; stops early if unchanged */
-static void se_propagate_min_deadline(struct rb_node *node) {
-    while (node) {
-        struct sched_entity *se = rb_entry(node, struct sched_entity, sched_node);
-        if (!se_update_min_deadline(se))
-            break;
-        node = rb_parent(node);
-    }
 }
 
 static void se_recompute_min_deadline(struct rb_node *node) {
