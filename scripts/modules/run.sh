@@ -73,7 +73,7 @@ kairos_run_test_once() {
 
     local qemu_cmd
     printf -v qemu_cmd \
-        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q run' \
+        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
         "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
 
     local rc=0

@@ -255,7 +255,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -661,6 +661,36 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 test-isolated:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=1 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
 
+test-driver:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x01" test
+
+test-mm:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x02" test
+
+test-sync:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x04" test
+
+test-vfork:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x08" test
+
+test-sched:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x10" test
+
+test-crash:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x20" test
+
+test-syscall-trap:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x40" test
+
+test-syscall: test-syscall-trap
+
 gc-runs:
 	$(Q)mkdir -p "$(TEST_RUNS_ROOT)"
 	$(Q)keep="$(RUNS_KEEP)"; \
@@ -720,6 +750,14 @@ help:
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests (isolated by default)"
 	@echo "  test-isolated - Alias of isolated test mode"
+	@echo "  test-driver - Run driver test module only"
+	@echo "  test-mm  - Run memory test module only"
+	@echo "  test-sync - Run sync test module only"
+	@echo "  test-vfork - Run vfork test module only"
+	@echo "  test-sched - Run scheduler test module only"
+	@echo "  test-crash - Run crash test module only"
+	@echo "  test-syscall-trap - Run syscall/trap test module only"
+	@echo "  test-syscall - Alias of test-syscall-trap"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"

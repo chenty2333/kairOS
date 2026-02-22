@@ -72,6 +72,13 @@ QEMU configuration:
 
 - `make test` — run kernel tests (default isolated mode, one run directory per invocation)
 - `make test-isolated` — isolated test alias
+- `make test-driver` — driver module only
+- `make test-mm` — memory module only
+- `make test-sync` — sync module only
+- `make test-vfork` — vfork module only
+- `make test-sched` — scheduler module only
+- `make test-crash` — crash module only
+- `make test-syscall-trap` / `make test-syscall` — syscall/trap module only
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
