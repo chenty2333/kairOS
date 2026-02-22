@@ -11,29 +11,82 @@
 
 int run_driver_tests(void);
 int run_mm_tests(void);
+int run_syscall_trap_tests(void);
 extern int run_sched_stress_tests(void);
 
-void init_user(void) {
 #if CONFIG_KERNEL_TESTS
+enum kernel_test_module_bits {
+    KTEST_MOD_DRIVER = 1U << 0,
+    KTEST_MOD_MM = 1U << 1,
+    KTEST_MOD_SYNC = 1U << 2,
+    KTEST_MOD_VFORK = 1U << 3,
+    KTEST_MOD_SCHED = 1U << 4,
+    KTEST_MOD_CRASH = 1U << 5,
+    KTEST_MOD_SYSCALL_TRAP = 1U << 6,
+};
+
+static int kernel_test_module_enabled(unsigned int bit) {
+    return (CONFIG_KERNEL_TEST_MASK & bit) != 0;
+}
+
+static int kernel_test_main(void *arg __attribute__((unused))) {
     int suite_fail = 0;
     int total_failed = 0;
 
-    suite_fail = run_driver_tests();
-    total_failed += (suite_fail > 0) ? suite_fail : 0;
+    if (kernel_test_module_enabled(KTEST_MOD_DRIVER)) {
+        suite_fail = run_driver_tests();
+        total_failed += (suite_fail > 0) ? suite_fail : 0;
+    } else {
+        pr_info("Skipping driver tests (CONFIG_KERNEL_TEST_MASK)\n");
+    }
 
-    suite_fail = run_mm_tests();
-    total_failed += (suite_fail > 0) ? suite_fail : 0;
+    if (kernel_test_module_enabled(KTEST_MOD_MM)) {
+        suite_fail = run_mm_tests();
+        total_failed += (suite_fail > 0) ? suite_fail : 0;
+    } else {
+        pr_info("Skipping mm tests (CONFIG_KERNEL_TEST_MASK)\n");
+    }
 
-    pr_info("Starting robustness test...\n");
-    run_sync_test();
-    run_vfork_test();
-    suite_fail = run_sched_stress_tests();
-    total_failed += (suite_fail > 0) ? suite_fail : 0;
+    if (kernel_test_module_enabled(KTEST_MOD_SYSCALL_TRAP)) {
+        suite_fail = run_syscall_trap_tests();
+        total_failed += (suite_fail > 0) ? suite_fail : 0;
+    } else {
+        pr_info("Skipping syscall/trap tests (CONFIG_KERNEL_TEST_MASK)\n");
+    }
+
+    if (kernel_test_module_enabled(KTEST_MOD_SYNC) ||
+        kernel_test_module_enabled(KTEST_MOD_VFORK) ||
+        kernel_test_module_enabled(KTEST_MOD_SCHED) ||
+        kernel_test_module_enabled(KTEST_MOD_CRASH)) {
+        pr_info("Starting robustness test...\n");
+    }
+
+    if (kernel_test_module_enabled(KTEST_MOD_SYNC))
+        run_sync_test();
+    else
+        pr_info("Skipping sync test (CONFIG_KERNEL_TEST_MASK)\n");
+
+    if (kernel_test_module_enabled(KTEST_MOD_VFORK))
+        run_vfork_test();
+    else
+        pr_info("Skipping vfork test (CONFIG_KERNEL_TEST_MASK)\n");
+
+    if (kernel_test_module_enabled(KTEST_MOD_SCHED)) {
+        suite_fail = run_sched_stress_tests();
+        total_failed += (suite_fail > 0) ? suite_fail : 0;
+    } else {
+        pr_info("Skipping sched tests (CONFIG_KERNEL_TEST_MASK)\n");
+    }
+
+    if (kernel_test_module_enabled(KTEST_MOD_CRASH)) {
 #if defined(ARCH_riscv64)
-    run_crash_test();
+        run_crash_test();
 #else
-    pr_info("Skipping crash test on this architecture\n");
+        pr_info("Skipping crash test on this architecture\n");
 #endif
+    } else {
+        pr_info("Skipping crash test (CONFIG_KERNEL_TEST_MASK)\n");
+    }
 
     arch_irq_enable();
     int status;
@@ -49,6 +102,24 @@ void init_user(void) {
     arch_cpu_shutdown();
     while (1) {
         arch_cpu_halt();
+    }
+}
+#endif
+
+void init_user(void) {
+#if CONFIG_KERNEL_TESTS
+    struct process *runner = kthread_create(kernel_test_main, NULL, "ktest");
+    if (!runner) {
+        pr_err("kernel tests: failed to start test runner thread\n");
+        arch_cpu_shutdown();
+        while (1) {
+            arch_cpu_halt();
+        }
+    }
+    sched_enqueue(runner);
+    arch_irq_enable();
+    while (1) {
+        schedule();
     }
 #else
     struct process *initp = proc_start_init();
