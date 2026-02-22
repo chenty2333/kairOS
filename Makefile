@@ -65,6 +65,8 @@ COMMON_ARCH_SRCS := \
 USE_GCC ?= 0
 TOOLCHAIN_MODE ?= auto
 WITH_TCC ?= 1
+INITRAMFS_BUSYBOX ?= 0
+QEMU_SMP ?= 4
 
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
@@ -90,6 +92,9 @@ else ifeq ($(ARCH),aarch64)
   QEMU_MACHINE := virt,gic-version=3
   QEMU_CPU := cortex-a72
   QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
+  INITRAMFS_BUSYBOX := 1
+  # AArch64 SMP path is still unstable; default to single CPU for run/debug.
+  QEMU_SMP := 1
   KERNEL_LOAD := 0x40000000
 else
   $(error Unsupported architecture: $(ARCH))
@@ -287,7 +292,7 @@ $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
 
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)$(KAIROS_CMD) image initramfs
+	$(Q)INITRAMFS_BUSYBOX=$(INITRAMFS_BUSYBOX) $(KAIROS_CMD) image initramfs
 	@touch $@
 
 busybox: $(BUSYBOX_STAMP)
@@ -391,7 +396,7 @@ $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
 # ============================================================
 
 # Common QEMU flags
-QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp 4
+QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp $(QEMU_SMP)
 # Use QEMU stdio multiplexer for robust interactive input in -nographic mode.
 QEMU_FLAGS += -serial mon:stdio
 QEMU_UEFI_NOISE_FILTER := ./scripts/impl/filter-uefi-noise.sh
@@ -506,7 +511,7 @@ RUN_DEPS := check-tools $(KERNEL) uefi disk
 
 run: $(RUN_DEPS)
 	@$(MAKE) --no-print-directory check-disk
-	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP)"
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
 	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
 else
@@ -514,7 +519,7 @@ else
 endif
 
 run-e1000: $(RUN_DEPS)
-	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, e1000)"
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP, e1000)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
 	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
 else
@@ -531,7 +536,7 @@ run-iso: iso
 	$(Q)$(QEMU) -cdrom $(ISO) -m 256M $(QEMU_EXTRA)
 
 debug: $(RUN_DEPS)
-	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, 4 SMP, GDB :1234)"
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP, GDB :1234)"
 	@echo "  In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
 	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -s -S $(QEMU_STDIN)
 
