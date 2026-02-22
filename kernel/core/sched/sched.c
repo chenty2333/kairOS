@@ -497,6 +497,7 @@ void sched_enqueue(struct process *p) {
 
     /* Find target CPU - currently simple: stay on current or preferred */
     int cpu = (p->se.cpu >= 0 && p->se.cpu < sched_nr_cpus()) ? p->se.cpu : arch_cpu_id();
+    int orig_cpu = p->se.cpu;
 
     /* Push migration: if preferred CPU is busy, try to find an idle one */
     if (sched_steal_is_enabled() && sched_nr_cpus() > 1) {
@@ -504,7 +505,9 @@ void sched_enqueue(struct process *p) {
                                        __ATOMIC_RELAXED);
         if (nr > 0) {
             int online = sched_nr_cpus();
-            for (int i = 0; i < online; i++) {
+            uint32_t start = (uint32_t)(cpu_data[cpu].ticks) % (uint32_t)online;
+            for (int j = 0; j < online; j++) {
+                int i = (int)((start + (uint32_t)j) % (uint32_t)online);
                 if (i == cpu) continue;
                 if (__atomic_load_n(&cpu_data[i].runqueue.nr_running,
                                      __ATOMIC_RELAXED) == 0) {
@@ -533,11 +536,10 @@ void sched_enqueue(struct process *p) {
     p->se.sched_class->enqueue_task(rq, p, ENQUEUE_WAKEUP);
     sched_stat_inc(&cpu_data[cpu].stats.enqueue_count);
     sched_trace_event(SCHED_TRACE_ENQUEUE, p, (uint64_t)cpu, p->se.vruntime);
-    int prev_cpu = p->se.cpu;
     se_mark_queued(&p->se, cpu);
     rq->nr_running++;
-    if (cpu != prev_cpu && prev_cpu >= 0)
-        sched_trace_event(SCHED_TRACE_MIGRATE, p, (uint64_t)prev_cpu, (uint64_t)cpu);
+    if (cpu != orig_cpu && orig_cpu >= 0)
+        sched_trace_event(SCHED_TRACE_MIGRATE, p, (uint64_t)orig_cpu, (uint64_t)cpu);
     sched_validate_entity(p, "sched_enqueue");
 
     /* Check preemption via class */
