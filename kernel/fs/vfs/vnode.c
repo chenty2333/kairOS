@@ -71,17 +71,33 @@ void vnode_get(struct vnode *vn) {
 void vnode_put(struct vnode *vn) {
     if (!vn)
         return;
-    uint32_t old = atomic_fetch_sub(&vn->refcount, 1);
-    if (old == 0)
+    uint32_t cur = atomic_read(&vn->refcount);
+    if (cur == 0)
         panic("vnode_put: refcount already zero on vnode ino=%lu",
               (unsigned long)vn->ino);
+    uint32_t old = atomic_fetch_sub(&vn->refcount, 1);
     if (old == 1) {
         struct vnode *parent = vn->parent;
         vn->parent = NULL;
         vn->name[0] = '\0';
-        if (vn->ops->close)
+        if (vn->ops && vn->ops->close)
             vn->ops->close(vn);
-        if (parent)
-            vnode_put(parent);
+        /* Iterate instead of recursing to avoid stack overflow */
+        while (parent) {
+            struct vnode *next = NULL;
+            cur = atomic_read(&parent->refcount);
+            if (cur == 0)
+                panic("vnode_put: refcount already zero on vnode ino=%lu",
+                      (unsigned long)parent->ino);
+            old = atomic_fetch_sub(&parent->refcount, 1);
+            if (old != 1)
+                break;
+            next = parent->parent;
+            parent->parent = NULL;
+            parent->name[0] = '\0';
+            if (parent->ops && parent->ops->close)
+                parent->ops->close(parent);
+            parent = next;
+        }
     }
 }

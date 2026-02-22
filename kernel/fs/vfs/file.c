@@ -197,7 +197,7 @@ void file_put(struct file *file) {
 }
 
 ssize_t vfs_read(struct file *file, void *buf, size_t len) {
-    if (!file)
+    if (!file || !file->vnode || !file->vnode->ops)
         return -EINVAL;
     if (file->vnode->type == VNODE_DIR)
         return -EISDIR;
@@ -225,7 +225,7 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
 }
 
 ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
-    if (!file)
+    if (!file || !file->vnode || !file->vnode->ops)
         return -EINVAL;
     if (file->vnode->type == VNODE_DIR)
         return -EISDIR;
@@ -265,6 +265,10 @@ int vfs_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
 }
 
 off_t vfs_seek(struct file *file, off_t offset, int whence) {
+    if (!file || !file->vnode)
+        return -EINVAL;
+    if (file->vnode->type == VNODE_PIPE || file->vnode->type == VNODE_SOCKET)
+        return -ESPIPE;
     off_t next;
     if (whence == SEEK_END) {
         rwlock_read_lock(&file->vnode->lock);

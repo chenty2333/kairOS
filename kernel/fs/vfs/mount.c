@@ -239,10 +239,9 @@ struct mount_ns *vfs_mount_ns_get_from(struct mount_ns *ns) {
 void vfs_mount_ns_put(struct mount_ns *ns) {
     if (!ns)
         return;
-    uint32_t old = atomic_read(&ns->refcount);
+    uint32_t old = atomic_fetch_sub(&ns->refcount, 1);
     if (old == 0)
         panic("vfs_mount_ns_put: refcount underflow");
-    old = atomic_fetch_sub(&ns->refcount, 1);
     if (ns == &init_mnt_ns)
         return;
     if (old == 1) {

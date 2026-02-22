@@ -95,13 +95,13 @@ static void dentry_unhash(struct dentry *d) {
 }
 
 void dentry_put(struct dentry *d) {
-    if (!d)
-        return;
-    uint32_t old = atomic_read(&d->refcount);
-    if (old == 0)
-        panic("dentry_put: refcount underflow on dentry '%s'", d->name);
-    old = atomic_fetch_sub(&d->refcount, 1);
-    if (old == 1) {
+    while (d) {
+        uint32_t old = atomic_read(&d->refcount);
+        if (old == 0)
+            panic("dentry_put: refcount underflow on dentry '%s'", d->name);
+        old = atomic_fetch_sub(&d->refcount, 1);
+        if (old != 1)
+            break;
         struct dentry *parent = d->parent;
         struct vnode *vn = d->vnode;
         d->parent = NULL;
@@ -109,9 +109,8 @@ void dentry_put(struct dentry *d) {
         dentry_unhash(d);
         if (vn)
             vnode_put(vn);
-        if (parent)
-            dentry_put(parent);
         kmem_cache_free(dentry_cache, d);
+        d = parent;
     }
 }
 

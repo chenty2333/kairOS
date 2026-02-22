@@ -80,14 +80,13 @@ static void n_tty_flush_input(struct tty_struct *tty) {
 
 static void n_tty_handle_char(struct tty_struct *tty, char c,
                                bool *pushed, uint32_t *sig_mask) {
-    /* Input translation */
-    if (tty->termios.c_iflag & ICRNL) {
-        if (c == '\r') c = '\n';
-    } else if (tty->termios.c_iflag & INLCR) {
-        if (c == '\n') c = '\r';
-    } else if (tty->termios.c_iflag & IGNCR) {
-        if (c == '\r') return;
-    }
+    /* Input translation (POSIX order: IGNCR before ICRNL) */
+    if ((tty->termios.c_iflag & IGNCR) && c == '\r')
+        return;
+    if ((tty->termios.c_iflag & ICRNL) && c == '\r')
+        c = '\n';
+    else if ((tty->termios.c_iflag & INLCR) && c == '\n')
+        c = '\r';
 
     /* ISIG: signal characters (independent of ICANON per POSIX) */
     if (tty->termios.c_lflag & ISIG) {
