@@ -9,18 +9,26 @@
 #include <kairos/process.h>
 #include <kairos/sched.h>
 
-void run_driver_tests(void);
-void run_mm_tests(void);
-extern void run_sched_stress_tests(void);
+int run_driver_tests(void);
+int run_mm_tests(void);
+extern int run_sched_stress_tests(void);
 
 void init_user(void) {
 #if CONFIG_KERNEL_TESTS
-    run_driver_tests();
-    run_mm_tests();
+    int suite_fail = 0;
+    int total_failed = 0;
+
+    suite_fail = run_driver_tests();
+    total_failed += (suite_fail > 0) ? suite_fail : 0;
+
+    suite_fail = run_mm_tests();
+    total_failed += (suite_fail > 0) ? suite_fail : 0;
+
     pr_info("Starting robustness test...\n");
     run_sync_test();
     run_vfork_test();
-    run_sched_stress_tests();
+    suite_fail = run_sched_stress_tests();
+    total_failed += (suite_fail > 0) ? suite_fail : 0;
 #if defined(ARCH_riscv64)
     run_crash_test();
 #else
@@ -33,6 +41,10 @@ void init_user(void) {
         ;
     }
 
+    if (total_failed == 0)
+        pr_info("TEST_SUMMARY: failed=0\n");
+    else
+        pr_err("TEST_SUMMARY: failed=%d\n", total_failed);
     pr_info("Tests complete. Stopping system...\n");
     arch_cpu_shutdown();
     while (1) {

@@ -159,7 +159,7 @@ static void test_vfs_umount_busy_with_child_mount(void) {
     test_check(ret == 0, "vfs umount child mount cleanup");
 }
 
-void run_driver_tests(void) {
+int run_driver_tests(void) {
     tests_failed = 0;
     pr_info("\n=== Driver Tests ===\n");
 
@@ -173,4 +173,5 @@ void run_driver_tests(void) {
         pr_info("driver tests: all passed\n");
     else
         pr_err("driver tests: %d failures\n", tests_failed);
+    return tests_failed;
 }

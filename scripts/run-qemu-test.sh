@@ -36,9 +36,18 @@ has_fail_markers=0
 has_pass_marker=0
 has_done_marker=0
 has_boot_marker=0
+has_summary_marker=0
+has_summary_pass=0
 
-if grep -Eiq "driver tests: [1-9][0-9]* failures|panic\\(|panic:|User exception|Kernel exception|Trap dump|Inst page fault|sepc=0x0000000000000000|Zombie Rescheduling|ASSERT failed|pcp list corruption|PCP integrity failure|disabling PCP on cpu" "${TEST_LOG}"; then
+if grep -Eiq "driver tests: [1-9][0-9]* failures|mm tests: [1-9][0-9]* failures|sched_stress: [1-9][0-9]* failures|sched_stress: .* FAIL:|panic\\(|panic:|User exception|Kernel exception|Trap dump|Inst page fault|sepc=0x0000000000000000|Zombie Rescheduling|ASSERT failed|pcp list corruption|PCP integrity failure|disabling PCP on cpu" "${TEST_LOG}"; then
     has_fail_markers=1
+fi
+
+if grep -Eiq "TEST_SUMMARY: failed=[0-9]+" "${TEST_LOG}"; then
+    has_summary_marker=1
+fi
+if grep -Fq "TEST_SUMMARY: failed=0" "${TEST_LOG}"; then
+    has_summary_pass=1
 fi
 
 if grep -Fq "driver tests: all passed" "${TEST_LOG}"; then
@@ -89,7 +98,16 @@ if [[ "${TEST_REQUIRE_MARKERS}" -eq 0 ]]; then
     exit 1
 fi
 
-if [[ ${has_pass_marker} -eq 1 && ${has_done_marker} -eq 1 ]]; then
+if [[ ${has_summary_marker} -eq 1 ]]; then
+    if [[ ${has_summary_pass} -eq 1 && ${has_done_marker} -eq 1 ]]; then
+        if [[ ${qemu_rc} -eq 124 && "${TEST_EXPECT_TIMEOUT}" -eq 1 ]]; then
+            echo "test: PASS (summary found, expected timeout)"
+        else
+            echo "test: PASS (qemu_rc=${qemu_rc}, summary passed)"
+        fi
+        exit 0
+    fi
+elif [[ ${has_pass_marker} -eq 1 && ${has_done_marker} -eq 1 ]]; then
     if [[ ${qemu_rc} -eq 124 && "${TEST_EXPECT_TIMEOUT}" -eq 1 ]]; then
         echo "test: PASS (markers found, expected timeout)"
     else
@@ -105,7 +123,11 @@ if [[ ${qemu_rc} -eq 124 ]]; then
 fi
 
 if [[ ${has_pass_marker} -eq 0 ]]; then
-    echo "test: missing pass marker: driver tests: all passed" >&2
+    if [[ ${has_summary_marker} -eq 1 ]]; then
+        echo "test: summary indicates failures" >&2
+    else
+        echo "test: missing pass marker: driver tests: all passed" >&2
+    fi
 else
     echo "test: missing completion marker" >&2
 fi

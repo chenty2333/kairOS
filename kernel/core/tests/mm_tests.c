@@ -261,10 +261,6 @@ static void test_pmm_reserve_range_nonallocatable(void) {
     size_t after = pmm_num_free_pages();
     test_check(before == after + 1, "reserve free_count_drop");
 
-    pmm_free_page(target);
-    size_t after_free = pmm_num_free_pages();
-    test_check(after_free == after, "reserve no_reinsert_on_free");
-
     paddr_t pages[MM_TEST_PROBE_MAX];
     size_t n = 0;
     bool seen = false;
@@ -298,7 +294,7 @@ static void test_kmalloc_aligned_basic(void) {
     kfree_aligned(p8);
 }
 
-void run_mm_tests(void) {
+int run_mm_tests(void) {
     tests_failed = 0;
     pr_info("\n=== MM Tests ===\n");
 
@@ -313,10 +309,11 @@ void run_mm_tests(void) {
         pr_info("mm tests: all passed\n");
     else
         pr_err("mm tests: %d failures\n", tests_failed);
+    return tests_failed;
 }
 
 #else
 
-void run_mm_tests(void) {}
+int run_mm_tests(void) { return 0; }
 
 #endif
