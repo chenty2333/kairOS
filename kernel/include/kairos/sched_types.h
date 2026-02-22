@@ -37,6 +37,7 @@ struct sched_entity {
     uint64_t last_run_time;  /* wall-clock timestamp of last pick (ns) */
     int nice;
     int cpu;
+    uint32_t wake_pending;
     struct rb_node sched_node;
     const struct sched_class *sched_class;
 };
@@ -60,6 +61,10 @@ static inline void sched_entity_init(struct sched_entity *se) {
     se->last_run_time = 0;
     se->nice = 0;
     se->cpu = -1;
+    se->wake_pending = 0;
+    se->sched_node.__rb_parent_color = 0;
+    se->sched_node.rb_left = NULL;
+    se->sched_node.rb_right = NULL;
     se->sched_class = NULL;
 }
 
