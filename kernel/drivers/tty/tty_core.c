@@ -80,11 +80,21 @@ void tty_free(struct tty_struct *tty) {
 int tty_open(struct tty_struct *tty) {
     if (!tty)
         return -EINVAL;
+
+    bool irq_state = arch_irq_save();
+    spin_lock(&tty->lock);
     tty->count++;
+    spin_unlock(&tty->lock);
+    arch_irq_restore(irq_state);
+
     if (tty->driver && tty->driver->ops && tty->driver->ops->open) {
         int ret = tty->driver->ops->open(tty);
         if (ret < 0) {
+            irq_state = arch_irq_save();
+            spin_lock(&tty->lock);
             tty->count--;
+            spin_unlock(&tty->lock);
+            arch_irq_restore(irq_state);
             return ret;
         }
     }
@@ -96,7 +106,16 @@ int tty_open(struct tty_struct *tty) {
 void tty_close(struct tty_struct *tty) {
     if (!tty)
         return;
-    if (--tty->count <= 0) {
+
+    bool do_close = false;
+    bool irq_state = arch_irq_save();
+    spin_lock(&tty->lock);
+    if (--tty->count <= 0)
+        do_close = true;
+    spin_unlock(&tty->lock);
+    arch_irq_restore(irq_state);
+
+    if (do_close) {
         if (tty->ldisc.ops && tty->ldisc.ops->close)
             tty->ldisc.ops->close(tty);
         if (tty->driver && tty->driver->ops && tty->driver->ops->close)
@@ -334,9 +353,21 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
     case TIOCSWINSZ: {
         if (!arg)
             return -EFAULT;
-        if (copy_from_user(&tty->winsize, (void *)arg,
-                           sizeof(tty->winsize)) < 0)
+        struct winsize ws;
+        if (copy_from_user(&ws, (void *)arg, sizeof(ws)) < 0)
             return -EFAULT;
+        bool changed;
+        pid_t fg;
+        bool irq_state = arch_irq_save();
+        spin_lock(&tty->lock);
+        changed = memcmp(&tty->winsize, &ws, sizeof(ws)) != 0;
+        if (changed)
+            tty->winsize = ws;
+        fg = tty->fg_pgrp;
+        spin_unlock(&tty->lock);
+        arch_irq_restore(irq_state);
+        if (changed && fg > 0)
+            signal_send_pgrp(fg, SIGWINCH);
         return 0;
     }
     case TIOCGSID: {
