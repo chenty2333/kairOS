@@ -38,9 +38,13 @@ sched_class interface: enqueue_task, dequeue_task, pick_next_task, put_prev_task
 
 fair_sched_class (EEVDF implementation):
 - Red-black tree (tasks_timeline) ordered by vruntime
+- sched_entity run_state machine: BLOCKED/RUNNABLE/QUEUED/RUNNING
+- wakeup handoff uses wake_pending to close sleep/wakeup race when wake arrives before RUNNING task transitions to BLOCKED
 - vruntime accumulates weighted by nice value (mapped through sched_nice_to_weight[])
 - Time slices: SCHED_SLICE_NS=3ms, SCHED_LATENCY_NS=6ms, SCHED_MIN_GRANULARITY_NS=0.5ms
 - vlag mechanism handles fairness compensation during task migration
+- min_deadline augmentation recompute uses iterative post-order walk (non-recursive)
+- sched_node is explicitly detached on entity init and rb_erase to prevent stale-link reuse
 
 Per-CPU run queue (percpu_data.runqueue):
 - nr_running count
@@ -54,8 +58,10 @@ SMP support:
 
 Core functions:
 - schedule(): pick next task and context switch
+- schedule() entry drains pending prev_task cleanup before next switch to avoid lost zombie cleanup events across fresh-task switches
 - sched_tick(): driven by timer interrupt, updates vruntime, checks preemption
 - sched_enqueue() / sched_dequeue(): enqueue/dequeue
+- sched_wake(): wake BLOCKED tasks, or set wake_pending for RUNNING tasks and request resched
 - sched_fork(): child inherits fair_sched_class
 
 ## Synchronization Primitives (core/sync/)

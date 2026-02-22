@@ -52,6 +52,7 @@ struct rq {
 void sched_init(void);
 void sched_init_cpu(int cpu);
 void sched_enqueue(struct process *p);
+void sched_wake(struct process *p);
 void sched_dequeue(struct process *p);
 void schedule(void);
 void sched_tick(void);

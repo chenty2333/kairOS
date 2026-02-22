@@ -124,10 +124,9 @@ void proc_wakeup(struct process *p) {
     if (p->wait_channel && p->wait_entry.active)
         wait_queue_remove_entry(&p->wait_entry);
     p->wait_channel = NULL;
-    p->state = PROC_RUNNABLE;
     sched_trace_event(SCHED_TRACE_WAKEUP, p, 0, 0);
     proc_unlock(p);
-    sched_enqueue(p);
+    sched_wake(p);
 }
 
 void proc_wake_expired_sleepers(uint64_t now_ticks) {
