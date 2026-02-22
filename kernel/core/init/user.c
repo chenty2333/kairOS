@@ -10,11 +10,13 @@
 #include <kairos/sched.h>
 
 void run_driver_tests(void);
+void run_mm_tests(void);
 extern void run_sched_stress_tests(void);
 
 void init_user(void) {
 #if CONFIG_KERNEL_TESTS
     run_driver_tests();
+    run_mm_tests();
     pr_info("Starting robustness test...\n");
     run_sync_test();
     run_vfork_test();
