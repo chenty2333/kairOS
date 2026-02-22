@@ -69,19 +69,12 @@ static void remove_vma(struct mm_struct *mm, struct vm_area *vma) {
     rb_erase(&vma->rb_node, &mm->mm_rb);
 }
 
-int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
-               uint32_t flags, struct vnode *vn, off_t offset) {
-    if (!mm) {
-        return -EINVAL;
-    }
-
+int mm_add_vma_locked(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                             uint32_t flags, struct vnode *vn, off_t offset) {
     start = ALIGN_DOWN(start, CONFIG_PAGE_SIZE);
     end = ALIGN_UP(end, CONFIG_PAGE_SIZE);
-    if (start >= end) {
+    if (start >= end)
         return -EINVAL;
-    }
-
-    mutex_lock(&mm->lock);
 
     struct vm_area *acc = NULL;
     if (!vn) {
@@ -90,10 +83,8 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
             if (!hit) {
                 break;
             }
-            if (hit->vnode) {
-                mutex_unlock(&mm->lock);
+            if (hit->vnode)
                 return -EEXIST;
-            }
 
             start = (start < hit->start) ? start : hit->start;
             end = (end > hit->end) ? end : hit->end;
@@ -110,16 +101,13 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
             }
         }
     } else if (find_vma_intersection(mm, start, end)) {
-        mutex_unlock(&mm->lock);
         return -EEXIST;
     }
 
     if (!acc) {
         acc = kzalloc(sizeof(*acc));
-        if (!acc) {
-            mutex_unlock(&mm->lock);
+        if (!acc)
             return -ENOMEM;
-        }
         INIT_LIST_HEAD(&acc->list);
     }
 
@@ -150,8 +138,18 @@ int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
     }
 
     insert_vma(mm, acc);
-    mutex_unlock(&mm->lock);
     return 0;
+}
+
+int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+               uint32_t flags, struct vnode *vn, off_t offset) {
+    if (!mm)
+        return -EINVAL;
+
+    mutex_lock(&mm->lock);
+    int ret = mm_add_vma_locked(mm, start, end, flags, vn, offset);
+    mutex_unlock(&mm->lock);
+    return ret;
 }
 
 int mm_add_vma_file(struct mm_struct *mm, vaddr_t start, vaddr_t end,
@@ -293,6 +291,7 @@ int mm_munmap(struct mm_struct *mm, vaddr_t addr, size_t len) {
             vma->end = addr;
 
             INIT_LIST_HEAD(&nv->list);
+            memset(&nv->rb_node, 0, sizeof(nv->rb_node));
 
             insert_vma(mm, nv);
 
