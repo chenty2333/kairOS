@@ -11,6 +11,10 @@
 #include <kairos/string.h>
 #include <kairos/vfs.h>
 
+/* internal, defined in vma.c */
+int mm_add_vma_locked(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                      uint32_t flags, struct vnode *vn, off_t offset);
+
 /* --- Core mm_struct --- */
 
 void vmm_init(void) {}
@@ -31,15 +35,15 @@ struct mm_struct *mm_create(void) {
 void mm_get(struct mm_struct *mm) {
     if (!mm)
         return;
-    mutex_lock(&mm->lock);
-    mm->refcount++;
-    mutex_unlock(&mm->lock);
+    __atomic_add_fetch(&mm->refcount, 1, __ATOMIC_RELAXED);
 }
 
 void mm_destroy(struct mm_struct *mm) {
     if (!mm) return;
+    uint32_t old = __atomic_fetch_sub(&mm->refcount, 1, __ATOMIC_ACQ_REL);
+    if (old > 1)
+        return;
     mutex_lock(&mm->lock);
-    if (--mm->refcount > 0) { mutex_unlock(&mm->lock); return; }
     struct vm_area *vma, *tmp;
     list_for_each_entry_safe(vma, tmp, &mm->vma_list, list) {
         mm_unmap_range_noflush(mm->pgdir, vma->start, vma->end);
@@ -250,13 +254,13 @@ vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk) {
             mutex_unlock(&mm->lock);
             return old_brk;
         }
-        mutex_unlock(&mm->lock);
 
-        if (mm_add_vma(mm, USER_HEAP_START, newbrk, VM_READ | VM_WRITE, NULL,
-                       0) < 0)
+        if (mm_add_vma_locked(mm, USER_HEAP_START, newbrk,
+                              VM_READ | VM_WRITE, NULL, 0) < 0) {
+            mutex_unlock(&mm->lock);
             return old_brk;
+        }
 
-        mutex_lock(&mm->lock);
         mm->brk = newbrk;
         mutex_unlock(&mm->lock);
         return newbrk;

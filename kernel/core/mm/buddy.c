@@ -631,7 +631,6 @@ void free_pages(struct page *page, unsigned int order) {
         return;
     }
     int cpu = pmm_sanitize_cpu((int)arch_cpu_id());
-    bool was_on_pcp = (page->flags & PG_PCP) != 0;
     page->flags &= ~(PG_KERNEL | PG_USER | PG_SLAB);
     page->refcount = 0;
     page->order = order;
@@ -683,8 +682,9 @@ void free_pages(struct page *page, unsigned int order) {
             if (pcp_enabled && !pcp_validate_locked(cpu, "free postcheck"))
                 pcp_disable_locked("free postcheck failed", cpu);
         }
-        if ((!pcp_enabled || (!queued_to_pcp && !queued_to_remote)) &&
-            !was_on_pcp) {
+        if (!queued_to_pcp && !queued_to_remote) {
+            page->flags &= ~PG_PCP;
+            page->pcp_home_cpu = -1;
             spin_lock(&buddy_lock);
             __free_pages(page, order);
             spin_unlock(&buddy_lock);
@@ -921,11 +921,17 @@ void pmm_put_page(paddr_t pa) {
     struct page *p = phys_to_page(pa);
     if (!p)
         return;
-    uint32_t old = __atomic_fetch_sub(&p->refcount, 1, __ATOMIC_RELAXED);
-    if (old == 0) {
-        __atomic_store_n(&p->refcount, 0, __ATOMIC_RELAXED);
-        pr_err("pmm: put on free page %p (pa=%p)\n", p, (void *)pa);
-        return;
+    uint32_t old;
+    for (;;) {
+        old = __atomic_load_n(&p->refcount, __ATOMIC_RELAXED);
+        if (old == 0) {
+            pr_err("pmm: put on free page %p (pa=%p)\n", p, (void *)pa);
+            return;
+        }
+        if (__atomic_compare_exchange_n(&p->refcount, &old, old - 1,
+                                        false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            break;
     }
     if (old == 1)
         free_pages(p, 0);

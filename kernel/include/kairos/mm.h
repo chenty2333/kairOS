@@ -156,6 +156,7 @@ int mm_map_user_pages(struct mm_struct *mm, size_t size, uint32_t prot,
 void *phys_to_virt(paddr_t addr);
 paddr_t virt_to_phys(void *addr);
 void *ioremap(paddr_t phys, size_t size);
+// WARN: no-op — ioremap uses HHDM, no VA allocator to reclaim. Needs vmalloc.
 void iounmap(void *virt);
 
 #endif

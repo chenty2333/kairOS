@@ -146,8 +146,34 @@ paddr_t arch_mmu_create_table(void) {
     return dst;
 }
 
+static void destroy_pt(paddr_t table, int level) {
+    if (!table || table == kernel_pgdir)
+        return;
+
+    uint64_t *pt = (uint64_t *)phys_to_virt(table);
+    if (level > 0) {
+        for (size_t i = 0; i < PTES_PER_PAGE; i++) {
+            if (pt[i] & PTE_P)
+                destroy_pt((paddr_t)(pt[i] & PTE_ADDR_MASK), level - 1);
+        }
+    }
+    pmm_free_page(table);
+}
+
 void arch_mmu_destroy_table(paddr_t table) {
-    (void)table;
+    if (!table || table == kernel_pgdir)
+        return;
+
+    /*
+     * Only free user-half entries (lower 256 PML4 slots).
+     * Upper 256 are shared kernel mappings — don't recurse into them.
+     */
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(table);
+    for (size_t i = 0; i < PTES_PER_PAGE / 2; i++) {
+        if (pml4[i] & PTE_P)
+            destroy_pt((paddr_t)(pml4[i] & PTE_ADDR_MASK), 2);
+    }
+    pmm_free_page(table);
 }
 
 int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
