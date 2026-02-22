@@ -21,8 +21,9 @@ source "${ROOT_DIR}/scripts/lib/common.sh"
 source "${ROOT_DIR}/scripts/lib/toolchain.sh"
 
 TCC_SRC="${TCC_SRC:-$ROOT_DIR/third_party/tinycc}"
-OUT_DIR="${OUT_DIR:-$ROOT_DIR/build/${ARCH}/tcc}"
-SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build}"
+OUT_DIR="${OUT_DIR:-$BUILD_ROOT/${ARCH}/tcc}"
+SYSROOT="${SYSROOT:-$BUILD_ROOT/${ARCH}/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 
 TARGET="$(kairos_arch_to_musl_target "$ARCH")" || {
@@ -79,7 +80,7 @@ if [[ -n "${KAIROS_TC_NOTE:-}" && "$QUIET" != "1" ]]; then
 fi
 
 # --- Build in a temporary directory to avoid polluting the source tree ---
-BUILD_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/tcc-build")"
+BUILD_DIR="$(realpath -m "$BUILD_ROOT/${ARCH}/tcc-build")"
 mkdir -p "$BUILD_DIR"
 
 if [[ "$QUIET" == "1" ]]; then

@@ -14,7 +14,8 @@ set -euo pipefail
 ARCH="${1:-riscv64}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT_DIR}/scripts/lib/common.sh"
-BUILD_DIR="$ROOT_DIR/build/$ARCH"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build}"
+BUILD_DIR="$BUILD_ROOT/$ARCH"
 QUIET="${QUIET:-0}"
 
 case "$ARCH" in

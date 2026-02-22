@@ -19,6 +19,7 @@ KAIROS_ARCH="${ARCH:-riscv64}"
 KAIROS_QUIET="${QUIET:-0}"
 KAIROS_VERBOSE=0
 KAIROS_JOBS="${JOBS:-$(nproc)}"
+KAIROS_BUILD_ROOT="${BUILD_ROOT:-${KAIROS_ROOT_DIR}/build}"
 
 kairos_usage() {
     cat <<'EOF'
@@ -29,6 +30,7 @@ Global options:
   --quiet         Quiet mode
   --verbose       Verbose command echo
   --jobs <n>      Parallel jobs for build scripts
+  --build-root <path>  Build root directory (default: <repo>/build)
   -h, --help      Show help
 
 Commands:
@@ -66,6 +68,11 @@ while [[ $# -gt 0 ]]; do
             KAIROS_JOBS="$2"
             shift 2
             ;;
+        --build-root)
+            [[ $# -ge 2 ]] || kairos_die "--build-root requires a value"
+            KAIROS_BUILD_ROOT="$2"
+            shift 2
+            ;;
         -h | --help)
             kairos_usage
             exit 0
@@ -81,7 +88,10 @@ done
 
 [[ $# -gt 0 ]] || kairos_die "missing command"
 kairos_require_arch "$KAIROS_ARCH"
-export KAIROS_ROOT_DIR KAIROS_ARCH KAIROS_QUIET KAIROS_VERBOSE KAIROS_JOBS
+if [[ "${KAIROS_BUILD_ROOT}" != /* ]]; then
+    KAIROS_BUILD_ROOT="${KAIROS_ROOT_DIR}/${KAIROS_BUILD_ROOT}"
+fi
+export KAIROS_ROOT_DIR KAIROS_ARCH KAIROS_QUIET KAIROS_VERBOSE KAIROS_JOBS KAIROS_BUILD_ROOT
 
 command="$1"
 shift

@@ -18,8 +18,9 @@ source "${ROOT_DIR}/scripts/lib/common.sh"
 source "${ROOT_DIR}/scripts/lib/toolchain.sh"
 
 MUSL_SRC="${MUSL_SRC:-$ROOT_DIR/third_party/musl}"
-SYSROOT="${SYSROOT:-$ROOT_DIR/build/${ARCH}/sysroot}"
-BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build/${ARCH}/musl}"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build}"
+SYSROOT="${SYSROOT:-$BUILD_ROOT/${ARCH}/sysroot}"
+BUILD_DIR="${BUILD_DIR:-$BUILD_ROOT/${ARCH}/musl}"
 JOBS="${JOBS:-$(nproc)}"
 USE_GCC="${USE_GCC:-0}"
 
@@ -61,7 +62,7 @@ fi
 # For full musl builds with clang, ensure compiler-rt builtins exist.
 # This keeps TOOLCHAIN_MODE=auto usable when clang is selected.
 if [[ "${MUSL_STATIC_ONLY:-0}" != "1" && "$KAIROS_TC_KIND" == "clang" ]]; then
-  RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
+  RT_RESOURCE_DIR="$(realpath -m "$BUILD_ROOT/${ARCH}/compiler-rt/resource")"
   _rt_builtins=""
   if [[ -d "$RT_RESOURCE_DIR" ]]; then
     _rt_builtins="$(find "$RT_RESOURCE_DIR" -name 'libclang_rt.builtins*.a' | head -n1 || true)"
@@ -77,7 +78,7 @@ fi
 # find them.  This is needed for the full build (libc.so) on aarch64 where
 # 128-bit float operations require __subtf3 etc. from compiler-rt.
 # GCC ships its own libgcc so none of this applies.
-RT_RESOURCE_DIR="$(realpath -m "$ROOT_DIR/build/${ARCH}/compiler-rt/resource")"
+RT_RESOURCE_DIR="$(realpath -m "$BUILD_ROOT/${ARCH}/compiler-rt/resource")"
 if [[ "$CC" == clang* ]] && [[ -d "$RT_RESOURCE_DIR" ]]; then
   CFLAGS="${CFLAGS} -resource-dir $RT_RESOURCE_DIR"
   LDFLAGS="${LDFLAGS} -resource-dir $RT_RESOURCE_DIR"
