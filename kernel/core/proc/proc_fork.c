@@ -108,10 +108,10 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     if (clone_flags & CLONE_THREAD) {
         child->tgid = parent->tgid;
         child->group_leader = parent->group_leader;
-        bool tflags;
-        spin_lock_irqsave(&proc_table_lock, &tflags);
+        bool flags;
+        spin_lock_irqsave(&proc_table_lock, &flags);
         list_add_tail(&child->thread_group, &parent->group_leader->thread_group);
-        spin_unlock_irqrestore(&proc_table_lock, tflags);
+        spin_unlock_irqrestore(&proc_table_lock, flags);
     }
 
     /* Address space: share or clone */
