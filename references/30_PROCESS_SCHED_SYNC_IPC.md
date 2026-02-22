@@ -26,7 +26,8 @@ Lifecycle (core/proc/):
 - proc_wait(): reaps child processes
 
 Other:
-- kthread_create(): create kernel threads
+- kthread_create(): create detached kernel threads (not parent-linked, not reaped via proc_wait)
+- kthread_create_joinable(): create kernel threads linked to current parent for proc_wait-based reaping
 - proc_idle_init(): create idle process
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
 

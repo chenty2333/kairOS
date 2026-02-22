@@ -22,6 +22,48 @@ static void test_fail(const char *fmt, ...) {
     tests_failed++;
 }
 
+static int reap_children_bounded(int expected, const char *tag) {
+    int reaped = 0;
+    int status = 0;
+    const int max_loops = 200000;
+
+    for (int i = 0; i < max_loops && reaped < expected; i++) {
+        pid_t pid = proc_wait(-1, &status, WNOHANG);
+        if (pid > 0) {
+            reaped++;
+            continue;
+        }
+        if (pid < 0)
+            break;
+        proc_yield();
+    }
+
+    if (reaped < expected) {
+        struct process *self = proc_current();
+        pr_warn("sched_stress: %s reap timeout (%d/%d)\n", tag, reaped, expected);
+        int cpus = sched_cpu_count();
+        if (cpus < 1)
+            cpus = 1;
+        for (int c = 0; c < cpus; c++)
+            sched_debug_dump_cpu(c);
+        for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+            pid_t pid = proc_get_nth_pid(i);
+            if (pid <= 0)
+                break;
+            struct process *p = proc_find(pid);
+            if (!p || p == self)
+                continue;
+            if (p->parent == self) {
+                pr_warn("sched_stress: %s pending child pid=%d state=%d\n",
+                        tag, p->pid, p->state);
+                sched_debug_dump_process(p);
+            }
+        }
+    }
+
+    return reaped;
+}
+
 /* ---------- test_sched_fork_exit_storm ---------- */
 
 #define FORK_STORM_N 64
@@ -37,7 +79,7 @@ static void test_sched_fork_exit_storm(void) {
     pr_info("sched_stress: fork_exit_storm\n");
     int created = 0;
     for (int i = 0; i < FORK_STORM_N; i++) {
-        struct process *p = kthread_create(fork_exit_child, NULL, "fes");
+        struct process *p = kthread_create_joinable(fork_exit_child, NULL, "fes");
         if (p) {
             sched_enqueue(p);
             created++;
@@ -45,9 +87,10 @@ static void test_sched_fork_exit_storm(void) {
             pr_warn("sched_stress: fork_exit_storm: kthread_create failed at i=%d\n", i);
         }
     }
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int reaped = reap_children_bounded(created, "fork_exit_storm");
+    if (reaped != created)
+        test_fail("sched_stress: fork_exit_storm FAIL: reaped %d/%d\n",
+                  reaped, created);
     pr_info("sched_stress: fork_exit_storm done (%d/%d created)\n", created, FORK_STORM_N);
 }
 
@@ -91,7 +134,7 @@ static void test_sched_sleep_wakeup_stress(void) {
 
     int created = 0;
     for (int i = 0; i < SLEEP_WAKE_SLEEPERS; i++) {
-        struct process *p = kthread_create(sleeper_thread, NULL, "slp");
+        struct process *p = kthread_create_joinable(sleeper_thread, NULL, "slp");
         if (p) {
             __atomic_fetch_add(&sw_live_sleepers, 1, __ATOMIC_RELEASE);
             sched_enqueue(p);
@@ -100,16 +143,18 @@ static void test_sched_sleep_wakeup_stress(void) {
             pr_warn("sched_stress: sleep_wakeup: kthread_create failed at i=%d\n", i);
         }
     }
-    struct process *w = kthread_create(waker_thread, NULL, "wkr");
+    struct process *w = kthread_create_joinable(waker_thread, NULL, "wkr");
     if (w) {
         sched_enqueue(w);
     } else {
         pr_warn("sched_stress: sleep_wakeup: waker kthread_create failed\n");
     }
 
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int created_total = created + (w ? 1 : 0);
+    int reaped = reap_children_bounded(created_total, "sleep_wakeup_stress");
+    if (reaped != created_total)
+        test_fail("sched_stress: sleep_wakeup_stress FAIL: reaped %d/%d\n",
+                  reaped, created_total);
     pr_info("sched_stress: sleep_wakeup_stress done (%d/%d sleepers created)\n",
             created, SLEEP_WAKE_SLEEPERS);
 }
@@ -132,7 +177,7 @@ static void test_sched_yield_storm(void) {
     int n = sched_cpu_count() * 2;
     int created = 0;
     for (int i = 0; i < n; i++) {
-        struct process *p = kthread_create(yield_thread, NULL, "yld");
+        struct process *p = kthread_create_joinable(yield_thread, NULL, "yld");
         if (p) {
             sched_enqueue(p);
             created++;
@@ -140,9 +185,10 @@ static void test_sched_yield_storm(void) {
             pr_warn("sched_stress: yield_storm: kthread_create failed at i=%d\n", i);
         }
     }
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int reaped = reap_children_bounded(created, "yield_storm");
+    if (reaped != created)
+        test_fail("sched_stress: yield_storm FAIL: reaped %d/%d\n",
+                  reaped, created);
     pr_info("sched_stress: yield_storm done (%d/%d created)\n", created, n);
 }
 
@@ -172,7 +218,7 @@ static void test_sched_preempt_stress(void) {
     int n = sched_cpu_count() * 2;
     int created = 0;
     for (int i = 0; i < n; i++) {
-        struct process *p = kthread_create(preempt_thread, NULL, "pre");
+        struct process *p = kthread_create_joinable(preempt_thread, NULL, "pre");
         if (p) {
             sched_enqueue(p);
             created++;
@@ -180,9 +226,10 @@ static void test_sched_preempt_stress(void) {
             pr_warn("sched_stress: preempt_stress: kthread_create failed at i=%d\n", i);
         }
     }
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int reaped = reap_children_bounded(created, "preempt_stress");
+    if (reaped != created)
+        test_fail("sched_stress: preempt_stress FAIL: reaped %d/%d\n",
+                  reaped, created);
     pr_info("sched_stress: preempt_stress done (%d/%d created)\n", created, n);
 }
 
@@ -219,16 +266,17 @@ static void test_eevdf_deadline_ordering(void) {
     int nice_vals[] = {-10, -5, 0, 0, 5, 5, 10, 19};
     int created = 0;
     for (int i = 0; i < EEVDF_DEADLINE_N; i++) {
-        struct process *p = kthread_create(eevdf_deadline_thread,
+        struct process *p = kthread_create_joinable(eevdf_deadline_thread,
                                            (void *)(intptr_t)nice_vals[i], "edl");
         if (p) {
             sched_enqueue(p);
             created++;
         }
     }
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int reaped = reap_children_bounded(created, "eevdf_deadline_ordering");
+    if (reaped != created)
+        test_fail("sched_stress: eevdf_deadline_ordering FAIL: reaped %d/%d\n",
+                  reaped, created);
     int done = __atomic_load_n(&eevdf_deadline_done, __ATOMIC_ACQUIRE);
     if (done != created)
         test_fail("sched_stress: eevdf_deadline_ordering FAIL: %d/%d completed\n",
@@ -297,16 +345,18 @@ static void test_eevdf_lag_fairness(void) {
     __atomic_store_n(&lag_sleeper_ran, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&lag_spinner_ran, 0, __ATOMIC_RELEASE);
 
-    struct process *s = kthread_create(lag_sleeper, NULL, "lslp");
-    struct process *sp = kthread_create(lag_spinner, NULL, "lspn");
-    struct process *w = kthread_create(lag_waker, NULL, "lwkr");
+    struct process *s = kthread_create_joinable(lag_sleeper, NULL, "lslp");
+    struct process *sp = kthread_create_joinable(lag_spinner, NULL, "lspn");
+    struct process *w = kthread_create_joinable(lag_waker, NULL, "lwkr");
     if (s) sched_enqueue(s);
     if (sp) sched_enqueue(sp);
     if (w) sched_enqueue(w);
 
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int created_total = (s ? 1 : 0) + (sp ? 1 : 0) + (w ? 1 : 0);
+    int reaped = reap_children_bounded(created_total, "eevdf_lag_fairness");
+    if (reaped != created_total)
+        test_fail("sched_stress: eevdf_lag_fairness FAIL: reaped %d/%d\n",
+                  reaped, created_total);
     int slp = __atomic_load_n(&lag_sleeper_ran, __ATOMIC_ACQUIRE);
     int spn = __atomic_load_n(&lag_spinner_ran, __ATOMIC_ACQUIRE);
     pr_info("sched_stress: eevdf_lag_fairness done (sleeper=%d spinner=%d)\n",
@@ -348,14 +398,16 @@ static void test_eevdf_nice_isolation(void) {
     __atomic_store_n(&nice_counter_lo, 0, __ATOMIC_RELEASE);
 
     /* Create one high-priority and one low-priority worker */
-    struct process *hi = kthread_create(nice_worker, (void *)(intptr_t)0, "nhi");
-    struct process *lo = kthread_create(nice_worker, (void *)(intptr_t)10, "nlo");
+    struct process *hi = kthread_create_joinable(nice_worker, (void *)(intptr_t)0, "nhi");
+    struct process *lo = kthread_create_joinable(nice_worker, (void *)(intptr_t)10, "nlo");
     if (hi) sched_enqueue(hi);
     if (lo) sched_enqueue(lo);
 
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int created = (hi ? 1 : 0) + (lo ? 1 : 0);
+    int reaped = reap_children_bounded(created, "eevdf_nice_isolation");
+    if (reaped != created)
+        test_fail("sched_stress: eevdf_nice_isolation FAIL: reaped %d/%d\n",
+                  reaped, created);
     uint64_t h = __atomic_load_n(&nice_counter_hi, __ATOMIC_ACQUIRE);
     uint64_t l = __atomic_load_n(&nice_counter_lo, __ATOMIC_ACQUIRE);
     pr_info("sched_stress: eevdf_nice_isolation done (nice0=%llu nice10=%llu)\n",
@@ -390,7 +442,7 @@ static int fork_penalty_child(void *arg) {
 static int fork_penalty_parent(void *arg) {
     (void)arg;
     for (int i = 0; i < FORK_PENALTY_N; i++) {
-        struct process *c = kthread_create(fork_penalty_child, NULL, "fpc");
+        struct process *c = kthread_create_joinable(fork_penalty_child, NULL, "fpc");
         if (c)
             sched_enqueue(c);
         /* Parent does work between forks */
@@ -413,12 +465,13 @@ static void test_eevdf_fork_penalty(void) {
     __atomic_store_n(&fork_penalty_parent_iters, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&fork_penalty_child_done, 0, __ATOMIC_RELEASE);
 
-    struct process *p = kthread_create(fork_penalty_parent, NULL, "fpp");
+    struct process *p = kthread_create_joinable(fork_penalty_parent, NULL, "fpp");
     if (p) sched_enqueue(p);
 
-    int status;
-    while (proc_wait(-1, &status, 0) > 0)
-        ;
+    int reaped = reap_children_bounded(p ? 1 : 0, "eevdf_fork_penalty");
+    if (p && reaped != 1)
+        test_fail("sched_stress: eevdf_fork_penalty FAIL: reaped %d/%d\n",
+                  reaped, 1);
     int pi = __atomic_load_n(&fork_penalty_parent_iters, __ATOMIC_ACQUIRE);
     int cd = __atomic_load_n(&fork_penalty_child_done, __ATOMIC_ACQUIRE);
     pr_info("sched_stress: eevdf_fork_penalty done (parent_iters=%d children=%d/%d)\n",

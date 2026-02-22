@@ -173,6 +173,8 @@ void run_sync_test(void);
 void run_vfork_test(void);
 
 struct process *kthread_create(int (*fn)(void *), void *arg, const char *name);
+struct process *kthread_create_joinable(int (*fn)(void *), void *arg,
+                                        const char *name);
 #define current proc_current()
 
 /* FD management */

@@ -66,6 +66,21 @@ static inline bool sched_steal_is_enabled(void) {
     return __atomic_load_n(&sched_steal_enabled, __ATOMIC_ACQUIRE);
 }
 
+static int sched_rq_cpu_id(const struct rq *rq) {
+    if (!rq)
+        return -1;
+    int online = sched_nr_cpus();
+    if (online < 1)
+        online = 1;
+    if (online > CONFIG_MAX_CPUS)
+        online = CONFIG_MAX_CPUS;
+    for (int i = 0; i < online; i++) {
+        if (&cpu_data[i].runqueue == rq)
+            return i;
+    }
+    return -1;
+}
+
 static const char *sched_trace_event_name(uint16_t type) {
     switch (type) {
     case SCHED_TRACE_ENQUEUE: return "enqueue";
@@ -487,10 +502,11 @@ void sched_init_cpu(int cpu) {
 
 void sched_post_switch_cleanup(void) {
     struct percpu_data *cpu = arch_get_percpu();
-    if (cpu->prev_task) {
-        struct process *prev = cpu->prev_task;
+    struct process *prev =
+        __atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE);
+    if (prev) {
         /* State already updated before context switch; nothing to do. */
-        cpu->prev_task = NULL;
+        __atomic_store_n(&cpu->prev_task, NULL, __ATOMIC_RELEASE);
         /* Zombie finished context switch — notify waiting parent */
         if (prev->state == PROC_ZOMBIE && prev->parent) {
             wait_queue_wakeup_all(&prev->parent->exit_wait);
@@ -773,9 +789,10 @@ void schedule(void) {
                 arch_tss_set_rsp0(kstack);
         }
 
-        if (next->context) arch_context_set_cpu(next->context, cpu->cpu_id);
+        if (next->context && next->mm)
+            arch_context_set_cpu(next->context, cpu->cpu_id);
 
-        cpu->prev_task = prev;
+        __atomic_store_n(&cpu->prev_task, prev, __ATOMIC_RELEASE);
 
         spin_unlock(&rq->lock);
         if (prev && prev->context) arch_context_switch(prev->context, next->context);
@@ -787,7 +804,8 @@ void schedule(void) {
         next->state = PROC_RUNNING;
         se_mark_running(&next->se);
         rq->cfs.curr_se = &next->se;
-        if (cpu->prev_task) sched_post_switch_cleanup();
+        if (__atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE))
+            sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
         arch_irq_restore(state);
     }
@@ -923,7 +941,27 @@ struct percpu_data *sched_cpu_data(int cpu) {
 /* --- Public accessor API --- */
 
 bool sched_is_on_cpu(const struct process *p) {
-    return p ? se_is_on_cpu(&p->se) : false;
+    if (!p)
+        return false;
+
+    int cpu_count = sched_nr_cpus();
+    if (cpu_count < 1)
+        cpu_count = 1;
+    if (cpu_count > CONFIG_MAX_CPUS)
+        cpu_count = CONFIG_MAX_CPUS;
+
+    for (int i = 0; i < cpu_count; i++) {
+        struct process *curr =
+            __atomic_load_n(&cpu_data[i].curr_proc, __ATOMIC_ACQUIRE);
+        if (curr == p)
+            return true;
+        struct process *prev =
+            __atomic_load_n(&cpu_data[i].prev_task, __ATOMIC_ACQUIRE);
+        if (prev == p)
+            return true;
+    }
+
+    return se_is_on_cpu(&p->se);
 }
 
 int sched_entity_cpu(const struct process *p) {
@@ -1109,6 +1147,14 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
     if (cfs->nr_running == 0)
         return NULL;
 
+    int src_cpu = sched_rq_cpu_id(rq);
+    struct process *in_switch = NULL;
+    struct process *curr = NULL;
+    if (src_cpu >= 0 && src_cpu < CONFIG_MAX_CPUS) {
+        in_switch = __atomic_load_n(&cpu_data[src_cpu].prev_task, __ATOMIC_ACQUIRE);
+        curr = __atomic_load_n(&cpu_data[src_cpu].curr_proc, __ATOMIC_ACQUIRE);
+    }
+
     /*
      * Steal strategy: take the rightmost node (largest vruntime) —
      * the task that has consumed the most virtual CPU time and is
@@ -1123,6 +1169,8 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
         struct sched_entity *se =
             rb_entry(node, struct sched_entity, sched_node);
         struct process *cand = container_of(se, struct process, se);
+        if (cand == in_switch || cand == curr)
+            continue;
         if (cand->state != PROC_RUNNABLE)
             continue;
         if (se_state_load(se) != SE_STATE_QUEUED)

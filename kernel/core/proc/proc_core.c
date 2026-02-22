@@ -301,6 +301,25 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name) {
     return p;
 }
 
+struct process *kthread_create_joinable(int (*fn)(void *), void *arg,
+                                        const char *name) {
+    struct process *p = kthread_create(fn, arg, name);
+    if (!p)
+        return NULL;
+
+    struct process *parent = proc_current();
+    if (!parent)
+        return p;
+
+    p->parent = parent;
+    p->ppid = parent->pid;
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
+    list_add(&p->sibling, &parent->children);
+    spin_unlock_irqrestore(&proc_table_lock, flags);
+    return p;
+}
+
 static int idle_thread(void *arg __attribute__((unused))) {
     while (1) {
         arch_irq_enable();
