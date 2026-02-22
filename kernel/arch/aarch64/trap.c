@@ -56,17 +56,10 @@ static void handle_exception(struct trap_frame *tf) {
         int64_t ret = syscall_dispatch(nr, tf->tf_a0, tf->tf_a1, tf->tf_a2,
                                        tf->tf_a3, tf->tf_a4, tf->tf_a5);
         tf->tf_a0 = ret;
-        if (ret >= 0) {
-            struct process *cur = proc_current();
-            if (!cur || cur->syscall_abi == SYSCALL_ABI_LINUX) {
-                if (nr == LINUX_NR_execve || nr == LINUX_NR_execveat)
-                    return; /* execve set ELR to new entry; don't advance */
-            } else {
-                if (nr == SYS_exec)
-                    return;
-            }
-        }
-        tf->elr += 4;
+        /*
+         * AArch64 SVC sets ELR_EL1 to the next instruction automatically.
+         * Do not advance tf->elr here, or user mode will skip an instruction.
+         */
         return;
     }
 
