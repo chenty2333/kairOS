@@ -136,6 +136,12 @@ fi
 # impossible when cross-compiling (riscv64 binary on x86_64 host).
 # Setting <target>-libtcc1-usegcc=yes tells TCC's lib/Makefile to use
 # the cross-GCC ($(CC)) and $(AR) instead.
+#
+# IMPORTANT: clear MAKEFLAGS/MAKEOVERRIDES from the outer KairOS build.
+# Top-level `make ARCH=aarch64 ...` exports `ARCH` as a command-line override;
+# if that leaks into TinyCC's Makefile it overrides config.mak's `ARCH=arm64`,
+# resulting in empty libtcc object lists and link failures.
+env -u MAKEFLAGS -u MAKEOVERRIDES -u MFLAGS \
 make -C "$BUILD_DIR" "${make_jobs[@]}" \
   "${TCC_LIBTCC1_TARGET}-libtcc1-usegcc=yes" \
   tcc libtcc1.a >"$_out" 2>&1
