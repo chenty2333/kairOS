@@ -43,6 +43,7 @@ void pmm_put_page(paddr_t pa);
 int pmm_page_refcount(paddr_t pa);
 size_t pmm_num_free_pages(void);
 size_t pmm_total_pages(void);
+void pmm_reserve_range(paddr_t start, paddr_t end);
 int pmm_pcp_report(char *buf, size_t bufsz);
 int pmm_integrity_report(char *buf, size_t bufsz);
 int pmm_remote_free_report(char *buf, size_t bufsz);

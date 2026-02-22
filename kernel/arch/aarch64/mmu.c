@@ -33,7 +33,10 @@
 #define AARCH64_PTE_AP_RO_EL0 (3ULL << 6)
 #define AARCH64_PTE_UXN       (1ULL << 54)
 #define AARCH64_PTE_PXN       (1ULL << 53)
+#define AARCH64_PTE_SW_COW    (1ULL << 55) /* software-defined bit for COW */
 #define AARCH64_PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
+#define AARCH64_PTE_ATTRIDX_MASK (7ULL << 2)
+#define AARCH64_PTE_AP_MASK   (3ULL << 6)
 
 /* MAIR attribute indices */
 #define MT_DEVICE_nGnRnE 0
@@ -151,9 +154,30 @@ static uint64_t flags_to_pte(uint64_t f) {
     } else {
         p |= (f & PTE_WRITE) ? AARCH64_PTE_AP_RW_EL1 : AARCH64_PTE_AP_RO_EL1;
     }
+    if (f & PTE_COW)
+        p |= AARCH64_PTE_SW_COW;
     if (!(f & PTE_EXEC))
         p |= AARCH64_PTE_UXN | AARCH64_PTE_PXN;
     return p;
+}
+
+static uint64_t pte_to_flags(uint64_t pte) {
+    if (!(pte & AARCH64_PTE_VALID))
+        return 0;
+
+    uint64_t f = PTE_VALID | PTE_READ;
+    uint64_t ap = pte & AARCH64_PTE_AP_MASK;
+    if (ap == AARCH64_PTE_AP_RW_EL0 || ap == AARCH64_PTE_AP_RW_EL1)
+        f |= PTE_WRITE;
+    if (ap == AARCH64_PTE_AP_RW_EL0 || ap == AARCH64_PTE_AP_RO_EL0)
+        f |= PTE_USER;
+    if (!(pte & (AARCH64_PTE_UXN | AARCH64_PTE_PXN)))
+        f |= PTE_EXEC;
+    if ((pte & AARCH64_PTE_ATTRIDX_MASK) == AARCH64_PTE_ATTRIDX(MT_DEVICE_nGnRnE))
+        f |= PTE_DEVICE;
+    if (pte & AARCH64_PTE_SW_COW)
+        f |= PTE_COW;
+    return f;
 }
 
 /* --- Build TCR_EL1 --- */
@@ -324,14 +348,23 @@ paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
 
 uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
     uint64_t *pte = walk_pgtable(table, va, false);
-    return pte ? *pte : 0;
+    if (!pte || !(*pte & AARCH64_PTE_VALID))
+        return 0;
+    paddr_t pa = (paddr_t)(*pte & AARCH64_PTE_ADDR_MASK);
+    return ((pa >> PAGE_SHIFT) << 10) | pte_to_flags(*pte);
 }
 
 int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte) {
     uint64_t *entry = walk_pgtable(table, va, false);
     if (!entry)
         return -ENOENT;
-    *entry = pte;
+    paddr_t pa = (paddr_t)(((pte >> 10) << PAGE_SHIFT) & AARCH64_PTE_ADDR_MASK);
+    uint64_t flags = pte & ((1ULL << 10) - 1);
+    if (!(flags & PTE_VALID)) {
+        *entry = 0;
+        return 0;
+    }
+    *entry = pa | flags_to_pte(flags);
     return 0;
 }
 
