@@ -4,12 +4,23 @@
 
 #if CONFIG_KERNEL_TESTS
 
+#include <stdarg.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/wait.h>
+
+static int tests_failed;
+
+static void test_fail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintk(fmt, ap);
+    va_end(ap);
+    tests_failed++;
+}
 
 /* ---------- test_sched_fork_exit_storm ---------- */
 
@@ -220,8 +231,8 @@ static void test_eevdf_deadline_ordering(void) {
         ;
     int done = __atomic_load_n(&eevdf_deadline_done, __ATOMIC_ACQUIRE);
     if (done != created)
-        pr_err("sched_stress: eevdf_deadline_ordering FAIL: %d/%d completed\n",
-               done, created);
+        test_fail("sched_stress: eevdf_deadline_ordering FAIL: %d/%d completed\n",
+                  done, created);
     else
         pr_info("sched_stress: eevdf_deadline_ordering done (%d/%d)\n",
                 done, EEVDF_DEADLINE_N);
@@ -301,8 +312,8 @@ static void test_eevdf_lag_fairness(void) {
     pr_info("sched_stress: eevdf_lag_fairness done (sleeper=%d spinner=%d)\n",
             slp, spn);
     if (slp < LAG_ROUNDS / 2)
-        pr_err("sched_stress: eevdf_lag_fairness WARN: sleeper starved (%d/%d)\n",
-               slp, LAG_ROUNDS);
+        test_fail("sched_stress: eevdf_lag_fairness FAIL: sleeper starved (%d/%d)\n",
+                  slp, LAG_ROUNDS);
 }
 
 /* ---------- test_eevdf_nice_isolation ---------- */
@@ -351,7 +362,7 @@ static void test_eevdf_nice_isolation(void) {
             (unsigned long long)h, (unsigned long long)l);
     /* Both should complete; the test validates no starvation */
     if (h == 0 || l == 0)
-        pr_err("sched_stress: eevdf_nice_isolation FAIL: starvation detected\n");
+        test_fail("sched_stress: eevdf_nice_isolation FAIL: starvation detected\n");
 }
 
 /* ---------- test_eevdf_fork_penalty ---------- */
@@ -413,13 +424,14 @@ static void test_eevdf_fork_penalty(void) {
     pr_info("sched_stress: eevdf_fork_penalty done (parent_iters=%d children=%d/%d)\n",
             pi, cd, FORK_PENALTY_N);
     if (pi < FORK_PENALTY_N / 2)
-        pr_err("sched_stress: eevdf_fork_penalty FAIL: parent starved (%d/%d)\n",
-               pi, FORK_PENALTY_N);
+        test_fail("sched_stress: eevdf_fork_penalty FAIL: parent starved (%d/%d)\n",
+                  pi, FORK_PENALTY_N);
 }
 
 /* ---------- Entry point ---------- */
 
-void run_sched_stress_tests(void) {
+int run_sched_stress_tests(void) {
+    tests_failed = 0;
     pr_info("sched_stress: starting\n");
     test_sched_fork_exit_storm();
     test_sched_sleep_wakeup_stress();
@@ -429,7 +441,11 @@ void run_sched_stress_tests(void) {
     test_eevdf_lag_fairness();
     test_eevdf_nice_isolation();
     test_eevdf_fork_penalty();
-    pr_info("sched_stress: all passed\n");
+    if (tests_failed == 0)
+        pr_info("sched_stress: all passed\n");
+    else
+        pr_err("sched_stress: %d failures\n", tests_failed);
+    return tests_failed;
 }
 
 #endif /* CONFIG_KERNEL_TESTS */
