@@ -255,7 +255,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean distclean run debug iso test test-isolated user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean distclean run debug iso test test-isolated gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -584,13 +584,42 @@ TEST_LOG ?= $(BUILD_DIR)/test.log
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
+TEST_RUNS_ROOT ?= build/runs
+RUNS_KEEP ?= 20
+GC_RUNS_AUTO ?= 1
 
 test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
 TEST_RUN_ID ?= $(shell date +%s%N)
 test-isolated:
-	$(Q)$(MAKE) --no-print-directory ARCH=$(ARCH) BUILD_ROOT=build/runs/$(TEST_RUN_ID) TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
+	$(Q)if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+		$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+	fi
+	$(Q)$(MAKE) --no-print-directory ARCH=$(ARCH) BUILD_ROOT=$(TEST_RUNS_ROOT)/$(TEST_RUN_ID) TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
+
+gc-runs:
+	$(Q)mkdir -p "$(TEST_RUNS_ROOT)"
+	$(Q)keep="$(RUNS_KEEP)"; \
+	if ! printf '%s' "$$keep" | grep -Eq '^[0-9]+$$'; then \
+		echo "gc-runs: RUNS_KEEP must be a non-negative integer, got '$$keep'" >&2; \
+		exit 2; \
+	fi; \
+	if [ "$$keep" -eq 0 ]; then \
+		find "$(TEST_RUNS_ROOT)" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +; \
+		echo "gc-runs: kept 0 runs (removed all)"; \
+		exit 0; \
+	fi; \
+	i=0; \
+	ls -1dt "$(TEST_RUNS_ROOT)"/* 2>/dev/null | while IFS= read -r run_dir; do \
+		if [ -d "$$run_dir" ]; then \
+			i=$$((i+1)); \
+			if [ "$$i" -gt "$$keep" ]; then \
+				rm -rf "$$run_dir"; \
+			fi; \
+		fi; \
+	done; \
+	echo "gc-runs: kept latest $$keep runs under $(TEST_RUNS_ROOT)"
 
 test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)$(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
@@ -625,6 +654,8 @@ help:
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests"
+	@echo "  test-isolated - Run tests in isolated build/runs/<id> (auto GC)"
+	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
 	@echo "  test-matrix - Run SMP x DEBUG test matrix"
@@ -634,6 +665,9 @@ help:
 	@echo "  EMBEDDED_INIT - Build embedded init blob (riscv64 only)"
 	@echo "  TOOLCHAIN_MODE - Toolchain policy (auto, clang, gcc)"
 	@echo "  WITH_TCC - Include tcc in rootfs for disk/run (default: 1)"
+	@echo "  TEST_RUNS_ROOT - Isolated test runs root (default: build/runs)"
+	@echo "  RUNS_KEEP - Number of isolated runs to keep on GC (default: 20)"
+	@echo "  GC_RUNS_AUTO - Auto run gc-runs before test-isolated (default: 1)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""
