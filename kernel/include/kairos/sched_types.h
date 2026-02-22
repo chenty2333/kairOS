@@ -30,6 +30,7 @@ struct sched_entity {
     /* EEVDF core fields */
     uint64_t vruntime;       /* virtual runtime (key for RB-tree ordering) */
     uint64_t deadline;       /* virtual deadline = vruntime + vslice */
+    uint64_t min_deadline;   /* subtree min deadline (augmented RB-tree) */
     int64_t  vlag;           /* lag = V - vruntime at dequeue (positive = owed CPU) */
     uint64_t slice;          /* requested time slice in ns */
 
@@ -53,6 +54,7 @@ static inline void sched_entity_init(struct sched_entity *se) {
     se->run_state = SE_STATE_BLOCKED;
     se->vruntime = 0;
     se->deadline = 0;
+    se->min_deadline = UINT64_MAX;
     se->vlag = 0;
     se->slice = 0;  /* will be set to SCHED_SLICE_NS at enqueue */
     se->last_run_time = 0;
