@@ -146,6 +146,12 @@ static struct unix_sock *unix_sock_alloc(struct socket *sock) {
     us->path[0] = '\0';
     us->bound = false;
     us->peer = NULL;
+    us->buf.data = NULL;
+    us->buf.head = 0;
+    us->buf.tail = 0;
+    us->buf.count = 0;
+    wait_queue_init(&us->buf.rwait);
+    wait_queue_init(&us->buf.wwait);
     us->shutdown_flags = 0;
     INIT_LIST_HEAD(&us->accept_queue);
     us->backlog = 0;
