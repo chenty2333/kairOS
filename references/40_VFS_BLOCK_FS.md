@@ -32,6 +32,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - LRU eviction policy, dcache_count tracks entry count, evicts when exceeding CONFIG_DCACHE_MAX
 - Supports negative caching (DENTRY_NEGATIVE) for non-existent paths
 - Dentry tree structure: parent/children/child linked lists, supports subtree traversal
+- dentry_put/vnode_put use iterative (not recursive) parent-chain release to avoid stack overflow on deep directory trees
 
 ## Mount System (fs/vfs/mount.c)
 
@@ -46,6 +47,8 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 ## Open/Truncate Semantics (fs/vfs/file.c)
 
 - vfs_open_at_path() propagates truncate callback failures when O_TRUNC is requested; open no longer succeeds if underlying truncate fails
+- vfs_read/vfs_write guard against NULL vnode and NULL ops before dispatching
+- vfs_seek returns -ESPIPE for VNODE_PIPE and VNODE_SOCKET
 
 ## Block I/O Layer (fs/bio/bio.c)
 
