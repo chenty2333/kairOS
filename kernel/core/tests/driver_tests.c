@@ -8,6 +8,7 @@
 #include <kairos/ringbuf.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
+#include <kairos/vfs.h>
 #include <kairos/virtio.h>
 
 static int tests_failed;
@@ -130,6 +131,34 @@ static void test_netdev_registry(void) {
     netdev_unregister(&dev);
 }
 
+static void test_vfs_umount_busy_with_child_mount(void) {
+    struct stat st;
+    int ret = vfs_stat("/tmp", &st);
+    if (ret < 0 || !S_ISDIR(st.st_mode)) {
+        pr_warn("tests: skip vfs umount busy test (/tmp unavailable)\n");
+        return;
+    }
+
+    const char *mntpt = "/tmp/.kairos_umount_busy";
+    ret = vfs_mkdir(mntpt, 0755);
+    if (ret < 0 && ret != -EEXIST) {
+        pr_warn("tests: skip vfs umount busy test (mkdir ret=%d)\n", ret);
+        return;
+    }
+
+    ret = vfs_mount(NULL, mntpt, "tmpfs", 0);
+    if (ret < 0) {
+        pr_warn("tests: skip vfs umount busy test (mount ret=%d)\n", ret);
+        return;
+    }
+
+    ret = vfs_umount("/tmp");
+    test_check(ret == -EBUSY, "vfs umount busy on parent with child mount");
+
+    ret = vfs_umount(mntpt);
+    test_check(ret == 0, "vfs umount child mount cleanup");
+}
+
 void run_driver_tests(void) {
     tests_failed = 0;
     pr_info("\n=== Driver Tests ===\n");
@@ -138,6 +167,7 @@ void run_driver_tests(void) {
     test_virtqueue();
     test_blkdev_registry();
     test_netdev_registry();
+    test_vfs_umount_busy_with_child_mount();
 
     if (tests_failed == 0)
         pr_info("driver tests: all passed\n");
