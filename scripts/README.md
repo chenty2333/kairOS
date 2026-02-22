@@ -6,7 +6,7 @@
 ## 主入口
 
 - `scripts/kairos.sh`
-  - 全局参数：`--arch` `--quiet` `--verbose` `--jobs`
+  - 全局参数：`--arch` `--quiet` `--verbose` `--jobs` `--build-root`
   - 顶层命令：`toolchain` `image` `run` `deps` `doctor`
 
 ## 模块层（由 kairos.sh 调用）
@@ -27,6 +27,7 @@
 - `scripts/lib/log.sh`：统一日志输出
 - `scripts/lib/env.sh`：架构与默认 UEFI 路径解析
 - `scripts/lib/cmd.sh`：统一命令执行与日志归档（`build/<arch>/logs/*.log`）
+- `scripts/lib/lock.sh`：全局锁与 BUILD_ROOT 局部锁
 
 ## 实现层
 
@@ -36,6 +37,7 @@
   - `scripts/impl/fetch-*.sh`
 - 仍保留独立脚本：
   - `run-qemu-test.sh` `test-matrix.sh` `gen-user-init.sh` `patch-elf-phdrs.py`
+  - `run-qemu-test.sh` 会在测试运行目录输出 `manifest.json` 和 `result.json`
 
 ## 推荐调用方式
 

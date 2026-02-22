@@ -255,7 +255,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean distclean run debug iso test test-isolated gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run debug iso test test-isolated gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -546,10 +546,13 @@ debug: $(RUN_DEPS)
 # ============================================================
 
 clean:
+	rm -rf $(BUILD_DIR)
+
+clean-all:
 	rm -rf build/
 
 # Deep clean: also purge build artifacts from third_party source trees
-distclean: clean
+distclean: clean-all
 	@for d in third_party/musl third_party/busybox; do \
 		if [ -d "$$d" ]; then \
 			echo "  CLEAN   $$d"; \
@@ -587,16 +590,25 @@ SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
 TEST_RUNS_ROOT ?= build/runs
 RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
+TEST_ISOLATED ?= 1
+ifndef RUN_ID
+RUN_ID := $(shell sh -c 'printf "%s-%s" "$$(date +%s%N)" "$$$$"')
+endif
+TEST_BUILD_ROOT ?= $(TEST_RUNS_ROOT)/$(RUN_ID)
 
 test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
-
-TEST_RUN_ID ?= $(shell date +%s%N)
-test-isolated:
-	$(Q)if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
-		$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+	$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
+		if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+		fi; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test; \
+	else \
+		RUN_ID="$(RUN_ID)" $(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
 	fi
-	$(Q)$(MAKE) --no-print-directory ARCH=$(ARCH) BUILD_ROOT=$(TEST_RUNS_ROOT)/$(TEST_RUN_ID) TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
+
+test-isolated:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=1 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
 
 gc-runs:
 	$(Q)mkdir -p "$(TEST_RUNS_ROOT)"
@@ -638,7 +650,8 @@ help:
 	@echo "  all      - Build kernel (default)"
 	@echo "  run      - Run in QEMU"
 	@echo "  debug    - Run with GDB server"
-	@echo "  clean    - Remove build artifacts"
+	@echo "  clean    - Remove current BUILD_ROOT/ARCH artifacts"
+	@echo "  clean-all - Remove all build/ artifacts"
 	@echo "  user     - Build userland init"
 	@echo "  initramfs - Build initramfs image"
 	@echo "  compiler-rt - Build clang compiler-rt builtins"
@@ -653,8 +666,8 @@ help:
 	@echo "  uefi     - Prepare UEFI boot image"
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
-	@echo "  test     - Run kernel tests"
-	@echo "  test-isolated - Run tests in isolated build/runs/<id> (auto GC)"
+	@echo "  test     - Run kernel tests (isolated by default)"
+	@echo "  test-isolated - Alias of isolated test mode"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
@@ -667,7 +680,9 @@ help:
 	@echo "  WITH_TCC - Include tcc in rootfs for disk/run (default: 1)"
 	@echo "  TEST_RUNS_ROOT - Isolated test runs root (default: build/runs)"
 	@echo "  RUNS_KEEP - Number of isolated runs to keep on GC (default: 20)"
-	@echo "  GC_RUNS_AUTO - Auto run gc-runs before test-isolated (default: 1)"
+	@echo "  GC_RUNS_AUTO - Auto run gc-runs before test (default: 1)"
+	@echo "  TEST_ISOLATED - Enable isolated test run (default: 1)"
+	@echo "  RUN_ID - Explicit isolated test run id (optional)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""

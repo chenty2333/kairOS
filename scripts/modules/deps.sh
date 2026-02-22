@@ -26,14 +26,22 @@ kairos_deps_dispatch() {
     case "$action" in
         fetch)
             local component="${1:-all}"
-            kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "${component}"
+            kairos_lock_global "deps-fetch" \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "${component}" || \
+                kairos_die "deps fetch is busy (global lock: deps-fetch)"
             ;;
         freedoom)
-            kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh"
+            kairos_lock_global "deps-fetch" \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh" || \
+                kairos_die "deps fetch is busy (global lock: deps-fetch)"
             ;;
         all)
-            kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "all"
-            kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh"
+            kairos_lock_global "deps-fetch" \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "all" || \
+                kairos_die "deps fetch is busy (global lock: deps-fetch)"
+            kairos_lock_global "deps-fetch" \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh" || \
+                kairos_die "deps fetch is busy (global lock: deps-fetch)"
             ;;
         *)
             kairos_die "unknown deps action: ${action}"
