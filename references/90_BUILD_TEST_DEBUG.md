@@ -56,7 +56,8 @@ Variables:
 
 ## Running
 
-- `make run` — run in QEMU (auto-builds kernel + uefi + disk)
+- `make run` — run in QEMU (default isolated mode, one run directory per invocation)
+- `make run-e1000` — run in QEMU with e1000 NIC (default isolated mode)
 - `make debug` — QEMU + GDB server (port 1234)
 - `make run-iso` — boot from ISO (x86_64 only; not a primary verification path for other architectures)
 
@@ -75,8 +76,8 @@ QEMU configuration:
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
 
-Tests are executed via scripts/run-qemu-test.sh, orchestrated by scripts/kairos.sh.
-For isolated runs, outputs are under `build/runs/<run_id>/` and include:
+Run/test sessions are executed via `scripts/run-qemu-session.sh` and `scripts/run-qemu-test.sh`, orchestrated by Make + `scripts/kairos.sh`.
+For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - `manifest.json` (command, arch, build root, git sha, timestamps)
 - `result.json` (pass/fail/timeout/error + reason + marker summary + log path)
 
@@ -88,6 +89,7 @@ Concurrency and locking:
 Run retention:
 - `make gc-runs` keeps latest `RUNS_KEEP` runs (default `20`)
 - `make test` auto-triggers `gc-runs` when `GC_RUNS_AUTO=1` (default)
+- `make run` auto-triggers `gc-runs` for `RUN_RUNS_ROOT` when `RUN_GC_AUTO=1` (default keep `5` via `RUNS_KEEP_RUN`)
 
 Result decision policy:
 - `scripts/run-qemu-test.sh` writes `manifest.json` at start and `result.json` at end.

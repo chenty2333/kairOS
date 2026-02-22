@@ -36,8 +36,8 @@
   - `scripts/impl/make-*.sh`
   - `scripts/impl/fetch-*.sh`
 - 仍保留独立脚本：
-  - `run-qemu-test.sh` `test-matrix.sh` `gen-user-init.sh` `patch-elf-phdrs.py`
-  - `run-qemu-test.sh` 会在测试运行目录输出 `manifest.json` 和 `result.json`
+  - `run-qemu-test.sh` `run-qemu-session.sh` `test-matrix.sh` `gen-user-init.sh` `patch-elf-phdrs.py`
+  - `run-qemu-test.sh` / `run-qemu-session.sh` 会在运行目录输出 `manifest.json` 和 `result.json`
 
 ## 推荐调用方式
 

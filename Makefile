@@ -255,7 +255,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run debug iso test test-isolated gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -510,21 +510,62 @@ doctor: check-tools
 # Boot prerequisites: UEFI firmware + Limine boot image + disk (all architectures)
 RUN_DEPS := check-tools $(KERNEL) uefi disk
 
-run: $(RUN_DEPS)
+run:
+	$(Q)if [ "$(RUN_ISOLATED)" = "1" ]; then \
+		if [ "$(RUN_GC_AUTO)" = "1" ]; then \
+			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP_RUN)" TEST_RUNS_ROOT="$(RUN_RUNS_ROOT)"; \
+		fi; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(RUN_BUILD_ROOT)" \
+			RUN_ISOLATED=0 RUN_ID="$(RUN_ID)" run-direct; \
+	else \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(BUILD_ROOT)" RUN_ID="$(RUN_ID)" run-direct; \
+	fi
+
+run-direct: $(RUN_DEPS) scripts/run-qemu-session.sh
 	@$(MAKE) --no-print-directory check-disk
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
-	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
+	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
+		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
+		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		SESSION_FILTER_CMD="$(QEMU_UEFI_NOISE_FILTER)" \
+		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 else
-	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)
+	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
+		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
+		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
 
-run-e1000: $(RUN_DEPS)
+run-e1000:
+	$(Q)if [ "$(RUN_ISOLATED)" = "1" ]; then \
+		if [ "$(RUN_GC_AUTO)" = "1" ]; then \
+			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP_RUN)" TEST_RUNS_ROOT="$(RUN_RUNS_ROOT)"; \
+		fi; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(RUN_BUILD_ROOT)" \
+			RUN_ISOLATED=0 RUN_ID="$(RUN_ID)" run-e1000-direct; \
+	else \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(BUILD_ROOT)" RUN_ID="$(RUN_ID)" run-e1000-direct; \
+	fi
+
+run-e1000-direct: $(RUN_DEPS) scripts/run-qemu-session.sh
+	@$(MAKE) --no-print-directory check-disk
 	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP, e1000)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
-	$(Q)bash -o pipefail -c "$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN) 2>&1 | $(QEMU_UEFI_NOISE_FILTER)"
+	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
+		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
+		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		SESSION_FILTER_CMD="$(QEMU_UEFI_NOISE_FILTER)" \
+		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 else
-	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)
+	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
+		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
+		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
 
 # Create bootable ISO (x86_64 only for now)
@@ -591,10 +632,20 @@ TEST_RUNS_ROOT ?= build/runs
 RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
 TEST_ISOLATED ?= 1
+RUN_RUNS_ROOT ?= build/runs/run
+RUNS_KEEP_RUN ?= 5
+RUN_GC_AUTO ?= 1
+RUN_ISOLATED ?= 1
+RUN_TIMEOUT ?= 0
+RUN_REQUIRE_BOOT ?= 1
 ifndef RUN_ID
 RUN_ID := $(shell sh -c 'printf "%s-%s" "$$(date +%s%N)" "$$$$"')
 endif
 TEST_BUILD_ROOT ?= $(TEST_RUNS_ROOT)/$(RUN_ID)
+RUN_BUILD_ROOT ?= $(RUN_RUNS_ROOT)/$(RUN_ID)
+RUN_LOG ?= $(BUILD_DIR)/run.log
+RUN_MANIFEST ?= $(BUILD_ROOT)/manifest.json
+RUN_RESULT ?= $(BUILD_ROOT)/result.json
 
 test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
@@ -648,7 +699,8 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  all      - Build kernel (default)"
-	@echo "  run      - Run in QEMU"
+	@echo "  run      - Run in QEMU (isolated by default)"
+	@echo "  run-e1000 - Run in QEMU with e1000 NIC (isolated by default)"
 	@echo "  debug    - Run with GDB server"
 	@echo "  clean    - Remove current BUILD_ROOT/ARCH artifacts"
 	@echo "  clean-all - Remove all build/ artifacts"
@@ -682,7 +734,13 @@ help:
 	@echo "  RUNS_KEEP - Number of isolated runs to keep on GC (default: 20)"
 	@echo "  GC_RUNS_AUTO - Auto run gc-runs before test (default: 1)"
 	@echo "  TEST_ISOLATED - Enable isolated test run (default: 1)"
-	@echo "  RUN_ID - Explicit isolated test run id (optional)"
+	@echo "  RUN_RUNS_ROOT - Isolated run sessions root (default: build/runs/run)"
+	@echo "  RUNS_KEEP_RUN - Number of isolated run sessions to keep (default: 5)"
+	@echo "  RUN_GC_AUTO - Auto run gc-runs before run (default: 1)"
+	@echo "  RUN_ISOLATED - Enable isolated run session (default: 1)"
+	@echo "  RUN_TIMEOUT - Session timeout seconds for run (0 means no timeout)"
+	@echo "  RUN_REQUIRE_BOOT - Require boot marker for run success (default: 1)"
+	@echo "  RUN_ID - Explicit isolated session id for run/test (optional)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""
