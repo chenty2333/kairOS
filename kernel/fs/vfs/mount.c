@@ -248,6 +248,8 @@ void vfs_mount_ns_put(struct mount_ns *ns) {
     if (old == 1) {
         if (ns->root_dentry)
             dentry_put(ns->root_dentry);
+        if (ns->root)
+            vfs_mount_put(ns->root);
         kfree(ns);
     }
 }
@@ -260,6 +262,8 @@ struct mount_ns *vfs_mount_ns_clone(struct mount_ns *ns) {
         return NULL;
     copy->root = ns->root;
     copy->root_dentry = ns->root_dentry;
+    if (copy->root)
+        vfs_mount_hold(copy->root);
     if (copy->root_dentry)
         dentry_get(copy->root_dentry);
     atomic_init(&copy->refcount, 1);
@@ -269,8 +273,13 @@ struct mount_ns *vfs_mount_ns_clone(struct mount_ns *ns) {
 int vfs_mount_ns_set_root(struct mount_ns *ns, struct dentry *root) {
     if (!ns || !root)
         return -EINVAL;
+    if (!root->mnt)
+        return -EINVAL;
+    vfs_mount_hold(root->mnt);
     if (ns->root_dentry)
         dentry_put(ns->root_dentry);
+    if (ns->root)
+        vfs_mount_put(ns->root);
     ns->root_dentry = root;
     ns->root = root->mnt;
     dentry_get(ns->root_dentry);
@@ -316,6 +325,7 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     struct mount *mnt = NULL;
     struct blkdev *dev = NULL;
     int ret = -ENOMEM;
+    bool mounted_ok = false;
     const char *src_use = src;
     if (src_use && strncmp(src_use, "/dev/", 5) == 0)
         src_use += 5;
@@ -341,6 +351,7 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
     atomic_init(&mnt->refcount, 1);
     if ((ret = mnt->ops->mount(mnt)) < 0)
         goto err;
+    mounted_ok = true;
     if (mnt->root) {
         mnt->root->parent = NULL;
         mnt->root->name[0] = '\0';
@@ -394,8 +405,11 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
         root_mount = mnt;
     spin_unlock(&vfs_lock);
     if (strcmp(tgt, "/") == 0) {
+        if (init_mnt_ns.root)
+            vfs_mount_put(init_mnt_ns.root);
         init_mnt_ns.root = mnt;
         init_mnt_ns.root_dentry = mnt->root_dentry;
+        vfs_mount_hold(mnt);
     }
     vfs_mount_global_unlock();
     return 0;
@@ -406,6 +420,16 @@ err:
         dentry_put(mnt->mountpoint_dentry);
         mnt->mountpoint_dentry = NULL;
     }
+    if (mnt && mnt->root_dentry) {
+        dentry_drop(mnt->root_dentry);
+        mnt->root_dentry = NULL;
+    }
+    if (mnt && mnt->root) {
+        vnode_put(mnt->root);
+        mnt->root = NULL;
+    }
+    if (mounted_ok && mnt && mnt->ops && mnt->ops->unmount)
+        mnt->ops->unmount(mnt);
     vfs_mount_global_unlock();
     if (mnt) {
         kfree(mnt->mountpoint);
@@ -501,8 +525,24 @@ int vfs_umount(const char *tgt) {
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
         if (strcmp(mnt->mountpoint, tgt) == 0) {
+            struct mount *child;
+            list_for_each_entry(child, &mount_list, list) {
+                if (child != mnt && child->parent == mnt) {
+                    spin_unlock(&vfs_lock);
+                    vfs_mount_global_unlock();
+                    return -EBUSY;
+                }
+            }
+            uint32_t mount_refs = atomic_read(&mnt->refcount);
+            uint32_t baseline_refs = 1;
+            if (mnt == init_mnt_ns.root)
+                baseline_refs++;
+            if (mount_refs > baseline_refs) {
+                spin_unlock(&vfs_lock);
+                vfs_mount_global_unlock();
+                return -EBUSY;
+            }
             spin_unlock(&vfs_lock);
-
             if (mnt->ops->unmount && !(mnt->mflags & MOUNT_F_BIND)) {
                 int ret = mnt->ops->unmount(mnt);
                 if (ret < 0) {
@@ -518,6 +558,7 @@ int vfs_umount(const char *tgt) {
             spin_unlock(&vfs_lock);
 
             if (mnt == init_mnt_ns.root) {
+                vfs_mount_put(init_mnt_ns.root);
                 init_mnt_ns.root = NULL;
                 init_mnt_ns.root_dentry = NULL;
             }

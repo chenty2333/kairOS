@@ -13,8 +13,13 @@
 
 void console_attach_vnode(struct vnode *vn) {
     struct tty_struct *tty = console_tty_get();
-    if (tty)
+    if (tty) {
+        bool irq_state = arch_irq_save();
+        spin_lock(&tty->lock);
         tty->vnode = vn;
+        spin_unlock(&tty->lock);
+        arch_irq_restore(irq_state);
+    }
 }
 
 static int console_try_fill_batch(void) {

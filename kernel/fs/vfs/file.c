@@ -114,8 +114,16 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
     }
     if ((flags & O_TRUNC) && vn->ops->truncate) {
         rwlock_write_lock(&vn->lock);
-        vn->ops->truncate(vn, 0);
+        ret = vn->ops->truncate(vn, 0);
         rwlock_write_unlock(&vn->lock);
+        if (ret < 0) {
+            dentry_put(file->dentry);
+            file->dentry = NULL;
+            vnode_put(vn);
+            vfs_file_free(file);
+            dentry_put(resolved.dentry);
+            return ret;
+        }
     }
     if (vn->ops && vn->ops->open) {
         ret = vn->ops->open(file);
