@@ -26,6 +26,7 @@ struct epoll_item {
     bool dispatching;
     bool deleted;
     bool initializing;
+    bool oneshot_armed;
     struct list_head list;
     struct list_head ready_node;
     struct wait_queue detach_wait;
@@ -38,6 +39,22 @@ struct epoll_instance {
     struct poll_wait_head waiters;
     bool closing;
 };
+
+#define EPOLL_EVENT_MASK (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP)
+
+static inline uint32_t epoll_event_watch_mask(uint32_t events) {
+    return events & EPOLL_EVENT_MASK;
+}
+
+static inline uint32_t epoll_item_watch_events(const struct epoll_item *item) {
+    if (!item)
+        return 0;
+
+    uint32_t events = epoll_event_watch_mask(item->events);
+    if ((item->events & EPOLLONESHOT) && !item->oneshot_armed)
+        return 0;
+    return events;
+}
 
 static struct epoll_instance *epoll_from_fd(int epfd, struct file **filep) {
     struct file *file = fd_get(proc_current(), epfd);
@@ -91,6 +108,10 @@ static void epoll_mark_ready(struct epoll_item *item, uint32_t revents) {
     if (!ep)
         return;
 
+    revents &= EPOLL_EVENT_MASK;
+    if (!revents)
+        return;
+
     mutex_lock(&ep->lock);
     if (!ep->closing && !item->deleted) {
         item->revents = revents;
@@ -110,12 +131,13 @@ static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
         epoll_item_put(item);
         return;
     }
-    uint32_t mask = events ? (events & item->events) : item->events;
+    uint32_t watch_events = epoll_item_watch_events(item);
+    uint32_t mask = events ? (events & watch_events) : watch_events;
     if (!mask) {
         epoll_item_put(item);
         return;
     }
-    uint32_t revents = (uint32_t)vfs_poll(item->file, mask);
+    uint32_t revents = (uint32_t)vfs_poll(item->file, mask) & EPOLL_EVENT_MASK;
     if (revents)
         epoll_mark_ready(item, revents);
     epoll_item_put(item);
@@ -263,10 +285,11 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->dispatching = false;
         item->deleted = false;
         item->initializing = true;
+        item->oneshot_armed = (events & EPOLLONESHOT) != 0;
         item->watch.head = NULL;
         item->watch.prepare = epoll_item_prepare;
         item->watch.notify = epoll_item_notify;
-        item->watch.events = events;
+        item->watch.events = epoll_item_watch_events(item);
         item->watch.data = item;
         INIT_LIST_HEAD(&item->list);
         INIT_LIST_HEAD(&item->ready_node);
@@ -284,7 +307,9 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         }
         item->events = events;
         item->data = data;
-        __atomic_store_n(&item->watch.events, events, __ATOMIC_RELEASE);
+        item->oneshot_armed = (events & EPOLLONESHOT) != 0;
+        __atomic_store_n(&item->watch.events, epoll_item_watch_events(item),
+                         __ATOMIC_RELEASE);
         epoll_item_get(item);
         break;
     case EPOLL_CTL_DEL:
@@ -311,8 +336,10 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     mutex_unlock(&ep->lock);
 
     if (op == EPOLL_CTL_ADD) {
-        vfs_poll_watch(item->file->vnode, &item->watch, item->events);
-        uint32_t revents = (uint32_t)vfs_poll(item->file, item->events);
+        uint32_t watch_events = epoll_item_watch_events(item);
+        vfs_poll_watch(item->file->vnode, &item->watch, watch_events);
+        uint32_t revents = (uint32_t)vfs_poll(item->file, watch_events) &
+                           EPOLL_EVENT_MASK;
         __atomic_store_n(&item->initializing, false, __ATOMIC_RELEASE);
         if (revents)
             epoll_mark_ready(item, revents);
@@ -323,7 +350,9 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     }
 
     if (op == EPOLL_CTL_MOD) {
-        uint32_t revents = (uint32_t)vfs_poll(item->file, item->events);
+        uint32_t watch_events = epoll_item_watch_events(item);
+        uint32_t revents = (uint32_t)vfs_poll(item->file, watch_events) &
+                           EPOLL_EVENT_MASK;
         if (revents)
             epoll_mark_ready(item, revents);
         epoll_item_put(item);
@@ -392,18 +421,29 @@ static int epoll_collect_ready(struct epoll_instance *ep,
     list_for_each_entry_safe(item, tmp, &local_ready, ready_node) {
         list_del(&item->ready_node);
         uint32_t revents = 0;
-        if (!item->deleted && item->ep)
-            revents = (uint32_t)vfs_poll(item->file, item->events);
+        uint32_t watch_events = epoll_item_watch_events(item);
+        if (!item->deleted && item->ep && watch_events)
+            revents =
+                (uint32_t)vfs_poll(item->file, watch_events) & EPOLL_EVENT_MASK;
 
+        bool delivered = false;
         if (revents && out < (int)maxevents) {
             events[out].events = revents;
             events[out].data = item->data;
             out++;
+            delivered = true;
         }
 
-        bool can_requeue = (revents != 0);
+        bool can_requeue = delivered;
         mutex_lock(&ep->lock);
         item->dispatching = false;
+        if (delivered && (item->events & EPOLLONESHOT)) {
+            item->oneshot_armed = false;
+            __atomic_store_n(&item->watch.events, 0, __ATOMIC_RELEASE);
+            can_requeue = false;
+        }
+        if (delivered && (item->events & EPOLLET))
+            can_requeue = false;
         if (ep->closing || item->deleted || !item->ep)
             can_requeue = false;
         if (can_requeue)
@@ -427,7 +467,7 @@ static void epoll_rescan(struct epoll_instance *ep) {
         mutex_lock(&ep->lock);
         list_for_each_entry(item, &ep->items, list) {
             if (ep->closing || item->deleted || item->ready ||
-                item->dispatching)
+                item->dispatching || epoll_item_watch_events(item) == 0)
                 continue;
             count++;
         }
@@ -445,7 +485,7 @@ static void epoll_rescan(struct epoll_instance *ep) {
         mutex_lock(&ep->lock);
         list_for_each_entry(item, &ep->items, list) {
             if (ep->closing || item->deleted || item->ready ||
-                item->dispatching)
+                item->dispatching || epoll_item_watch_events(item) == 0)
                 continue;
             if (idx >= count) {
                 overflow = true;
@@ -466,8 +506,12 @@ static void epoll_rescan(struct epoll_instance *ep) {
         for (size_t i = 0; i < idx; i++) {
             item = items[i];
             if (!item->deleted && item->ep) {
-                uint32_t revents =
-                    (uint32_t)vfs_poll(item->file, item->events);
+                uint32_t watch_events = epoll_item_watch_events(item);
+                uint32_t revents = 0;
+                if (watch_events) {
+                    revents = (uint32_t)vfs_poll(item->file, watch_events) &
+                              EPOLL_EVENT_MASK;
+                }
                 if (revents)
                     epoll_mark_ready(item, revents);
             }

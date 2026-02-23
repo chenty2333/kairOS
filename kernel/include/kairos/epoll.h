@@ -18,6 +18,8 @@
 #define EPOLLOUT 0x0004
 #define EPOLLERR 0x0008
 #define EPOLLHUP 0x0010
+#define EPOLLONESHOT (1U << 30)
+#define EPOLLET (1U << 31)
 
 struct epoll_event {
     uint32_t events;

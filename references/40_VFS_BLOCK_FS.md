@@ -80,6 +80,7 @@ Special:
 
 - vfs_poll.c: VFS poll infrastructure, based on pollwait mechanism
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
+- Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
 
 Related references:
 - references/00_REPO_MAP.md

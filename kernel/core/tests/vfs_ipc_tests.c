@@ -454,6 +454,167 @@ static void test_epoll_pipe_semantics(void) {
     close_file_if_open(&rf);
 }
 
+static void test_epoll_edge_oneshot_semantics(void) {
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    struct file *epf = NULL;
+    int rfd = -1, wfd = -1, epfd = -1;
+    int ret = pipe_create(&rf, &wf);
+    test_check(ret == 0, "epoll edge create pipe");
+    if (ret < 0)
+        return;
+
+    do {
+        rfd = fd_alloc(proc_current(), rf);
+        test_check(rfd >= 0, "epoll edge alloc rfd");
+        if (rfd < 0)
+            break;
+        wfd = fd_alloc(proc_current(), wf);
+        test_check(wfd >= 0, "epoll edge alloc wfd");
+        if (wfd < 0)
+            break;
+        rf = NULL;
+        wf = NULL;
+
+        ret = epoll_create_file(&epf);
+        test_check(ret == 0, "epoll edge create epf");
+        if (ret < 0)
+            break;
+        epfd = fd_alloc(proc_current(), epf);
+        test_check(epfd >= 0, "epoll edge alloc epfd");
+        if (epfd < 0)
+            break;
+        epf = NULL;
+
+        struct epoll_event ev = {
+            .events = EPOLLIN | EPOLLET,
+            .data = 0xC3,
+        };
+        ret = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, rfd, &ev);
+        test_check(ret == 0, "epoll edge add");
+        if (ret < 0)
+            break;
+
+        struct epoll_event events[4];
+        ssize_t wr = fd_write_once(wfd, "AB", 2);
+        test_check(wr == 2, "epoll edge write first");
+
+        memset(events, 0, sizeof(events));
+        int ready = epoll_wait_events(epfd, events, 4, 50);
+        test_check(ready > 0, "epoll edge first ready");
+        test_check(epoll_has_event(events, ready, 0xC3, EPOLLIN),
+                   "epoll edge first mask");
+
+        memset(events, 0, sizeof(events));
+        ready = epoll_wait_events(epfd, events, 4, 0);
+        test_check(ready == 0, "epoll edge no repeat");
+
+        char rbuf[8];
+        ssize_t rd = fd_read_once(rfd, rbuf, sizeof(rbuf));
+        test_check(rd == 2, "epoll edge read first");
+
+        wr = fd_write_once(wfd, "CD", 2);
+        test_check(wr == 2, "epoll edge write second");
+        memset(events, 0, sizeof(events));
+        ready = epoll_wait_events(epfd, events, 4, 50);
+        test_check(ready > 0, "epoll edge second ready");
+        test_check(epoll_has_event(events, ready, 0xC3, EPOLLIN),
+                   "epoll edge second mask");
+        rd = fd_read_once(rfd, rbuf, sizeof(rbuf));
+        test_check(rd == 2, "epoll edge read second");
+    } while (0);
+
+    close_fd_if_open(&epfd);
+    close_fd_if_open(&wfd);
+    close_fd_if_open(&rfd);
+    close_file_if_open(&epf);
+    close_file_if_open(&wf);
+    close_file_if_open(&rf);
+
+    rf = wf = epf = NULL;
+    rfd = wfd = epfd = -1;
+    ret = pipe_create(&rf, &wf);
+    test_check(ret == 0, "epoll oneshot create pipe");
+    if (ret < 0)
+        return;
+
+    do {
+        rfd = fd_alloc(proc_current(), rf);
+        test_check(rfd >= 0, "epoll oneshot alloc rfd");
+        if (rfd < 0)
+            break;
+        wfd = fd_alloc(proc_current(), wf);
+        test_check(wfd >= 0, "epoll oneshot alloc wfd");
+        if (wfd < 0)
+            break;
+        rf = NULL;
+        wf = NULL;
+
+        ret = epoll_create_file(&epf);
+        test_check(ret == 0, "epoll oneshot create epf");
+        if (ret < 0)
+            break;
+        epfd = fd_alloc(proc_current(), epf);
+        test_check(epfd >= 0, "epoll oneshot alloc epfd");
+        if (epfd < 0)
+            break;
+        epf = NULL;
+
+        struct epoll_event ev = {
+            .events = EPOLLIN | EPOLLONESHOT,
+            .data = 0xD4,
+        };
+        ret = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, rfd, &ev);
+        test_check(ret == 0, "epoll oneshot add");
+        if (ret < 0)
+            break;
+
+        struct epoll_event events[4];
+        ssize_t wr = fd_write_once(wfd, "X", 1);
+        test_check(wr == 1, "epoll oneshot write first");
+
+        memset(events, 0, sizeof(events));
+        int ready = epoll_wait_events(epfd, events, 4, 50);
+        test_check(ready > 0, "epoll oneshot first ready");
+        test_check(epoll_has_event(events, ready, 0xD4, EPOLLIN),
+                   "epoll oneshot first mask");
+
+        memset(events, 0, sizeof(events));
+        ready = epoll_wait_events(epfd, events, 4, 0);
+        test_check(ready == 0, "epoll oneshot disarmed");
+
+        char rbuf[8];
+        ssize_t rd = fd_read_once(rfd, rbuf, sizeof(rbuf));
+        test_check(rd == 1, "epoll oneshot read first");
+
+        wr = fd_write_once(wfd, "Y", 1);
+        test_check(wr == 1, "epoll oneshot write second");
+        memset(events, 0, sizeof(events));
+        ready = epoll_wait_events(epfd, events, 4, 0);
+        test_check(ready == 0, "epoll oneshot still disarmed");
+
+        ret = epoll_ctl_fd(epfd, EPOLL_CTL_MOD, rfd, &ev);
+        test_check(ret == 0, "epoll oneshot mod rearm");
+        if (ret < 0)
+            break;
+
+        memset(events, 0, sizeof(events));
+        ready = epoll_wait_events(epfd, events, 4, 50);
+        test_check(ready > 0, "epoll oneshot rearm ready");
+        test_check(epoll_has_event(events, ready, 0xD4, EPOLLIN),
+                   "epoll oneshot rearm mask");
+        rd = fd_read_once(rfd, rbuf, sizeof(rbuf));
+        test_check(rd == 1, "epoll oneshot read second");
+    } while (0);
+
+    close_fd_if_open(&epfd);
+    close_fd_if_open(&wfd);
+    close_fd_if_open(&rfd);
+    close_file_if_open(&epf);
+    close_file_if_open(&wf);
+    close_file_if_open(&rf);
+}
+
 int run_vfs_ipc_tests(void) {
     tests_failed = 0;
     pr_info("\n=== VFS/IPC Tests ===\n");
@@ -461,6 +622,7 @@ int run_vfs_ipc_tests(void) {
     test_tmpfs_vfs_semantics();
     test_pipe_semantics();
     test_epoll_pipe_semantics();
+    test_epoll_edge_oneshot_semantics();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");

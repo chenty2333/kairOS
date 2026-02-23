@@ -499,6 +499,12 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
         return -ENOTCONN;
     }
 
+    mutex_lock(&is->lock);
+    bool peer_closed = is->peer_closed;
+    mutex_unlock(&is->lock);
+    if (peer_closed)
+        return -EPIPE;
+
     size_t total = 0;
     while (total < len) {
         u16_t sndbuf = tcp_sndbuf(is->pcb.tcp);
@@ -781,13 +787,34 @@ static int inet_close(struct socket *sock) {
     }
 
     if (is->proto == IPPROTO_TCP && is->pcb.tcp) {
-        tcp_arg(is->pcb.tcp, NULL);
-        tcp_recv(is->pcb.tcp, NULL);
-        tcp_sent(is->pcb.tcp, NULL);
-        tcp_err(is->pcb.tcp, NULL);
-        tcp_close(is->pcb.tcp);
+        struct tcp_pcb *pcb = is->pcb.tcp;
+        bool listening = (pcb->state == LISTEN);
+        tcp_arg(pcb, NULL);
+        if (listening) {
+            tcp_accept(pcb, NULL);
+            tcp_close(pcb);
+        } else {
+            tcp_recv(pcb, NULL);
+            tcp_sent(pcb, NULL);
+            tcp_err(pcb, NULL);
+
+            for (int i = 0; i < 2000; i++) {
+                if (!pcb->unsent && !pcb->unacked)
+                    break;
+                tcp_output(pcb);
+                proc_yield();
+            }
+
+            if (pcb->unsent || pcb->unacked) {
+                tcp_abort(pcb);
+            } else {
+                tcp_close(pcb);
+            }
+        }
+        is->pcb.tcp = NULL;
     } else if (is->proto == IPPROTO_UDP && is->pcb.udp) {
         udp_remove(is->pcb.udp);
+        is->pcb.udp = NULL;
     }
 
     /* Drain accept queue */

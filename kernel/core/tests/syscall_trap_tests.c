@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -25,6 +26,142 @@ static int trap_handle_calls;
 static int trap_should_deliver_calls;
 static bool trap_handler_saw_current_tf;
 static struct trap_frame *trap_handler_tf;
+
+#if defined(ARCH_riscv64)
+#define SYSCALL_USER_TEST_CODE_ADDR 0x12000
+
+/*
+ * User-mode ecall sequence:
+ * 1) SYS_uname with bad pointer: expect -EFAULT
+ * 2) SYS_getpid: expect > 0
+ * 3) SYS_uname with stack pointer: expect 0
+ * 4) SYS_exit(0)
+ * failure exits with non-zero code.
+ */
+static const uint8_t user_syscall_e2e_prog[] = {
+    0x13, 0x05, 0xf0, 0xff, 0x93, 0x08, 0x40, 0x06, 0x73, 0x00, 0x00, 0x00,
+    0x93, 0x02, 0x20, 0xff, 0x63, 0x16, 0x55, 0x02, 0x93, 0x08, 0x50, 0x00,
+    0x73, 0x00, 0x00, 0x00, 0x63, 0x56, 0xa0, 0x02, 0x13, 0x05, 0x01, 0xc0,
+    0x93, 0x08, 0x40, 0x06, 0x73, 0x00, 0x00, 0x00, 0x63, 0x14, 0x05, 0x02,
+    0x13, 0x05, 0x00, 0x00, 0x93, 0x08, 0x10, 0x00, 0x73, 0x00, 0x00, 0x00,
+    0x13, 0x05, 0xb0, 0x00, 0x93, 0x08, 0x10, 0x00, 0x73, 0x00, 0x00, 0x00,
+    0x13, 0x05, 0xc0, 0x00, 0x93, 0x08, 0x10, 0x00, 0x73, 0x00, 0x00, 0x00,
+    0x13, 0x05, 0xd0, 0x00, 0x93, 0x08, 0x10, 0x00, 0x73, 0x00, 0x00, 0x00,
+    0x6f, 0x00, 0x00, 0x00,
+};
+
+static struct process *create_legacy_user_process(const char *name,
+                                                  const uint8_t *code,
+                                                  size_t code_size,
+                                                  struct process *parent) {
+    struct process *p = proc_alloc_internal();
+    if (!p)
+        return NULL;
+
+    bool linked_parent = false;
+    strncpy(p->name, name, sizeof(p->name) - 1);
+    p->uid = p->gid = 1000;
+    p->syscall_abi = SYSCALL_ABI_LEGACY;
+
+    if (parent) {
+        p->parent = parent;
+        p->ppid = parent->pid;
+        list_add(&p->sibling, &parent->children);
+        linked_parent = true;
+    }
+
+    p->mm = mm_create();
+    if (!p->mm)
+        goto fail;
+
+    if (mm_add_vma(p->mm, SYSCALL_USER_TEST_CODE_ADDR,
+                   SYSCALL_USER_TEST_CODE_ADDR + code_size, VM_READ | VM_EXEC,
+                   NULL, 0) < 0) {
+        goto fail;
+    }
+
+    for (size_t off = 0; off < code_size; off += CONFIG_PAGE_SIZE) {
+        paddr_t pa = pmm_alloc_page();
+        if (!pa)
+            goto fail;
+        memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
+        size_t remaining = code_size - off;
+        size_t len = remaining < CONFIG_PAGE_SIZE ? remaining : CONFIG_PAGE_SIZE;
+        memcpy(phys_to_virt(pa), code + off, len);
+        if (arch_mmu_map(p->mm->pgdir, SYSCALL_USER_TEST_CODE_ADDR + off, pa,
+                         PTE_USER | PTE_READ | PTE_EXEC) < 0) {
+            pmm_free_page(pa);
+            goto fail;
+        }
+    }
+
+    vaddr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    if (mm_add_vma(p->mm, stack_bottom, USER_STACK_TOP,
+                   VM_READ | VM_WRITE | VM_STACK, NULL, 0) < 0) {
+        goto fail;
+    }
+
+    for (vaddr_t va = stack_bottom; va < USER_STACK_TOP; va += CONFIG_PAGE_SIZE) {
+        paddr_t pa = pmm_alloc_page();
+        if (!pa)
+            goto fail;
+        memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
+        if (arch_mmu_map(p->mm->pgdir, va, pa, PTE_USER | PTE_READ | PTE_WRITE) <
+            0) {
+            pmm_free_page(pa);
+            goto fail;
+        }
+    }
+
+    arch_context_init(p->context, SYSCALL_USER_TEST_CODE_ADDR,
+                      USER_STACK_TOP - 16, false);
+    return p;
+
+fail:
+    if (linked_parent && !list_empty(&p->sibling))
+        list_del(&p->sibling);
+    if (p->mm)
+        mm_destroy(p->mm);
+    proc_free_internal(p);
+    return NULL;
+}
+
+static void test_syscall_user_e2e(void) {
+    struct process *parent = proc_current();
+    test_check(parent != NULL, "user_e2e parent exists");
+    if (!parent)
+        return;
+
+    struct process *child =
+        create_legacy_user_process("sys_e2e", user_syscall_e2e_prog,
+                                   sizeof(user_syscall_e2e_prog), parent);
+    test_check(child != NULL, "user_e2e create child");
+    if (!child)
+        return;
+
+    pid_t expected = child->pid;
+    sched_enqueue(child);
+
+    int status = 0;
+    pid_t wp = 0;
+    for (int i = 0; i < 4000; i++) {
+        wp = proc_wait(expected, &status, WNOHANG);
+        if (wp == expected || wp < 0)
+            break;
+        proc_yield();
+    }
+    if (wp == 0)
+        wp = proc_wait(expected, &status, 0);
+
+    test_check(wp == expected, "user_e2e child reaped");
+    if (wp == expected)
+        test_check(status == 0, "user_e2e child exit zero");
+}
+#else
+static void test_syscall_user_e2e(void) {
+    pr_info("syscall_trap_tests: user e2e skipped on non-riscv64\n");
+}
+#endif
 
 static int64_t dispatch_legacy(uint64_t num, uint64_t a0, uint64_t a1,
                                uint64_t a2, uint64_t a3, uint64_t a4,
@@ -255,6 +392,7 @@ int run_syscall_trap_tests(void) {
     test_trap_dispatch_guard_clauses();
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();
+    test_syscall_user_e2e();
 
     if (tests_failed == 0)
         pr_info("syscall/trap tests: all passed\n");

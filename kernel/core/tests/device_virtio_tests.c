@@ -427,6 +427,97 @@ static void mmio_write32(uint8_t *base, uint32_t off, uint32_t val) {
     writel(val, (void *)(base + off));
 }
 
+static int mmio_ok_probe_calls;
+static int mmio_ok_remove_calls;
+
+static int mmio_ok_probe(struct virtio_device *vdev) {
+    (void)vdev;
+    mmio_ok_probe_calls++;
+    return 0;
+}
+
+static void mmio_ok_remove(struct virtio_device *vdev) {
+    (void)vdev;
+    mmio_ok_remove_calls++;
+}
+
+static void test_virtio_mmio_probe_remove_cleanup(void) {
+    uint8_t *mmio = kzalloc(0x200);
+    test_check(mmio != NULL, "virtio_mmio_ok alloc regs");
+    if (!mmio)
+        return;
+
+    mmio_write32(mmio, VIRTIO_MMIO_MAGIC_VALUE, 0x74726976);
+    mmio_write32(mmio, VIRTIO_MMIO_DEVICE_ID, KT_VIRTIO_DEV_ID_OK);
+
+    paddr_t mmio_pa = virt_to_phys(mmio);
+    struct resource res[2] = {
+        {
+            .start = mmio_pa,
+            .end = mmio_pa + 0x1ff,
+            .flags = IORESOURCE_MEM,
+        },
+        {
+            .start = 3,
+            .end = 3,
+            .flags = IORESOURCE_IRQ,
+        },
+    };
+
+    struct device pdev;
+    memset(&pdev, 0, sizeof(pdev));
+    strncpy(pdev.name, "ktest-mmio-ok", sizeof(pdev.name) - 1);
+    pdev.resources = res;
+    pdev.num_resources = 2;
+
+    mmio_ok_probe_calls = 0;
+    mmio_ok_remove_calls = 0;
+
+    struct virtio_driver drv = {
+        .drv = {.name = "ktest-mmio-virtio"},
+        .device_id = KT_VIRTIO_DEV_ID_OK,
+        .probe = mmio_ok_probe,
+        .remove = mmio_ok_remove,
+    };
+
+    int ret = virtio_register_driver(&drv);
+    test_check(ret == 0, "virtio_mmio_ok register virtio driver");
+    if (ret < 0) {
+        kfree(mmio);
+        return;
+    }
+
+    bool probed = false;
+    do {
+        ret = virtio_mmio_driver.probe(&pdev);
+        test_check(ret == 0, "virtio_mmio_ok probe success");
+        if (ret < 0)
+            break;
+        probed = true;
+
+        struct virtio_device *vdev = (struct virtio_device *)dev_get_drvdata(&pdev);
+        test_check(vdev != NULL, "virtio_mmio_ok drvdata set");
+        if (!vdev)
+            break;
+
+        test_check(vdev->id == KT_VIRTIO_DEV_ID_OK, "virtio_mmio_ok device id");
+        test_check(vdev->dev.driver == &drv.drv, "virtio_mmio_ok matched driver");
+        test_check(mmio_ok_probe_calls == 1, "virtio_mmio_ok probe callback");
+
+        if (virtio_mmio_driver.remove)
+            virtio_mmio_driver.remove(&pdev);
+        test_check(dev_get_drvdata(&pdev) == NULL, "virtio_mmio_ok drvdata cleared");
+        test_check(mmio_ok_remove_calls == 1, "virtio_mmio_ok remove callback");
+        probed = false;
+    } while (0);
+
+    if (probed && virtio_mmio_driver.remove)
+        virtio_mmio_driver.remove(&pdev);
+
+    driver_unregister(&drv.drv);
+    kfree(mmio);
+}
+
 static void test_virtio_mmio_probe_failfast(void) {
     struct device dev_no_res;
     memset(&dev_no_res, 0, sizeof(dev_no_res));
@@ -481,6 +572,7 @@ int run_device_virtio_tests(void) {
     test_device_probe_failure_rollback();
     test_driver_unregister_cleanup();
     test_virtio_bus_probe_and_rollback();
+    test_virtio_mmio_probe_remove_cleanup();
     test_virtio_mmio_probe_failfast();
 
     if (tests_failed == 0)

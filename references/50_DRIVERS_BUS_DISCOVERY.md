@@ -33,6 +33,7 @@ PCI bus (bus/pci.c):
 VirtIO bus:
 - Registered as a separate bus_type (virtio_bus_type)
 - virtio_mmio.c: VirtIO MMIO transport layer, probed as a platform driver, discovers VirtIO devices and registers them on the virtio bus
+- virtio_mmio probe stores transport state in `dev->driver_data`; remove path unregisters the child virtio device and frees transport resources
 
 ## Device Discovery Flow (core/init/devices.c)
 

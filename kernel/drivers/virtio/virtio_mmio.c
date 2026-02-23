@@ -146,6 +146,7 @@ static int virtio_mmio_probe(struct device *dev) {
     mdev->irq = irq;
     mdev->vdev.id = virtio_id;
     mdev->vdev.ops = &mmio_ops;
+    dev_set_drvdata(dev, mdev);
     
     snprintf(mdev->vdev.dev.name, sizeof(mdev->vdev.dev.name), "virtio-mmio.%p", base);
     
@@ -154,8 +155,26 @@ static int virtio_mmio_probe(struct device *dev) {
     arch_irq_register(mdev->irq, virtio_mmio_intr, mdev);
 
     pr_info("virtio-mmio: found device %d at %p, irq %d\n", virtio_id, base, mdev->irq);
-    
-    return virtio_device_register(&mdev->vdev);
+
+    int ret = virtio_device_register(&mdev->vdev);
+    if (ret < 0) {
+        dev_set_drvdata(dev, NULL);
+        iounmap(base);
+        kfree(mdev);
+        return ret;
+    }
+    return 0;
+}
+
+static void virtio_mmio_remove(struct device *dev) {
+    struct virtio_mmio_device *mdev = dev_get_drvdata(dev);
+    if (!mdev)
+        return;
+
+    device_unregister(&mdev->vdev.dev);
+    dev_set_drvdata(dev, NULL);
+    iounmap(mdev->base);
+    kfree(mdev);
 }
 
 struct driver virtio_mmio_driver = {
@@ -163,4 +182,5 @@ struct driver virtio_mmio_driver = {
     .compatible = "virtio,mmio",
     .bus = &platform_bus_type,
     .probe = virtio_mmio_probe,
+    .remove = virtio_mmio_remove,
 };
