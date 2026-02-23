@@ -23,6 +23,7 @@
 .set CTX_TTBR0, 120
 .set CTX_KFN, 128
 .set CTX_KARG, 136
+.set CTX_TPIDR, 144
 
 .global arch_context_switch
 arch_context_switch:
@@ -35,6 +36,8 @@ arch_context_switch:
     mov x2, sp
     str x2, [x0, #CTX_SP]
     str x30, [x0, #CTX_LR]
+    mrs x2, tpidr_el0
+    str x2, [x0, #CTX_TPIDR]
 
     ldp x19, x20, [x1, #CTX_X19]
     ldp x21, x22, [x1, #CTX_X21]
@@ -45,6 +48,8 @@ arch_context_switch:
     ldr x2, [x1, #CTX_SP]
     mov sp, x2
     ldr x30, [x1, #CTX_LR]
+    ldr x2, [x1, #CTX_TPIDR]
+    msr tpidr_el0, x2
     ret
 
 .global arch_enter_user

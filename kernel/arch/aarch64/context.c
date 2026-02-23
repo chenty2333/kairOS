@@ -28,6 +28,7 @@ struct arch_context {
     uint64_t ttbr0;
     uint64_t kthread_fn;
     uint64_t kthread_arg;
+    uint64_t tpidr_el0;
 };
 
 extern void kthread_entry(void);
@@ -118,9 +119,9 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
 }
 
 void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
-    (void)ctx;
-    /* Set tpidr_el0 directly; restored on context switch */
-    __asm__ __volatile__("msr tpidr_el0, %0" :: "r"(tls));
+    if (!ctx)
+        return;
+    ctx->tpidr_el0 = tls;
 }
 
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {

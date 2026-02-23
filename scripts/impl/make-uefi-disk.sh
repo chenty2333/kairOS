@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Create a UEFI bootable FAT image with Limine + kernel.
+# Prepare UEFI boot media with Limine + kernel.
 #
 # Usage: scripts/kairos.sh --arch <arch> image uefi-disk
 #
@@ -15,9 +15,11 @@ BUILD_DIR="$BUILD_ROOT/$ARCH"
 QUIET="${QUIET:-0}"
 KERNEL="$BUILD_DIR/kairos.elf"
 BOOT_IMG="$BUILD_DIR/boot.img"
+BOOT_FS="$BUILD_DIR/bootfs"
 LIMINE_DIR="$ROOT_DIR/third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
 LIMINE_CFG="$ROOT_DIR/limine.cfg"
+UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-dir}" # dir|img|both
 
 BOOT_EFI="$(kairos_arch_to_boot_efi "$ARCH")" || {
     echo "Error: Unsupported ARCH for UEFI boot image: $ARCH"
@@ -45,30 +47,11 @@ if [ ! -f "$BOOT_EFI_SRC" ]; then
     exit 1
 fi
 
-MKFS_FAT="$(command -v mkfs.fat || command -v mkfs.vfat || true)"
-if [ -z "$MKFS_FAT" ]; then
-    echo "Error: mkfs.fat not found"
-    echo "Install with: sudo dnf install dosfstools"
-    exit 1
-fi
-
 IMG_SIZE_MB="${IMG_SIZE_MB:-64}"
-
-rm -f "$BOOT_IMG"
-if ! truncate -s "${IMG_SIZE_MB}M" "$BOOT_IMG" 2>/dev/null; then
-    dd if=/dev/zero of="$BOOT_IMG" bs=1M count="$IMG_SIZE_MB" status=none
-fi
-"$MKFS_FAT" -F 32 "$BOOT_IMG" >/dev/null
-
-MNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kairos-uefi-XXXXXX")"
 CFG_TMP="$(mktemp "${TMPDIR:-/tmp}/kairos-limine-XXXXXX.cfg")"
 
 cleanup() {
-    if mountpoint -q "$MNT_DIR"; then
-        sudo umount "$MNT_DIR" || true
-    fi
     rm -f "$CFG_TMP"
-    rmdir "$MNT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -81,7 +64,6 @@ tolower($0) ~ /^default_entry[[:space:]]*:/ { next }
 { print }
 ' "$LIMINE_CFG" > "$CFG_TMP"
 
-sudo mount -o loop "$BOOT_IMG" "$MNT_DIR"
 mkdir -p "$BUILD_DIR"
 cp "$BOOT_EFI_SRC" "$BOOT_EFI_DST"
 if [ -x "$LIMINE_DIR/limine" ]; then
@@ -89,28 +71,73 @@ if [ -x "$LIMINE_DIR/limine" ]; then
     "$LIMINE_DIR/limine" enroll-config "$BOOT_EFI_DST" "$CFG_HASH" >/dev/null 2>&1 || true
 fi
 
-sudo mkdir -p "$MNT_DIR/EFI/BOOT" "$MNT_DIR/boot/limine"
-sudo cp "$BOOT_EFI_DST" "$MNT_DIR/EFI/BOOT/$BOOT_EFI"
-sudo cp "$CFG_TMP" "$MNT_DIR/limine.cfg"
-sudo cp "$CFG_TMP" "$MNT_DIR/boot/limine/limine.cfg"
-sudo cp "$CFG_TMP" "$MNT_DIR/boot/limine/limine.conf"
-sudo cp "$KERNEL" "$MNT_DIR/kairos.elf"
-sudo cp "$KERNEL" "$MNT_DIR/boot/kairos.elf"
+rm -rf "$BOOT_FS"
+mkdir -p "$BOOT_FS/EFI/BOOT" "$BOOT_FS/boot/limine" "$BOOT_FS/boot"
+cp "$BOOT_EFI_DST" "$BOOT_FS/EFI/BOOT/$BOOT_EFI"
+cp "$CFG_TMP" "$BOOT_FS/limine.cfg"
+cp "$CFG_TMP" "$BOOT_FS/boot/limine/limine.cfg"
+cp "$CFG_TMP" "$BOOT_FS/boot/limine/limine.conf"
+cp "$KERNEL" "$BOOT_FS/kairos.elf"
+cp "$KERNEL" "$BOOT_FS/boot/kairos.elf"
 if [ "$ARCH" = "riscv64" ] && [ -f "qemu-virt.dtb" ]; then
-    sudo cp qemu-virt.dtb "$MNT_DIR/qemu-virt.dtb"
-    sudo cp qemu-virt.dtb "$MNT_DIR/boot/qemu-virt.dtb"
+    cp qemu-virt.dtb "$BOOT_FS/qemu-virt.dtb"
+    cp qemu-virt.dtb "$BOOT_FS/boot/qemu-virt.dtb"
 fi
 if [ -f "$INITRAMFS" ]; then
-    sudo cp "$INITRAMFS" "$MNT_DIR/initramfs.cpio"
-    sudo cp "$INITRAMFS" "$MNT_DIR/boot/initramfs.cpio"
+    cp "$INITRAMFS" "$BOOT_FS/initramfs.cpio"
+    cp "$INITRAMFS" "$BOOT_FS/boot/initramfs.cpio"
 else
     echo "WARN: initramfs not found at $INITRAMFS" >&2
 fi
-sync
-sudo umount "$MNT_DIR"
+
+make_boot_img_mtools() {
+    local mkfs_fat
+    mkfs_fat="$(command -v mkfs.fat || command -v mkfs.vfat || true)"
+    if [ -z "$mkfs_fat" ]; then
+        return 1
+    fi
+    if ! command -v mcopy >/dev/null 2>&1 || ! command -v mmd >/dev/null 2>&1; then
+        return 1
+    fi
+
+    rm -f "$BOOT_IMG"
+    if ! truncate -s "${IMG_SIZE_MB}M" "$BOOT_IMG" 2>/dev/null; then
+        dd if=/dev/zero of="$BOOT_IMG" bs=1M count="$IMG_SIZE_MB" status=none
+    fi
+    "$mkfs_fat" -F 32 "$BOOT_IMG" >/dev/null
+    mmd -i "$BOOT_IMG" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine >/dev/null
+    mcopy -i "$BOOT_IMG" -s "$BOOT_FS"/* ::/ >/dev/null
+}
+
+case "$UEFI_BOOT_MODE" in
+    dir) ;;
+    img)
+        if ! make_boot_img_mtools; then
+            echo "Error: UEFI_BOOT_MODE=img requires mkfs.fat + mtools (mcopy/mmd)" >&2
+            exit 1
+        fi
+        ;;
+    both)
+        if ! make_boot_img_mtools; then
+            echo "WARN: boot.img skipped (missing mkfs.fat + mtools)" >&2
+        fi
+        ;;
+    *)
+        echo "Error: invalid UEFI_BOOT_MODE='$UEFI_BOOT_MODE' (expected dir|img|both)" >&2
+        exit 1
+        ;;
+esac
 
 if [ "$QUIET" = "1" ]; then
-    echo "  BOOT    $BOOT_IMG (${IMG_SIZE_MB}M FAT32)"
+    if [ "$UEFI_BOOT_MODE" = "img" ]; then
+        echo "  BOOT    $BOOT_IMG (${IMG_SIZE_MB}M FAT32)"
+    else
+        echo "  BOOT    $BOOT_FS (UEFI FAT dir)"
+    fi
 else
-    echo "UEFI boot image created: $BOOT_IMG"
+    echo "UEFI boot media prepared:"
+    echo "  $BOOT_FS"
+    if [ -f "$BOOT_IMG" ]; then
+        echo "  $BOOT_IMG"
+    fi
 fi

@@ -465,12 +465,19 @@ endif
 UEFI_CODE := $(BUILD_DIR)/uefi-code.fd
 UEFI_VARS := $(BUILD_DIR)/uefi-vars.fd
 UEFI_BOOT := $(BUILD_DIR)/boot.img
+UEFI_BOOT_DIR := $(BUILD_DIR)/bootfs
+QEMU_UEFI_BOOT_MODE ?= dir
+UEFI_BOOT_MODE ?= $(QEMU_UEFI_BOOT_MODE)
 
 # UEFI pflash + Limine boot image (all architectures)
 QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly=on
 QEMU_UEFI_FLAGS += -drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS)
 
+ifeq ($(QEMU_UEFI_BOOT_MODE),img)
 QEMU_BOOT_FLAGS := -drive id=boot,file=$(UEFI_BOOT),format=raw,if=none
+else
+QEMU_BOOT_FLAGS := -drive id=boot,file=fat:rw:$(UEFI_BOOT_DIR),format=raw,if=none
+endif
 QEMU_BOOT_FLAGS += -device $(QEMU_VIRTIO_BLK_DEV),drive=boot,bootindex=0$(QEMU_VIRTIO_PCI_ROM_OPT)
 
 QEMU_MEDIA_FLAGS := $(QEMU_UEFI_FLAGS) $(QEMU_BOOT_FLAGS)
@@ -627,7 +634,7 @@ distclean: clean-all
 
 # Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) $(KAIROS_CMD) image uefi
+	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) $(KAIROS_CMD) image uefi
 
 # Create a disk image with ext2 filesystem
 disk: $(DISK_STAMP)
