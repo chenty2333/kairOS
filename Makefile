@@ -256,7 +256,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs lock-status user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -530,12 +530,14 @@ ifneq ($(strip $(QEMU_STDIN)),)
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
 		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 else
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
 		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		SESSION_FILTER_CMD="$(QEMU_UEFI_NOISE_FILTER)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
@@ -544,6 +546,7 @@ else
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
 		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
@@ -567,12 +570,14 @@ ifneq ($(strip $(QEMU_STDIN)),)
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
 		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 else
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
 		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		SESSION_FILTER_CMD="$(QEMU_UEFI_NOISE_FILTER)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
@@ -581,6 +586,7 @@ else
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
 		SESSION_LOG="$(RUN_LOG)" SESSION_BUILD_ROOT="$(BUILD_ROOT)" SESSION_BUILD_DIR="$(BUILD_DIR)" \
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
+		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
@@ -658,6 +664,8 @@ RUN_GC_AUTO ?= 1
 RUN_ISOLATED ?= 1
 RUN_TIMEOUT ?= 0
 RUN_REQUIRE_BOOT ?= 1
+RUN_LOCK_WAIT ?= 0
+TEST_LOCK_WAIT ?= 0
 ifndef RUN_ID
 RUN_ID := $(shell sh -c 'ts="$$(date +%y%m%d-%H%M)"; rnd="$$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d "[[:space:]]")"; if [ -z "$$rnd" ]; then rnd="$$(printf "%04x" "$$$$")"; fi; printf "%s-%s" "$$ts" "$$rnd"')
 endif
@@ -675,7 +683,7 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
 			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test; \
 	else \
-		RUN_ID="$(RUN_ID)" $(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
+		RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
 	fi
 
 test-isolated:
@@ -756,14 +764,34 @@ gc-runs:
 	done; \
 	echo "gc-runs: kept latest $$keep runs under $(TEST_RUNS_ROOT)"
 
+lock-status:
+	@echo "lock-status: scanning build lock files"
+	@{ \
+		find build -type f \( -path '*/.locks/*.lock' -o -path '*/.locks/*.lock.meta' \) 2>/dev/null | sort -u; \
+	} | while IFS= read -r p; do \
+		if [ -z "$$p" ]; then continue; fi; \
+		case "$$p" in \
+			*.lock.meta) \
+				lock="$${p%.meta}"; \
+				pid="$$(awk -F= '$$1=="pid"{print $$2; exit}' "$$p" 2>/dev/null)"; \
+				state="dead"; \
+				if [ -n "$$pid" ] && kill -0 "$$pid" >/dev/null 2>&1; then state="alive"; fi; \
+				echo "$$lock (meta pid=$${pid:-?} state=$$state)"; \
+				;; \
+			*) \
+				echo "$$p"; \
+				;; \
+		esac; \
+	done
+
 test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)$(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
+	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
 
 test-matrix: check-tools $(KAIROS_DEPS) scripts/test-matrix.sh
-	$(Q)$(KAIROS_CMD) run test-matrix
+	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-matrix
 
 test-debug: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)$(KAIROS_CMD) run test-debug --extra-cflags "$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
+	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-debug --extra-cflags "$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
 # Show help
 help:
@@ -807,6 +835,7 @@ help:
 	@echo "  test-tty - Run tty stack module only (tty_core/n_tty/pty)"
 	@echo "  test-soak-pr - Run PR soak + low-rate fault injection module only"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
+	@echo "  lock-status - List lock files and metadata (pid/state)"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
 	@echo "  test-matrix - Run SMP x DEBUG test matrix"
@@ -826,6 +855,8 @@ help:
 	@echo "  RUN_ISOLATED - Enable isolated run session (default: 1)"
 	@echo "  RUN_TIMEOUT - Session timeout seconds for run (0 means no timeout)"
 	@echo "  RUN_REQUIRE_BOOT - Require boot marker for run success (default: 1)"
+	@echo "  RUN_LOCK_WAIT - Seconds to wait for run qemu lock before lock_busy (default: 0)"
+	@echo "  TEST_LOCK_WAIT - Seconds to wait for test qemu lock before lock_busy (default: 0)"
 	@echo "  RUN_ID - Explicit isolated session id for run/test (default: YYMMDD-HHMM-xxxx)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
