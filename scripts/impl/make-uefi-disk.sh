@@ -20,6 +20,7 @@ LIMINE_DIR="$ROOT_DIR/third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
 LIMINE_CFG="$ROOT_DIR/limine.cfg"
 UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-dir}" # dir|img|both
+QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}" # optional dir|img
 
 BOOT_EFI="$(kairos_arch_to_boot_efi "$ARCH")" || {
     echo "Error: Unsupported ARCH for UEFI boot image: $ARCH"
@@ -31,6 +32,21 @@ case "$ARCH" in
     x86_64) LIMINE_DEFAULT_ENTRY=2 ;;
     aarch64) LIMINE_DEFAULT_ENTRY=3 ;;
 esac
+
+case "$QEMU_UEFI_BOOT_MODE" in
+    "" | dir | img) ;;
+    *)
+        echo "Error: invalid QEMU_UEFI_BOOT_MODE='$QEMU_UEFI_BOOT_MODE' (expected dir|img)" >&2
+        exit 1
+        ;;
+esac
+
+if [ -n "$QEMU_UEFI_BOOT_MODE" ] &&
+    [ "$UEFI_BOOT_MODE" != "both" ] &&
+    [ "$QEMU_UEFI_BOOT_MODE" != "$UEFI_BOOT_MODE" ]; then
+    echo "Error: UEFI_BOOT_MODE='$UEFI_BOOT_MODE' mismatches QEMU_UEFI_BOOT_MODE='$QEMU_UEFI_BOOT_MODE'" >&2
+    exit 1
+fi
 
 if [ ! -f "$KERNEL" ]; then
     echo "Error: Kernel not found at $KERNEL"
@@ -119,6 +135,10 @@ case "$UEFI_BOOT_MODE" in
         ;;
     both)
         if ! make_boot_img_mtools; then
+            if [ "$QEMU_UEFI_BOOT_MODE" = "img" ]; then
+                echo "Error: QEMU_UEFI_BOOT_MODE=img requires boot.img, but mkfs.fat + mtools are missing" >&2
+                exit 1
+            fi
             echo "WARN: boot.img skipped (missing mkfs.fat + mtools)" >&2
         fi
         ;;

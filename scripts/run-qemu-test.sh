@@ -27,6 +27,8 @@ TEST_QEMU_PID_FILE="${TEST_QEMU_PID_FILE:-${TEST_BUILD_ROOT}/test-runner.pid}"
 TEST_BUILD_DIR="${TEST_BUILD_DIR:-${TEST_BUILD_ROOT}/${TEST_ARCH}}"
 TEST_LOCK_FILE="${TEST_LOCK_FILE:-${TEST_BUILD_DIR}/.locks/qemu.lock}"
 TEST_LOCK_WAIT="${TEST_LOCK_WAIT:-0}"
+TEST_UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-}"
+TEST_QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}"
 
 json_quote() {
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
@@ -117,6 +119,8 @@ write_manifest() {
   "build_root": $(json_quote "${TEST_BUILD_ROOT}"),
   "command": "run-qemu-test.sh",
   "qemu_cmd": $(json_quote "${QEMU_CMD}"),
+  "uefi_boot_mode": $(json_quote "${TEST_UEFI_BOOT_MODE}"),
+  "qemu_uefi_boot_mode": $(json_quote "${TEST_QEMU_UEFI_BOOT_MODE}"),
   "git_sha": $(json_quote "${git_sha}"),
   "start_time_utc": $(json_quote "${start_time_utc}"),
   "host_pid": $$,

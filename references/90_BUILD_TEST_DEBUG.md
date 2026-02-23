@@ -69,6 +69,12 @@ QEMU configuration:
 - Graphics: `QEMU_GUI=1` enables GTK display
 - Disk: virtio-blk; riscv64 uses virtio-mmio, x86_64/aarch64 use virtio-pci
 - All architectures boot via UEFI + Limine
+- Boot media contract: `UEFI_BOOT_MODE=dir|img|both` controls generated boot artifacts, `QEMU_UEFI_BOOT_MODE=dir|img` controls run-time media selection
+- Default is directory boot (`bootfs`); when `UEFI_BOOT_MODE=both`, run-time default remains `dir`
+- For non-`both` builds, mode mismatch is rejected early (`UEFI_BOOT_MODE` must equal `QEMU_UEFI_BOOT_MODE`)
+- `scripts/run-qemu-session.sh` preflights boot media strictly and fails fast on missing expected artifact (no automatic `boot.img`/`bootfs` fallback)
+- Under `UEFI_BOOT_MODE=both`, selecting `QEMU_UEFI_BOOT_MODE=img` requires `mkfs.fat + mtools`; missing host tools now fail image preparation early
+- `make uefi` now propagates image-preparation failure to caller (no silent success on missing boot image prerequisites)
 
 ## Testing
 

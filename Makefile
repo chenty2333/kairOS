@@ -466,8 +466,41 @@ UEFI_CODE := $(BUILD_DIR)/uefi-code.fd
 UEFI_VARS := $(BUILD_DIR)/uefi-vars.fd
 UEFI_BOOT := $(BUILD_DIR)/boot.img
 UEFI_BOOT_DIR := $(BUILD_DIR)/bootfs
-QEMU_UEFI_BOOT_MODE ?= dir
-UEFI_BOOT_MODE ?= $(QEMU_UEFI_BOOT_MODE)
+UEFI_BOOT_MODE ?=
+QEMU_UEFI_BOOT_MODE ?=
+
+VALID_UEFI_BOOT_MODES := dir img both
+VALID_QEMU_UEFI_BOOT_MODES := dir img
+
+ifeq ($(strip $(UEFI_BOOT_MODE)),)
+ifeq ($(strip $(QEMU_UEFI_BOOT_MODE)),)
+UEFI_BOOT_MODE := dir
+else
+UEFI_BOOT_MODE := $(QEMU_UEFI_BOOT_MODE)
+endif
+endif
+
+ifneq ($(filter $(UEFI_BOOT_MODE),$(VALID_UEFI_BOOT_MODES)),$(UEFI_BOOT_MODE))
+$(error invalid UEFI_BOOT_MODE='$(UEFI_BOOT_MODE)' (expected dir|img|both))
+endif
+
+ifeq ($(strip $(QEMU_UEFI_BOOT_MODE)),)
+ifeq ($(UEFI_BOOT_MODE),both)
+QEMU_UEFI_BOOT_MODE := dir
+else
+QEMU_UEFI_BOOT_MODE := $(UEFI_BOOT_MODE)
+endif
+endif
+
+ifneq ($(filter $(QEMU_UEFI_BOOT_MODE),$(VALID_QEMU_UEFI_BOOT_MODES)),$(QEMU_UEFI_BOOT_MODE))
+$(error invalid QEMU_UEFI_BOOT_MODE='$(QEMU_UEFI_BOOT_MODE)' (expected dir|img))
+endif
+
+ifneq ($(UEFI_BOOT_MODE),both)
+ifneq ($(QEMU_UEFI_BOOT_MODE),$(UEFI_BOOT_MODE))
+$(error UEFI_BOOT_MODE='$(UEFI_BOOT_MODE)' mismatches QEMU_UEFI_BOOT_MODE='$(QEMU_UEFI_BOOT_MODE)'; set one mode or use UEFI_BOOT_MODE=both)
+endif
+endif
 
 # UEFI pflash + Limine boot image (all architectures)
 QEMU_UEFI_FLAGS := -drive if=pflash,format=raw,unit=0,file=$(UEFI_CODE),readonly=on
@@ -540,6 +573,7 @@ ifneq ($(strip $(QEMU_STDIN)),)
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
 		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 else
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
@@ -548,6 +582,7 @@ else
 		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		SESSION_FILTER_CMD="$(QEMU_UEFI_NOISE_FILTER)" \
+		UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
 else
@@ -556,6 +591,7 @@ else
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
 		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
 
@@ -580,6 +616,7 @@ ifneq ($(strip $(QEMU_STDIN)),)
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
 		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 else
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
@@ -588,6 +625,7 @@ else
 		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
 		SESSION_FILTER_CMD="$(QEMU_UEFI_NOISE_FILTER)" \
+		UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
 else
@@ -596,6 +634,7 @@ else
 		SESSION_ARCH="$(ARCH)" SESSION_RUN_ID="$(RUN_ID)" SESSION_REQUIRE_BOOT="$(RUN_REQUIRE_BOOT)" \
 		SESSION_LOCK_WAIT="$(RUN_LOCK_WAIT)" \
 		SESSION_MANIFEST="$(RUN_MANIFEST)" SESSION_RESULT="$(RUN_RESULT)" \
+		UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		QEMU_CMD='$(QEMU) $(QEMU_RUN_FLAGS) -device e1000,netdev=net0 $(QEMU_STDIN)' ./scripts/run-qemu-session.sh
 endif
 
@@ -634,7 +673,8 @@ distclean: clean-all
 
 # Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) $(KAIROS_CMD) image uefi
+	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) \
+		QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) $(KAIROS_CMD) image uefi
 
 # Create a disk image with ext2 filesystem
 disk: $(DISK_STAMP)
@@ -697,33 +737,34 @@ RUN_MANIFEST ?= $(BUILD_ROOT)/manifest.json
 RUN_RESULT ?= $(BUILD_ROOT)/result.json
 
 test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
-		if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
-			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
-		fi; \
-		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
-			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" \
-			TEST_TIMEOUT="$(TEST_TIMEOUT)" $(TEST_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test; \
-			else \
-				RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
-			fi
+		$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
+			if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+				$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+			fi; \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+				TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" \
+				TEST_TIMEOUT="$(TEST_TIMEOUT)" $(TEST_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test; \
+		else \
+			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+				$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
+		fi
 
 test-tcc-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)if [ "$(TCC_SMOKE_ISOLATED)" = "1" ]; then \
-		if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
-			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
-		fi; \
-		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
-			TCC_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" TCC_SMOKE_EXTRA_CFLAGS="$(TCC_SMOKE_EXTRA_CFLAGS)" \
-			TCC_SMOKE_TIMEOUT="$(TCC_SMOKE_TIMEOUT)" $(TCC_SMOKE_LOG_FWD) \
-			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-tcc-smoke; \
-			else \
-			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" \
-			TCC_SMOKE_BOOT_DELAY_SEC="$(TCC_SMOKE_BOOT_DELAY_SEC)" \
-			TCC_SMOKE_STEP_DELAY_SEC="$(TCC_SMOKE_STEP_DELAY_SEC)" \
-			$(KAIROS_CMD) run test-tcc-smoke --extra-cflags "$(TCC_SMOKE_EXTRA_CFLAGS)" \
-			--timeout "$(TCC_SMOKE_TIMEOUT)" --log "$(TCC_SMOKE_LOG)"; \
-	fi
+		$(Q)if [ "$(TCC_SMOKE_ISOLATED)" = "1" ]; then \
+			if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+				$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+			fi; \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+				TCC_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" TCC_SMOKE_EXTRA_CFLAGS="$(TCC_SMOKE_EXTRA_CFLAGS)" \
+				TCC_SMOKE_TIMEOUT="$(TCC_SMOKE_TIMEOUT)" $(TCC_SMOKE_LOG_FWD) \
+				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-tcc-smoke; \
+		else \
+			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+				TCC_SMOKE_BOOT_DELAY_SEC="$(TCC_SMOKE_BOOT_DELAY_SEC)" \
+				TCC_SMOKE_STEP_DELAY_SEC="$(TCC_SMOKE_STEP_DELAY_SEC)" \
+				$(KAIROS_CMD) run test-tcc-smoke --extra-cflags "$(TCC_SMOKE_EXTRA_CFLAGS)" \
+				--timeout "$(TCC_SMOKE_TIMEOUT)" --log "$(TCC_SMOKE_LOG)"; \
+		fi
 
 test-isolated:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=1 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test
@@ -849,13 +890,16 @@ lock-clean-stale:
 	echo "lock-clean-stale: removed legacy=$$legacy dead_meta=$$dead missing_lock_meta=$$missing kept_live_meta=$$kept"
 
 test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
+	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+		$(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
 
 test-matrix: check-tools $(KAIROS_DEPS) scripts/test-matrix.sh
-	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-matrix
+	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+		$(KAIROS_CMD) run test-matrix
 
 test-debug: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-debug --extra-cflags "$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
+	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+		$(KAIROS_CMD) run test-debug --extra-cflags "$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
 # Show help
 help:

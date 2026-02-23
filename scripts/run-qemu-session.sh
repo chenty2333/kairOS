@@ -25,6 +25,8 @@ SESSION_QEMU_PID_FILE="${SESSION_QEMU_PID_FILE:-${SESSION_BUILD_ROOT}/qemu.pid}"
 SESSION_BUILD_DIR="${SESSION_BUILD_DIR:-${SESSION_BUILD_ROOT}/${SESSION_ARCH}}"
 SESSION_LOCK_FILE="${SESSION_LOCK_FILE:-${SESSION_BUILD_DIR}/.locks/qemu.lock}"
 SESSION_LOCK_WAIT="${SESSION_LOCK_WAIT:-0}"
+SESSION_UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-}"
+SESSION_QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}"
 
 json_quote() {
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
@@ -36,6 +38,32 @@ json_bool() {
     else
         echo "false"
     fi
+}
+
+validate_boot_drive_cmd() {
+    local cmd="$1"
+    local boot_spec boot_path
+
+    if [[ "${cmd}" =~ -drive[[:space:]]+id=boot,file=([^,[:space:]]+),format=raw,if=none ]]; then
+        boot_spec="${BASH_REMATCH[1]}"
+        if [[ "${boot_spec}" == fat:rw:* ]]; then
+            boot_path="${boot_spec#fat:rw:}"
+            if [[ ! -d "${boot_path}" ]]; then
+                echo "run: bootfs missing (${boot_path})" >&2
+                return 1
+            fi
+            return 0
+        fi
+
+        boot_path="${boot_spec}"
+        if [[ ! -f "${boot_path}" ]]; then
+            echo "run: boot image missing (${boot_path})" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    return 0
 }
 
 write_manifest() {
@@ -54,6 +82,8 @@ write_manifest() {
   "build_root": $(json_quote "${SESSION_BUILD_ROOT}"),
   "command": "run-qemu-session.sh",
   "qemu_cmd": $(json_quote "${QEMU_CMD}"),
+  "uefi_boot_mode": $(json_quote "${SESSION_UEFI_BOOT_MODE}"),
+  "qemu_uefi_boot_mode": $(json_quote "${SESSION_QEMU_UEFI_BOOT_MODE}"),
   "git_sha": $(json_quote "${git_sha}"),
   "start_time_utc": $(json_quote "${start_time_utc}"),
   "host_pid": $$,
@@ -100,6 +130,18 @@ run_session_main() {
     rm -f "${SESSION_LOG}"
     start_ms="$(date +%s%3N)"
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+    if ! validate_boot_drive_cmd "${QEMU_CMD}"; then
+        write_manifest "${start_time_utc}"
+        end_ms="$(date +%s%3N)"
+        end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        duration_ms="$((end_ms - start_ms))"
+        write_result "${end_time_utc}" "${duration_ms}" "error" "missing_boot_media" 2 2 0 0
+        echo "run: manifest -> ${SESSION_MANIFEST}"
+        echo "run: result -> ${SESSION_RESULT}"
+        return 2
+    fi
+
     write_manifest "${start_time_utc}"
 
     if [[ -f "${SESSION_QEMU_PID_FILE}" ]]; then

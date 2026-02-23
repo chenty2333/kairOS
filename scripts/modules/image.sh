@@ -26,13 +26,17 @@ EOF
 kairos_image_with_build_lock() {
     local rc=0
     local build_dir="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}"
-    if ! kairos_lock_buildroot "${build_dir}" "image" "$@"; then
-        rc=$?
+    set +e
+    kairos_lock_buildroot "${build_dir}" "image" "$@"
+    rc=$?
+    set -e
+    if ((rc != 0)); then
         if kairos_lock_is_busy_rc "${rc}"; then
             kairos_die "image action is busy for BUILD_ROOT=${build_dir} (lock: image)"
         fi
+        return "$rc"
     fi
-    return "$rc"
+    return 0
 }
 
 kairos_image_stage_rootfs() {

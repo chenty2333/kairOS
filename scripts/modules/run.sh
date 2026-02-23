@@ -75,8 +75,9 @@ kairos_run_test_once() {
 
     local qemu_cmd
     printf -v qemu_cmd \
-        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q QEMU_STDIN= RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
-        "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
+        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q QEMU_STDIN= RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q run-direct' \
+        "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
+        "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
 
     kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" "" 1
 }
@@ -93,15 +94,17 @@ kairos_run_test_tcc_smoke_once() {
     local inner_make_cmd=""
     local smoke_cmd=""
     local qemu_cmd=""
-    local required_any="Usage: tcc"
-    local required_all=$'Usage: tcc\n# echo __TCC_SMOKE_DONE__\n__TCC_SMOKE_DONE__'
+    local required_any="TCC_BIN_OK"
+    local required_all=$'TCC_BIN_OK\nRC_EXEC:0\n__TCC_SMOKE_DONE__'
     local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma'
 
     printf -v inner_make_cmd \
-        'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0' \
-        "${make_jobs}" "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
+        'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
+        "${make_jobs}" "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
+        "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
 
     printf -v smoke_cmd '%s' \
+        ": > \"${run_log}\"; " \
         "fifo=\"\$(mktemp -u /tmp/kairos-tcc-smoke.XXXXXX)\"; " \
         "mkfifo \"\$fifo\"; " \
         "( exec 3<>\"\$fifo\"; " \
@@ -109,7 +112,12 @@ kairos_run_test_tcc_smoke_once() {
         "grep -Eiq 'init: starting shell|BusyBox v' \"${run_log}\" 2>/dev/null && break; " \
         "sleep 1; " \
         "done; " \
-        "sleep ${boot_delay}; printf 'tcc\\n' >&3; " \
+        "sleep ${boot_delay}; " \
+        "printf 'printf '\\''int main(void){return 0;}\\\\n'\\'' > /tmp/tcc_smoke_exec.c\\n' >&3; " \
+        "sleep ${step_delay}; printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_exec\\n' >&3; " \
+        "sleep ${step_delay}; printf 'test -x /tmp/tcc_smoke_exec && echo TCC_BIN_OK\\n' >&3; " \
+        "sleep ${step_delay}; printf '/tmp/tcc_smoke_exec\\n' >&3; " \
+        "sleep ${step_delay}; printf 'echo RC_EXEC:$?\\n' >&3; " \
         "sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n' >&3; " \
         "sleep ${step_delay}; printf 'poweroff\\n' >&3; " \
         "exec 3>&- ) & " \
@@ -147,6 +155,8 @@ kairos_run_test_locked() {
         kairos_exec_script_env "test" \
             QEMU_CMD="${qemu_cmd}" \
             QEMU_EXTRA="" \
+            UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-}" \
+            QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}" \
             TEST_TIMEOUT="${timeout_s}" \
             TEST_LOG="${log_path}" \
             TEST_REQUIRE_MARKERS="${require_markers}" \
