@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+KAIROS_ROOT_DIR="${KAIROS_ROOT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+# shellcheck source=scripts/lib/lock.sh
+source "${SCRIPT_DIR}/lib/lock.sh"
+
 QEMU_CMD="${QEMU_CMD:-}"
 SESSION_KIND="${SESSION_KIND:-run}"
 SESSION_TIMEOUT="${SESSION_TIMEOUT:-0}"
@@ -18,7 +23,7 @@ SESSION_MANIFEST="${SESSION_MANIFEST:-${SESSION_BUILD_ROOT}/manifest.json}"
 SESSION_RESULT="${SESSION_RESULT:-${SESSION_BUILD_ROOT}/result.json}"
 SESSION_QEMU_PID_FILE="${SESSION_QEMU_PID_FILE:-${SESSION_BUILD_ROOT}/qemu.pid}"
 SESSION_BUILD_DIR="${SESSION_BUILD_DIR:-${SESSION_BUILD_ROOT}/${SESSION_ARCH}}"
-SESSION_LOCK_FILE="${SESSION_LOCK_FILE:-${SESSION_BUILD_DIR}/.locks/qemu-run.lock}"
+SESSION_LOCK_FILE="${SESSION_LOCK_FILE:-${SESSION_BUILD_DIR}/.locks/qemu.lock}"
 SESSION_LOCK_WAIT="${SESSION_LOCK_WAIT:-0}"
 
 json_quote() {
@@ -87,6 +92,125 @@ write_result() {
 JSON
 }
 
+run_session_main() {
+    local start_ms start_time_utc end_ms end_time_utc duration_ms
+    local old_pid wrapped_qemu_cmd qemu_rc has_boot_marker has_fail_markers
+    local status reason exit_code
+
+    rm -f "${SESSION_LOG}"
+    start_ms="$(date +%s%3N)"
+    start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    write_manifest "${start_time_utc}"
+
+    if [[ -f "${SESSION_QEMU_PID_FILE}" ]]; then
+        old_pid="$(cat "${SESSION_QEMU_PID_FILE}" 2>/dev/null || true)"
+        if [[ "${old_pid}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
+            end_ms="$(date +%s%3N)"
+            end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            duration_ms="$((end_ms - start_ms))"
+            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 0 0
+            echo "run: existing qemu pid is still running (${old_pid})" >&2
+            return 2
+        fi
+        rm -f "${SESSION_QEMU_PID_FILE}"
+    fi
+
+    echo "run: kind=${SESSION_KIND} timeout=${SESSION_TIMEOUT}s"
+    echo "run: log -> ${SESSION_LOG}"
+    echo "run: manifest -> ${SESSION_MANIFEST}"
+    echo "run: result -> ${SESSION_RESULT}"
+
+    wrapped_qemu_cmd=""
+    printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${SESSION_QEMU_PID_FILE}" "${QEMU_CMD}"
+
+    set +e
+    if [[ "${SESSION_TIMEOUT}" -gt 0 ]]; then
+        if [[ -n "${SESSION_FILTER_CMD}" ]]; then
+            timeout --signal=TERM --kill-after=5s "${SESSION_TIMEOUT}s" \
+                bash -lc "${wrapped_qemu_cmd}" 2>&1 | bash -lc "${SESSION_FILTER_CMD}" | tee -a "${SESSION_LOG}"
+            qemu_rc=${PIPESTATUS[0]}
+        else
+            timeout --signal=TERM --kill-after=5s "${SESSION_TIMEOUT}s" \
+                bash -lc "${wrapped_qemu_cmd}" 2>&1 | tee -a "${SESSION_LOG}"
+            qemu_rc=${PIPESTATUS[0]}
+        fi
+    else
+        if [[ -n "${SESSION_FILTER_CMD}" ]]; then
+            bash -lc "${wrapped_qemu_cmd}" 2>&1 | bash -lc "${SESSION_FILTER_CMD}" | tee -a "${SESSION_LOG}"
+            qemu_rc=${PIPESTATUS[0]}
+        else
+            bash -lc "${wrapped_qemu_cmd}" 2>&1 | tee -a "${SESSION_LOG}"
+            qemu_rc=${PIPESTATUS[0]}
+        fi
+    fi
+    set -e
+
+    has_boot_marker=0
+    has_fail_markers=0
+
+    if grep -Eiq "${SESSION_BOOT_MARKER}" "${SESSION_LOG}"; then
+        has_boot_marker=1
+    fi
+    if grep -Eiq "${SESSION_FAIL_REGEX}" "${SESSION_LOG}"; then
+        has_fail_markers=1
+    fi
+
+    status="fail"
+    reason="unexpected_exit"
+    exit_code=1
+
+    if [[ "${SESSION_EXPECT_TIMEOUT}" -eq 1 ]]; then
+        if [[ ${has_fail_markers} -eq 1 ]]; then
+            status="fail"
+            reason="failure_markers_detected"
+        elif [[ ${qemu_rc} -eq 124 ]]; then
+            status="pass"
+            reason="expected_timeout"
+            exit_code=0
+        elif [[ ${qemu_rc} -eq 0 ]]; then
+            if [[ "${SESSION_REQUIRE_BOOT}" -eq 1 && ${has_boot_marker} -eq 0 ]]; then
+                status="fail"
+                reason="missing_boot_marker"
+            else
+                status="pass"
+                reason="completed_before_timeout"
+                exit_code=0
+            fi
+        fi
+    else
+        if [[ ${has_fail_markers} -eq 1 ]]; then
+            status="fail"
+            reason="failure_markers_detected"
+        elif [[ ${qemu_rc} -eq 124 ]]; then
+            status="timeout"
+            reason="timeout"
+        elif [[ ${qemu_rc} -eq 0 ]]; then
+            if [[ "${SESSION_REQUIRE_BOOT}" -eq 1 && ${has_boot_marker} -eq 0 ]]; then
+                status="fail"
+                reason="missing_boot_marker"
+            else
+                status="pass"
+                reason="qemu_exit_zero"
+                exit_code=0
+            fi
+        fi
+    fi
+
+    end_ms="$(date +%s%3N)"
+    end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    duration_ms="$((end_ms - start_ms))"
+    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${has_fail_markers}" "${has_boot_marker}"
+
+    if [[ "${status}" == "pass" ]]; then
+        echo "run: PASS (${reason}, qemu_rc=${qemu_rc})"
+        return 0
+    fi
+
+    echo "run: ${status} (${reason}, qemu_rc=${qemu_rc})" >&2
+    tail -n 120 "${SESSION_LOG}" >&2 || true
+    return "${exit_code}"
+}
+
 if [[ -z "${QEMU_CMD}" ]]; then
     echo "run: QEMU_CMD is empty" >&2
     exit 2
@@ -109,8 +233,18 @@ mkdir -p \
     "$(dirname "${SESSION_QEMU_PID_FILE}")" \
     "$(dirname "${SESSION_LOCK_FILE}")"
 
-exec {lock_fd}> "${SESSION_LOCK_FILE}"
-if ! flock -w "${SESSION_LOCK_WAIT}" "${lock_fd}"; then
+trap 'rm -f "${SESSION_QEMU_PID_FILE}" || true' EXIT
+
+set +e
+KAIROS_LOCK_WAIT="${SESSION_LOCK_WAIT}" kairos_lock_with_file "${SESSION_LOCK_FILE}" run_session_main
+rc=$?
+set -e
+
+if [[ "${rc}" -eq 0 ]]; then
+    exit 0
+fi
+
+if kairos_lock_is_busy_rc "${rc}"; then
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     write_manifest "${start_time_utc}"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -119,122 +253,4 @@ if ! flock -w "${SESSION_LOCK_WAIT}" "${lock_fd}"; then
     exit 2
 fi
 
-cleanup() {
-    rm -f "${SESSION_QEMU_PID_FILE}" || true
-    flock -u "${lock_fd}" || true
-    exec {lock_fd}>&- || true
-}
-trap cleanup EXIT
-
-rm -f "${SESSION_LOG}"
-start_ms="$(date +%s%3N)"
-start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-write_manifest "${start_time_utc}"
-
-if [[ -f "${SESSION_QEMU_PID_FILE}" ]]; then
-    old_pid="$(cat "${SESSION_QEMU_PID_FILE}" 2>/dev/null || true)"
-    if [[ "${old_pid}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
-        end_ms="$(date +%s%3N)"
-        end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-        duration_ms="$((end_ms - start_ms))"
-        write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 0 0
-        echo "run: existing qemu pid is still running (${old_pid})" >&2
-        exit 2
-    fi
-    rm -f "${SESSION_QEMU_PID_FILE}"
-fi
-
-echo "run: kind=${SESSION_KIND} timeout=${SESSION_TIMEOUT}s"
-echo "run: log -> ${SESSION_LOG}"
-echo "run: manifest -> ${SESSION_MANIFEST}"
-echo "run: result -> ${SESSION_RESULT}"
-
-wrapped_qemu_cmd=""
-printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${SESSION_QEMU_PID_FILE}" "${QEMU_CMD}"
-
-set +e
-if [[ "${SESSION_TIMEOUT}" -gt 0 ]]; then
-    if [[ -n "${SESSION_FILTER_CMD}" ]]; then
-        timeout --signal=TERM --kill-after=5s "${SESSION_TIMEOUT}s" \
-            bash -lc "${wrapped_qemu_cmd}" 2>&1 | bash -lc "${SESSION_FILTER_CMD}" | tee -a "${SESSION_LOG}"
-        qemu_rc=${PIPESTATUS[0]}
-    else
-        timeout --signal=TERM --kill-after=5s "${SESSION_TIMEOUT}s" \
-            bash -lc "${wrapped_qemu_cmd}" 2>&1 | tee -a "${SESSION_LOG}"
-        qemu_rc=${PIPESTATUS[0]}
-    fi
-else
-    if [[ -n "${SESSION_FILTER_CMD}" ]]; then
-        bash -lc "${wrapped_qemu_cmd}" 2>&1 | bash -lc "${SESSION_FILTER_CMD}" | tee -a "${SESSION_LOG}"
-        qemu_rc=${PIPESTATUS[0]}
-    else
-        bash -lc "${wrapped_qemu_cmd}" 2>&1 | tee -a "${SESSION_LOG}"
-        qemu_rc=${PIPESTATUS[0]}
-    fi
-fi
-set -e
-
-has_boot_marker=0
-has_fail_markers=0
-
-if grep -Eiq "${SESSION_BOOT_MARKER}" "${SESSION_LOG}"; then
-    has_boot_marker=1
-fi
-if grep -Eiq "${SESSION_FAIL_REGEX}" "${SESSION_LOG}"; then
-    has_fail_markers=1
-fi
-
-status="fail"
-reason="unexpected_exit"
-exit_code=1
-
-if [[ "${SESSION_EXPECT_TIMEOUT}" -eq 1 ]]; then
-    if [[ ${has_fail_markers} -eq 1 ]]; then
-        status="fail"
-        reason="failure_markers_detected"
-    elif [[ ${qemu_rc} -eq 124 ]]; then
-        status="pass"
-        reason="expected_timeout"
-        exit_code=0
-    elif [[ ${qemu_rc} -eq 0 ]]; then
-        if [[ "${SESSION_REQUIRE_BOOT}" -eq 1 && ${has_boot_marker} -eq 0 ]]; then
-            status="fail"
-            reason="missing_boot_marker"
-        else
-            status="pass"
-            reason="completed_before_timeout"
-            exit_code=0
-        fi
-    fi
-else
-    if [[ ${has_fail_markers} -eq 1 ]]; then
-        status="fail"
-        reason="failure_markers_detected"
-    elif [[ ${qemu_rc} -eq 124 ]]; then
-        status="timeout"
-        reason="timeout"
-    elif [[ ${qemu_rc} -eq 0 ]]; then
-        if [[ "${SESSION_REQUIRE_BOOT}" -eq 1 && ${has_boot_marker} -eq 0 ]]; then
-            status="fail"
-            reason="missing_boot_marker"
-        else
-            status="pass"
-            reason="qemu_exit_zero"
-            exit_code=0
-        fi
-    fi
-fi
-
-end_ms="$(date +%s%3N)"
-end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-duration_ms="$((end_ms - start_ms))"
-write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${has_fail_markers}" "${has_boot_marker}"
-
-if [[ "${status}" == "pass" ]]; then
-    echo "run: PASS (${reason}, qemu_rc=${qemu_rc})"
-    exit 0
-fi
-
-echo "run: ${status} (${reason}, qemu_rc=${qemu_rc})" >&2
-tail -n 120 "${SESSION_LOG}" >&2 || true
-exit "${exit_code}"
+exit "${rc}"

@@ -103,9 +103,12 @@ For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
 
 Concurrency and locking:
-- Shared-resource operations use a global lock.
-- `image` and `run/test` use per-`BUILD_ROOT` locks.
-- Different `BUILD_ROOT` runs are parallel-safe; same `BUILD_ROOT` conflicting actions are blocked.
+- Global locks live at `build/.locks/global-<name>.lock` (current shared resource: `global-deps-fetch.lock`).
+- Local locks live at `<BUILD_ROOT>/<arch>/.locks/<name>.lock` (current: `image.lock`, `qemu.lock`).
+- `scripts/run-qemu-session.sh` and `scripts/run-qemu-test.sh` share `qemu.lock` per build directory, so same `BUILD_ROOT` run/test sessions are serialized.
+- Lock metadata is written to `<lock>.meta` (`pid/start_utc/start_epoch/cwd/cmd`) for observability.
+- On lock contention, stale metadata (dead pid) is reclaimed automatically and lock acquisition is retried once.
+- Different `BUILD_ROOT` runs are parallel-safe; same `BUILD_ROOT` conflicting actions are blocked and return `lock_busy`.
 
 Run retention:
 - `make gc-runs` keeps latest `RUNS_KEEP` runs (default `20`)

@@ -28,7 +28,7 @@ kairos_image_with_build_lock() {
     local build_dir="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}"
     if ! kairos_lock_buildroot "${build_dir}" "image" "$@"; then
         rc=$?
-        if [[ "$rc" -eq 75 ]]; then
+        if kairos_lock_is_busy_rc "${rc}"; then
             kairos_die "image action is busy for BUILD_ROOT=${build_dir} (lock: image)"
         fi
     fi

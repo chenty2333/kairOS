@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+KAIROS_ROOT_DIR="${KAIROS_ROOT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+# shellcheck source=scripts/lib/lock.sh
+source "${SCRIPT_DIR}/lib/lock.sh"
+
 QEMU_CMD="${QEMU_CMD:-}"
 TEST_TIMEOUT="${TEST_TIMEOUT:-180}"
 TEST_LOG="${TEST_LOG:-build/test.log}"
@@ -16,6 +21,9 @@ TEST_RUN_ID="${TEST_RUN_ID:-$(basename "$TEST_BUILD_ROOT")}"
 TEST_MANIFEST="${TEST_MANIFEST:-${TEST_BUILD_ROOT}/manifest.json}"
 TEST_RESULT="${TEST_RESULT:-${TEST_BUILD_ROOT}/result.json}"
 TEST_QEMU_PID_FILE="${TEST_QEMU_PID_FILE:-${TEST_BUILD_ROOT}/test-runner.pid}"
+TEST_BUILD_DIR="${TEST_BUILD_DIR:-${TEST_BUILD_ROOT}/${TEST_ARCH}}"
+TEST_LOCK_FILE="${TEST_LOCK_FILE:-${TEST_BUILD_DIR}/.locks/qemu.lock}"
+TEST_LOCK_WAIT="${TEST_LOCK_WAIT:-0}"
 
 json_quote() {
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
@@ -159,6 +167,194 @@ write_result() {
 JSON
 }
 
+run_test_main() {
+    local start_ms start_time_utc end_ms end_time_utc duration_ms
+    local old_pid wrapped_qemu_cmd qemu_rc
+    local has_boot_marker has_fatal_markers has_failure_markers
+    local structured_status structured_schema structured_failed structured_done structured_enabled_mask
+    local status reason exit_code verdict_source
+
+    rm -f "${TEST_LOG}"
+
+    start_ms="$(date +%s%3N)"
+    start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    write_manifest "${start_time_utc}"
+
+    if [[ -f "${TEST_QEMU_PID_FILE}" ]]; then
+        old_pid="$(cat "${TEST_QEMU_PID_FILE}" 2>/dev/null || true)"
+        if [[ "${old_pid}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
+            end_ms="$(date +%s%3N)"
+            end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            duration_ms="$((end_ms - start_ms))"
+            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1
+            echo "test: existing qemu pid is still running (${old_pid})" >&2
+            return 2
+        fi
+        rm -f "${TEST_QEMU_PID_FILE}"
+    fi
+
+    echo "test: running qemu (timeout=${TEST_TIMEOUT}s)"
+    echo "test: log -> ${TEST_LOG}"
+    echo "test: require_markers=${TEST_REQUIRE_MARKERS} expect_timeout=${TEST_EXPECT_TIMEOUT}"
+    echo "test: manifest -> ${TEST_MANIFEST}"
+    echo "test: result -> ${TEST_RESULT}"
+
+    wrapped_qemu_cmd=""
+    printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${TEST_QEMU_PID_FILE}" "${QEMU_CMD}"
+
+    set +e
+    timeout --signal=TERM --kill-after=5s "${TEST_TIMEOUT}s" \
+        bash -lc "${wrapped_qemu_cmd}" >"${TEST_LOG}" 2>&1
+    qemu_rc=$?
+    set -e
+    rm -f "${TEST_QEMU_PID_FILE}"
+
+    has_boot_marker=0
+    has_fatal_markers=0
+    has_failure_markers=0
+
+    if grep -Eiq "${TEST_BOOT_MARKER}" "${TEST_LOG}"; then
+        has_boot_marker=1
+    fi
+
+    if grep -Eiq "${TEST_FATAL_MARKER}" "${TEST_LOG}"; then
+        has_fatal_markers=1
+    fi
+
+    if grep -Eiq "${TEST_FAILURE_MARKER}" "${TEST_LOG}"; then
+        has_failure_markers=1
+    fi
+
+    structured_status="missing"
+    structured_schema=-1
+    structured_failed=-1
+    structured_done=0
+    structured_enabled_mask=-1
+    read -r structured_status structured_schema structured_failed structured_done structured_enabled_mask < <(extract_structured_result)
+
+    status="fail"
+    reason="unknown"
+    exit_code=1
+    verdict_source="fallback"
+
+    if [[ "${TEST_REQUIRE_MARKERS}" -eq 1 ]]; then
+        verdict_source="structured"
+        if [[ ${has_fatal_markers} -eq 1 ]]; then
+            status="fail"
+            reason="fatal_markers_detected"
+        elif [[ "${structured_status}" == "missing" ]]; then
+            if [[ ${has_failure_markers} -eq 1 ]]; then
+                status="fail"
+                reason="failure_markers_without_structured"
+            elif [[ ${qemu_rc} -eq 124 ]]; then
+                status="timeout"
+                reason="timeout_without_structured"
+            else
+                status="infra_fail"
+                reason="missing_structured_result"
+            fi
+        elif [[ "${structured_status}" == "invalid" ]]; then
+            if [[ ${has_failure_markers} -eq 1 ]]; then
+                status="fail"
+                reason="failure_markers_with_invalid_structured"
+            else
+                status="infra_fail"
+                reason="invalid_structured_result"
+            fi
+        elif [[ "${structured_done}" -ne 1 ]]; then
+            status="infra_fail"
+            reason="structured_done_false"
+        elif [[ "${structured_failed}" -gt 0 ]]; then
+            status="fail"
+            reason="structured_failed"
+        elif [[ ${qemu_rc} -eq 0 ]]; then
+            status="pass"
+            reason="structured_passed"
+        elif [[ ${qemu_rc} -eq 124 ]]; then
+            status="pass"
+            reason="structured_passed_timeout_exit"
+        else
+            status="fail"
+            reason="unexpected_exit_after_structured"
+        fi
+    else
+        if [[ ${has_fatal_markers} -eq 1 ]]; then
+            status="fail"
+            reason="fatal_markers_detected"
+        elif [[ "${structured_status}" == "ok" && "${structured_done}" -eq 1 ]]; then
+            verdict_source="structured"
+            if [[ "${structured_failed}" -gt 0 ]]; then
+                status="fail"
+                reason="structured_failed"
+            elif [[ "${TEST_EXPECT_TIMEOUT}" -eq 1 ]]; then
+                if [[ ${qemu_rc} -eq 124 || ${qemu_rc} -eq 0 ]]; then
+                    status="pass"
+                    reason="structured_passed"
+                else
+                    status="fail"
+                    reason="structured_passed_unexpected_exit"
+                fi
+            elif [[ ${qemu_rc} -eq 0 ]]; then
+                status="pass"
+                reason="structured_passed"
+            elif [[ ${qemu_rc} -eq 124 ]]; then
+                status="timeout"
+                reason="timeout_after_structured"
+            else
+                status="fail"
+                reason="unexpected_exit_after_structured"
+            fi
+        elif [[ ${has_boot_marker} -eq 0 ]]; then
+            status="fail"
+            reason="missing_boot_marker"
+        elif [[ "${TEST_EXPECT_TIMEOUT}" -eq 1 ]]; then
+            if [[ ${qemu_rc} -eq 124 ]]; then
+                status="pass"
+                reason="expected_timeout"
+            elif [[ ${qemu_rc} -eq 0 ]]; then
+                status="pass"
+                reason="qemu_exit_zero"
+            else
+                status="fail"
+                reason="unexpected_exit_in_soak"
+            fi
+        else
+            if [[ ${qemu_rc} -eq 0 ]]; then
+                status="pass"
+                reason="qemu_exit_zero"
+            elif [[ ${qemu_rc} -eq 124 ]]; then
+                status="timeout"
+                reason="timeout"
+            else
+                status="fail"
+                reason="unexpected_exit"
+            fi
+        fi
+    fi
+
+    if [[ "${status}" == "pass" ]]; then
+        exit_code=0
+    elif [[ "${status}" == "error" || "${status}" == "infra_fail" ]]; then
+        exit_code=2
+    else
+        exit_code=1
+    fi
+
+    end_ms="$(date +%s%3N)"
+    end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    duration_ms="$((end_ms - start_ms))"
+    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}"
+
+    if [[ "${status}" == "pass" ]]; then
+        echo "test: PASS (${reason}, qemu_rc=${qemu_rc})"
+        return 0
+    fi
+
+    echo "test: ${status} (${reason}, qemu_rc=${qemu_rc})" >&2
+    tail -n 120 "${TEST_LOG}" >&2 || true
+    return "${exit_code}"
+}
+
 if [[ -z "${QEMU_CMD}" ]]; then
     echo "test: QEMU_CMD is empty" >&2
     exit 2
@@ -174,183 +370,36 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 2
 fi
 
-mkdir -p "$(dirname "${TEST_LOG}")" "$(dirname "${TEST_MANIFEST}")" "$(dirname "${TEST_RESULT}")" "$(dirname "${TEST_QEMU_PID_FILE}")"
-rm -f "${TEST_LOG}"
-
-start_ms="$(date +%s%3N)"
-start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-write_manifest "${start_time_utc}"
-
-if [[ -f "${TEST_QEMU_PID_FILE}" ]]; then
-    old_pid="$(cat "${TEST_QEMU_PID_FILE}" 2>/dev/null || true)"
-    if [[ "${old_pid}" =~ ^[0-9]+$ ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then
-        end_ms="$(date +%s%3N)"
-        end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-        duration_ms="$((end_ms - start_ms))"
-        write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1
-        echo "test: existing qemu pid is still running (${old_pid})" >&2
-        exit 2
-    fi
-    rm -f "${TEST_QEMU_PID_FILE}"
+if ! [[ "${TEST_TIMEOUT}" =~ ^[0-9]+$ ]]; then
+    echo "test: TEST_TIMEOUT must be a non-negative integer" >&2
+    exit 2
 fi
 
-echo "test: running qemu (timeout=${TEST_TIMEOUT}s)"
-echo "test: log -> ${TEST_LOG}"
-echo "test: require_markers=${TEST_REQUIRE_MARKERS} expect_timeout=${TEST_EXPECT_TIMEOUT}"
-echo "test: manifest -> ${TEST_MANIFEST}"
-echo "test: result -> ${TEST_RESULT}"
+mkdir -p \
+    "$(dirname "${TEST_LOG}")" \
+    "$(dirname "${TEST_MANIFEST}")" \
+    "$(dirname "${TEST_RESULT}")" \
+    "$(dirname "${TEST_QEMU_PID_FILE}")" \
+    "$(dirname "${TEST_LOCK_FILE}")"
 
-wrapped_qemu_cmd=""
-printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${TEST_QEMU_PID_FILE}" "${QEMU_CMD}"
+trap 'rm -f "${TEST_QEMU_PID_FILE}" || true' EXIT
 
 set +e
-timeout --signal=TERM --kill-after=5s "${TEST_TIMEOUT}s" \
-    bash -lc "${wrapped_qemu_cmd}" >"${TEST_LOG}" 2>&1
-qemu_rc=$?
+KAIROS_LOCK_WAIT="${TEST_LOCK_WAIT}" kairos_lock_with_file "${TEST_LOCK_FILE}" run_test_main
+rc=$?
 set -e
-rm -f "${TEST_QEMU_PID_FILE}"
 
-has_boot_marker=0
-has_fatal_markers=0
-has_failure_markers=0
-
-if grep -Eiq "${TEST_BOOT_MARKER}" "${TEST_LOG}"; then
-    has_boot_marker=1
-fi
-
-if grep -Eiq "${TEST_FATAL_MARKER}" "${TEST_LOG}"; then
-    has_fatal_markers=1
-fi
-
-if grep -Eiq "${TEST_FAILURE_MARKER}" "${TEST_LOG}"; then
-    has_failure_markers=1
-fi
-
-structured_status="missing"
-structured_schema=-1
-structured_failed=-1
-structured_done=0
-structured_enabled_mask=-1
-read -r structured_status structured_schema structured_failed structured_done structured_enabled_mask < <(extract_structured_result)
-
-status="fail"
-reason="unknown"
-exit_code=1
-verdict_source="fallback"
-
-if [[ "${TEST_REQUIRE_MARKERS}" -eq 1 ]]; then
-    verdict_source="structured"
-    if [[ ${has_fatal_markers} -eq 1 ]]; then
-        status="fail"
-        reason="fatal_markers_detected"
-    elif [[ "${structured_status}" == "missing" ]]; then
-        if [[ ${has_failure_markers} -eq 1 ]]; then
-            status="fail"
-            reason="failure_markers_without_structured"
-        elif [[ ${qemu_rc} -eq 124 ]]; then
-            status="timeout"
-            reason="timeout_without_structured"
-        else
-            status="infra_fail"
-            reason="missing_structured_result"
-        fi
-    elif [[ "${structured_status}" == "invalid" ]]; then
-        if [[ ${has_failure_markers} -eq 1 ]]; then
-            status="fail"
-            reason="failure_markers_with_invalid_structured"
-        else
-            status="infra_fail"
-            reason="invalid_structured_result"
-        fi
-    elif [[ "${structured_done}" -ne 1 ]]; then
-        status="infra_fail"
-        reason="structured_done_false"
-    elif [[ "${structured_failed}" -gt 0 ]]; then
-        status="fail"
-        reason="structured_failed"
-    elif [[ ${qemu_rc} -eq 0 ]]; then
-        status="pass"
-        reason="structured_passed"
-    elif [[ ${qemu_rc} -eq 124 ]]; then
-        status="pass"
-        reason="structured_passed_timeout_exit"
-    else
-        status="fail"
-        reason="unexpected_exit_after_structured"
-    fi
-else
-    if [[ ${has_fatal_markers} -eq 1 ]]; then
-        status="fail"
-        reason="fatal_markers_detected"
-    elif [[ "${structured_status}" == "ok" && "${structured_done}" -eq 1 ]]; then
-        verdict_source="structured"
-        if [[ "${structured_failed}" -gt 0 ]]; then
-            status="fail"
-            reason="structured_failed"
-        elif [[ "${TEST_EXPECT_TIMEOUT}" -eq 1 ]]; then
-            if [[ ${qemu_rc} -eq 124 || ${qemu_rc} -eq 0 ]]; then
-                status="pass"
-                reason="structured_passed"
-            else
-                status="fail"
-                reason="structured_passed_unexpected_exit"
-            fi
-        elif [[ ${qemu_rc} -eq 0 ]]; then
-            status="pass"
-            reason="structured_passed"
-        elif [[ ${qemu_rc} -eq 124 ]]; then
-            status="timeout"
-            reason="timeout_after_structured"
-        else
-            status="fail"
-            reason="unexpected_exit_after_structured"
-        fi
-    elif [[ ${has_boot_marker} -eq 0 ]]; then
-        status="fail"
-        reason="missing_boot_marker"
-    elif [[ "${TEST_EXPECT_TIMEOUT}" -eq 1 ]]; then
-        if [[ ${qemu_rc} -eq 124 ]]; then
-            status="pass"
-            reason="expected_timeout"
-        elif [[ ${qemu_rc} -eq 0 ]]; then
-            status="pass"
-            reason="qemu_exit_zero"
-        else
-            status="fail"
-            reason="unexpected_exit_in_soak"
-        fi
-    else
-        if [[ ${qemu_rc} -eq 0 ]]; then
-            status="pass"
-            reason="qemu_exit_zero"
-        elif [[ ${qemu_rc} -eq 124 ]]; then
-            status="timeout"
-            reason="timeout"
-        else
-            status="fail"
-            reason="unexpected_exit"
-        fi
-    fi
-fi
-
-if [[ "${status}" == "pass" ]]; then
-    exit_code=0
-elif [[ "${status}" == "error" || "${status}" == "infra_fail" ]]; then
-    exit_code=2
-else
-    exit_code=1
-fi
-
-end_ms="$(date +%s%3N)"
-end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-duration_ms="$((end_ms - start_ms))"
-write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}"
-
-if [[ "${status}" == "pass" ]]; then
-    echo "test: PASS (${reason}, qemu_rc=${qemu_rc})"
+if [[ "${rc}" -eq 0 ]]; then
     exit 0
 fi
 
-echo "test: ${status} (${reason}, qemu_rc=${qemu_rc})" >&2
-tail -n 120 "${TEST_LOG}" >&2 || true
-exit "${exit_code}"
+if kairos_lock_is_busy_rc "${rc}"; then
+    start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    write_manifest "${start_time_utc}"
+    end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1
+    echo "test: session is busy (lock: ${TEST_LOCK_FILE})" >&2
+    exit 2
+fi
+
+exit "${rc}"

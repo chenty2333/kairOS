@@ -14,6 +14,17 @@ Actions:
 EOF
 }
 
+kairos_deps_with_global_lock() {
+    local rc=0
+    if ! kairos_lock_global "deps-fetch" "$@"; then
+        rc=$?
+        if kairos_lock_is_busy_rc "${rc}"; then
+            kairos_die "deps fetch is busy (global lock: deps-fetch)"
+        fi
+    fi
+    return "${rc}"
+}
+
 kairos_deps_dispatch() {
     local action="${1:-}"
     shift || true
@@ -26,22 +37,18 @@ kairos_deps_dispatch() {
     case "$action" in
         fetch)
             local component="${1:-all}"
-            kairos_lock_global "deps-fetch" \
-                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "${component}" || \
-                kairos_die "deps fetch is busy (global lock: deps-fetch)"
+            kairos_deps_with_global_lock \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "${component}"
             ;;
         freedoom)
-            kairos_lock_global "deps-fetch" \
-                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh" || \
-                kairos_die "deps fetch is busy (global lock: deps-fetch)"
+            kairos_deps_with_global_lock \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh"
             ;;
         all)
-            kairos_lock_global "deps-fetch" \
-                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "all" || \
-                kairos_die "deps fetch is busy (global lock: deps-fetch)"
-            kairos_lock_global "deps-fetch" \
-                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh" || \
-                kairos_die "deps fetch is busy (global lock: deps-fetch)"
+            kairos_deps_with_global_lock \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-deps.sh" "all"
+            kairos_deps_with_global_lock \
+                kairos_exec_script "deps" "${KAIROS_ROOT_DIR}/scripts/impl/fetch-freedoom.sh"
             ;;
         *)
             kairos_die "unknown deps action: ${action}"
