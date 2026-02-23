@@ -33,18 +33,19 @@ PCI bus (bus/pci.c):
 VirtIO bus:
 - Registered as a separate bus_type (virtio_bus_type)
 - virtio_mmio.c: VirtIO MMIO transport layer, probed as a platform driver, discovers VirtIO devices and registers them on the virtio bus
+- virtio_pci.c: VirtIO PCI transport layer, probed as a PCI driver, parses VirtIO vendor capabilities (common/notify/isr/device config) and registers child virtio devices on the virtio bus
 - virtio_mmio probe stores transport state in `dev->driver_data`; remove path unregisters the child virtio device and frees transport resources
 
 ## Device Discovery Flow (core/init/devices.c)
 
 init_devices() execution order:
 1. Register buses: platform_bus_init(), pci_bus_init(), bus_register(&virtio_bus_type)
-2. Register drivers: virtio_mmio_driver, virtio_blk_driver, virtio_net_driver, drm_lite_driver (optional)
+2. Register drivers: virtio_mmio_driver, virtio_pci_driver, virtio_blk_driver, virtio_net_driver, drm_lite_driver (optional)
 3. Firmware descriptors: fw_init(), register_limine_framebuffers(), acpi_init()
 4. Device tree scan: fdt_scan_devices() (if DTB present)
 5. Enumerate devices: platform_bus_enumerate(), pci_enumerate()
 
-FDT scanning and Limine framebuffer registration call fw_register_desc(); ACPI currently only probes RSDP and marks available.
+FDT scanning and Limine framebuffer registration call fw_register_desc(); ACPI probes RSDP, and aarch64 PCI host init additionally parses ACPI MCFG to discover ECAM for pci_enumerate().
 
 Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumerate() creates device → device_register() triggers matching → driver.probe()
 
@@ -91,9 +92,11 @@ lwIP integration:
 
 - AF_INET listen() backlog parameter is ignored
 - virtio_net RX → lwIP input path is not yet wired up
-- ACPI device discovery is still scaffolding; does not register device descriptors
+- ACPI platform-device discovery is still scaffolding (does not register fw descriptors); currently only PCI ECAM discovery via MCFG is wired for aarch64
+- virtio-pci currently uses common INTx path; MSI-X and advanced PCI features are not wired yet
 
 Related references:
 - references/00_REPO_MAP.md
 - references/10_BOOT_FIRMWARE_TRAP_SYSCALL_TIME.md
 - references/40_VFS_BLOCK_FS.md
+- references/51_DRM_LITE_DISPLAY.md
