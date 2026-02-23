@@ -16,10 +16,21 @@ struct early_mmio_region {
     size_t  size;
 };
 
-/* Forward declarations for Phase 2-3 ops */
-struct irqchip_ops;
+/* Forward declarations for Phase 3 ops */
+struct platform_desc;
 struct timer_ops;
 struct earlycon_ops;
+
+#define IRQCHIP_MAX_IRQS 1024
+
+struct irqchip_ops {
+    void (*init)(const struct platform_desc *plat);
+    void (*enable)(int irq);
+    void (*disable)(int irq);
+    uint32_t (*ack)(void);
+    void (*eoi)(uint32_t irq);
+    void (*send_sgi)(uint32_t cpu, uint32_t intid);
+};
 
 struct platform_desc {
     const char name[PLATFORM_NAME_MAX];
@@ -41,5 +52,9 @@ struct platform_desc {
 
 void platform_select(const char *arch);
 const struct platform_desc *platform_get(void);
+
+/* Unified IRQ handler table */
+void platform_irq_register(int irq, void (*handler)(void *), void *arg);
+void platform_irq_dispatch_nr(uint32_t irq);
 
 #endif

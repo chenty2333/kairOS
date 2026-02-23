@@ -6,6 +6,7 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -87,18 +88,6 @@ extern void isr47(void);
 extern void isr128(void);
 extern void isr240(void);
 
-extern void lapic_eoi(void);
-extern void ioapic_init(void);
-extern void lapic_init(void);
-extern void lapic_timer_init(uint32_t hz);
-extern void ioapic_route_irq(int irq, int vector, int cpu, bool masked);
-
-struct irq_handler_entry {
-    void (*handler)(void *);
-    void *arg;
-};
-
-static struct irq_handler_entry irq_handlers[256];
 static void handle_irq(struct trap_frame *tf);
 
 static void idt_set_gate(int n, void (*handler)(void)) {
@@ -124,32 +113,6 @@ static void idt_load(void) {
 
 struct trap_frame *get_current_trapframe(void) {
     return arch_get_percpu()->current_tf;
-}
-
-
-void arch_irq_init(void) {
-    ioapic_init();
-    lapic_init();
-}
-
-void arch_irq_enable_nr(int irq) {
-    if (irq < 0 || irq >= 256)
-        return;
-    ioapic_route_irq(irq, IRQ_BASE + irq, 0, false);
-}
-
-void arch_irq_disable_nr(int irq) {
-    if (irq < 0 || irq >= 256)
-        return;
-    ioapic_route_irq(irq, IRQ_BASE + irq, 0, true);
-}
-
-void arch_irq_register(int irq, void (*handler)(void *), void *arg) {
-    if (irq < 0 || irq >= 256)
-        return;
-    irq_handlers[irq].handler = handler;
-    irq_handlers[irq].arg = arg;
-    arch_irq_enable_nr(irq);
 }
 
 void arch_irq_handler(struct trap_frame *tf) {
@@ -209,15 +172,16 @@ static void handle_timer_irq(struct trap_frame *tf) {
 }
 
 static void handle_irq(struct trap_frame *tf) {
+    const struct platform_desc *plat = platform_get();
     int vec = (int)tf->trapno;
     int irq = vec - IRQ_BASE;
     if (irq == 0) {
         handle_timer_irq(tf);
-    } else if (irq >= 0 && irq < 256) {
-        if (irq_handlers[irq].handler)
-            irq_handlers[irq].handler(irq_handlers[irq].arg);
+    } else if (irq > 0 && irq < IRQCHIP_MAX_IRQS) {
+        platform_irq_dispatch_nr((uint32_t)irq);
     }
-    lapic_eoi();
+    if (plat && plat->irqchip)
+        plat->irqchip->eoi(0);
 }
 
 static enum trap_core_event_type x86_event_type(const struct trap_frame *tf) {

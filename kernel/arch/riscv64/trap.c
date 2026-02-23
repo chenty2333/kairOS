@@ -5,6 +5,7 @@
 #include <asm/arch.h>
 #include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -105,13 +106,21 @@ static void handle_exception(struct trap_frame *tf) {
 
     if (cause >= EXC_INST_PAGE_FAULT && cause <= EXC_STORE_PAGE_FAULT) {
         bool user_addr = tf->stval <= USER_SPACE_END;
+        int fault_ret = -1;
+        uint32_t f = 0;
         if (cur && cur->mm && user_addr) {
-            uint32_t f = (cause == EXC_STORE_PAGE_FAULT)  ? PTE_WRITE
-                         : (cause == EXC_INST_PAGE_FAULT) ? PTE_EXEC
-                                                          : 0;
-            if (mm_handle_fault(cur->mm, tf->stval, f) == 0)
+            f = (cause == EXC_STORE_PAGE_FAULT)  ? PTE_WRITE
+                : (cause == EXC_INST_PAGE_FAULT) ? PTE_EXEC
+                                                 : 0;
+            fault_ret = mm_handle_fault(cur->mm, tf->stval, f);
+            if (fault_ret == 0)
                 return;
         }
+        pr_err("trap: page fault unresolved pid=%d comm=%s sepc=%p addr=%p access=%s ret=%d\n",
+               cur ? cur->pid : -1,
+               (cur && cur->name[0]) ? cur->name : "?",
+               (void *)tf->sepc, (void *)tf->stval,
+               pf_access_type(cause), fault_ret);
         if (!from_user) {
             unsigned long fix = search_exception_table(tf->sepc);
             if (fix) {
@@ -149,7 +158,13 @@ static void handle_interrupt(const struct trap_core_event *ev) {
     if (cause == IRQ_S_TIMER) {
         timer_interrupt_handler(ev);
     } else if (cause == IRQ_S_EXT) {
-        arch_irq_handler(tf);
+        const struct platform_desc *plat = platform_get();
+        if (plat && plat->irqchip) {
+            uint32_t irq = plat->irqchip->ack();
+            if (irq > 0 && irq < IRQCHIP_MAX_IRQS)
+                platform_irq_dispatch_nr(irq);
+            plat->irqchip->eoi(irq);
+        }
     } else if (cause == IRQ_S_SOFT) {
         __asm__ __volatile__("csrc sip, %0" ::"r"(1UL << 1));
         struct percpu_data *cpu = arch_get_percpu();
@@ -266,5 +281,7 @@ void arch_backtrace(void) {
         fp = prev;
     }
 }
+
+void arch_irq_handler(struct trap_frame *tf) { (void)tf; }
 
 void arch_dump_regs(struct arch_context *ctx __attribute__((unused))) {}

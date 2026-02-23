@@ -4,6 +4,8 @@
 
 #include <kairos/platform_core.h>
 
+extern const struct irqchip_ops __attribute__((weak)) apic_ops;
+
 static const struct platform_desc qemu_q35_x86_64 = {
     .name       = "qemu-q35-x86_64",
     .compatible = "",
@@ -13,6 +15,7 @@ static const struct platform_desc qemu_q35_x86_64 = {
         { .base = 0xFEC00000, .size = 0x1000 },    /* IOAPIC */
         { .base = 0xFEE00000, .size = 0x1000 },    /* LAPIC */
     },
+    .irqchip = &apic_ops,
 };
 
 PLATFORM_REGISTER(qemu_q35_x86_64);

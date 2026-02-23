@@ -5,6 +5,7 @@
 #include <asm/arch.h>
 #include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -15,24 +16,9 @@
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
-extern void gic_init(void);
-extern uint32_t gic_ack_irq(void);
-extern void gic_eoi(uint32_t irq);
-extern void gic_enable_irq(uint32_t irq);
-extern void gic_disable_irq(uint32_t irq);
-
+/* WARN: ARM architecture fixed INTIDs, not board-configurable */
 #define TIMER_PPI_IRQ 30
 #define IPI_SGI_IRQ   1
-#define MAX_IRQ       1024
-
-/* --- IRQ handler table --- */
-
-struct irq_entry {
-    void (*handler)(void *);
-    void *arg;
-};
-
-static struct irq_entry irq_handlers[MAX_IRQ];
 
 #define AARCH64_SPSR_MODE_MASK 0xf
 #define AARCH64_SPSR_EL0T      0x0
@@ -107,14 +93,14 @@ static void handle_exception(struct trap_frame *tf) {
 }
 
 static void handle_irq(const struct trap_core_event *ev) {
-    uint32_t irq = gic_ack_irq();
-
-    if (irq >= 1020) {
-        /* Spurious interrupt */
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip)
         return;
-    }
 
-    gic_eoi(irq);
+    uint32_t irq = plat->irqchip->ack();
+
+    if (irq >= 1020)
+        return;
 
     if (irq == IPI_SGI_IRQ) {
         struct percpu_data *cpu = arch_get_percpu();
@@ -127,22 +113,14 @@ static void handle_irq(const struct trap_core_event *ev) {
             while (1)
                 arch_cpu_halt();
         }
-        return;
-    }
-
-    if (irq == TIMER_PPI_IRQ) {
+    } else if (irq == TIMER_PPI_IRQ) {
         arch_timer_ack();
         tick_policy_on_timer_irq(ev);
-        return;
+    } else if (irq < IRQCHIP_MAX_IRQS) {
+        platform_irq_dispatch_nr(irq);
     }
 
-    /* Dispatch registered handlers */
-    if (irq < MAX_IRQ && irq_handlers[irq].handler) {
-        irq_handlers[irq].handler(irq_handlers[irq].arg);
-        return;
-    }
-
-    pr_warn("IRQ: unhandled irq %u\n", irq);
+    plat->irqchip->eoi(irq);
 }
 /* PLACEHOLDER_TRAP_REST */
 
@@ -191,25 +169,8 @@ void aarch64_trap_dispatch(struct trap_frame *tf) {
 void arch_trap_init(void) {
     extern void vector_table(void);
     __asm__ __volatile__("msr vbar_el1, %0" :: "r"(&vector_table));
-    gic_init();
+    arch_irq_init();
     pr_info("Trap: initialized\n");
-}
-
-void arch_irq_init(void) {}
-
-void arch_irq_enable_nr(int irq) {
-    gic_enable_irq((uint32_t)irq);
-}
-
-void arch_irq_disable_nr(int irq) {
-    gic_disable_irq((uint32_t)irq);
-}
-
-void arch_irq_register(int irq, void (*handler)(void *), void *arg) {
-    if (irq >= 0 && irq < MAX_IRQ) {
-        irq_handlers[irq].handler = handler;
-        irq_handlers[irq].arg = arg;
-    }
 }
 
 void arch_irq_handler(struct trap_frame *tf) { (void)tf; }

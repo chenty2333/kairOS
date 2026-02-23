@@ -8,8 +8,6 @@
 #include <kairos/tick.h>
 #include <kairos/types.h>
 
-extern void gic_enable_irq(uint32_t irq);
-
 #define TIMER_PPI_IRQ 30  /* EL1 Physical Timer PPI (INTID 30) */
 
 static uint64_t timer_freq;
@@ -37,7 +35,7 @@ void arch_timer_init(uint64_t hz) {
     __asm__ __volatile__("msr cntp_ctl_el0, %0" :: "r"((uint64_t)1));
 
     /* Enable the Physical Timer PPI in the GIC */
-    gic_enable_irq(TIMER_PPI_IRQ);
+    arch_irq_enable_nr(TIMER_PPI_IRQ);
 
     pr_info("Timer: %lu Hz (interval=%lu ticks)\n",
             (unsigned long)hz, (unsigned long)timer_interval);
