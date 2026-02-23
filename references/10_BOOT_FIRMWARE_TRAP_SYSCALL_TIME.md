@@ -74,6 +74,10 @@ Two-layer structure:
 - Core layer:
   - core/time/tick.c — tick_policy_on_timer_irq() handles timer interrupts, drives scheduler time slices (sched_tick), polls console input, handles poll sleep expiry
   - core/time/time.c — system time management (wall clock, monotonic time, nanosecond-precision timer queue)
+  - Linux sleep ABI compatibility:
+    - `nanosleep` on `EINTR` now fills remaining time (`rem`) when provided
+    - `clock_nanosleep` supports both relative sleep and `TIMER_ABSTIME` absolute deadlines
+    - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
 BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. tick_policy_init() designates the timekeeper CPU.
 

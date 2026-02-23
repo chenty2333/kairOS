@@ -15,6 +15,7 @@
 #include "sys_time_helpers.h"
 
 #define NS_PER_SEC 1000000000ULL
+#define TIMER_ABSTIME 1U
 
 struct linux_utsname {
     char sysname[65];
@@ -50,8 +51,40 @@ struct linux_tms {
 };
 
 static uint64_t ns_to_sched_ticks(uint64_t ns) {
+    if (ns == 0)
+        return 0;
     uint64_t ticks = (ns * CONFIG_HZ + NS_PER_SEC - 1) / NS_PER_SEC;
     return ticks ? ticks : 1;
+}
+
+static int64_t sleep_until_deadline(uint64_t deadline, uint64_t rem_ptr,
+                                    bool report_remaining) {
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+
+    while (arch_timer_get_ticks() < deadline) {
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        poll_sleep_arm(&sleep, curr, deadline);
+        int sleep_rc = proc_sleep_on(NULL, &sleep, true);
+        poll_sleep_cancel(&sleep);
+        if (sleep_rc == -EINTR) {
+            if (report_remaining && rem_ptr) {
+                uint64_t now = arch_timer_get_ticks();
+                uint64_t rem_ticks = (deadline > now) ? (deadline - now) : 0;
+                uint64_t rem_ns = arch_timer_ticks_to_ns(rem_ticks);
+                struct timespec rem = {
+                    .tv_sec = (time_t)(rem_ns / NS_PER_SEC),
+                    .tv_nsec = (int64_t)(rem_ns % NS_PER_SEC),
+                };
+                if (copy_to_user((void *)rem_ptr, &rem, sizeof(rem)) < 0)
+                    return -EFAULT;
+            }
+            return -EINTR;
+        }
+    }
+    return 0;
 }
 
 static char uts_domainname[65] = "kairos";
@@ -122,7 +155,7 @@ int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
 
 int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
                       uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)rem_ptr; (void)a2; (void)a3; (void)a4; (void)a5;
+    (void)a2; (void)a3; (void)a4; (void)a5;
     struct timespec req;
     int rc = sys_copy_timespec(req_ptr, &req, false);
     if (rc < 0)
@@ -130,29 +163,38 @@ int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
 
     uint64_t ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
     uint64_t delta = ns_to_sched_ticks(ns);
+    if (delta == 0)
+        return 0;
     uint64_t deadline = arch_timer_get_ticks() + delta;
-
-    struct process *curr = proc_current();
-    while (arch_timer_get_ticks() < deadline) {
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        poll_sleep_arm(&sleep, curr, deadline);
-        int sleep_rc = proc_sleep_on(NULL, NULL, true);
-        poll_sleep_cancel(&sleep);
-        if (sleep_rc == -EINTR)
-            return -EINTR;
-    }
-    return 0;
+    return sleep_until_deadline(deadline, rem_ptr, true);
 }
 
 int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
                             uint64_t rem_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags != 0)
+    if (flags & ~TIMER_ABSTIME)
         return -EINVAL;
     if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
         return -EINVAL;
-    return sys_nanosleep(req_ptr, rem_ptr, 0, 0, 0, 0);
+    struct timespec req;
+    int rc = sys_copy_timespec(req_ptr, &req, false);
+    if (rc < 0)
+        return rc;
+
+    uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
+    if (flags & TIMER_ABSTIME) {
+        uint64_t now_ns = time_now_ns();
+        if (req_ns <= now_ns)
+            return 0;
+        req_ns -= now_ns;
+    }
+
+    uint64_t delta = ns_to_sched_ticks(req_ns);
+    if (delta == 0)
+        return 0;
+    uint64_t deadline = arch_timer_get_ticks() + delta;
+    return sleep_until_deadline(deadline, rem_ptr,
+                                (flags & TIMER_ABSTIME) == 0);
 }
 
 int64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,

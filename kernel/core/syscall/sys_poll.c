@@ -126,11 +126,51 @@ static int timespec_to_timeout_ms(const struct timespec *ts) {
     return (int)ms;
 }
 
+static int poll_sleep_timeout(int timeout_ms) {
+    if (timeout_ms == 0)
+        return 0;
+
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+
+    uint64_t deadline = 0;
+    if (timeout_ms > 0) {
+        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
+        if (!delta)
+            delta = 1;
+        deadline = arch_timer_get_ticks() + delta;
+    }
+
+    while (1) {
+        if (deadline && arch_timer_get_ticks() >= deadline)
+            return 0;
+
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        if (deadline)
+            poll_sleep_arm(&sleep, curr, deadline);
+        int rc = proc_sleep_on(NULL, deadline ? (void *)&sleep : (void *)curr,
+                               true);
+        if (deadline)
+            poll_sleep_cancel(&sleep);
+        if (rc == -EINTR)
+            return -EINTR;
+    }
+}
+
 int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
                  uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    int64_t tmo = (int64_t)timeout_ms;
+    if (tmo < -1)
+        tmo = -1;
+    const int64_t tmo_max = 0x7fffffffLL;
+    if (tmo > tmo_max)
+        tmo = tmo_max;
+
     if (nfds == 0)
-        return 0;
+        return poll_sleep_timeout((int)tmo);
     if (!fds_ptr)
         return -EFAULT;
     if (nfds > SIZE_MAX / sizeof(struct pollfd))
@@ -145,12 +185,6 @@ int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
         return -EFAULT;
     }
 
-    int64_t tmo = (int64_t)timeout_ms;
-    if (tmo < -1)
-        tmo = -1;
-    const int64_t tmo_max = 0x7fffffffLL;
-    if (tmo > tmo_max)
-        tmo = tmo_max;
     int ready = poll_wait_kernel(kfds, (size_t)nfds, (int)tmo);
     if (ready < 0) {
         kfree(kfds);
@@ -196,7 +230,7 @@ static int do_select_common(uint64_t nfds, uint64_t readfds_ptr,
     }
 
     if (count == 0)
-        return 0;
+        return poll_sleep_timeout(timeout_ms);
 
     int ready = poll_wait_kernel(fds, count, timeout_ms);
     if (ready < 0)

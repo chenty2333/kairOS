@@ -481,6 +481,8 @@ int64_t sys_rt_sigsuspend(uint64_t mask_ptr, uint64_t sigsetsize, uint64_t a2,
 }
 
 static uint64_t ns_to_sched_ticks(uint64_t ns) {
+    if (ns == 0)
+        return 0;
     uint64_t ticks = (ns * CONFIG_HZ + NS_PER_SEC - 1) / NS_PER_SEC;
     return ticks ? ticks : 1;
 }

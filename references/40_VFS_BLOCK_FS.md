@@ -99,6 +99,8 @@ Special:
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks) and `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`)
+- `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
+- `select`/`pselect6` with no watched fds also honor timeout sleep semantics
 
 Related references:
 - references/00_REPO_MAP.md
