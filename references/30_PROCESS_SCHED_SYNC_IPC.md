@@ -53,8 +53,8 @@ Per-CPU run queue (percpu_data.runqueue):
 
 SMP support:
 - sched_steal_enabled runtime flag controls pull-based work stealing
-- Work stealing (pull): idle CPU steals task with largest vruntime (least owed) via cached rb_rightmost pointer
-- Steal path clears source CPU `prev_task` when it still points to the stolen task, avoiding stale on-CPU observations in wait/reap paths
+- Work stealing (pull) implementation is currently gated off (`fair_steal_task()` returns `NULL`)
+- Boot path keeps `sched_steal_enabled=false` until cross-CPU run_state/runqueue invariants are hardened
 - Push migration: sched_enqueue redirects tasks to idle CPUs when preferred CPU is busy (randomized scan, lockless pre-check)
 - sched_trace ring buffer for debugging (per-CPU, records enqueue/dequeue/pick/switch/steal/migrate events)
 

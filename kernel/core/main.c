@@ -58,7 +58,8 @@ static void smp_init(void) {
         arch_cpu_relax();
     }
     pr_info("SMP: %d CPUs active\n", started + 1);
-    sched_set_steal_enabled(true);
+    // FIXME: keep work stealing disabled until scheduler invariants are hardened.
+    sched_set_steal_enabled(false);
 }
 
 /**

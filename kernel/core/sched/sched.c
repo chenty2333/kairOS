@@ -453,6 +453,19 @@ static bool sched_rb_erase(struct sched_entity *se, struct cfs_rq *cfs_rq) {
     return true;
 }
 
+static bool sched_rb_contains(struct cfs_rq *cfs_rq,
+                              const struct sched_entity *target) {
+    int steps = 0;
+    for (struct rb_node *node = rb_first(&cfs_rq->tasks_timeline);
+         node; node = rb_next(node)) {
+        if (sched_rb_walk_limit_reached(&steps, "sched_rb_contains"))
+            break;
+        if (node == &target->sched_node)
+            return true;
+    }
+    return false;
+}
+
 static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq) {
     struct sched_entity *best = NULL;
     int steps = 0;
@@ -1102,20 +1115,18 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
             uint64_t vslice = calc_vslice(&prev->se);
             prev->se.deadline = prev->se.vruntime + vslice;
         }
-        if (se_node_is_detached(&prev->se)) {
+        bool detached = se_node_is_detached(&prev->se);
+        if (!detached && !sched_rb_contains(cfs, &prev->se)) {
+            se_node_mark_detached(&prev->se);
+            detached = true;
+        }
+        if (detached) {
             __enqueue_entity(cfs, &prev->se);
-            se_mark_queued(&prev->se, prev->se.cpu);
             cfs->nr_running++;
             rq->nr_running++;
             update_min_vruntime(cfs);
-        } else {
-            /*
-             * Keep run_state coherent even if the node is unexpectedly still
-             * linked (e.g. wakeup/switch race); the entity is on-rq in that
-             * case and must not remain marked RUNNING.
-             */
-            se_mark_queued(&prev->se, prev->se.cpu);
         }
+        se_mark_queued(&prev->se, prev->se.cpu);
         return;
     }
 
@@ -1200,84 +1211,11 @@ static void fair_check_preempt_curr(struct rq *rq, struct process *p) {
     }
 }
 
-static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
-    struct cfs_rq *cfs = &rq->cfs;
-    if (cfs->nr_running == 0)
-        return NULL;
-
-    int src_cpu = sched_rq_cpu_id(rq);
-    struct process *in_switch = NULL;
-    struct process *curr = NULL;
-    if (src_cpu >= 0 && src_cpu < CONFIG_MAX_CPUS) {
-        in_switch = __atomic_load_n(&cpu_data[src_cpu].prev_task, __ATOMIC_ACQUIRE);
-        curr = __atomic_load_n(&cpu_data[src_cpu].curr_proc, __ATOMIC_ACQUIRE);
-    }
-    if (in_switch)
-        return NULL;
-    if (curr) {
-        uint32_t curr_se = se_state_load(&curr->se);
-        if (curr_se != SE_STATE_RUNNING || curr->state != PROC_RUNNING ||
-            curr->se.cpu != src_cpu)
-            return NULL;
-    }
-
-    /*
-     * Steal strategy: take the rightmost node (largest vruntime) —
-     * the task that has consumed the most virtual CPU time and is
-     * therefore least owed.  rb_rightmost is cached O(1); we walk
-     * left via rb_prev only if the rightmost fails the state check.
-     */
-    struct sched_entity *best_se = NULL;
-    struct process *best = NULL;
-    int steps = 0;
-
-    for (struct rb_node *node = cfs->rb_rightmost;
-         node; node = rb_prev(node)) {
-        if (sched_rb_walk_limit_reached(&steps, "fair_steal_task"))
-            break;
-        struct sched_entity *se =
-            rb_entry(node, struct sched_entity, sched_node);
-        struct process *cand = container_of(se, struct process, se);
-        if (cand == in_switch || cand == curr)
-            continue;
-        if (cand->state != PROC_RUNNABLE)
-            continue;
-        if (se_state_load(se) != SE_STATE_QUEUED)
-            continue;
-        if (src_cpu >= 0 && cand->se.cpu != src_cpu)
-            continue;
-        best_se = se;
-        best = cand;
-        break;
-    }
-
-    if (!best_se)
-        return NULL;
-
-    if (!sched_rb_erase(best_se, cfs))
-        return NULL;
-    /* Save lag relative to source CPU for destination placement */
-    best_se->vlag = (int64_t)(cfs->min_vruntime - best_se->vruntime);
-    se_mark_runnable(best_se);
-    best_se->cpu = dst_cpu;
-    cfs->nr_running--;
-    rq->nr_running--;
-    update_min_vruntime(cfs);
-    sched_validate_entity(best, "fair_steal_task");
-
-    if (src_cpu >= 0 && src_cpu < CONFIG_MAX_CPUS) {
-        struct percpu_data *src = &cpu_data[src_cpu];
-        struct process *expected = best;
-        __atomic_compare_exchange_n(&src->prev_task, &expected, NULL, false,
-                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-        expected = best;
-        struct process *replacement = src->idle_proc;
-        __atomic_compare_exchange_n(&src->curr_proc, &expected, replacement,
-                                    false, __ATOMIC_ACQ_REL,
-                                    __ATOMIC_ACQUIRE);
-    }
-
-    return best;
+static struct process *fair_steal_task(struct rq *rq __attribute__((unused)),
+                                       int dst_cpu
+                                       __attribute__((unused))) {
+    // FIXME: re-enable steal after cross-CPU run_state/rq invariants are proven.
+    return NULL;
 }
 
 const struct sched_class fair_sched_class = {

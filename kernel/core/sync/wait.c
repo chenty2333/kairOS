@@ -84,26 +84,23 @@ static void wait_queue_wakeup(struct wait_queue *wq, bool all) {
         return;
     }
 
-    struct wait_queue_entry *snapshot = NULL;
+    LIST_HEAD(snapshot);
     bool flags;
     spin_lock_irqsave(&wq->lock, &flags);
-    while (1) {
-        if (list_empty(&wq->head))
-            break;
+    while (!list_empty(&wq->head)) {
         struct wait_queue_entry *entry =
             list_first_entry(&wq->head, struct wait_queue_entry, node);
         list_del(&entry->node);
+        entry->active = false;
         entry->wq = NULL;
-        entry->node.next = (struct list_head *)snapshot;
-        snapshot = entry;
+        list_add_tail(&entry->node, &snapshot);
     }
     spin_unlock_irqrestore(&wq->lock, flags);
 
-    while (snapshot) {
-        struct wait_queue_entry *entry = snapshot;
-        snapshot = (struct wait_queue_entry *)entry->node.next;
-        INIT_LIST_HEAD(&entry->node);
-        entry->active = false;
+    while (!list_empty(&snapshot)) {
+        struct wait_queue_entry *entry =
+            list_first_entry(&snapshot, struct wait_queue_entry, node);
+        list_del(&entry->node);
         if (entry->proc) {
             entry->proc->wait_channel = NULL;
             proc_wakeup(entry->proc);
