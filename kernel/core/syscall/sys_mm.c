@@ -27,6 +27,17 @@
 #define MREMAP_MAYMOVE 1
 #define MREMAP_FIXED 2
 
+static uint64_t sysmm_normalize_prot(uint64_t prot) {
+#if defined(ARCH_aarch64)
+    /* Linux AArch64 extensions not modeled in current VM permissions. */
+    const uint64_t ABI_PROT_BTI = 0x10;
+    const uint64_t ABI_PROT_MTE = 0x20;
+    return prot & ~(ABI_PROT_BTI | ABI_PROT_MTE);
+#else
+    return prot;
+#endif
+}
+
 static uint32_t prot_to_vm(uint64_t prot) {
     uint32_t vm = 0;
     if (prot & PROT_READ)
@@ -51,6 +62,7 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         return -EINVAL;
     if (!len)
         return -EINVAL;
+    prot = sysmm_normalize_prot(prot);
     if (prot & ~PROT_MASK)
         return -EINVAL;
     if (flags & ~MAP_MASK)
@@ -136,6 +148,7 @@ int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a3,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
+    prot = sysmm_normalize_prot(prot);
     if (prot & ~PROT_MASK)
         return -EINVAL;
     return (int64_t)mm_mprotect(p->mm, (vaddr_t)addr, (size_t)len,

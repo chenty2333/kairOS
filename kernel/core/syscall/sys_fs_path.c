@@ -33,10 +33,14 @@ static uint32_t sysfs_translate_open_flags(uint64_t flags_raw) {
      * the in-kernel VFS layer. Translate user ABI bits at syscall boundary.
      */
     const uint32_t ABI_O_DIRECTORY = 040000;
+    const uint32_t ABI_O_DIRECT = 0200000;
     const uint32_t ABI_O_NOFOLLOW = 0100000;
     const uint32_t ABI_O_LARGEFILE = 0400000;
+    const uint32_t ABI_FLAG_INVALID = 0x80000000U;
 
     uint32_t out = flags & ~(ABI_O_DIRECTORY | ABI_O_NOFOLLOW | ABI_O_LARGEFILE);
+    if (flags & ABI_O_DIRECT)
+        out |= ABI_FLAG_INVALID;
     if (flags & ABI_O_DIRECTORY)
         out |= O_DIRECTORY;
     if (flags & ABI_O_NOFOLLOW)
