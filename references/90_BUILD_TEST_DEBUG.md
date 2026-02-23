@@ -99,7 +99,7 @@ Run/test sessions are executed via `scripts/run-qemu-session.sh` and `scripts/ru
 For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - Default `<run_id>` format is short-readable `YYMMDD-HHMM-xxxx` (example: `250222-2315-7f3a`)
 - `manifest.json` (command, arch, build root, git sha, timestamps)
-- `result.json` (pass/fail/timeout/error + reason + marker summary + log path)
+- `result.json` (status/reason/verdict source + structured test summary + marker flags + log path)
 - `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
 
 Concurrency and locking:
@@ -114,8 +114,9 @@ Run retention:
 
 Result decision policy:
 - `scripts/run-qemu-test.sh` writes `manifest.json` at start and `result.json` at end.
-- `TEST_SUMMARY` is preferred when present; log markers remain fallback compatibility checks.
-- `result.json` is the primary machine-readable test outcome.
+- `TEST_RESULT_JSON` (kernel-emitted single-line JSON) is the primary verdict source for marker-required test runs.
+- If structured output is missing/invalid, the runner uses timeout/failure markers as guarded fallback and reports non-pass status.
+- `result.json` is the primary machine-readable test outcome consumed by automation.
 
 Primary verification architecture is ARCH=riscv64 (run, test, test-soak, uefi).
 

@@ -171,6 +171,8 @@ static int kernel_test_main(void *arg __attribute__((unused))) {
         pr_info("TEST_SUMMARY: failed=0\n");
     else
         pr_err("TEST_SUMMARY: failed=%d\n", total_failed);
+    pr_info("TEST_RESULT_JSON: {\"schema_version\":1,\"failed\":%d,\"done\":true,\"enabled_mask\":%u}\n",
+            total_failed, (unsigned int)CONFIG_KERNEL_TEST_MASK);
     pr_info("Tests complete. Stopping system...\n");
     arch_cpu_shutdown();
     while (1) {

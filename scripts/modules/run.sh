@@ -8,7 +8,7 @@ kairos_run_usage() {
 Usage: scripts/kairos.sh [global options] run <action> [options]
 
 Actions:
-  test        Run kernel tests (marker-based)
+  test        Run kernel tests (structured-result first)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-soak   Run soak test (expects timeout)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
