@@ -133,6 +133,7 @@ Run retention:
 Result decision policy:
 - `scripts/run-qemu-test.sh` writes `manifest.json` at start and `result.json` at end.
 - `TEST_RESULT_JSON` (kernel-emitted single-line JSON) is the primary verdict source for marker-required test runs.
+- When structured result is complete and passed, `qemu_rc=0/124/2` are accepted (`2` covers firmware-reset style exits seen on some runs).
 - If structured output is missing/invalid, the runner uses timeout/failure markers as guarded fallback and reports non-pass status.
 - `run-qemu-test.sh` also supports optional log assertions:
   - `TEST_REQUIRED_MARKER_REGEX`: at least one required regex

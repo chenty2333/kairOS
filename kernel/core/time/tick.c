@@ -39,16 +39,24 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
     }
 
     sched_tick();
-    if (sched_need_resched()) {
-        if (from_user) {
-            schedule();
-        } else if (proc_current() == arch_get_percpu()->idle_proc) {
-            schedule();
-        } else if (!in_atomic()) {
-            /* Kernel preemption: safe to reschedule when preempt_count == 0 */
-            schedule();
-        }
+    if (!sched_need_resched())
+        return;
+
+    if (from_user) {
+        schedule();
+        return;
     }
+
+    if (proc_current() == arch_get_percpu()->idle_proc) {
+        schedule();
+        return;
+    }
+
+    /*
+     * Defer kernel-thread preemption to explicit reschedule points.
+     * Calling schedule() directly from a kernel-mode timer IRQ can switch
+     * context while unwinding trap state and corrupt return control flow.
+     */
 }
 
 uint64_t tick_policy_get_ticks(void) {

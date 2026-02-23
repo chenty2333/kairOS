@@ -15,6 +15,9 @@ TEST_EXPECT_TIMEOUT="${TEST_EXPECT_TIMEOUT:-0}"
 TEST_BOOT_MARKER="${TEST_BOOT_MARKER:-SMP: [0-9]+ CPUs active|init: started /init|BusyBox v}"
 TEST_FATAL_MARKER="${TEST_FATAL_MARKER:-panic\\(|panic:|User exception|Kernel exception|Trap dump|Inst page fault|ASSERT failed|sepc=0x0000000000000000}"
 TEST_FAILURE_MARKER="${TEST_FAILURE_MARKER:-driver tests: [1-9][0-9]* failures|mm tests: [1-9][0-9]* failures|sched_stress: [1-9][0-9]* failures|sched_stress: .* FAIL:|vfs_ipc_tests: .* failed|socket_tests: .* failed|device_virtio_tests: .* failed|syscall_trap_tests: .* failed|tty_tests: .* failed|soak_tests: .* failed}"
+TEST_REQUIRED_MARKER_REGEX="${TEST_REQUIRED_MARKER_REGEX:-}"
+TEST_REQUIRED_MARKERS_ALL="${TEST_REQUIRED_MARKERS_ALL:-}"
+TEST_FORBIDDEN_MARKER_REGEX="${TEST_FORBIDDEN_MARKER_REGEX:-}"
 TEST_BUILD_ROOT="${TEST_BUILD_ROOT:-$(dirname "$TEST_LOG")}"
 TEST_ARCH="${TEST_ARCH:-unknown}"
 TEST_RUN_ID="${TEST_RUN_ID:-$(basename "$TEST_BUILD_ROOT")}"
@@ -138,6 +141,8 @@ write_result() {
     local structured_failed="${13}"
     local structured_done="${14}"
     local structured_enabled_mask="${15}"
+    local has_required_markers="${16}"
+    local has_forbidden_markers="${17}"
 
     cat >"${TEST_RESULT}" <<JSON
 {
@@ -161,7 +166,9 @@ write_result() {
   "markers": {
     "has_boot_marker": $(json_bool "${has_boot_marker}"),
     "has_fatal_markers": $(json_bool "${has_fatal_markers}"),
-    "has_failure_markers": $(json_bool "${has_failure_markers}")
+    "has_failure_markers": $(json_bool "${has_failure_markers}"),
+    "has_required_markers": $(json_bool "${has_required_markers}"),
+    "has_forbidden_markers": $(json_bool "${has_forbidden_markers}")
   }
 }
 JSON
@@ -171,6 +178,7 @@ run_test_main() {
     local start_ms start_time_utc end_ms end_time_utc duration_ms
     local old_pid wrapped_qemu_cmd qemu_rc
     local has_boot_marker has_fatal_markers has_failure_markers
+    local has_required_markers has_forbidden_markers
     local structured_status structured_schema structured_failed structured_done structured_enabled_mask
     local status reason exit_code verdict_source
 
@@ -186,7 +194,7 @@ run_test_main() {
             end_ms="$(date +%s%3N)"
             end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             duration_ms="$((end_ms - start_ms))"
-            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1
+            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 1 0
             echo "test: existing qemu pid is still running (${old_pid})" >&2
             return 2
         fi
@@ -212,6 +220,8 @@ run_test_main() {
     has_boot_marker=0
     has_fatal_markers=0
     has_failure_markers=0
+    has_required_markers=1
+    has_forbidden_markers=0
 
     if grep -Eiq "${TEST_BOOT_MARKER}" "${TEST_LOG}"; then
         has_boot_marker=1
@@ -223,6 +233,25 @@ run_test_main() {
 
     if grep -Eiq "${TEST_FAILURE_MARKER}" "${TEST_LOG}"; then
         has_failure_markers=1
+    fi
+    if [[ -n "${TEST_REQUIRED_MARKER_REGEX}" ]] &&
+        ! grep -Eiq "${TEST_REQUIRED_MARKER_REGEX}" "${TEST_LOG}"; then
+        has_required_markers=0
+    fi
+    if [[ ${has_required_markers} -eq 1 && -n "${TEST_REQUIRED_MARKERS_ALL}" ]]; then
+        while IFS= read -r required; do
+            if [[ -z "${required}" ]]; then
+                continue
+            fi
+            if ! grep -Eiq "${required}" "${TEST_LOG}"; then
+                has_required_markers=0
+                break
+            fi
+        done <<< "${TEST_REQUIRED_MARKERS_ALL}"
+    fi
+    if [[ -n "${TEST_FORBIDDEN_MARKER_REGEX}" ]] &&
+        grep -Eiq "${TEST_FORBIDDEN_MARKER_REGEX}" "${TEST_LOG}"; then
+        has_forbidden_markers=1
     fi
 
     structured_status="missing"
@@ -242,6 +271,12 @@ run_test_main() {
         if [[ ${has_fatal_markers} -eq 1 ]]; then
             status="fail"
             reason="fatal_markers_detected"
+        elif [[ ${has_forbidden_markers} -eq 1 ]]; then
+            status="fail"
+            reason="forbidden_markers_detected"
+        elif [[ ${has_required_markers} -eq 0 ]]; then
+            status="fail"
+            reason="required_markers_missing"
         elif [[ "${structured_status}" == "missing" ]]; then
             if [[ ${has_failure_markers} -eq 1 ]]; then
                 status="fail"
@@ -273,6 +308,9 @@ run_test_main() {
         elif [[ ${qemu_rc} -eq 124 ]]; then
             status="pass"
             reason="structured_passed_timeout_exit"
+        elif [[ ${qemu_rc} -eq 2 ]]; then
+            status="pass"
+            reason="structured_passed_qemu_reset_exit"
         else
             status="fail"
             reason="unexpected_exit_after_structured"
@@ -281,6 +319,12 @@ run_test_main() {
         if [[ ${has_fatal_markers} -eq 1 ]]; then
             status="fail"
             reason="fatal_markers_detected"
+        elif [[ ${has_forbidden_markers} -eq 1 ]]; then
+            status="fail"
+            reason="forbidden_markers_detected"
+        elif [[ ${has_required_markers} -eq 0 ]]; then
+            status="fail"
+            reason="required_markers_missing"
         elif [[ "${structured_status}" == "ok" && "${structured_done}" -eq 1 ]]; then
             verdict_source="structured"
             if [[ "${structured_failed}" -gt 0 ]]; then
@@ -343,7 +387,7 @@ run_test_main() {
     end_ms="$(date +%s%3N)"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     duration_ms="$((end_ms - start_ms))"
-    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}"
+    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}" "${has_required_markers}" "${has_forbidden_markers}"
 
     if [[ "${status}" == "pass" ]]; then
         echo "test: PASS (${reason}, qemu_rc=${qemu_rc})"
@@ -397,7 +441,7 @@ if kairos_lock_is_busy_rc "${rc}"; then
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     write_manifest "${start_time_utc}"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1
+    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 1 0
     echo "test: manifest -> ${TEST_MANIFEST}"
     echo "test: result -> ${TEST_RESULT}"
     echo "test: lock_busy (lock: ${TEST_LOCK_FILE})" >&2

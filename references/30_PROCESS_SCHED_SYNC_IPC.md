@@ -9,6 +9,8 @@ Process states: PROC_UNUSED → PROC_EMBRYO → PROC_RUNNABLE → PROC_RUNNING �
 process struct (include/kairos/process.h) key fields:
 - pid/ppid/pgid/sid/tgid, uid/gid/umask
 - state, exit_code, syscall_abi (Linux or Legacy)
+- sched_flags: scheduler migration policy bits (`PROC_SCHEDF_STEALABLE`, `PROC_SCHEDF_KTHREAD`)
+- sched_affinity: CPU affinity bitmask used by enqueue/steal placement
 - se: scheduling entity (sched_entity)
 - mm: address space (mm_struct)
 - fdtable: file descriptor table (refcounted, supports CLONE_FILES sharing)
@@ -28,7 +30,9 @@ Lifecycle (core/proc/):
 Other:
 - kthread_create(): create detached kernel threads (not parent-linked, not reaped via proc_wait)
 - kthread_create_joinable(): create kernel threads linked to current parent for proc_wait-based reaping
+- kthread default placement policy: creator CPU affinity bit + non-stealable (can be relaxed explicitly)
 - proc_idle_init(): create idle process
+- userspace `/init` supervises the login shell in a restart loop, logs exit cause (exit code / signal), and uses bounded exponential backoff on repeated failures
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
 
 ## Scheduler (core/sched/sched.c)
@@ -53,9 +57,12 @@ Per-CPU run queue (percpu_data.runqueue):
 
 SMP support:
 - sched_steal_enabled runtime flag controls pull-based work stealing
-- Work stealing (pull) implementation is currently gated off (`fair_steal_task()` returns `NULL`)
-- Boot path keeps `sched_steal_enabled=false` until cross-CPU run_state/runqueue invariants are hardened
-- Push migration: sched_enqueue redirects tasks to idle CPUs when preferred CPU is busy (randomized scan, lockless pre-check)
+- Work stealing (pull) is enabled in normal boot path (`sched_set_steal_enabled(true)`)
+- `fair_steal_task()` steals queued RUNNABLE entities from remote CFS runqueues (rightmost scan), with source/destination CPU state checks
+- Steal candidacy is explicit and requires both `proc_sched_is_stealable()` and destination-CPU affinity allowance
+- Default policy: user processes are stealable with full affinity; kernel threads (`kthread_create*`, idle) are marked `PROC_SCHEDF_KTHREAD`, non-stealable, and affinity-pinned to creator CPU
+- Failed steal attempts use per-CPU cooldown to reduce hot-loop lock pressure on empty/imbalanced systems
+- Enqueue placement respects per-process affinity and falls back to the first online allowed CPU if the hinted CPU is not allowed
 - sched_trace ring buffer for debugging (per-CPU, records enqueue/dequeue/pick/switch/steal/migrate events)
 
 Core functions:
@@ -63,6 +70,7 @@ Core functions:
 - schedule() and sched_tick() use local per-CPU `curr_proc` as the scheduler truth source
 - schedule() entry drains pending `prev_task` cleanup on the local CPU before new switches
 - sched_tick(): driven by timer interrupt, updates vruntime, checks preemption
+- Timer-IRQ-driven `schedule()` is limited to user return path or idle task; kernel-thread reschedule is deferred to explicit resched points to avoid trap-unwind context corruption
 - sched_enqueue() / sched_dequeue(): enqueue/dequeue
 - sched_wake(): wake BLOCKED tasks, or set wake_pending for RUNNING tasks and request resched
 - sched_fork(): child inherits fair_sched_class
