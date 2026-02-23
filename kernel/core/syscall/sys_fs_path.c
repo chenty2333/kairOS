@@ -504,7 +504,12 @@ int64_t sys_openat2(uint64_t dirfd, uint64_t path_ptr, uint64_t how_ptr,
                              RESOLVE_IN_ROOT | RESOLVE_CACHED;
     if (how.resolve & ~known_resolve)
         return -EINVAL;
-    if (how.resolve != 0)
+    /*
+     * Compatibility subset:
+     * - RESOLVE_NO_MAGICLINKS is accepted as a no-op (no magic-link support).
+     * - Other resolve constraints still need full path-walk hardening.
+     */
+    if (how.resolve & ~(uint64_t)RESOLVE_NO_MAGICLINKS)
         return -EOPNOTSUPP;
 
     uint32_t flags = (uint32_t)how.flags;
@@ -514,7 +519,8 @@ int64_t sys_openat2(uint64_t dirfd, uint64_t path_ptr, uint64_t how_ptr,
     return sys_openat(dirfd, path_ptr, flags, how.mode, 0, 0);
 }
 
-static int sysfs_check_access(struct vnode *vn, uint64_t mode) {
+static int sysfs_check_access(struct vnode *vn, uint64_t mode,
+                              bool use_effective_ids) {
     if (!vn)
         return -ENOENT;
     if (mode == F_OK)
@@ -523,9 +529,11 @@ static int sysfs_check_access(struct vnode *vn, uint64_t mode) {
     struct process *p = proc_current();
     uid_t uid = p ? p->uid : 0;
     gid_t gid = p ? p->gid : 0;
+    (void)use_effective_ids;
 
     rwlock_read_lock(&vn->lock);
     mode_t perms = vn->mode & 0777;
+    bool is_dir = (vn->type == VNODE_DIR);
     uint32_t bits;
     if (uid == vn->uid)
         bits = (perms >> 6) & 0x7;
@@ -534,6 +542,12 @@ static int sysfs_check_access(struct vnode *vn, uint64_t mode) {
     else
         bits = perms & 0x7;
     rwlock_read_unlock(&vn->lock);
+
+    if (uid == 0) {
+        if ((mode & X_OK) && ((perms & 0111) == 0) && !is_dir)
+            return -EACCES;
+        return 0;
+    }
 
     if ((mode & R_OK) && !(bits & 0x4))
         return -EACCES;
@@ -551,6 +565,7 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return -EINVAL;
     if (mode & ~(F_OK | R_OK | W_OK | X_OK))
         return -EINVAL;
+    bool use_effective_ids = (flags & AT_EACCESS) != 0;
 
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
@@ -564,12 +579,12 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
             return -EINVAL;
         if ((int64_t)dirfd == AT_FDCWD) {
             struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
-            return sysfs_check_access(cwd_vn, mode);
+            return sysfs_check_access(cwd_vn, mode, use_effective_ids);
         }
         struct file *f = fd_get(p, (int)dirfd);
         if (!f)
             return -EBADF;
-        int ret = sysfs_check_access(f->vnode, mode);
+        int ret = sysfs_check_access(f->vnode, mode, use_effective_ids);
         file_put(f);
         return ret;
     }
@@ -589,7 +604,8 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return -ENOENT;
     }
 
-    int access_ret = sysfs_check_access(resolved.dentry->vnode, mode);
+    int access_ret =
+        sysfs_check_access(resolved.dentry->vnode, mode, use_effective_ids);
     dentry_put(resolved.dentry);
     return access_ret;
 }

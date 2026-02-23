@@ -10,6 +10,11 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
+#define RWF_HIPRI   0x00000001U
+#define RWF_DSYNC   0x00000002U
+#define RWF_SYNC    0x00000004U
+#define RWF_NOWAIT  0x00000008U
+
 /**
  * sys_read_write_file - perform IO on an already-resolved file pointer.
  * Caller holds a reference on @f; this function does NOT release it.
@@ -450,17 +455,23 @@ int64_t sys_pwritev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
 
 int64_t sys_preadv2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                     uint64_t pos_l, uint64_t pos_h, uint64_t flags) {
-    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
-    if (flags != 0)
+    const uint64_t supported = RWF_HIPRI | RWF_NOWAIT;
+    if (flags & ~supported)
         return -EOPNOTSUPP;
+    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
+    if (offset == UINT64_MAX)
+        return sys_readv(fd, iov_ptr, iovcnt, 0, 0, 0);
     return sys_pread_writev(fd, iov_ptr, iovcnt, offset, false);
 }
 
 int64_t sys_pwritev2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                      uint64_t pos_l, uint64_t pos_h, uint64_t flags) {
-    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
-    if (flags != 0)
+    const uint64_t supported = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT;
+    if (flags & ~supported)
         return -EOPNOTSUPP;
+    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
+    if (offset == UINT64_MAX)
+        return sys_writev(fd, iov_ptr, iovcnt, 0, 0, 0);
     return sys_pread_writev(fd, iov_ptr, iovcnt, offset, true);
 }
 

@@ -28,9 +28,10 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `newfstatat` supports `AT_EMPTY_PATH` and treats empty path without it as `ENOENT`
   - `statx` is wired to the same path resolution and returns `STATX_BASIC_STATS` data
   - `faccessat2`/`faccessat` support `AT_EMPTY_PATH` on fd targets
+  - `faccessat2` accepts `AT_EACCESS` (currently same credential source as real IDs) and applies root-friendly access checks
   - `fchmodat`/`fchownat`/`utimensat` accept `AT_EMPTY_PATH` for fd-target metadata updates
   - `fchmodat2` is wired to `fchmodat` semantics and flag validation
-  - `openat2` supports `struct open_how` parsing and currently maps to `openat` when `resolve=0`
+  - `openat2` supports `struct open_how` parsing; `RESOLVE_NO_MAGICLINKS` is accepted, other `resolve` constraints are pending
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 
 ## Dentry Cache (fs/vfs/dentry.c)
@@ -60,7 +61,8 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - Linux ABI read/write extensions:
   - `pread64`/`pwrite64` and `preadv2`/`pwritev2` are wired through existing positional I/O paths
   - `preadv`/`pwritev` and `preadv2`/`pwritev2` follow Linux split-offset ABI (`pos_l`/`pos_h`)
-  - `preadv2`/`pwritev2` currently support `flags=0` only
+  - `preadv2` supports `RWF_HIPRI|RWF_NOWAIT`; `pwritev2` supports `RWF_HIPRI|RWF_DSYNC|RWF_SYNC|RWF_NOWAIT`
+  - `preadv2`/`pwritev2` with offset `-1` follow non-positional `readv`/`writev` fallback
 
 ## Block I/O Layer (fs/bio/bio.c)
 
