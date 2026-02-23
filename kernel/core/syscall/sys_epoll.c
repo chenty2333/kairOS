@@ -11,6 +11,39 @@
 #include <kairos/vfs.h>
 
 #define NS_PER_SEC 1000000000ULL
+#define SIG_UNBLOCKABLE_MASK \
+    ((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)))
+
+struct epoll_sigmask_ctx {
+    struct process *proc;
+    sigset_t old_mask;
+    bool active;
+};
+
+static sigset_t epoll_sanitize_sigmask(sigset_t mask) {
+    return mask & ~SIG_UNBLOCKABLE_MASK;
+}
+
+static int epoll_sigmask_apply(const sigset_t *new_mask,
+                               struct epoll_sigmask_ctx *ctx) {
+    if (!new_mask || !ctx)
+        return -EINVAL;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    ctx->proc = p;
+    ctx->old_mask = p->sig_blocked;
+    p->sig_blocked = epoll_sanitize_sigmask(*new_mask);
+    ctx->active = true;
+    return 0;
+}
+
+static void epoll_sigmask_restore(struct epoll_sigmask_ctx *ctx) {
+    if (!ctx || !ctx->active || !ctx->proc)
+        return;
+    ctx->proc->sig_blocked = ctx->old_mask;
+    ctx->active = false;
+}
 
 int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -50,12 +83,14 @@ int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
 
 int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
                        uint64_t timeout_ms, uint64_t a4, uint64_t a5) {
+    bool have_sigmask = false;
+    sigset_t mask = 0;
     if (a4) {
         if (a5 != sizeof(sigset_t))
             return -EINVAL;
-        sigset_t mask;
         if (copy_from_user(&mask, (void *)a4, sizeof(mask)) < 0)
             return -EFAULT;
+        have_sigmask = true;
     }
     if (maxevents == 0)
         return -EINVAL;
@@ -74,8 +109,18 @@ int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
         tmo = -1;
     if (tmo > 0x7fffffffLL)
         tmo = 0x7fffffffLL;
+
+    struct epoll_sigmask_ctx sigctx = {0};
+    if (have_sigmask) {
+        int apply_rc = epoll_sigmask_apply(&mask, &sigctx);
+        if (apply_rc < 0) {
+            kfree(out);
+            return apply_rc;
+        }
+    }
     int ready = epoll_wait_events((int)epfd, out, (size_t)maxevents,
                                   (int)tmo);
+    epoll_sigmask_restore(&sigctx);
     int64_t ret = ready;
     if (ready > 0 &&
         copy_to_user((void *)events_ptr, out,
