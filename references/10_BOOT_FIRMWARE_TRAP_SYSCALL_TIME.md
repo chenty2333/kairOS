@@ -20,7 +20,7 @@ boot_info struct is defined in include/kairos/boot.h, accessed globally through 
 Two parsing paths, both ultimately register into the firmware descriptor table (core/dev/firmware.c):
 
 - FDT path: init_boot() → firmware/fdt.c:fdt_parse() parses memory and reserved regions; init_devices() → fdt_scan_devices() scans device nodes → fw_register_desc() registers descriptors
-- ACPI path: init_devices() → firmware/acpi.c:acpi_init() → probes RSDP and marks available (currently does not further parse XSDT/MCFG/MADT)
+- ACPI path: init_devices() → firmware/acpi.c:acpi_init() probes RSDP and marks available; on aarch64, pci_enumerate() → arch/aarch64/pci.c:arch_pci_host_init() further parses RSDP → XSDT/RSDT → MCFG to discover PCI ECAM
 
 The firmware descriptor table is the intermediate layer for device discovery: firmware/ writes, bus/ reads and enumerates.
 

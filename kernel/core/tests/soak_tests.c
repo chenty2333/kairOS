@@ -8,7 +8,10 @@
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
+#include <kairos/sched.h>
+#include <kairos/signal.h>
 #include <kairos/string.h>
+#include <kairos/uaccess.h>
 
 #if CONFIG_KERNEL_TESTS
 
@@ -50,13 +53,76 @@ static uint32_t soak_rand32(void) {
     return (uint32_t)((soak_prng_state * 2685821657736338717ULL) >> 32);
 }
 
-static int run_suite_once(const struct soak_suite_entry *suite, uint32_t iter) {
-    int ret = suite->run();
-    if (ret > 0) {
-        pr_err("soak_pr: iter=%u suite=%s failed=%d\n", iter, suite->name, ret);
-        return ret;
+static void shuffle_indices(size_t *arr, size_t n) {
+    if (!arr || n < 2)
+        return;
+    for (size_t i = n - 1; i > 0; i--) {
+        size_t j = (size_t)(soak_rand32() % (uint32_t)(i + 1));
+        size_t t = arr[i];
+        arr[i] = arr[j];
+        arr[j] = t;
     }
-    return 0;
+}
+
+struct suite_run_ctx {
+    const struct soak_suite_entry *suite;
+    volatile int done;
+    int ret;
+};
+
+static int soak_suite_worker(void *arg) {
+    struct suite_run_ctx *ctx = (struct suite_run_ctx *)arg;
+    ctx->ret = ctx->suite->run();
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    proc_exit(0);
+}
+
+static int run_suite_once(const struct soak_suite_entry *suite, uint32_t iter) {
+    struct suite_run_ctx ctx = {
+        .suite = suite,
+        .done = 0,
+        .ret = -EIO,
+    };
+    struct process *child =
+        kthread_create_joinable(soak_suite_worker, &ctx, "soakrun");
+    if (!child) {
+        pr_err("soak_pr: iter=%u suite=%s create failed\n", iter, suite->name);
+        return 1;
+    }
+    pid_t cpid = child->pid;
+    sched_enqueue(child);
+
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(
+        (uint64_t)CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC * 1000000000ULL);
+    if (timeout_ticks == 0)
+        timeout_ticks = 1;
+    uint64_t start = arch_timer_ticks();
+
+    while (1) {
+        int status = 0;
+        pid_t wp = proc_wait(cpid, &status, WNOHANG);
+        if (wp == cpid) {
+            int ret = ctx.ret;
+            if (ret > 0) {
+                pr_err("soak_pr: iter=%u suite=%s failed=%d\n", iter, suite->name,
+                       ret);
+            }
+            return ret > 0 ? ret : 0;
+        }
+        if (wp < 0) {
+            pr_err("soak_pr: iter=%u suite=%s wait failed (%d)\n", iter,
+                   suite->name, (int)wp);
+            return 1;
+        }
+        if ((arch_timer_ticks() - start) >= timeout_ticks) {
+            pr_err("soak_pr: iter=%u suite=%s timeout %us, killing\n", iter,
+                   suite->name, CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC);
+            signal_send(cpid, SIGKILL);
+            (void)proc_wait(cpid, &status, 0);
+            return 1;
+        }
+        proc_yield();
+    }
 }
 
 static int soak_fault_probe_kmalloc(uint32_t iter) {
@@ -83,14 +149,36 @@ static int soak_fault_probe_kmalloc(uint32_t iter) {
     return 0;
 }
 
+static int soak_fault_probe_uaccess(uint32_t iter) {
+    uint8_t kbuf[16];
+    void *bad_user =
+        (void *)(uintptr_t)(USER_SPACE_END + (vaddr_t)CONFIG_PAGE_SIZE);
+
+    fault_inject_scope_enter();
+    for (uint32_t i = 0; i < CONFIG_KERNEL_SOAK_PR_UACCESS_FAULT_PROBE_OPS; i++) {
+        int r1 = copy_from_user(kbuf, bad_user, sizeof(kbuf));
+        int r2 = copy_to_user(bad_user, kbuf, sizeof(kbuf));
+        if (r1 != -EFAULT || r2 != -EFAULT) {
+            fault_inject_scope_exit();
+            pr_err("soak_pr: iter=%u uaccess probe unexpected ret r1=%d r2=%d\n",
+                   iter, r1, r2);
+            return 1;
+        }
+    }
+    fault_inject_scope_exit();
+    return 0;
+}
+
 int run_soak_tests(void) {
     uint64_t start_ticks = arch_timer_ticks();
     uint64_t duration_ns =
         (uint64_t)CONFIG_KERNEL_SOAK_PR_DURATION_SEC * 1000000000ULL;
     uint64_t duration_ticks = arch_timer_ns_to_ticks(duration_ns);
     size_t enabled_non_sched[ARRAY_SIZE(soak_suites)];
+    size_t non_sched_cycle[ARRAY_SIZE(soak_suites)];
     uint32_t suite_runs[ARRAY_SIZE(soak_suites)];
     size_t enabled_non_sched_cnt = 0;
+    size_t non_sched_pos = 0;
     size_t sched_idx = ARRAY_SIZE(soak_suites) - 1;
     bool sched_enabled = false;
     bool ran_any = false;
@@ -116,10 +204,13 @@ int run_soak_tests(void) {
     fault_inject_enable(true);
 
     pr_info("\n=== Soak PR Tests ===\n");
-    pr_info("soak_pr: duration=%us kmalloc_fault=%u/1000 suite_mask=0x%x\n",
+    pr_info("soak_pr: duration=%us kmalloc_fault=%u/1000 suite_mask=0x%x "
+            "min_runs=%u suite_timeout=%us\n",
             CONFIG_KERNEL_SOAK_PR_DURATION_SEC,
             CONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE,
-            CONFIG_KERNEL_SOAK_PR_SUITE_MASK);
+            CONFIG_KERNEL_SOAK_PR_SUITE_MASK,
+            CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE,
+            CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC);
 
     for (size_t i = 0; i < ARRAY_SIZE(soak_suites); i++) {
         if ((CONFIG_KERNEL_SOAK_PR_SUITE_MASK & soak_suites[i].bit) == 0)
@@ -134,6 +225,10 @@ int run_soak_tests(void) {
         tests_failed++;
         goto out;
     }
+    memcpy(non_sched_cycle, enabled_non_sched,
+           enabled_non_sched_cnt * sizeof(enabled_non_sched[0]));
+    shuffle_indices(non_sched_cycle, enabled_non_sched_cnt);
+    non_sched_pos = 0;
 
     while ((arch_timer_ticks() - start_ticks) < duration_ticks) {
         size_t idx = 0;
@@ -149,8 +244,15 @@ int run_soak_tests(void) {
 
         if (run_sched_now || enabled_non_sched_cnt == 0)
             idx = sched_idx;
-        else
-            idx = enabled_non_sched[soak_rand32() % enabled_non_sched_cnt];
+        else {
+            if (non_sched_pos >= enabled_non_sched_cnt) {
+                memcpy(non_sched_cycle, enabled_non_sched,
+                       enabled_non_sched_cnt * sizeof(enabled_non_sched[0]));
+                shuffle_indices(non_sched_cycle, enabled_non_sched_cnt);
+                non_sched_pos = 0;
+            }
+            idx = non_sched_cycle[non_sched_pos++];
+        }
 
         int ret = run_suite_once(&soak_suites[idx], iter++);
         ran_any = true;
@@ -167,6 +269,11 @@ int run_soak_tests(void) {
                 tests_failed += ret;
                 break;
             }
+            ret = soak_fault_probe_uaccess(iter);
+            if (ret > 0) {
+                tests_failed += ret;
+                break;
+            }
         }
 
         if ((iter & 7U) == 0) {
@@ -178,6 +285,17 @@ int run_soak_tests(void) {
                         FAULT_INJECT_POINT_KMALLOC),
                     (unsigned long long)fault_inject_failures(
                         FAULT_INJECT_POINT_KMALLOC));
+            pr_info("soak_pr: iter=%u uaccess: cfu_hits=%llu cfu_fail=%llu "
+                    "ctu_hits=%llu ctu_fail=%llu\n",
+                    iter,
+                    (unsigned long long)fault_inject_hits(
+                        FAULT_INJECT_POINT_COPY_FROM_USER),
+                    (unsigned long long)fault_inject_failures(
+                        FAULT_INJECT_POINT_COPY_FROM_USER),
+                    (unsigned long long)fault_inject_hits(
+                        FAULT_INJECT_POINT_COPY_TO_USER),
+                    (unsigned long long)fault_inject_failures(
+                        FAULT_INJECT_POINT_COPY_TO_USER));
         }
         proc_yield();
     }
@@ -193,6 +311,25 @@ out:
             (unsigned long long)(elapsed_ns / 1000000ULL), iter,
             (unsigned long long)fault_inject_hits(FAULT_INJECT_POINT_KMALLOC),
             (unsigned long long)fault_inject_failures(FAULT_INJECT_POINT_KMALLOC));
+    pr_info("soak_pr: uaccess cfu_hits=%llu cfu_fail=%llu ctu_hits=%llu ctu_fail=%llu\n",
+            (unsigned long long)fault_inject_hits(
+                FAULT_INJECT_POINT_COPY_FROM_USER),
+            (unsigned long long)fault_inject_failures(
+                FAULT_INJECT_POINT_COPY_FROM_USER),
+            (unsigned long long)fault_inject_hits(
+                FAULT_INJECT_POINT_COPY_TO_USER),
+            (unsigned long long)fault_inject_failures(
+                FAULT_INJECT_POINT_COPY_TO_USER));
+
+    for (size_t i = 0; i < ARRAY_SIZE(soak_suites); i++) {
+        if ((CONFIG_KERNEL_SOAK_PR_SUITE_MASK & soak_suites[i].bit) == 0)
+            continue;
+        if (suite_runs[i] < CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE) {
+            pr_err("soak_pr: suite=%s runs=%u below min=%u\n", soak_suites[i].name,
+                   suite_runs[i], CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE);
+            tests_failed++;
+        }
+    }
     for (size_t i = 0; i < ARRAY_SIZE(soak_suites); i++) {
         if ((CONFIG_KERNEL_SOAK_PR_SUITE_MASK & soak_suites[i].bit) == 0)
             continue;

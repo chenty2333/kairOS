@@ -8,6 +8,9 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
+static struct pci_host global_pci_host;
+static bool global_pci_host_ready;
+
 /* ------------------------------------------------------------------ */
 /*  Weak arch hook — overridden by arch/riscv64/pci.c                 */
 /* ------------------------------------------------------------------ */
@@ -284,11 +287,78 @@ int pci_register_driver(struct pci_driver *pdrv)
     return driver_register(&pdrv->drv);
 }
 
+int pci_dev_read_config_8(const struct pci_device *pdev, uint16_t off,
+                          uint8_t *val) {
+    if (!pdev || !val || !global_pci_host_ready)
+        return -EINVAL;
+    *val = pci_read_config_8(&global_pci_host, pdev->bus, pdev->slot,
+                             pdev->func, off);
+    return 0;
+}
+
+int pci_dev_read_config_16(const struct pci_device *pdev, uint16_t off,
+                           uint16_t *val) {
+    if (!pdev || !val || !global_pci_host_ready)
+        return -EINVAL;
+    *val = pci_read_config_16(&global_pci_host, pdev->bus, pdev->slot,
+                              pdev->func, off);
+    return 0;
+}
+
+int pci_dev_read_config_32(const struct pci_device *pdev, uint16_t off,
+                           uint32_t *val) {
+    if (!pdev || !val || !global_pci_host_ready)
+        return -EINVAL;
+    *val = pci_read_config_32(&global_pci_host, pdev->bus, pdev->slot,
+                              pdev->func, off);
+    return 0;
+}
+
+int pci_dev_write_config_8(const struct pci_device *pdev, uint16_t off,
+                           uint8_t val) {
+    if (!pdev || !global_pci_host_ready)
+        return -EINVAL;
+    pci_write_config_8(&global_pci_host, pdev->bus, pdev->slot,
+                       pdev->func, off, val);
+    return 0;
+}
+
+int pci_dev_write_config_16(const struct pci_device *pdev, uint16_t off,
+                            uint16_t val) {
+    if (!pdev || !global_pci_host_ready)
+        return -EINVAL;
+    pci_write_config_16(&global_pci_host, pdev->bus, pdev->slot,
+                        pdev->func, off, val);
+    return 0;
+}
+
+int pci_dev_write_config_32(const struct pci_device *pdev, uint16_t off,
+                            uint32_t val) {
+    if (!pdev || !global_pci_host_ready)
+        return -EINVAL;
+    pci_write_config_32(&global_pci_host, pdev->bus, pdev->slot,
+                        pdev->func, off, val);
+    return 0;
+}
+
+int pci_dev_enable_bus_master(struct pci_device *pdev) {
+    if (!pdev)
+        return -EINVAL;
+    uint16_t cmd = 0;
+    int ret = pci_dev_read_config_16(pdev, PCI_COMMAND, &cmd);
+    if (ret < 0)
+        return ret;
+    cmd |= PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
+    return pci_dev_write_config_16(pdev, PCI_COMMAND, cmd);
+}
+
 int pci_enumerate(void)
 {
     struct pci_host host = {0};
     int ret = arch_pci_host_init(&host);
     if (ret < 0)
         return ret;
-    return pci_scan_bus(&host);
+    global_pci_host = host;
+    global_pci_host_ready = true;
+    return pci_scan_bus(&global_pci_host);
 }

@@ -14,6 +14,7 @@
 #define PL011_DR   0x00
 #define PL011_FR   0x18
 #define PL011_FR_TXFF (1 << 5)
+#define PL011_FR_RXFE (1 << 4)
 
 static inline void pl011_putc(char c) {
     volatile uint32_t *uart = (volatile uint32_t *)phys_to_virt(PL011_BASE);
@@ -22,10 +23,28 @@ static inline void pl011_putc(char c) {
     uart[PL011_DR / 4] = (uint32_t)c;
 }
 
+static inline int pl011_getc_nb(void) {
+    volatile uint32_t *uart = (volatile uint32_t *)phys_to_virt(PL011_BASE);
+    if (uart[PL011_FR / 4] & PL011_FR_RXFE)
+        return -1;
+    return (int)(uart[PL011_DR / 4] & 0xffU);
+}
+
 void arch_early_putchar(char c) {
     if (c == '\n')
         pl011_putc('\r');
     pl011_putc(c);
+}
+
+int arch_early_getchar(void) {
+    int ch;
+    while ((ch = pl011_getc_nb()) < 0) {
+    }
+    return ch;
+}
+
+int arch_early_getchar_nb(void) {
+    return pl011_getc_nb();
 }
 
 void arch_cpu_halt(void) {

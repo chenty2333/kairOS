@@ -15,6 +15,7 @@
 #define PCI_DEVICE_ID       0x02
 #define PCI_COMMAND         0x04
 #define PCI_STATUS          0x06
+#define PCI_CAP_PTR         0x34
 #define PCI_CLASS_REVISION  0x08
 #define PCI_CACHE_LINE_SIZE 0x0c
 #define PCI_HEADER_TYPE     0x0e
@@ -32,6 +33,7 @@
 #define PCI_COMMAND_MEMORY      0x0002
 #define PCI_COMMAND_MASTER      0x0004
 #define PCI_COMMAND_INTX_DISABLE 0x0400
+#define PCI_STATUS_CAP_LIST     0x0010
 
 /* Header type */
 #define PCI_HEADER_TYPE_MASK    0x7f
@@ -45,6 +47,7 @@
 #define PCI_BAR_MEM_PREFETCH    0x08
 
 #define PCI_MAX_BAR 6
+#define PCI_CAP_ID_VNDR 0x09
 
 struct pci_host_ops {
     uint32_t (*read_config)(uint8_t bus, uint8_t slot, uint8_t func,
@@ -106,6 +109,19 @@ extern struct bus_type pci_bus_type;
 int pci_bus_init(void);
 int pci_enumerate(void);
 int pci_register_driver(struct pci_driver *pdrv);
+int pci_dev_read_config_8(const struct pci_device *pdev, uint16_t off,
+                          uint8_t *val);
+int pci_dev_read_config_16(const struct pci_device *pdev, uint16_t off,
+                           uint16_t *val);
+int pci_dev_read_config_32(const struct pci_device *pdev, uint16_t off,
+                           uint32_t *val);
+int pci_dev_write_config_8(const struct pci_device *pdev, uint16_t off,
+                           uint8_t val);
+int pci_dev_write_config_16(const struct pci_device *pdev, uint16_t off,
+                            uint16_t val);
+int pci_dev_write_config_32(const struct pci_device *pdev, uint16_t off,
+                            uint32_t val);
+int pci_dev_enable_bus_master(struct pci_device *pdev);
 
 /* Config space access */
 uint8_t  pci_read_config_8(struct pci_host *host, uint8_t bus,

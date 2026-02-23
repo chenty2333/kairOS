@@ -18,6 +18,7 @@
 
 /* Drivers */
 extern struct driver virtio_mmio_driver;
+extern struct pci_driver virtio_pci_driver;
 extern struct virtio_driver virtio_blk_driver;
 extern struct virtio_driver virtio_net_driver;
 #if CONFIG_DRM_LITE
@@ -63,6 +64,7 @@ void init_devices(void) {
     bus_register(&virtio_bus_type);
 
     driver_register(&virtio_mmio_driver);
+    pci_register_driver(&virtio_pci_driver);
     virtio_register_driver(&virtio_blk_driver);
     virtio_register_driver(&virtio_net_driver);
 #if CONFIG_DRM_LITE
@@ -76,5 +78,7 @@ void init_devices(void) {
         fdt_scan_devices(dtb);
     }
     platform_bus_enumerate();
-    pci_enumerate();
+    int ret = pci_enumerate();
+    if (ret < 0)
+        pr_warn("pci: enumerate skipped (ret=%d)\n", ret);
 }

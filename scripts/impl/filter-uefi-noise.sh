@@ -10,5 +10,8 @@ awk '
 /Tpm2SubmitCommand - Tcg2 - Not Found/ { next }
 /Tpm2GetCapabilityPcrs fail!/ { next }
 /ConvertPages:/ { next }
-{ print }
+{
+    print
+    fflush()
+}
 '
