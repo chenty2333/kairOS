@@ -27,6 +27,10 @@ static time_t current_time_sec(void)
 
 static uint32_t sysfs_translate_open_flags(uint64_t flags_raw) {
     uint32_t flags = (uint32_t)flags_raw;
+    const uint32_t ABI_O_DSYNC = 010000;
+    const uint32_t ABI_O_ASYNC = 020000;
+    const uint32_t ABI_O_NOATIME = 01000000;
+    const uint32_t ABI_O_SYNC = 04010000;
 #if defined(ARCH_aarch64)
     /*
      * AArch64 Linux O_* bit assignments differ from the generic values used by
@@ -47,10 +51,19 @@ static uint32_t sysfs_translate_open_flags(uint64_t flags_raw) {
         out |= O_NOFOLLOW;
     if (flags & ABI_O_LARGEFILE)
         out |= O_LARGEFILE;
-    return out;
+    flags = out;
 #else
-    return flags;
+    (void)ABI_O_DSYNC;
+    (void)ABI_O_ASYNC;
+    (void)ABI_O_NOATIME;
+    (void)ABI_O_SYNC;
 #endif
+    /*
+     * Compatibility: accept Linux sync/async/noatime hints even if current VFS
+     * backend does not implement their full semantics yet.
+     */
+    flags &= ~(ABI_O_DSYNC | ABI_O_ASYNC | ABI_O_NOATIME | ABI_O_SYNC);
+    return flags;
 }
 
 int64_t sys_getcwd(uint64_t buf_ptr, uint64_t size, uint64_t a2, uint64_t a3,
@@ -770,9 +783,8 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
                    uint64_t newdirfd, uint64_t newpath_ptr,
                    uint64_t flags, uint64_t a5) {
     (void)a5;
-    /* AT_EMPTY_PATH (0x1000) is the only supported flag besides
-     * AT_SYMLINK_FOLLOW (0x400) */
-    if (flags & ~(AT_SYMLINK_NOFOLLOW | 0x400)) {
+    /* AT_SYMLINK_FOLLOW is currently the only supported linkat flag. */
+    if (flags & ~AT_SYMLINK_FOLLOW) {
         return -EINVAL;
     }
 
@@ -786,7 +798,7 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
     }
 
     /* Resolve old path (target of the link) */
-    int nflags = (flags & 0x400) ? NAMEI_FOLLOW : 0; /* AT_SYMLINK_FOLLOW */
+    int nflags = (flags & AT_SYMLINK_FOLLOW) ? NAMEI_FOLLOW : 0;
     struct path oldp;
     path_init(&oldp);
     int ret = sysfs_resolve_at((int64_t)olddirfd, oldpath, &oldp, nflags);

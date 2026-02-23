@@ -71,6 +71,7 @@ static int gen_stat(pid_t pid, char *buf, size_t bufsz);
 static int gen_sched(pid_t pid, char *buf, size_t bufsz);
 static int gen_version(pid_t pid, char *buf, size_t bufsz);
 static int gen_cmdline(pid_t pid, char *buf, size_t bufsz);
+static int gen_mounts(pid_t pid, char *buf, size_t bufsz);
 static int gen_mm_pcp(pid_t pid, char *buf, size_t bufsz);
 static int gen_mm_integrity(pid_t pid, char *buf, size_t bufsz);
 static int gen_mm_remote_free(pid_t pid, char *buf, size_t bufsz);
@@ -241,6 +242,54 @@ static int gen_cmdline(pid_t pid __attribute__((unused)),
     const struct boot_info *bi = boot_info_get();
     const char *cmd = (bi && bi->cmdline) ? bi->cmdline : "";
     return snprintf(buf, bufsz, "%s\n", cmd);
+}
+
+static int gen_mounts(pid_t pid __attribute__((unused)),
+                      char *buf, size_t bufsz) {
+    const char *paths[] = {"/", "/proc", "/dev", "/tmp", "/sys", "/oldroot"};
+    struct mount *seen[ARRAY_SIZE(paths)] = {0};
+    size_t seen_count = 0;
+    int len = 0;
+
+    for (size_t i = 0; i < ARRAY_SIZE(paths); i++) {
+        struct mount *mnt = vfs_mount_for_path(paths[i]);
+        if (!mnt)
+            continue;
+
+        bool duplicate = false;
+        for (size_t j = 0; j < seen_count; j++) {
+            if (seen[j] == mnt) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+        seen[seen_count++] = mnt;
+
+        const char *target =
+            (mnt->mountpoint && mnt->mountpoint[0] != '\0') ?
+                mnt->mountpoint :
+                paths[i];
+        const char *fstype =
+            (mnt->ops && mnt->ops->name) ? mnt->ops->name : "unknown";
+
+        if ((size_t)len >= bufsz)
+            break;
+        int n = snprintf(buf + len, bufsz - (size_t)len, "none %s %s rw 0 0\n",
+                         target, fstype);
+        if (n < 0)
+            return len;
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            break;
+        }
+        len += n;
+    }
+
+    if (len == 0)
+        len = snprintf(buf, bufsz, "none / rootfs rw 0 0\n");
+    return len;
 }
 
 static int gen_mm_pcp(pid_t pid __attribute__((unused)),
@@ -533,6 +582,7 @@ static const struct static_entry_def static_entries[] = {
     {"sched",   gen_sched},
     {"version", gen_version},
     {"cmdline", gen_cmdline},
+    {"mounts", gen_mounts},
     {"mm_pcp", gen_mm_pcp},
     {"mm_integrity", gen_mm_integrity},
     {"mm_remote_free", gen_mm_remote_free},

@@ -56,6 +56,18 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
 
 static char uts_domainname[65] = "kairos";
 
+static const char *uname_machine(void) {
+#if defined(ARCH_aarch64)
+    return "aarch64";
+#elif defined(ARCH_x86_64)
+    return "x86_64";
+#elif defined(ARCH_riscv64)
+    return "riscv64";
+#else
+    return CONFIG_ARCH;
+#endif
+}
+
 int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
@@ -246,7 +258,7 @@ int64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
     strcpy(uts.nodename, "kairos");
     strcpy(uts.release, "0.1.0");
     strcpy(uts.version, "kairos");
-    strcpy(uts.machine, "riscv64");
+    strncpy(uts.machine, uname_machine(), sizeof(uts.machine) - 1);
     strncpy(uts.domainname, uts_domainname, sizeof(uts.domainname) - 1);
     if (copy_to_user((void *)buf_ptr, &uts, sizeof(uts)) < 0)
         return -EFAULT;
