@@ -83,7 +83,7 @@ QEMU configuration:
 - `make test-vfs-ipc` — vfs/tmpfs/pipe/epoll module only (includes epoll EPOLLET/EPOLLONESHOT regressions)
 - `make test-socket` — socket module only (AF_UNIX stream/dgram + accept stability, AF_INET TCP/UDP time-bounded attempts)
 - `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module only
-- `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo semantics, pty pair EOF path)
+- `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo/isig semantics, blocking read wakeup and EINTR paths, pty pair EOF + reopen stability)
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix

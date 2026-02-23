@@ -6,6 +6,8 @@
 #include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
+#include <kairos/sched.h>
+#include <kairos/signal.h>
 #include <kairos/string.h>
 #include <kairos/vfs.h>
 
@@ -68,6 +70,20 @@ static void drain_nonblock(struct file *f) {
     }
 }
 
+static bool sig_pending_has(struct process *p, int sig) {
+    if (!p || sig <= 0 || sig > 63)
+        return false;
+    uint64_t mask = 1ULL << (sig - 1);
+    return (__atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & mask) != 0;
+}
+
+static void sig_pending_clear(struct process *p, int sig) {
+    if (!p || sig <= 0 || sig > 63)
+        return;
+    uint64_t mask = 1ULL << (sig - 1);
+    __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
+}
+
 static int open_pty_pair(struct file **master, struct file **slave) {
     if (!master || !slave)
         return -EINVAL;
@@ -109,6 +125,21 @@ static int open_pty_pair(struct file **master, struct file **slave) {
 
     close_file_if_open(master);
     return -ENXIO;
+}
+
+struct tty_blocking_read_ctx {
+    struct file *f;
+    volatile int started;
+    ssize_t ret;
+    uint8_t buf[16];
+    size_t len;
+};
+
+static int tty_blocking_reader(void *arg) {
+    struct tty_blocking_read_ctx *ctx = (struct tty_blocking_read_ctx *)arg;
+    ctx->started = 1;
+    ctx->ret = vfs_read(ctx->f, ctx->buf, ctx->len);
+    return 0;
 }
 
 static void test_pty_open_read_write_ioctl(void) {
@@ -249,12 +280,177 @@ static void test_n_tty_canonical_echo(void) {
     close_file_if_open(&master);
 }
 
+static void test_n_tty_isig_behavior(void) {
+    struct file *master = NULL;
+    struct file *slave = NULL;
+    int ret = open_pty_pair(&master, &slave);
+    test_check(ret == 0, "n_tty isig open pty pair");
+    if (ret < 0)
+        return;
+
+    set_nonblock(master, true);
+    set_nonblock(slave, true);
+    drain_nonblock(master);
+    drain_nonblock(slave);
+
+    struct process *cur = proc_current();
+    test_check(cur != NULL, "n_tty isig current proc");
+    if (!cur) {
+        close_file_if_open(&slave);
+        close_file_if_open(&master);
+        return;
+    }
+
+    sig_pending_clear(cur, SIGINT);
+
+    uint8_t intr = 3;
+    ssize_t wr = vfs_write(master, &intr, 1);
+    test_check(wr == 1, "n_tty isig write intr");
+
+    uint8_t echo[8];
+    memset(echo, 0, sizeof(echo));
+    ssize_t rd = read_collect(master, echo, 4, 128);
+    test_check(rd == 4, "n_tty isig echo len");
+    if (rd == 4)
+        test_check(memcmp(echo, "^C\r\n", 4) == 0, "n_tty isig echo data");
+
+    rd = vfs_read(slave, echo, sizeof(echo));
+    test_check(rd == -EAGAIN, "n_tty isig no canonical data queued");
+    test_check(sig_pending_has(cur, SIGINT), "n_tty isig pending set");
+    sig_pending_clear(cur, SIGINT);
+
+    close_file_if_open(&slave);
+    close_file_if_open(&master);
+}
+
+static void test_n_tty_blocking_read_paths(void) {
+    struct file *master = NULL;
+    struct file *slave = NULL;
+    int ret = open_pty_pair(&master, &slave);
+    test_check(ret == 0, "n_tty blocking open pty pair");
+    if (ret < 0)
+        return;
+
+    set_nonblock(master, true);
+    set_nonblock(slave, true);
+    drain_nonblock(master);
+    drain_nonblock(slave);
+    set_nonblock(master, false);
+    set_nonblock(slave, false);
+
+    do {
+        struct tty_blocking_read_ctx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.f = slave;
+        ctx.ret = -1;
+        ctx.len = 8;
+
+        struct process *child =
+            kthread_create_joinable(tty_blocking_reader, &ctx, "ttyblk");
+        test_check(child != NULL, "n_tty blocking wake child create");
+        if (!child)
+            break;
+        pid_t cpid = child->pid;
+        sched_enqueue(child);
+
+        for (int i = 0; i < 2000 && !ctx.started; i++)
+            proc_yield();
+        test_check(ctx.started != 0, "n_tty blocking wake child started");
+
+        int status = 0;
+        pid_t wp = proc_wait(cpid, &status, WNOHANG);
+        test_check(wp == 0, "n_tty blocking wake child blocked");
+
+        ssize_t wr = vfs_write(master, "wake\n", 5);
+        test_check(wr == 5, "n_tty blocking wake write");
+
+        wp = proc_wait(cpid, &status, 0);
+        test_check(wp == cpid, "n_tty blocking wake child reaped");
+        if (wp == cpid) {
+            test_check(status == 0, "n_tty blocking wake child exit");
+            test_check(ctx.ret == 5, "n_tty blocking wake read len");
+            if (ctx.ret == 5)
+                test_check(memcmp(ctx.buf, "wake\n", 5) == 0,
+                           "n_tty blocking wake read data");
+        }
+    } while (0);
+
+    do {
+        struct tty_blocking_read_ctx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.f = slave;
+        ctx.ret = -1;
+        ctx.len = 8;
+
+        struct process *child =
+            kthread_create_joinable(tty_blocking_reader, &ctx, "ttyeintr");
+        test_check(child != NULL, "n_tty blocking eintr child create");
+        if (!child)
+            break;
+        pid_t cpid = child->pid;
+        sched_enqueue(child);
+
+        for (int i = 0; i < 2000 && !ctx.started; i++)
+            proc_yield();
+        test_check(ctx.started != 0, "n_tty blocking eintr child started");
+
+        int status = 0;
+        pid_t wp = proc_wait(cpid, &status, WNOHANG);
+        test_check(wp == 0, "n_tty blocking eintr child blocked");
+
+        int sret = signal_send(cpid, SIGUSR1);
+        test_check(sret == 0, "n_tty blocking eintr send signal");
+
+        wp = proc_wait(cpid, &status, 0);
+        test_check(wp == cpid, "n_tty blocking eintr child reaped");
+        if (wp == cpid) {
+            test_check(status == 0, "n_tty blocking eintr child exit");
+            test_check(ctx.ret == -EINTR, "n_tty blocking eintr read ret");
+        }
+    } while (0);
+
+    close_file_if_open(&slave);
+    close_file_if_open(&master);
+}
+
+static void test_pty_reopen_stability(void) {
+    for (int i = 0; i < 96; i++) {
+        struct file *master = NULL;
+        struct file *slave = NULL;
+        int ret = open_pty_pair(&master, &slave);
+        test_check(ret == 0, "pty reopen pair");
+        if (ret < 0) {
+            close_file_if_open(&slave);
+            close_file_if_open(&master);
+            break;
+        }
+
+        set_nonblock(master, true);
+        set_nonblock(slave, true);
+        drain_nonblock(master);
+        drain_nonblock(slave);
+
+        ssize_t wr = vfs_write(master, "r\n", 2);
+        test_check(wr == 2, "pty reopen write");
+        uint8_t buf[4];
+        memset(buf, 0, sizeof(buf));
+        ssize_t rd = read_collect(slave, buf, 2, 128);
+        test_check(rd == 2, "pty reopen read");
+
+        close_file_if_open(&slave);
+        close_file_if_open(&master);
+    }
+}
+
 int run_tty_tests(void) {
     tests_failed = 0;
     pr_info("Running tty tests...\n");
 
     test_pty_open_read_write_ioctl();
     test_n_tty_canonical_echo();
+    test_n_tty_isig_behavior();
+    test_n_tty_blocking_read_paths();
+    test_pty_reopen_stability();
 
     if (tests_failed == 0)
         pr_info("tty tests: all passed\n");
