@@ -17,6 +17,25 @@
 #define F_GETFL            3
 #define F_SETFL            4
 #define F_DUPFD_CLOEXEC    1030
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+
+static int fdtable_unshare_current(void) {
+    struct process *p = proc_current();
+    if (!p || !p->fdtable)
+        return -EINVAL;
+    if (atomic_read(&p->fdtable->refcount) <= 1)
+        return 0;
+
+    struct fdtable *new_fdt = fdtable_copy(p->fdtable);
+    if (!new_fdt)
+        return -ENOMEM;
+
+    struct fdtable *old_fdt = p->fdtable;
+    p->fdtable = new_fdt;
+    fdtable_put(old_fdt);
+    return 0;
+}
 
 int64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
@@ -99,6 +118,63 @@ int64_t sys_pipe2(uint64_t fd_array, uint64_t flags, uint64_t a2, uint64_t a3,
     if (flags & ~allowed)
         return -EINVAL;
     return (int64_t)pipe_create_fds(fd_array, (uint32_t)flags);
+}
+
+int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
+                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
+        return -EINVAL;
+
+    uint32_t from = (uint32_t)first;
+    uint32_t to = (uint32_t)last;
+    if (from > to)
+        return -EINVAL;
+
+    if (uflags & CLOSE_RANGE_UNSHARE) {
+        int ret = fdtable_unshare_current();
+        if (ret < 0)
+            return ret;
+    }
+
+    struct process *p = proc_current();
+    if (!p || !p->fdtable)
+        return -EINVAL;
+    if (from >= CONFIG_MAX_FILES_PER_PROC)
+        return 0;
+
+    if (to >= CONFIG_MAX_FILES_PER_PROC)
+        to = CONFIG_MAX_FILES_PER_PROC - 1;
+
+    struct fdtable *fdt = p->fdtable;
+    if (uflags & CLOSE_RANGE_CLOEXEC) {
+        mutex_lock(&fdt->lock);
+        for (uint32_t fd = from; fd <= to; fd++) {
+            if (fdt->files[fd])
+                fdt->fd_flags[fd] |= FD_CLOEXEC;
+        }
+        mutex_unlock(&fdt->lock);
+        return 0;
+    }
+
+    struct file *to_close[CONFIG_MAX_FILES_PER_PROC];
+    int close_count = 0;
+    mutex_lock(&fdt->lock);
+    for (uint32_t fd = from; fd <= to; fd++) {
+        struct file *f = fdt->files[fd];
+        if (!f)
+            continue;
+        fdt->files[fd] = NULL;
+        fdt->fd_flags[fd] = 0;
+        to_close[close_count++] = f;
+    }
+    mutex_unlock(&fdt->lock);
+
+    for (int i = 0; i < close_count; i++)
+        vfs_close(to_close[i]);
+    return 0;
 }
 
 int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,

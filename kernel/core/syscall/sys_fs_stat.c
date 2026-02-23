@@ -134,6 +134,58 @@ struct linux_stat {
     unsigned int __unused5;
 };
 
+struct linux_statx_timestamp {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t __reserved;
+};
+
+struct linux_statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __pad0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct linux_statx_timestamp stx_atime;
+    struct linux_statx_timestamp stx_btime;
+    struct linux_statx_timestamp stx_ctime;
+    struct linux_statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t __pad1[14];
+};
+
+#define STATX_TYPE 0x00000001U
+#define STATX_MODE 0x00000002U
+#define STATX_NLINK 0x00000004U
+#define STATX_UID 0x00000008U
+#define STATX_GID 0x00000010U
+#define STATX_ATIME 0x00000020U
+#define STATX_MTIME 0x00000040U
+#define STATX_CTIME 0x00000080U
+#define STATX_INO 0x00000100U
+#define STATX_SIZE 0x00000200U
+#define STATX_BLOCKS 0x00000400U
+#define STATX_BASIC_STATS 0x000007ffU
+#define STATX_BTIME 0x00000800U
+#define STATX_ALL 0x00000fffU
+#define STATX__RESERVED 0x80000000U
+
+#define AT_NO_AUTOMOUNT 0x800
+#define AT_STATX_SYNC_TYPE 0x6000
+#define AT_STATX_SYNC_AS_STAT 0x0000
+#define AT_STATX_FORCE_SYNC 0x2000
+#define AT_STATX_DONT_SYNC 0x4000
+
 static void stat_to_linux(const struct stat *st, struct linux_stat *lst) {
     memset(lst, 0, sizeof(*lst));
     lst->st_dev = (unsigned long)st->st_dev;
@@ -151,10 +203,56 @@ static void stat_to_linux(const struct stat *st, struct linux_stat *lst) {
     lst->st_ctime = (long)st->st_ctime;
 }
 
+static void linux_statx_set_ts(struct linux_statx_timestamp *dst, time_t sec) {
+    dst->tv_sec = (int64_t)sec;
+    dst->tv_nsec = 0;
+    dst->__reserved = 0;
+}
+
+static uint32_t dev_major(dev_t dev) {
+    return (uint32_t)((dev >> 16) & 0xffffU);
+}
+
+static uint32_t dev_minor(dev_t dev) {
+    return (uint32_t)(dev & 0xffffU);
+}
+
+static void stat_to_linux_statx(const struct stat *st, struct linux_statx *sx,
+                                uint32_t req_mask) {
+    (void)req_mask;
+    memset(sx, 0, sizeof(*sx));
+    sx->stx_mask = STATX_BASIC_STATS;
+    sx->stx_blksize = (uint32_t)st->st_blksize;
+    sx->stx_nlink = (uint32_t)st->st_nlink;
+    sx->stx_uid = (uint32_t)st->st_uid;
+    sx->stx_gid = (uint32_t)st->st_gid;
+    sx->stx_mode = (uint16_t)st->st_mode;
+    sx->stx_ino = (uint64_t)st->st_ino;
+    sx->stx_size = (uint64_t)st->st_size;
+    sx->stx_blocks = (uint64_t)st->st_blocks;
+    linux_statx_set_ts(&sx->stx_atime, st->st_atime);
+    linux_statx_set_ts(&sx->stx_btime, 0);
+    linux_statx_set_ts(&sx->stx_ctime, st->st_ctime);
+    linux_statx_set_ts(&sx->stx_mtime, st->st_mtime);
+    sx->stx_rdev_major = dev_major(st->st_rdev);
+    sx->stx_rdev_minor = dev_minor(st->st_rdev);
+    sx->stx_dev_major = dev_major(st->st_dev);
+    sx->stx_dev_minor = dev_minor(st->st_dev);
+}
+
 static int copy_linux_stat_to_user(uint64_t st_ptr, const struct stat *st) {
     struct linux_stat lst;
     stat_to_linux(st, &lst);
     if (copy_to_user((void *)st_ptr, &lst, sizeof(lst)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int copy_linux_statx_to_user(uint64_t stx_ptr, const struct stat *st,
+                                    uint32_t req_mask) {
+    struct linux_statx sx;
+    stat_to_linux_statx(st, &sx, req_mask);
+    if (copy_to_user((void *)stx_ptr, &sx, sizeof(sx)) < 0)
         return -EFAULT;
     return 0;
 }
@@ -273,6 +371,85 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
     if (ret < 0)
         return ret;
     return copy_linux_stat_to_user(st_ptr, &st);
+}
+
+int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
+                  uint64_t stx_ptr, uint64_t a5) {
+    (void)a5;
+    if (!stx_ptr)
+        return -EFAULT;
+
+    uint64_t allowed_flags = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH |
+                             AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE;
+    if (flags & ~allowed_flags)
+        return -EINVAL;
+
+    uint64_t sync_type = flags & AT_STATX_SYNC_TYPE;
+    if (sync_type != AT_STATX_SYNC_AS_STAT &&
+        sync_type != AT_STATX_FORCE_SYNC &&
+        sync_type != AT_STATX_DONT_SYNC)
+        return -EINVAL;
+
+    uint32_t req_mask = (uint32_t)mask;
+    if (req_mask & STATX__RESERVED)
+        return -EINVAL;
+    if (req_mask & ~STATX_ALL)
+        return -EINVAL;
+
+    char kpath[CONFIG_PATH_MAX];
+    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
+        return -EFAULT;
+    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+        return -ENOENT;
+
+    struct stat st;
+    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        if ((int64_t)dirfd == AT_FDCWD) {
+            struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
+            if (!cwd_vn)
+                return -ENOENT;
+            int ret = vfs_stat_vnode(cwd_vn, &st);
+            if (ret < 0)
+                return ret;
+            return copy_linux_statx_to_user(stx_ptr, &st, req_mask);
+        }
+
+        struct file *f = fd_get(p, (int)dirfd);
+        if (!f)
+            return -EBADF;
+        if (!f->vnode) {
+            file_put(f);
+            return -ENOENT;
+        }
+        int ret = vfs_stat_vnode(f->vnode, &st);
+        file_put(f);
+        if (ret < 0)
+            return ret;
+        return copy_linux_statx_to_user(stx_ptr, &st, req_mask);
+    }
+
+    int nflags = NAMEI_FOLLOW;
+    if (flags & AT_SYMLINK_NOFOLLOW)
+        nflags = NAMEI_NOFOLLOW;
+
+    struct path resolved;
+    path_init(&resolved);
+    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    ret = vfs_stat_vnode(resolved.dentry->vnode, &st);
+    dentry_put(resolved.dentry);
+    if (ret < 0)
+        return ret;
+    return copy_linux_statx_to_user(stx_ptr, &st, req_mask);
 }
 
 int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,

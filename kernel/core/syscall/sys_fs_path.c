@@ -18,6 +18,36 @@
 #define UTIME_NOW  ((int64_t)0x3fffffff)
 #define UTIME_OMIT ((int64_t)0x3ffffffe)
 
+#define RESOLVE_NO_XDEV 0x01U
+#define RESOLVE_NO_MAGICLINKS 0x02U
+#define RESOLVE_NO_SYMLINKS 0x04U
+#define RESOLVE_BENEATH 0x08U
+#define RESOLVE_IN_ROOT 0x10U
+#define RESOLVE_CACHED 0x20U
+
+struct linux_open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
+
+static int sysfs_open_how_tail_zeroed(uint64_t how_ptr, uint64_t size) {
+    uint8_t extra[16];
+    uint64_t off = sizeof(struct linux_open_how);
+    while (off < size) {
+        size_t chunk = (size - off > sizeof(extra)) ? sizeof(extra)
+                                                     : (size_t)(size - off);
+        if (copy_from_user(extra, (const void *)(how_ptr + off), chunk) < 0)
+            return -EFAULT;
+        for (size_t i = 0; i < chunk; i++) {
+            if (extra[i] != 0)
+                return -E2BIG;
+        }
+        off += chunk;
+    }
+    return 0;
+}
+
 static time_t current_time_sec(void)
 {
     return time_now_sec();
@@ -438,6 +468,45 @@ int64_t sys_open(uint64_t path, uint64_t flags, uint64_t mode, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     return sys_openat((uint64_t)(int64_t)AT_FDCWD, path, flags, mode, 0, 0);
+}
+
+int64_t sys_openat2(uint64_t dirfd, uint64_t path_ptr, uint64_t how_ptr,
+                    uint64_t size, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (!how_ptr)
+        return -EFAULT;
+    if (size < sizeof(struct linux_open_how))
+        return -EINVAL;
+    if (size > CONFIG_PAGE_SIZE)
+        return -E2BIG;
+
+    struct linux_open_how how = {0};
+    if (copy_from_user(&how, (const void *)how_ptr, sizeof(how)) < 0)
+        return -EFAULT;
+    if (size > sizeof(how)) {
+        int ret = sysfs_open_how_tail_zeroed(how_ptr, size);
+        if (ret < 0)
+            return ret;
+    }
+
+    if (how.flags & ~0xffffffffULL)
+        return -EINVAL;
+    if (how.mode & ~07777ULL)
+        return -EINVAL;
+
+    uint64_t known_resolve = RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS |
+                             RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH |
+                             RESOLVE_IN_ROOT | RESOLVE_CACHED;
+    if (how.resolve & ~known_resolve)
+        return -EINVAL;
+    if (how.resolve != 0)
+        return -EOPNOTSUPP;
+
+    uint32_t flags = (uint32_t)how.flags;
+    if (!(flags & O_CREAT) && how.mode != 0)
+        return -EINVAL;
+
+    return sys_openat(dirfd, path_ptr, flags, how.mode, 0, 0);
 }
 
 static int sysfs_check_access(struct vnode *vn, uint64_t mode) {
