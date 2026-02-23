@@ -40,26 +40,49 @@ void secondary_cpu_main(unsigned long cpu_id) {
 }
 
 static void smp_init(void) {
-    int started = 0, my_hart = (int)arch_cpu_id();
-    pr_info("SMP: Booting secondary CPUs...\n");
-    for (int cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++) {
-        if (cpu == my_hart) {
+    const struct boot_info *bi = boot_info_get();
+    int cpu_count = bi ? (int)bi->cpu_count : 1;
+    int bsp_cpu = bi ? (int)bi->bsp_cpu_id : (int)arch_cpu_id();
+    int started = 0;
+
+    if (cpu_count < 1)
+        cpu_count = 1;
+    if (cpu_count > CONFIG_MAX_CPUS)
+        cpu_count = CONFIG_MAX_CPUS;
+
+    pr_info("SMP: Booting secondary CPUs (bsp=%d total=%d)...\n",
+            bsp_cpu, cpu_count);
+
+    for (int cpu = 0; cpu < cpu_count; cpu++) {
+        if (cpu == bsp_cpu) {
             continue;
         }
         if (arch_start_cpu(cpu, (unsigned long)_secondary_start,
                            (unsigned long)cpu) == 0)
             started++;
     }
+
     if (started == 0) {
+        pr_info("SMP: 1 CPU active\n");
+        sched_set_steal_enabled(false);
         return;
     }
-    int timeout = 1000000;
-    while (secondary_cpus_online < started && timeout-- > 0) {
+
+    uint64_t wait_ticks = arch_timer_ns_to_ticks(2ULL * 1000 * 1000 * 1000);
+    if (wait_ticks == 0)
+        wait_ticks = CONFIG_HZ;
+    uint64_t deadline = arch_timer_get_ticks() + wait_ticks;
+
+    while (secondary_cpus_online < started &&
+           arch_timer_get_ticks() < deadline) {
         arch_cpu_relax();
     }
-    pr_info("SMP: %d CPUs active\n", started + 1);
-    // FIXME: keep work stealing disabled until scheduler invariants are hardened.
-    sched_set_steal_enabled(false);
+
+    int online = secondary_cpus_online + 1;
+    if (online < 1)
+        online = 1;
+    pr_info("SMP: %d/%d CPUs active\n", online, started + 1);
+    sched_set_steal_enabled(online > 1);
 }
 
 /**

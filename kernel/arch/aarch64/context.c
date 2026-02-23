@@ -104,6 +104,7 @@ void arch_setup_fork_child(struct arch_context *ctx, struct trap_frame *tf) {
     child_tf->tf_a0 = 0;
     ctx->lr = (uint64_t)fork_ret;
     ctx->sp = (uint64_t)child_tf;
+    __asm__ __volatile__("mrs %0, tpidr_el0" : "=r"(ctx->tpidr_el0));
 }
 
 void arch_context_set_retval(struct arch_context *ctx, uint64_t val) {

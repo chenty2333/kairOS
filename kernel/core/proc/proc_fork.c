@@ -34,6 +34,8 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->robust_len = parent->robust_len;
     child->itimer_real = parent->itimer_real;
     child->sigaltstack = parent->sigaltstack;
+    child->sched_flags = parent->sched_flags;
+    child->sched_affinity = parent->sched_affinity;
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->parent = parent;
     child->ppid = parent->pid;
@@ -125,11 +127,6 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
         }
     }
 
-    /* TLS */
-    if ((clone_flags & CLONE_SETTLS) && opts) {
-        arch_set_tls(child->context, opts->tls);
-    }
-
     struct trap_frame *tf = get_current_trapframe();
     if (tf) {
         arch_setup_fork_child(child->context, tf);
@@ -137,6 +134,11 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
             arch_context_set_user_sp(child->context, opts->child_stack);
     } else {
         arch_context_clone(child->context, parent->context);
+    }
+
+    /* TLS override must happen after trapframe/context setup. */
+    if ((clone_flags & CLONE_SETTLS) && opts) {
+        arch_set_tls(child->context, opts->tls);
     }
 
     sched_enqueue(child);
