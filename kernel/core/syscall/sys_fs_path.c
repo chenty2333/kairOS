@@ -336,10 +336,40 @@ int64_t sys_open(uint64_t path, uint64_t flags, uint64_t mode, uint64_t a3,
     return sys_openat((uint64_t)(int64_t)AT_FDCWD, path, flags, mode, 0, 0);
 }
 
+static int sysfs_check_access(struct vnode *vn, uint64_t mode) {
+    if (!vn)
+        return -ENOENT;
+    if (mode == F_OK)
+        return 0;
+
+    struct process *p = proc_current();
+    uid_t uid = p ? p->uid : 0;
+    gid_t gid = p ? p->gid : 0;
+
+    rwlock_read_lock(&vn->lock);
+    mode_t perms = vn->mode & 0777;
+    uint32_t bits;
+    if (uid == vn->uid)
+        bits = (perms >> 6) & 0x7;
+    else if (gid == vn->gid)
+        bits = (perms >> 3) & 0x7;
+    else
+        bits = perms & 0x7;
+    rwlock_read_unlock(&vn->lock);
+
+    if ((mode & R_OK) && !(bits & 0x4))
+        return -EACCES;
+    if ((mode & W_OK) && !(bits & 0x2))
+        return -EACCES;
+    if ((mode & X_OK) && !(bits & 0x1))
+        return -EACCES;
+    return 0;
+}
+
 int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                       uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW))
+    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
     if (mode & ~(F_OK | R_OK | W_OK | X_OK))
         return -EINVAL;
@@ -347,6 +377,24 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
+    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+        return -ENOENT;
+
+    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        if ((int64_t)dirfd == AT_FDCWD) {
+            struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
+            return sysfs_check_access(cwd_vn, mode);
+        }
+        struct file *f = fd_get(p, (int)dirfd);
+        if (!f)
+            return -EBADF;
+        int ret = sysfs_check_access(f->vnode, mode);
+        file_put(f);
+        return ret;
+    }
 
     int nflags = NAMEI_FOLLOW;
     if (flags & AT_SYMLINK_NOFOLLOW)
@@ -363,44 +411,15 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return -ENOENT;
     }
 
-    if (mode != F_OK) {
-        struct process *p = proc_current();
-        uid_t uid = p ? p->uid : 0;
-        gid_t gid = p ? p->gid : 0;
-        struct vnode *vn = resolved.dentry->vnode;
-        rwlock_read_lock(&vn->lock);
-        mode_t perms = vn->mode & 0777;
-        uint32_t bits = 0;
-        if (uid == vn->uid)
-            bits = (perms >> 6) & 0x7;
-        else if (gid == vn->gid)
-            bits = (perms >> 3) & 0x7;
-        else
-            bits = perms & 0x7;
-        rwlock_read_unlock(&vn->lock);
-
-        if ((mode & R_OK) && !(bits & 0x4)) {
-            dentry_put(resolved.dentry);
-            return -EACCES;
-        }
-        if ((mode & W_OK) && !(bits & 0x2)) {
-            dentry_put(resolved.dentry);
-            return -EACCES;
-        }
-        if ((mode & X_OK) && !(bits & 0x1)) {
-            dentry_put(resolved.dentry);
-            return -EACCES;
-        }
-    }
-
+    int access_ret = sysfs_check_access(resolved.dentry->vnode, mode);
     dentry_put(resolved.dentry);
-    return 0;
+    return access_ret;
 }
 
 int64_t sys_faccessat2(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                        uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW))
+    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
     return sys_faccessat(dirfd, path_ptr, mode, flags, 0, 0);
 }

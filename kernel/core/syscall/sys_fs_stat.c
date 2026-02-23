@@ -217,14 +217,43 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
     (void)a4; (void)a5;
     if (!st_ptr)
         return -EFAULT;
-    if (flags & ~AT_SYMLINK_NOFOLLOW)
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
+    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+        return -ENOENT;
 
     struct stat st;
+    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        if ((int64_t)dirfd == AT_FDCWD) {
+            struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
+            if (!cwd_vn)
+                return -ENOENT;
+            int ret = vfs_stat_vnode(cwd_vn, &st);
+            if (ret < 0)
+                return ret;
+            return copy_linux_stat_to_user(st_ptr, &st);
+        }
+        struct file *f = fd_get(p, (int)dirfd);
+        if (!f)
+            return -EBADF;
+        if (!f->vnode) {
+            file_put(f);
+            return -ENOENT;
+        }
+        int ret = vfs_stat_vnode(f->vnode, &st);
+        file_put(f);
+        if (ret < 0)
+            return ret;
+        return copy_linux_stat_to_user(st_ptr, &st);
+    }
+
     int nflags = NAMEI_FOLLOW;
     if (flags & AT_SYMLINK_NOFOLLOW)
         nflags = NAMEI_NOFOLLOW;

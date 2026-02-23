@@ -24,6 +24,9 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - vfs_namei_at(): resolves path from base path, supports NAMEI_FOLLOW (follow symlinks), NAMEI_CREATE, NAMEI_EXCL, NAMEI_DIRECTORY, NAMEI_NOFOLLOW
 - Automatically crosses mount points during resolution (dentry->mounted)
 - vfs_open_at_path(): path resolution + file open, handles O_CREAT/O_EXCL/O_TRUNC/O_DIRECTORY flags
+- Linux ABI path-stat/access compatibility:
+  - `newfstatat` supports `AT_EMPTY_PATH` and treats empty path without it as `ENOENT`
+  - `faccessat2`/`faccessat` support `AT_EMPTY_PATH` on fd targets
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 
 ## Dentry Cache (fs/vfs/dentry.c)
