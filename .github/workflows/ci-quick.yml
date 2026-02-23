@@ -1,0 +1,117 @@
+name: ci-quick
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ci-quick-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  riscv64-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(
+            clang
+            lld
+            llvm
+            make
+            python3
+            git
+            e2fsprogs
+            dosfstools
+            mtools
+            qemu-system-misc
+            qemu-utils
+            ovmf
+          )
+          if apt-cache show qemu-efi-riscv64 >/dev/null 2>&1; then
+            pkgs+=(qemu-efi-riscv64)
+          fi
+          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
+            pkgs+=(edk2-ovmf)
+          fi
+          sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Locate riscv64 UEFI firmware
+        run: |
+          set -euo pipefail
+          code_candidates=(
+            /usr/share/edk2/riscv/RISCV_VIRT_CODE.fd
+            /usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd
+            /usr/share/qemu/RISCV_VIRT_CODE.fd
+          )
+          vars_candidates=(
+            /usr/share/edk2/riscv/RISCV_VIRT_VARS.fd
+            /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd
+            /usr/share/qemu/RISCV_VIRT_VARS.fd
+          )
+          code_src=""
+          vars_src=""
+          for p in "${code_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              code_src="${p}"
+              break
+            fi
+          done
+          for p in "${vars_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              vars_src="${p}"
+              break
+            fi
+          done
+          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
+            echo "Unable to locate riscv64 UEFI firmware on runner" >&2
+            exit 2
+          fi
+          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
+          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
+          echo "Using UEFI_CODE_SRC=${code_src}"
+          echo "Using UEFI_VARS_SRC=${vars_src}"
+
+      - name: Run quick regression
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 test
+
+      - name: Capture latest isolated run
+        id: latest_run
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload quick-test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-riscv64-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ steps.latest_run.outputs.path }}/manifest.json
+            ${{ steps.latest_run.outputs.path }}/result.json
+            ${{ steps.latest_run.outputs.path }}/riscv64/logs/test.log
+            ${{ steps.latest_run.outputs.path }}/riscv64/test.log
+            ${{ steps.latest_run.outputs.path }}/riscv64/run.log
+            build/riscv64/test.log
+            build/riscv64/run.log

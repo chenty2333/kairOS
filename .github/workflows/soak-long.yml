@@ -1,0 +1,178 @@
+name: soak-long
+
+on:
+  push:
+    tags:
+      - soak-*
+      - night-*
+  workflow_dispatch:
+    inputs:
+      soak_duration_sec:
+        description: "CONFIG_KERNEL_SOAK_PR_DURATION_SEC"
+        required: false
+        default: "10800"
+      soak_fault_permille:
+        description: "CONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE"
+        required: false
+        default: "1"
+      soak_suite_mask:
+        description: "CONFIG_KERNEL_SOAK_PR_SUITE_MASK"
+        required: false
+        default: "0xFF"
+      soak_min_runs_per_suite:
+        description: "CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE"
+        required: false
+        default: "2"
+      soak_suite_timeout_sec:
+        description: "CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC"
+        required: false
+        default: "180"
+      soak_test_timeout_sec:
+        description: "make SOAK_PR_TIMEOUT (runner-side timeout)"
+        required: false
+        default: "14400"
+
+concurrency:
+  group: soak-long-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  riscv64-soak-pr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      ARCH: riscv64
+      SOAK_DURATION_SEC: ${{ github.event.inputs.soak_duration_sec || '10800' }}
+      SOAK_FAULT_PERMILLE: ${{ github.event.inputs.soak_fault_permille || '1' }}
+      SOAK_SUITE_MASK: ${{ github.event.inputs.soak_suite_mask || '0xFF' }}
+      SOAK_MIN_RUNS_PER_SUITE: ${{ github.event.inputs.soak_min_runs_per_suite || '2' }}
+      SOAK_SUITE_TIMEOUT_SEC: ${{ github.event.inputs.soak_suite_timeout_sec || '180' }}
+      SOAK_TEST_TIMEOUT_SEC: ${{ github.event.inputs.soak_test_timeout_sec || '14400' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(
+            clang
+            lld
+            llvm
+            make
+            python3
+            git
+            e2fsprogs
+            dosfstools
+            mtools
+            qemu-system-misc
+            qemu-utils
+            ovmf
+          )
+          if apt-cache show qemu-efi-riscv64 >/dev/null 2>&1; then
+            pkgs+=(qemu-efi-riscv64)
+          fi
+          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
+            pkgs+=(edk2-ovmf)
+          fi
+          sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Locate riscv64 UEFI firmware
+        run: |
+          set -euo pipefail
+          code_candidates=(
+            /usr/share/edk2/riscv/RISCV_VIRT_CODE.fd
+            /usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd
+            /usr/share/qemu/RISCV_VIRT_CODE.fd
+          )
+          vars_candidates=(
+            /usr/share/edk2/riscv/RISCV_VIRT_VARS.fd
+            /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd
+            /usr/share/qemu/RISCV_VIRT_VARS.fd
+          )
+          code_src=""
+          vars_src=""
+          for p in "${code_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              code_src="${p}"
+              break
+            fi
+          done
+          for p in "${vars_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              vars_src="${p}"
+              break
+            fi
+          done
+          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
+            echo "Unable to locate riscv64 UEFI firmware on runner" >&2
+            exit 2
+          fi
+          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
+          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
+          echo "Using UEFI_CODE_SRC=${code_src}"
+          echo "Using UEFI_VARS_SRC=${vars_src}"
+
+      - name: Validate soak params
+        run: |
+          set -euo pipefail
+          re_uint='^[0-9]+$'
+          re_mask='^(0x[0-9A-Fa-f]+|[0-9]+)$'
+          [[ "${SOAK_DURATION_SEC}" =~ ${re_uint} ]]
+          [[ "${SOAK_FAULT_PERMILLE}" =~ ${re_uint} ]]
+          [[ "${SOAK_MIN_RUNS_PER_SUITE}" =~ ${re_uint} ]]
+          [[ "${SOAK_SUITE_TIMEOUT_SEC}" =~ ${re_uint} ]]
+          [[ "${SOAK_TEST_TIMEOUT_SEC}" =~ ${re_uint} ]]
+          [[ "${SOAK_SUITE_MASK}" =~ ${re_mask} ]]
+          if (( SOAK_FAULT_PERMILLE < 0 || SOAK_FAULT_PERMILLE > 1000 )); then
+            echo "SOAK_FAULT_PERMILLE must be in [0, 1000]" >&2
+            exit 2
+          fi
+
+      - name: Run long soak-pr
+        run: |
+          set -euo pipefail
+          extra_cflags=(
+            "-DCONFIG_KERNEL_FAULT_INJECT=1"
+            "-DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=${SOAK_DURATION_SEC}"
+            "-DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=${SOAK_FAULT_PERMILLE}"
+            "-DCONFIG_KERNEL_SOAK_PR_SUITE_MASK=${SOAK_SUITE_MASK}"
+            "-DCONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE=${SOAK_MIN_RUNS_PER_SUITE}"
+            "-DCONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC=${SOAK_SUITE_TIMEOUT_SEC}"
+          )
+          printf 'soak cflags: %s\n' "${extra_cflags[*]}"
+          make --no-print-directory ARCH="${ARCH}" \
+            SOAK_PR_TIMEOUT="${SOAK_TEST_TIMEOUT_SEC}" \
+            SOAK_PR_EXTRA_CFLAGS="${extra_cflags[*]}" \
+            test-soak-pr
+
+      - name: Capture latest isolated run
+        id: latest_run
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-long-riscv64-${{ github.run_id }}
+          retention-days: 21
+          if-no-files-found: warn
+          path: |
+            ${{ steps.latest_run.outputs.path }}/manifest.json
+            ${{ steps.latest_run.outputs.path }}/result.json
+            ${{ steps.latest_run.outputs.path }}/riscv64/logs/test.log
+            ${{ steps.latest_run.outputs.path }}/riscv64/test.log
+            ${{ steps.latest_run.outputs.path }}/riscv64/run.log
+            build/riscv64/soak-pr.log
+            build/riscv64/test.log
+            build/riscv64/run.log
