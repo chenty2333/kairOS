@@ -9,5 +9,7 @@
 
 uint64_t time_now_ns(void);
 time_t time_now_sec(void);
+uint64_t time_realtime_ns(void);
+int time_set_realtime_ns(uint64_t realtime_ns);
 
 #endif

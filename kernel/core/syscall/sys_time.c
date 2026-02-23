@@ -65,11 +65,7 @@ static int clockid_now_ns(uint64_t clockid, uint64_t *out_ns) {
         *out_ns = time_now_ns();
         return 0;
     case CLOCK_REALTIME:
-        /*
-         * Current time core does not maintain a separate realtime offset yet.
-         * Keep this split to preserve ABI behavior when realtime is introduced.
-         */
-        *out_ns = time_now_ns();
+        *out_ns = time_realtime_ns();
         return 0;
     default:
         return -EINVAL;
@@ -144,12 +140,16 @@ int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
         return -EINVAL;
+    if (clockid == CLOCK_MONOTONIC)
+        return -EINVAL;
     struct timespec ts;
     int rc = sys_copy_timespec(tp_ptr, &ts, false);
     if (rc < 0)
         return rc;
-    /* No RTC or time-setting support yet. */
-    return -EPERM;
+
+    uint64_t req_ns =
+        (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
+    return time_set_realtime_ns(req_ns);
 }
 
 int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
@@ -233,7 +233,7 @@ int64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (tv_ptr) {
-        uint64_t ns = time_now_ns();
+        uint64_t ns = time_realtime_ns();
         struct timeval tv = {
             .tv_sec = (time_t)(ns / NS_PER_SEC),
             .tv_usec = (suseconds_t)((ns % NS_PER_SEC) / 1000),
