@@ -254,9 +254,9 @@ void sys_init(void) {
 /* --- Time --- */
 
 u32_t sys_now(void) {
-    /* Return milliseconds since boot */
-    uint64_t ticks = arch_timer_ticks();
-    return (u32_t)(ticks * 1000 / CONFIG_HZ);
+    /* Return milliseconds from architecture timer source */
+    uint64_t ns = arch_timer_ticks_to_ns(arch_timer_ticks());
+    return (u32_t)(ns / 1000000ULL);
 }
 
 /* --- Critical sections --- */
