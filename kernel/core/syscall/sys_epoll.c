@@ -45,6 +45,20 @@ static void epoll_sigmask_restore(struct epoll_sigmask_ctx *ctx) {
     ctx->active = false;
 }
 
+static int epoll_copy_sigmask_from_user(sigset_t *out, uint64_t mask_ptr,
+                                        uint64_t sigsetsize) {
+    if (!out)
+        return -EINVAL;
+    *out = 0;
+    if (!mask_ptr)
+        return 0;
+    if (sigsetsize == 0 || sigsetsize > sizeof(sigset_t))
+        return -EINVAL;
+    if (copy_from_user(out, (void *)mask_ptr, (size_t)sigsetsize) < 0)
+        return -EFAULT;
+    return 1;
+}
+
 int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -86,11 +100,10 @@ int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
     bool have_sigmask = false;
     sigset_t mask = 0;
     if (a4) {
-        if (a5 != sizeof(sigset_t))
-            return -EINVAL;
-        if (copy_from_user(&mask, (void *)a4, sizeof(mask)) < 0)
-            return -EFAULT;
-        have_sigmask = true;
+        int rc = epoll_copy_sigmask_from_user(&mask, a4, a5);
+        if (rc < 0)
+            return rc;
+        have_sigmask = rc > 0;
     }
     if (maxevents == 0)
         return -EINVAL;
