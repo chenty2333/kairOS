@@ -110,6 +110,26 @@ CONFIGURE_ARGS=(
   --config-musl
 )
 
+# Keep PT_INTERP aligned with the actual musl loader name in sysroot
+# (e.g. ld-musl-riscv64-sf.so.1 on lp64 builds).
+TCC_ELFINTERP=""
+shopt -s nullglob
+ldso_candidates=("$SYSROOT"/lib/ld-musl-*.so.1)
+shopt -u nullglob
+if [[ ${#ldso_candidates[@]} -gt 0 ]]; then
+  for ldso in "${ldso_candidates[@]}"; do
+    ldso_name="$(basename "$ldso")"
+    if [[ "$ldso_name" == "ld-musl-${TCC_CPU}"*.so.1 ]]; then
+      TCC_ELFINTERP="/lib/${ldso_name}"
+      break
+    fi
+  done
+  if [[ -z "$TCC_ELFINTERP" ]]; then
+    TCC_ELFINTERP="/lib/$(basename "${ldso_candidates[0]}")"
+  fi
+  CONFIGURE_ARGS+=(--elfinterp="$TCC_ELFINTERP")
+fi
+
 if [[ -n "$CROSS_PREFIX" ]]; then
   CONFIGURE_ARGS+=(--cross-prefix="$CROSS_PREFIX")
 fi

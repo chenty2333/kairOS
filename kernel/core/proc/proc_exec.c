@@ -17,6 +17,8 @@
 
 #include "proc_internal.h"
 
+#define ELF_INTERP_LOAD_BIAS 0x0000002000000000ULL
+
 static void proc_free_strv(char **vec, int count) {
     if (!vec) {
         return;
@@ -37,10 +39,16 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
     int envc = 0;
     struct vnode *vn;
     struct path resolved;
+    struct path interp_resolved;
     struct mm_struct *old_mm, *new_mm;
     vaddr_t entry, sp;
+    vaddr_t interp_entry = 0;
     size_t size;
     int ret = 0;
+    struct elf_auxv_info aux = {0};
+    struct elf_auxv_info interp_aux = {0};
+    char interp_path[CONFIG_PATH_MAX];
+    bool has_interp = false;
 
     if (argv) {
         kargv = kmalloc((EXEC_ARG_MAX + 1) * sizeof(char *));
@@ -138,20 +146,59 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         goto out;
     }
 
+    ret = elf_read_interp_vnode(vn, size, interp_path, sizeof(interp_path));
+    if (ret == 0) {
+        has_interp = true;
+    } else if (ret != -ENOENT) {
+        dentry_put(resolved.dentry);
+        goto out;
+    }
+
     if (!(new_mm = mm_create())) {
         dentry_put(resolved.dentry);
         ret = -ENOMEM;
         goto out;
     }
-    struct elf_auxv_info aux;
-    if (elf_load_vnode(new_mm, vn, size, &entry, &aux) < 0 ||
-        elf_setup_stack(new_mm, kargv, kenvp, &sp, &aux) < 0) {
+    ret = elf_load_vnode(new_mm, vn, size, &entry, &aux);
+    dentry_put(resolved.dentry);
+    if (ret < 0) {
         mm_destroy(new_mm);
-        dentry_put(resolved.dentry);
         ret = -ENOEXEC;
         goto out;
     }
-    dentry_put(resolved.dentry);
+    aux.base = 0;
+
+    if (has_interp) {
+        path_init(&interp_resolved);
+        ret = vfs_namei(interp_path, &interp_resolved, NAMEI_FOLLOW);
+        if (ret < 0 || !interp_resolved.dentry ||
+            !interp_resolved.dentry->vnode ||
+            interp_resolved.dentry->vnode->type != VNODE_FILE) {
+            if (ret >= 0 && interp_resolved.dentry)
+                dentry_put(interp_resolved.dentry);
+            mm_destroy(new_mm);
+            ret = -ENOEXEC;
+            goto out;
+        }
+        struct vnode *ivn = interp_resolved.dentry->vnode;
+        size_t interp_size = ivn->size;
+        ret = elf_load_vnode_bias(new_mm, ivn, interp_size, ELF_INTERP_LOAD_BIAS,
+                                  &interp_entry, &interp_aux);
+        dentry_put(interp_resolved.dentry);
+        if (ret < 0) {
+            mm_destroy(new_mm);
+            ret = -ENOEXEC;
+            goto out;
+        }
+        aux.base = interp_aux.base;
+        entry = interp_entry;
+    }
+
+    if (elf_setup_stack(new_mm, kargv, kenvp, &sp, &aux) < 0) {
+        mm_destroy(new_mm);
+        ret = -ENOEXEC;
+        goto out;
+    }
 
     struct process *curr = proc_current();
     old_mm = curr->mm;

@@ -95,8 +95,8 @@ kairos_run_test_tcc_smoke_once() {
     local smoke_cmd=""
     local qemu_cmd=""
     local required_any="TCC_BIN_OK"
-    local required_all=$'TCC_BIN_OK\nRC_EXEC:0\n__TCC_SMOKE_DONE__'
-    local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma'
+    local required_all=$'TCC_BIN_OK\nRC_EXEC:0\nDYN_BIN_OK\nRC_DYN:0\n__TCC_SMOKE_DONE__'
+    local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma|PT_INTERP not supported'
 
     printf -v inner_make_cmd \
         'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
@@ -118,8 +118,12 @@ kairos_run_test_tcc_smoke_once() {
         "sleep ${step_delay}; printf 'test -x /tmp/tcc_smoke_exec && echo TCC_BIN_OK\\n' >&3; " \
         "sleep ${step_delay}; printf '/tmp/tcc_smoke_exec\\n' >&3; " \
         "sleep ${step_delay}; printf 'echo RC_EXEC:\$?\\n' >&3; " \
+        "sleep ${step_delay}; printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_dyn\\n' >&3; " \
+        "sleep ${step_delay}; printf 'test -x /tmp/tcc_smoke_dyn && echo DYN_BIN_OK\\n' >&3; " \
+        "sleep ${step_delay}; printf '/tmp/tcc_smoke_dyn\\n' >&3; " \
+        "sleep ${step_delay}; printf 'echo RC_DYN:\$?\\n' >&3; " \
         "sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n' >&3; " \
-        "sleep ${step_delay}; printf 'poweroff\\n' >&3; " \
+        "sleep ${step_delay}; printf '\\001x' >&3; " \
         "exec 3>&- ) & " \
         "feeder=\$!; " \
         "${inner_make_cmd} QEMU_STDIN=\"<\$fifo\" run-direct; rc=\$?; " \

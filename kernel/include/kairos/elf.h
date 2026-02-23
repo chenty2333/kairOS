@@ -131,12 +131,18 @@ struct elf_auxv_info {
     uint64_t phent;
     uint64_t phnum;
     vaddr_t entry;
+    vaddr_t base;
 };
 
 int elf_load(struct mm_struct *mm, const void *elf, size_t size,
              vaddr_t *entry_out, struct elf_auxv_info *aux_out);
 int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
                    vaddr_t *entry_out, struct elf_auxv_info *aux_out);
+int elf_load_vnode_bias(struct mm_struct *mm, struct vnode *vn, size_t size,
+                        vaddr_t load_bias, vaddr_t *entry_out,
+                        struct elf_auxv_info *aux_out);
+int elf_read_interp_vnode(struct vnode *vn, size_t size, char *out,
+                          size_t out_sz);
 int elf_setup_stack(struct mm_struct *mm, char *const argv[],
                     char *const envp[], vaddr_t *sp_out,
                     const struct elf_auxv_info *aux);

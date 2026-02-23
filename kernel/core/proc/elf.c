@@ -62,11 +62,6 @@ static int elf_check_ehdr(const Elf64_Ehdr *ehdr, size_t size) {
         return -ENOEXEC;
     }
 
-    if (ehdr->e_type == ET_DYN) {
-        pr_warn("ELF: ET_DYN not supported\n");
-        return -ENOEXEC;
-    }
-
     if (ehdr->e_phentsize != sizeof(Elf64_Phdr)) {
         pr_err("ELF: unexpected program header size\n");
         return -ENOEXEC;
@@ -88,14 +83,6 @@ static int elf_check_ehdr(const Elf64_Ehdr *ehdr, size_t size) {
 
 static int elf_check_phdr(const Elf64_Phdr *ph, size_t size,
                           bool check_align) {
-    if (ph->p_type == PT_INTERP) {
-        pr_warn("ELF: PT_INTERP not supported\n");
-        return -ENOEXEC;
-    }
-    if (ph->p_type == PT_DYNAMIC) {
-        pr_warn("ELF: PT_DYNAMIC ignored (no dynamic loader)\n");
-        return -ENOEXEC;
-    }
     if (ph->p_type != PT_LOAD) {
         return 0;
     }
@@ -253,8 +240,10 @@ static int vnode_read_exact(struct vnode *vn, void *buf, size_t len,
     return 0;
 }
 
-int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
-                   vaddr_t *entry_out, struct elf_auxv_info *aux_out) {
+static int elf_load_vnode_internal(struct mm_struct *mm, struct vnode *vn,
+                                   size_t size, vaddr_t load_bias,
+                                   vaddr_t *entry_out,
+                                   struct elf_auxv_info *aux_out) {
     Elf64_Ehdr ehdr;
     int ret;
     vaddr_t base = 0;
@@ -292,11 +281,11 @@ int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
     for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
         const Elf64_Phdr *ph = &phdrs[i];
         if (ph->p_type == PT_LOAD && !base_set) {
-            base = ph->p_vaddr - ph->p_offset;
+            base = (load_bias + ph->p_vaddr) - ph->p_offset;
             base_set = true;
         }
         if (ph->p_type == PT_PHDR) {
-            phdr_addr = ph->p_vaddr;
+            phdr_addr = load_bias + ph->p_vaddr;
         }
         ret = elf_check_phdr(ph, size, true);
         if (ret < 0) {
@@ -307,9 +296,16 @@ int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
             continue;
         }
 
-        vaddr_t seg_start = ph->p_vaddr;
+        vaddr_t seg_start = load_bias + ph->p_vaddr;
         vaddr_t seg_end = seg_start + ph->p_memsz;
-        if (ehdr.e_entry >= seg_start && ehdr.e_entry < seg_end) {
+        if (seg_end < seg_start || seg_start < USER_SPACE_START ||
+            seg_end > USER_SPACE_END + 1) {
+            kfree(phdrs);
+            return -ENOEXEC;
+        }
+
+        vaddr_t entry = load_bias + ehdr.e_entry;
+        if (entry >= seg_start && entry < seg_end) {
             entry_ok = true;
         }
         vaddr_t page_start = ALIGN_DOWN(seg_start, CONFIG_PAGE_SIZE);
@@ -345,24 +341,91 @@ int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
         return -ENOEXEC;
     }
 
-    *entry_out = ehdr.e_entry;
+    *entry_out = load_bias + ehdr.e_entry;
     if (aux_out) {
         aux_out->phent = ehdr.e_phentsize;
         aux_out->phnum = ehdr.e_phnum;
-        aux_out->entry = ehdr.e_entry;
+        aux_out->entry = load_bias + ehdr.e_entry;
         if (!phdr_addr && base_set)
             phdr_addr = base + ehdr.e_phoff;
         aux_out->phdr = phdr_addr;
+        aux_out->base = base_set ? base : load_bias;
     }
 
     kfree(phdrs);
     return 0;
 }
 
+int elf_load_vnode(struct mm_struct *mm, struct vnode *vn, size_t size,
+                   vaddr_t *entry_out, struct elf_auxv_info *aux_out) {
+    return elf_load_vnode_internal(mm, vn, size, 0, entry_out, aux_out);
+}
+
+int elf_load_vnode_bias(struct mm_struct *mm, struct vnode *vn, size_t size,
+                        vaddr_t load_bias, vaddr_t *entry_out,
+                        struct elf_auxv_info *aux_out) {
+    return elf_load_vnode_internal(mm, vn, size, load_bias, entry_out, aux_out);
+}
+
+int elf_read_interp_vnode(struct vnode *vn, size_t size, char *out,
+                          size_t out_sz) {
+    if (!vn || !out || out_sz == 0)
+        return -EINVAL;
+    if (size < sizeof(Elf64_Ehdr))
+        return -ENOEXEC;
+
+    Elf64_Ehdr ehdr;
+    int ret = vnode_read_exact(vn, &ehdr, sizeof(ehdr), 0);
+    if (ret < 0)
+        return ret;
+    ret = elf_check_ehdr(&ehdr, size);
+    if (ret < 0)
+        return ret;
+
+    size_t ph_size = (size_t)ehdr.e_phnum * ehdr.e_phentsize;
+    Elf64_Phdr *phdrs = kmalloc(ph_size);
+    if (!phdrs)
+        return -ENOMEM;
+
+    ret = vnode_read_exact(vn, phdrs, ph_size, (off_t)ehdr.e_phoff);
+    if (ret < 0) {
+        kfree(phdrs);
+        return ret;
+    }
+
+    ret = -ENOENT;
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        Elf64_Phdr *ph = &phdrs[i];
+        if (ph->p_type != PT_INTERP)
+            continue;
+        if (ph->p_filesz == 0 || ph->p_filesz > size ||
+            ph->p_offset + ph->p_filesz > size) {
+            ret = -ENOEXEC;
+            break;
+        }
+        if (ph->p_filesz > out_sz) {
+            ret = -ENAMETOOLONG;
+            break;
+        }
+        ret = vnode_read_exact(vn, out, (size_t)ph->p_filesz,
+                               (off_t)ph->p_offset);
+        if (ret < 0)
+            break;
+        out[out_sz - 1] = '\0';
+        if (!memchr(out, '\0', (size_t)ph->p_filesz))
+            out[(size_t)ph->p_filesz - 1] = '\0';
+        ret = 0;
+        break;
+    }
+    kfree(phdrs);
+    return ret;
+}
+
 #define AT_NULL 0
 #define AT_PHDR 3
 #define AT_PHENT 4
 #define AT_PHNUM 5
+#define AT_BASE 7
 #define AT_PAGESZ 6
 #define AT_ENTRY 9
 #define AT_UID 11
@@ -497,13 +560,16 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
         return ret;
     vaddr_t rand_addr = sp;
 
-    struct auxv_entry auxv[12];
+    struct auxv_entry auxv[14];
     int auxc = 0;
     if (aux && aux->phdr) {
         auxv[auxc++] = (struct auxv_entry){AT_PHDR, aux->phdr};
         auxv[auxc++] = (struct auxv_entry){AT_PHENT, aux->phent};
         auxv[auxc++] = (struct auxv_entry){AT_PHNUM, aux->phnum};
         auxv[auxc++] = (struct auxv_entry){AT_ENTRY, aux->entry};
+    }
+    if (aux && aux->base) {
+        auxv[auxc++] = (struct auxv_entry){AT_BASE, aux->base};
     }
     auxv[auxc++] = (struct auxv_entry){AT_PAGESZ, CONFIG_PAGE_SIZE};
     struct process *cur = proc_current();

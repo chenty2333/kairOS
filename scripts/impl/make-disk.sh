@@ -117,7 +117,7 @@ stage_doom() {
 
 stage_tcc() {
   [[ "$QUIET" != "1" ]] && echo "Staging rootfs tcc: $ROOTFS_DIR"
-  mkdir -p "$ROOTFS_DIR"/{usr/bin,usr/lib/tcc,usr/include,tmp}
+  mkdir -p "$ROOTFS_DIR"/{usr/bin,usr/lib/tcc,usr/include,lib,tmp}
 
   # tcc binary
   if [[ -x "$TCC_BIN" ]]; then
@@ -144,6 +144,29 @@ stage_tcc() {
       cp -f "$SYSROOT_DIR/lib/$f" "$ROOTFS_DIR/usr/lib/$f"
     fi
   done
+
+  # Dynamic loader/runtime for dynamically-linked ELF binaries.
+  if [[ -f "$SYSROOT_DIR/lib/libc.so" ]]; then
+    cp -f "$SYSROOT_DIR/lib/libc.so" "$ROOTFS_DIR/lib/libc.so"
+  fi
+  for ldso in "$SYSROOT_DIR"/lib/ld-musl-*.so.1; do
+    local ldso_name
+    ldso_name="$(basename "$ldso")"
+    rm -f "$ROOTFS_DIR/lib/$ldso_name"
+    if [[ -f "$ldso" ]]; then
+      cp -f "$ldso" "$ROOTFS_DIR/lib/$ldso_name"
+      continue
+    fi
+    if [[ -L "$ldso" ]]; then
+      if [[ -f "$SYSROOT_DIR/lib/libc.so" ]]; then
+        cp -f "$SYSROOT_DIR/lib/libc.so" "$ROOTFS_DIR/lib/$ldso_name"
+      fi
+    fi
+  done
+  if [[ "$ARCH" == "riscv64" && -f "$ROOTFS_DIR/lib/libc.so" &&
+        ! -e "$ROOTFS_DIR/lib/ld-musl-riscv64.so.1" ]]; then
+    cp -f "$ROOTFS_DIR/lib/libc.so" "$ROOTFS_DIR/lib/ld-musl-riscv64.so.1"
+  fi
 }
 
 case "$ROOTFS_STAGE" in
