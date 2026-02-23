@@ -4,6 +4,7 @@
 
 #include <kairos/epoll.h>
 #include <kairos/epoll_internal.h>
+#include <kairos/mm.h>
 #include <kairos/pipe.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
@@ -200,6 +201,11 @@ struct blocking_read_ctx {
 
 static int blocking_pipe_reader(void *arg) {
     struct blocking_read_ctx *ctx = (struct blocking_read_ctx *)arg;
+    if (!ctx || !ctx->r) {
+        if (ctx)
+            ctx->ret = -EIO;
+        proc_exit(0);
+    }
     ctx->started = 1;
     ctx->ret = vfs_read(ctx->r, ctx->buf, 4);
     proc_exit(0);
@@ -266,22 +272,26 @@ static void test_pipe_semantics(void) {
         return;
 
     do {
-        struct blocking_read_ctx ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.r = r;
-        ctx.ret = -1;
+        struct blocking_read_ctx *ctx = kzalloc(sizeof(*ctx));
+        test_check(ctx != NULL, "pipe blocking ctx alloc");
+        if (!ctx)
+            break;
+        ctx->r = r;
+        ctx->ret = -1;
 
         struct process *child =
-            kthread_create_joinable(blocking_pipe_reader, &ctx, "pipeblk");
+            kthread_create_joinable(blocking_pipe_reader, ctx, "pipeblk");
         test_check(child != NULL, "pipe blocking child create");
-        if (!child)
+        if (!child) {
+            kfree(ctx);
             break;
+        }
         pid_t expected_pid = child->pid;
         sched_enqueue(child);
 
-        for (int i = 0; i < 2000 && !ctx.started; i++)
+        for (int i = 0; i < 2000 && !ctx->started; i++)
             proc_yield();
-        test_check(ctx.started != 0, "pipe blocking child started");
+        test_check(ctx->started != 0, "pipe blocking child started");
 
         int status = 0;
         pid_t wp = proc_wait(child->pid, &status, WNOHANG);
@@ -292,8 +302,10 @@ static void test_pipe_semantics(void) {
 
         wp = proc_wait(child->pid, &status, 0);
         test_check(wp == expected_pid, "pipe blocking child reaped");
-        test_check(ctx.ret == 4, "pipe blocking child read len");
-        test_check(memcmp(ctx.buf, "PING", 4) == 0, "pipe blocking child read data");
+        test_check(ctx->ret == 4, "pipe blocking child read len");
+        test_check(memcmp(ctx->buf, "PING", 4) == 0,
+                   "pipe blocking child read data");
+        kfree(ctx);
     } while (0);
 
     close_file_if_open(&w);

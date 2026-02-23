@@ -72,21 +72,33 @@ struct suite_run_ctx {
 
 static int soak_suite_worker(void *arg) {
     struct suite_run_ctx *ctx = (struct suite_run_ctx *)arg;
+    if (!ctx || !ctx->suite || !ctx->suite->run) {
+        if (ctx) {
+            ctx->ret = 1;
+            __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+        }
+        proc_exit(0);
+    }
     ctx->ret = ctx->suite->run();
     __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
     proc_exit(0);
 }
 
 static int run_suite_once(const struct soak_suite_entry *suite, uint32_t iter) {
-    struct suite_run_ctx ctx = {
-        .suite = suite,
-        .done = 0,
-        .ret = -EIO,
-    };
+    struct suite_run_ctx *ctx = kzalloc(sizeof(*ctx));
+    if (!ctx) {
+        pr_err("soak_pr: iter=%u suite=%s alloc failed\n", iter, suite->name);
+        return 1;
+    }
+    ctx->suite = suite;
+    ctx->done = 0;
+    ctx->ret = -EIO;
+
     struct process *child =
-        kthread_create_joinable(soak_suite_worker, &ctx, "soakrun");
+        kthread_create_joinable(soak_suite_worker, ctx, "soakrun");
     if (!child) {
         pr_err("soak_pr: iter=%u suite=%s create failed\n", iter, suite->name);
+        kfree(ctx);
         return 1;
     }
     pid_t cpid = child->pid;
@@ -102,16 +114,18 @@ static int run_suite_once(const struct soak_suite_entry *suite, uint32_t iter) {
         int status = 0;
         pid_t wp = proc_wait(cpid, &status, WNOHANG);
         if (wp == cpid) {
-            int ret = ctx.ret;
+            int ret = ctx->ret;
             if (ret > 0) {
                 pr_err("soak_pr: iter=%u suite=%s failed=%d\n", iter, suite->name,
                        ret);
             }
+            kfree(ctx);
             return ret > 0 ? ret : 0;
         }
         if (wp < 0) {
             pr_err("soak_pr: iter=%u suite=%s wait failed (%d)\n", iter,
                    suite->name, (int)wp);
+            kfree(ctx);
             return 1;
         }
         if ((arch_timer_ticks() - start) >= timeout_ticks) {
@@ -119,6 +133,7 @@ static int run_suite_once(const struct soak_suite_entry *suite, uint32_t iter) {
                    suite->name, CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC);
             signal_send(cpid, SIGKILL);
             (void)proc_wait(cpid, &status, 0);
+            kfree(ctx);
             return 1;
         }
         proc_yield();

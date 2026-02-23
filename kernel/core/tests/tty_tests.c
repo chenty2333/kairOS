@@ -3,6 +3,7 @@
  */
 
 #include <kairos/ioctl.h>
+#include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -155,9 +156,14 @@ struct tty_blocking_read_ctx {
 
 static int tty_blocking_reader(void *arg) {
     struct tty_blocking_read_ctx *ctx = (struct tty_blocking_read_ctx *)arg;
+    if (!ctx || !ctx->f) {
+        if (ctx)
+            ctx->ret = -EIO;
+        proc_exit(0);
+    }
     ctx->started = 1;
     ctx->ret = vfs_read(ctx->f, ctx->buf, ctx->len);
-    return 0;
+    proc_exit(0);
 }
 
 static void test_pty_open_read_write_ioctl(void) {
@@ -367,23 +373,27 @@ static void test_n_tty_blocking_read_paths(void) {
     set_nonblock(slave, false);
 
     do {
-        struct tty_blocking_read_ctx ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.f = slave;
-        ctx.ret = -1;
-        ctx.len = 8;
+        struct tty_blocking_read_ctx *ctx = kzalloc(sizeof(*ctx));
+        test_check(ctx != NULL, "n_tty blocking wake ctx alloc");
+        if (!ctx)
+            break;
+        ctx->f = slave;
+        ctx->ret = -1;
+        ctx->len = 8;
 
         struct process *child =
-            kthread_create_joinable(tty_blocking_reader, &ctx, "ttyblk");
+            kthread_create_joinable(tty_blocking_reader, ctx, "ttyblk");
         test_check(child != NULL, "n_tty blocking wake child create");
-        if (!child)
+        if (!child) {
+            kfree(ctx);
             break;
+        }
         pid_t cpid = child->pid;
         sched_enqueue(child);
 
-        for (int i = 0; i < 2000 && !ctx.started; i++)
+        for (int i = 0; i < 2000 && !ctx->started; i++)
             proc_yield();
-        test_check(ctx.started != 0, "n_tty blocking wake child started");
+        test_check(ctx->started != 0, "n_tty blocking wake child started");
 
         int status = 0;
         pid_t wp = proc_wait(cpid, &status, WNOHANG);
@@ -396,31 +406,36 @@ static void test_n_tty_blocking_read_paths(void) {
         test_check(wp == cpid, "n_tty blocking wake child reaped");
         if (wp == cpid) {
             test_check(status == 0, "n_tty blocking wake child exit");
-            test_check(ctx.ret == 5, "n_tty blocking wake read len");
-            if (ctx.ret == 5)
-                test_check(memcmp(ctx.buf, "wake\n", 5) == 0,
+            test_check(ctx->ret == 5, "n_tty blocking wake read len");
+            if (ctx->ret == 5)
+                test_check(memcmp(ctx->buf, "wake\n", 5) == 0,
                            "n_tty blocking wake read data");
         }
+        kfree(ctx);
     } while (0);
 
     do {
-        struct tty_blocking_read_ctx ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.f = slave;
-        ctx.ret = -1;
-        ctx.len = 8;
+        struct tty_blocking_read_ctx *ctx = kzalloc(sizeof(*ctx));
+        test_check(ctx != NULL, "n_tty blocking eintr ctx alloc");
+        if (!ctx)
+            break;
+        ctx->f = slave;
+        ctx->ret = -1;
+        ctx->len = 8;
 
         struct process *child =
-            kthread_create_joinable(tty_blocking_reader, &ctx, "ttyeintr");
+            kthread_create_joinable(tty_blocking_reader, ctx, "ttyeintr");
         test_check(child != NULL, "n_tty blocking eintr child create");
-        if (!child)
+        if (!child) {
+            kfree(ctx);
             break;
+        }
         pid_t cpid = child->pid;
         sched_enqueue(child);
 
-        for (int i = 0; i < 2000 && !ctx.started; i++)
+        for (int i = 0; i < 2000 && !ctx->started; i++)
             proc_yield();
-        test_check(ctx.started != 0, "n_tty blocking eintr child started");
+        test_check(ctx->started != 0, "n_tty blocking eintr child started");
 
         int status = 0;
         pid_t wp = proc_wait(cpid, &status, WNOHANG);
@@ -433,8 +448,9 @@ static void test_n_tty_blocking_read_paths(void) {
         test_check(wp == cpid, "n_tty blocking eintr child reaped");
         if (wp == cpid) {
             test_check(status == 0, "n_tty blocking eintr child exit");
-            test_check(ctx.ret == -EINTR, "n_tty blocking eintr read ret");
+            test_check(ctx->ret == -EINTR, "n_tty blocking eintr read ret");
         }
+        kfree(ctx);
     } while (0);
 
     close_file_if_open(&slave);

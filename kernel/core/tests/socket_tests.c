@@ -260,24 +260,28 @@ static void test_unix_stream_accept_stability(void) {
         goto out;
 
     for (uint32_t round = 0; round < 32; round++) {
-        struct unix_stream_client_ctx ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.srv_addr = srv_addr;
-        ctx.token = 0xA5000000U | round;
-        ctx.ret = -1;
+        struct unix_stream_client_ctx *ctx = kzalloc(sizeof(*ctx));
+        test_check(ctx != NULL, "unix_accept_stress ctx alloc");
+        if (!ctx)
+            break;
+        ctx->srv_addr = srv_addr;
+        ctx->token = 0xA5000000U | round;
+        ctx->ret = -1;
 
         struct process *child = kthread_create_joinable(unix_stream_client_worker,
-                                                        &ctx, "unixacc");
+                                                        ctx, "unixacc");
         test_check(child != NULL, "unix_accept_stress child create");
-        if (!child)
+        if (!child) {
+            kfree(ctx);
             break;
+        }
 
         pid_t cpid = child->pid;
         sched_enqueue(child);
 
-        for (int i = 0; i < 2000 && !ctx.started; i++)
+        for (int i = 0; i < 2000 && !ctx->started; i++)
             proc_yield();
-        test_check(ctx.started != 0, "unix_accept_stress child started");
+        test_check(ctx->started != 0, "unix_accept_stress child started");
 
         bool listener_ready = wait_socket_event(listener, POLLIN, POLLIN, 2000);
         test_check(listener_ready, "unix_accept_stress listener readable");
@@ -287,18 +291,25 @@ static void test_unix_stream_accept_stability(void) {
             ret = listener->ops->accept(listener, &accepted);
             test_check(ret == 0, "unix_accept_stress accept");
             if (ret == 0 && accepted) {
-                uint32_t token = 0;
-                ssize_t rd = accepted->ops->recvfrom(accepted, &token, sizeof(token),
-                                                     0, NULL, NULL);
-                test_check(rd == (ssize_t)sizeof(token),
-                           "unix_accept_stress recv token");
-                if (rd == (ssize_t)sizeof(token))
-                    test_check(token == ctx.token, "unix_accept_stress token value");
+                bool accepted_ops_ok = accepted->ops && accepted->ops->recvfrom &&
+                                       accepted->ops->sendto;
+                test_check(accepted_ops_ok, "unix_accept_stress accepted ops valid");
+                if (accepted_ops_ok) {
+                    uint32_t token = 0;
+                    ssize_t rd = accepted->ops->recvfrom(accepted, &token,
+                                                         sizeof(token), 0, NULL,
+                                                         NULL);
+                    test_check(rd == (ssize_t)sizeof(token),
+                               "unix_accept_stress recv token");
+                    if (rd == (ssize_t)sizeof(token))
+                        test_check(token == ctx->token,
+                                   "unix_accept_stress token value");
 
-                ssize_t wr = accepted->ops->sendto(accepted, &token, sizeof(token),
-                                                   0, NULL, 0);
-                test_check(wr == (ssize_t)sizeof(token),
-                           "unix_accept_stress echo token");
+                    ssize_t wr = accepted->ops->sendto(accepted, &token,
+                                                       sizeof(token), 0, NULL, 0);
+                    test_check(wr == (ssize_t)sizeof(token),
+                               "unix_accept_stress echo token");
+                }
             }
         }
         close_socket_if_open(&accepted);
@@ -308,8 +319,9 @@ static void test_unix_stream_accept_stability(void) {
         test_check(wp == cpid, "unix_accept_stress child reaped");
         if (wp == cpid) {
             test_check(status == 0, "unix_accept_stress child exit status");
-            test_check(ctx.ret == 0, "unix_accept_stress child result");
+            test_check(ctx->ret == 0, "unix_accept_stress child result");
         }
+        kfree(ctx);
     }
 
 out:
@@ -589,11 +601,18 @@ static int inet_tcp_attempt_worker(void *arg) {
 }
 
 static bool run_inet_attempt_with_timeout(int (*worker)(void *),
-                                          struct inet_attempt_ctx *ctx,
+                                          const struct inet_attempt_ctx *ctx_tpl,
                                           const char *name, int spins) {
-    struct process *child = kthread_create_joinable(worker, ctx, name);
-    if (!child)
+    struct inet_attempt_ctx *ctx = kmalloc(sizeof(*ctx));
+    if (!ctx)
         return false;
+    memcpy(ctx, ctx_tpl, sizeof(*ctx));
+
+    struct process *child = kthread_create_joinable(worker, ctx, name);
+    if (!child) {
+        kfree(ctx);
+        return false;
+    }
 
     pid_t cpid = child->pid;
     sched_enqueue(child);
@@ -601,15 +620,21 @@ static bool run_inet_attempt_with_timeout(int (*worker)(void *),
     int status = 0;
     for (int i = 0; i < spins; i++) {
         pid_t wp = proc_wait(cpid, &status, WNOHANG);
-        if (wp == cpid)
-            return ctx->ok;
-        if (wp < 0)
+        if (wp == cpid) {
+            bool ok = ctx->ok;
+            kfree(ctx);
+            return ok;
+        }
+        if (wp < 0) {
+            kfree(ctx);
             return false;
+        }
         proc_yield();
     }
 
     signal_send(cpid, SIGKILL);
     (void)proc_wait(cpid, &status, 0);
+    kfree(ctx);
     return false;
 }
 
