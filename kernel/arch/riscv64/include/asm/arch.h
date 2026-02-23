@@ -6,6 +6,7 @@
  */
 
 #ifndef __ASSEMBLER__
+#include <kairos/config.h>
 #include <kairos/types.h>
 #endif
 
@@ -26,7 +27,15 @@ static inline int arch_cpu_id(void) {
     __asm__ __volatile__("mv %0, tp" : "=r"(tp));
     return (int)tp;
 }
+static inline void arch_set_cpu_id(int cpu) {
+    __asm__ __volatile__("mv tp, %0" : : "r"((unsigned long)cpu));
+}
+#define ARCH_HAS_CPU_ID_STABLE 1
+static inline int arch_cpu_id_stable(void) {
+    return arch_cpu_id();
+}
 #define ARCH_HAS_CPU_ID 1
+#define ARCH_HAS_CONTEXT_KERNEL_STACK 1
 #define ARCH_HAS_CONTEXT_SET_USER_SP 1
 #define ARCH_HAS_EARLY_GETCHAR 1
 

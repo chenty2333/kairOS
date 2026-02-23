@@ -20,6 +20,11 @@ int arch_cpu_count(void);
 #ifndef ARCH_HAS_CPU_ID
 int arch_cpu_id(void);
 #endif
+#ifndef ARCH_HAS_CPU_ID_STABLE
+static inline int arch_cpu_id_stable(void) {
+    return arch_cpu_id();
+}
+#endif
 void arch_cpu_halt(void);
 void arch_cpu_relax(void);
 noreturn void arch_cpu_reset(void);
@@ -47,9 +52,12 @@ void arch_context_set_cpu(struct arch_context *ctx, int cpu);
 void arch_set_tls(struct arch_context *ctx, uint64_t tls);
 #ifdef ARCH_HAS_TSS
 void arch_tss_set_rsp0(uint64_t rsp0);
-uint64_t arch_context_kernel_stack(const struct arch_context *ctx);
 #else
 static inline void arch_tss_set_rsp0(uint64_t rsp0) { (void)rsp0; }
+#endif
+#if defined(ARCH_HAS_TSS) || defined(ARCH_HAS_CONTEXT_KERNEL_STACK)
+uint64_t arch_context_kernel_stack(const struct arch_context *ctx);
+#else
 static inline uint64_t arch_context_kernel_stack(const struct arch_context *ctx) {
     (void)ctx;
     return 0;

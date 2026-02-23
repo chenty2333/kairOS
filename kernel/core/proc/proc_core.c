@@ -106,6 +106,7 @@ struct process *proc_alloc(void) {
     p->name[0] = '\0';
     p->mm = NULL;
     p->parent = NULL;
+    p->kstack_top = 0;
     sched_entity_init(&p->se);
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
@@ -162,6 +163,7 @@ struct process *proc_alloc(void) {
         p->state = PROC_UNUSED;
         return NULL;
     }
+    p->kstack_top = arch_context_kernel_stack(p->context);
     signal_init_process(p);
     p->start_time = arch_timer_ticks();
     p->vfork_parent = NULL;
@@ -199,6 +201,7 @@ void proc_adopt_child(struct process *parent, struct process *child) {
 
 void proc_free_internal(struct process *p) {
     if (p && p->context) {
+        p->kstack_top = 0;
         arch_context_free(p->context);
         p->context = NULL;
     }
@@ -248,8 +251,43 @@ void proc_free(struct process *p) {
     proc_free_internal(p);
 }
 
+#if defined(ARCH_riscv64)
+static inline uint64_t proc_read_sp(void) {
+    uint64_t sp;
+    __asm__ __volatile__("mv %0, sp" : "=r"(sp));
+    return sp;
+}
+
+static bool proc_stack_contains_sp(const struct process *p, uint64_t sp) {
+    if (!p || !p->kstack_top)
+        return false;
+    uint64_t bottom = p->kstack_top + 8 - (2ULL * CONFIG_PAGE_SIZE);
+    return sp >= bottom && sp <= p->kstack_top;
+}
+
+static struct process *proc_current_from_sp(uint64_t sp) {
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        struct process *cand = &proc_table[i];
+        if (cand->state == PROC_UNUSED || cand->state == PROC_EMBRYO)
+            continue;
+        if (proc_stack_contains_sp(cand, sp))
+            return cand;
+    }
+    return NULL;
+}
+#endif
+
 struct process *proc_current(void) {
-    return arch_get_percpu()->curr_proc;
+    struct process *curr = arch_get_percpu()->curr_proc;
+#if defined(ARCH_riscv64)
+    uint64_t sp = proc_read_sp();
+    if (proc_stack_contains_sp(curr, sp))
+        return curr;
+    struct process *fallback = proc_current_from_sp(sp);
+    if (fallback)
+        return fallback;
+#endif
+    return curr;
 }
 
 void proc_set_current(struct process *p) {

@@ -23,6 +23,8 @@ static bool proc_wait_find_reapable(struct process *parent, pid_t pid,
         if (child->state == PROC_ZOMBIE) {
             if (sched_is_on_cpu(child))
                 continue;
+            if (se_is_on_rq(&child->se))
+                continue;
             child->state = PROC_REAPING;
             list_del(&child->sibling);
             reap = child;

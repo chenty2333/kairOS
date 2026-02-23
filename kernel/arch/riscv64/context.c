@@ -148,3 +148,7 @@ void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {
     tf->tf_sp = sp;
     ctx->user_stack = sp;
 }
+
+uint64_t arch_context_kernel_stack(const struct arch_context *ctx) {
+    return ctx ? ctx->kernel_stack : 0;
+}

@@ -88,6 +88,16 @@ static inline bool sched_steal_is_enabled(void) {
     return __atomic_load_n(&sched_steal_enabled, __ATOMIC_ACQUIRE);
 }
 
+static inline struct percpu_data *sched_cpu_from_current(struct process *curr) {
+    struct percpu_data *cpu = arch_get_percpu();
+    if (!curr)
+        return cpu;
+    int se_cpu = curr->se.cpu;
+    if (se_cpu >= 0 && se_cpu < CONFIG_MAX_CPUS && se_cpu != cpu->cpu_id)
+        return &cpu_data[se_cpu];
+    return cpu;
+}
+
 static int sched_rq_cpu_id(const struct rq *rq) {
     if (!rq)
         return -1;
@@ -529,7 +539,7 @@ void sched_init_cpu(int cpu) {
 }
 
 void sched_post_switch_cleanup(void) {
-    struct percpu_data *cpu = arch_get_percpu();
+    struct percpu_data *cpu = sched_cpu_from_current(proc_current());
     struct process *prev =
         __atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE);
     if (prev) {
@@ -550,29 +560,9 @@ void sched_enqueue(struct process *p) {
     if (!p->se.sched_class)
         p->se.sched_class = &fair_sched_class;
 
-    /* Find target CPU - currently simple: stay on current or preferred */
+    /* Find target CPU - use preferred CPU or current CPU fallback */
     int cpu = (p->se.cpu >= 0 && p->se.cpu < sched_nr_cpus()) ? p->se.cpu : arch_cpu_id();
-    int orig_cpu = p->se.cpu;
-
-    /* Push migration: if preferred CPU is busy, try to find an idle one */
-    if (sched_steal_is_enabled() && sched_nr_cpus() > 1) {
-        uint32_t nr = __atomic_load_n(&cpu_data[cpu].runqueue.nr_running,
-                                       __ATOMIC_RELAXED);
-        if (nr > 0) {
-            int online = sched_nr_cpus();
-            uint32_t start = (uint32_t)(cpu_data[cpu].ticks) % (uint32_t)online;
-            for (int j = 0; j < online; j++) {
-                int i = (int)((start + (uint32_t)j) % (uint32_t)online);
-                if (i == cpu) continue;
-                if (__atomic_load_n(&cpu_data[i].runqueue.nr_running,
-                                     __ATOMIC_RELAXED) == 0) {
-                    cpu = i;
-                    p->se.cpu = cpu;
-                    break;
-                }
-            }
-        }
-    }
+    int orig_cpu = cpu;
 
     struct rq *rq = &cpu_data[cpu].runqueue;
 
@@ -722,7 +712,7 @@ static struct process *sched_steal_task(int self_id) {
 
 void schedule(void) {
     struct process *prev = proc_current(), *next;
-    struct percpu_data *cpu = arch_get_percpu();
+    struct percpu_data *cpu = sched_cpu_from_current(prev);
     struct sched_cpu_stats *stats = &cpu->stats;
     struct rq *rq = &cpu->runqueue;
     bool state = arch_irq_save();
@@ -844,8 +834,8 @@ void schedule(void) {
 }
 
 void sched_tick(void) {
-    struct percpu_data *cpu = arch_get_percpu();
     struct process *curr = proc_current();
+    struct percpu_data *cpu = sched_cpu_from_current(curr);
     struct rq *rq = &cpu->runqueue;
 
     cpu->ticks++;
@@ -1029,8 +1019,9 @@ uint64_t sched_rq_min_vruntime(int cpu) {
 void sched_debug_dump_process(const struct process *p) {
     if (!p) return;
     uint32_t st = __atomic_load_n(&p->se.run_state, __ATOMIC_ACQUIRE);
-    pr_err("  sched: pid=%d se_state=%s cpu=%d vruntime=%llu deadline=%llu vlag=%lld nice=%d\n",
-           p->pid, sched_se_state_name(st), p->se.cpu,
+    pr_err("  sched: pid=%d name=%s se_state=%s cpu=%d kstack=%p ctx=%p vruntime=%llu deadline=%llu vlag=%lld nice=%d\n",
+           p->pid, p->name, sched_se_state_name(st), p->se.cpu,
+           (void *)p->kstack_top, p->context,
            (unsigned long long)p->se.vruntime,
            (unsigned long long)p->se.deadline,
            (long long)p->se.vlag, p->se.nice);
@@ -1084,6 +1075,7 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
         se_take_wake_pending(&prev->se);
         /* Still runnable — re-enqueue onto RB-tree for next pick */
         prev->state = PROC_RUNNABLE;
+        se_mark_runnable(&prev->se);
         /* Refresh deadline if slice expired */
         if ((int64_t)(prev->se.vruntime - prev->se.deadline) >= 0) {
             uint64_t vslice = calc_vslice(&prev->se);
@@ -1095,6 +1087,13 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
             cfs->nr_running++;
             rq->nr_running++;
             update_min_vruntime(cfs);
+        } else {
+            /*
+             * Keep run_state coherent even if the node is unexpectedly still
+             * linked (e.g. wakeup/switch race); the entity is on-rq in that
+             * case and must not remain marked RUNNING.
+             */
+            se_mark_queued(&prev->se, prev->se.cpu);
         }
         return;
     }

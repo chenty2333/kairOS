@@ -118,6 +118,7 @@ struct process {
     struct process *parent;
     struct process *vfork_parent;
     struct arch_context *context;
+    uint64_t kstack_top;
     uint64_t utime, stime, start_time;
 };
 

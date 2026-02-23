@@ -57,8 +57,10 @@ static int reap_children_bounded(int expected, const char *tag) {
             if (!p || p == self)
                 continue;
             if (p->parent == self) {
-                pr_warn("sched_stress: %s pending child pid=%d state=%d\n",
-                        tag, p->pid, p->state);
+                pr_warn("sched_stress: %s pending child pid=%d state=%d on_rq=%d on_cpu=%d\n",
+                        tag, p->pid, p->state,
+                        se_is_on_rq(&p->se) ? 1 : 0,
+                        se_is_on_cpu(&p->se) ? 1 : 0);
                 sched_debug_dump_process(p);
             }
         }

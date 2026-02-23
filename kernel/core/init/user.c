@@ -35,6 +35,37 @@ static int kernel_test_module_enabled(unsigned int bit) {
     return (CONFIG_KERNEL_TEST_MASK & bit) != 0;
 }
 
+static void kernel_test_drain_children(void) {
+    int status = 0;
+    int miss_streak = 0;
+    uint64_t start = arch_timer_ticks();
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(10ULL * 1000 * 1000 * 1000);
+
+    while (1) {
+        pid_t pid = proc_wait(-1, &status, WNOHANG);
+        if (pid > 0) {
+            miss_streak = 0;
+            continue;
+        }
+        if (pid < 0)
+            break;
+        if ((arch_timer_ticks() - start) > timeout_ticks) {
+            pr_err("kernel tests: child drain timeout\n");
+            int cpus = sched_cpu_count();
+            if (cpus < 1)
+                cpus = 1;
+            for (int c = 0; c < cpus; c++)
+                sched_debug_dump_cpu(c);
+            break;
+        }
+        miss_streak++;
+        if ((miss_streak & 31) == 0)
+            proc_yield();
+        else
+            arch_cpu_relax();
+    }
+}
+
 static int kernel_test_main(void *arg __attribute__((unused))) {
     int suite_fail = 0;
     int total_failed = 0;
@@ -116,10 +147,7 @@ static int kernel_test_main(void *arg __attribute__((unused))) {
     }
 
     arch_irq_enable();
-    int status;
-    while (proc_wait(-1, &status, 0) > 0) {
-        ;
-    }
+    kernel_test_drain_children();
 
     if (total_failed == 0)
         pr_info("TEST_SUMMARY: failed=0\n");

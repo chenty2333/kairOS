@@ -51,7 +51,9 @@ noreturn void proc_exit(int status) {
     struct process *p = proc_current();
     int code = status & 0xff;
     bool is_thread = (p->group_leader != p);
-    pr_info("Process %d exiting: %d\n", p->pid, code);
+#if CONFIG_DEBUG
+    pr_debug("proc: pid=%d exiting code=%d\n", p->pid, code);
+#endif
 
     if (p->vfork_parent) {
         complete_all(&p->vfork_completion);

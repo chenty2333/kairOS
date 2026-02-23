@@ -128,7 +128,10 @@ struct percpu_data {
 
 extern struct percpu_data cpu_data[];
 static inline struct percpu_data *arch_get_percpu(void) {
-    return &cpu_data[arch_cpu_id()];
+    int cpu = arch_cpu_id_stable();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    return &cpu_data[cpu];
 }
 
 #define this_rq (&arch_get_percpu()->runqueue)

@@ -161,5 +161,5 @@ void arch_mmu_flush_tlb_all(void) {
 }
 
 void arch_cpu_init(int cpu_id) {
-    __asm__ __volatile__("mv tp, %0" ::"r"(cpu_id));
+    arch_set_cpu_id(cpu_id);
 }
