@@ -72,6 +72,7 @@ QEMU configuration:
 ## Testing
 
 - `make test` — run kernel tests (default isolated mode, one run directory per invocation)
+- `make test-tcc-smoke` — run interactive `tcc` smoke regression (send `tcc` command in guest shell, assert usage + prompt round-trip, and fail on SIGSEGV/`no vma` markers)
 - `make test-isolated` — isolated test alias
 - `make test-driver` — driver module only
 - `make test-mm` — memory module only
@@ -104,8 +105,8 @@ For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 
 Concurrency and locking:
 - Global locks live at `build/.locks/global-<name>.lock` (current shared resource: `global-deps-fetch.lock`).
-- Local locks live at `<BUILD_ROOT>/<arch>/.locks/<name>.lock` (current: `image.lock`, `qemu.lock`).
-- `scripts/run-qemu-session.sh` and `scripts/run-qemu-test.sh` share `qemu.lock` per build directory, so same `BUILD_ROOT` run/test sessions are serialized.
+- Local locks live at `<BUILD_ROOT>/<arch>/.locks/<name>.lock` (current: `image.lock`, `qemu.lock`, `test.lock`).
+- `scripts/run-qemu-session.sh` uses `qemu.lock`; `scripts/run-qemu-test.sh` (via `scripts/kairos.sh run test*`) uses `test.lock` to avoid nested `qemu.lock` self-contention.
 - Lock metadata is written to `<lock>.meta` (`pid/start_utc/start_epoch/cwd/cmd`) for observability.
 - On lock contention, stale metadata (dead pid) is reclaimed automatically and lock acquisition is retried once.
 - Different `BUILD_ROOT` runs are parallel-safe; same `BUILD_ROOT` conflicting actions are blocked and return `lock_busy`.
@@ -129,6 +130,10 @@ Result decision policy:
 - `scripts/run-qemu-test.sh` writes `manifest.json` at start and `result.json` at end.
 - `TEST_RESULT_JSON` (kernel-emitted single-line JSON) is the primary verdict source for marker-required test runs.
 - If structured output is missing/invalid, the runner uses timeout/failure markers as guarded fallback and reports non-pass status.
+- `run-qemu-test.sh` also supports optional log assertions:
+  - `TEST_REQUIRED_MARKER_REGEX`: at least one required regex
+  - `TEST_REQUIRED_MARKERS_ALL`: newline-delimited required regex list (all must match)
+  - `TEST_FORBIDDEN_MARKER_REGEX`: forbidden regex (any match fails)
 - `result.json` is the primary machine-readable test outcome consumed by automation.
 
 Primary verification architecture is ARCH=riscv64 (run, test, test-soak, uefi).

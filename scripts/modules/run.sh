@@ -10,6 +10,9 @@ Usage: scripts/kairos.sh [global options] run <action> [options]
 Actions:
   test        Run kernel tests (structured-result first)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
+  test-tcc-smoke
+              Run tcc smoke regression (interactive shell command path)
+              Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-soak   Run soak test (expects timeout)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-debug  Run tests with CONFIG_DEBUG
@@ -75,7 +78,30 @@ kairos_run_test_once() {
         'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
         "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}"
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" ""
+}
+
+kairos_run_test_tcc_smoke_once() {
+    local extra_cflags="$1"
+    local timeout_s="$2"
+    local log_path="$3"
+    local boot_delay="${TCC_SMOKE_BOOT_DELAY_SEC:-8}"
+    local step_delay="${TCC_SMOKE_STEP_DELAY_SEC:-1}"
+    local inner_make_cmd=""
+    local qemu_cmd=""
+    local required_any="Usage: tcc"
+    local required_all=$'Usage: tcc\n__TCC_SMOKE_DONE__\nkairos\\$ '
+    local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma'
+
+    printf -v inner_make_cmd \
+        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q QEMU_STDIN= RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
+        "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
+
+    printf -v qemu_cmd \
+        'bash -lc %q' \
+        "(sleep ${boot_delay}; printf 'tcc\\n'; sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n'; sleep ${step_delay}; printf 'poweroff\\n') | ${inner_make_cmd}"
+
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}"
 }
 
 kairos_run_test_locked() {
@@ -84,6 +110,10 @@ kairos_run_test_locked() {
     local log_path="$3"
     local require_markers="$4"
     local expect_timeout="$5"
+    local required_marker_regex="${6:-}"
+    local required_markers_all="${7:-}"
+    local forbidden_marker_regex="${8:-}"
+    local test_lock_file="${TEST_LOCK_FILE:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/.locks/test.lock}"
 
     kairos_run_clean_kernel_artifacts
 
@@ -98,9 +128,13 @@ kairos_run_test_locked() {
             TEST_LOG="${log_path}" \
             TEST_REQUIRE_MARKERS="${require_markers}" \
             TEST_EXPECT_TIMEOUT="${expect_timeout}" \
+            TEST_REQUIRED_MARKER_REGEX="${required_marker_regex}" \
+            TEST_REQUIRED_MARKERS_ALL="${required_markers_all}" \
+            TEST_FORBIDDEN_MARKER_REGEX="${forbidden_marker_regex}" \
             TEST_BUILD_ROOT="${KAIROS_BUILD_ROOT}" \
             TEST_ARCH="${KAIROS_ARCH}" \
             TEST_RUN_ID="${RUN_ID:-}" \
+            TEST_LOCK_FILE="${test_lock_file}" \
             "${KAIROS_ROOT_DIR}/scripts/run-qemu-test.sh"
     )
     rc=$?
@@ -159,6 +193,13 @@ kairos_run_dispatch() {
             log_path="${TEST_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/test.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
+            ;;
+        test-tcc-smoke)
+            extra="${TCC_SMOKE_EXTRA_CFLAGS:-}"
+            timeout_s="${TCC_SMOKE_TIMEOUT:-180}"
+            log_path="${TCC_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/tcc-smoke.log}"
+            kairos_run_parse_common_opts extra timeout_s log_path "$@"
+            kairos_run_test_tcc_smoke_once "$extra" "$timeout_s" "$log_path"
             ;;
         test-soak)
             extra="${SOAK_EXTRA_CFLAGS:--DCONFIG_PMM_PCP_MODE=2}"
