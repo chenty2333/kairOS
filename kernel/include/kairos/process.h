@@ -135,6 +135,18 @@ struct process {
     uint64_t utime, stime, start_time;
 };
 
+static inline sigset_t proc_pending_unblocked_signals(const struct process *p) {
+    if (!p)
+        return 0;
+    sigset_t pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+    sigset_t blocked = __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+    return pending & ~blocked;
+}
+
+static inline bool proc_has_unblocked_signal(const struct process *p) {
+    return proc_pending_unblocked_signals(p) != 0;
+}
+
 /* Atomic state store — orders prior writes (e.g. exit_code) before state. */
 static inline void proc_set_state_release(struct process *p,
                                           enum proc_state s) {

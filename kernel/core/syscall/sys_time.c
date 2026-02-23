@@ -102,6 +102,33 @@ static int64_t sleep_until_deadline(uint64_t deadline, uint64_t rem_ptr,
     return 0;
 }
 
+static int64_t clock_nanosleep_abstime(uint64_t clockid, uint64_t req_ns) {
+    while (1) {
+        uint64_t now_ns = 0;
+        int rc = clockid_now_ns(clockid, &now_ns);
+        if (rc < 0)
+            return rc;
+        if (req_ns <= now_ns)
+            return 0;
+
+        uint64_t rem_ns = req_ns - now_ns;
+        uint64_t delta = ns_to_sched_ticks(rem_ns);
+        if (delta == 0)
+            return 0;
+        /*
+         * CLOCK_REALTIME absolute sleep must observe wall-clock adjustments.
+         * Re-check once per scheduler tick so clock_settime() deltas are
+         * reflected promptly.
+         */
+        if (clockid == CLOCK_REALTIME && delta > 1)
+            delta = 1;
+        uint64_t deadline = arch_timer_get_ticks() + delta;
+        rc = sleep_until_deadline(deadline, 0, false);
+        if (rc < 0)
+            return rc;
+    }
+}
+
 static char uts_domainname[65] = "kairos";
 static char uts_nodename[65] = "kairos";
 
@@ -203,23 +230,8 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
         return rc;
 
     uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
-    if (flags & TIMER_ABSTIME) {
-        while (1) {
-            rc = clockid_now_ns(clockid, &now_ns);
-            if (rc < 0)
-                return rc;
-            if (req_ns <= now_ns)
-                return 0;
-            uint64_t rem_ns = req_ns - now_ns;
-            uint64_t delta = ns_to_sched_ticks(rem_ns);
-            if (delta == 0)
-                return 0;
-            uint64_t deadline = arch_timer_get_ticks() + delta;
-            rc = sleep_until_deadline(deadline, 0, false);
-            if (rc < 0)
-                return rc;
-        }
-    }
+    if (flags & TIMER_ABSTIME)
+        return clock_nanosleep_abstime(clockid, req_ns);
 
     uint64_t delta = ns_to_sched_ticks(req_ns);
     if (delta == 0)

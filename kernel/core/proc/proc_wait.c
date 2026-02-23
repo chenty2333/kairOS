@@ -82,7 +82,7 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
             proc_unlock(p);
             continue;
         }
-        if (p->sig_pending) {
+        if (proc_has_unblocked_signal(p)) {
             proc_unlock(p);
             wait_queue_remove(&p->exit_wait, p);
             return -EINTR;
@@ -102,7 +102,7 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
         p->sleep_deadline = 0;
         if (p->state == PROC_SLEEPING)
             p->state = PROC_RUNNING;
-        bool interrupted = p->sig_pending;
+        bool interrupted = proc_has_unblocked_signal(p);
         proc_unlock(p);
         if (interrupted)
             return -EINTR;

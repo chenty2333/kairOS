@@ -419,7 +419,7 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (interruptible && p->sig_pending)
+    if (interruptible && proc_has_unblocked_signal(p))
         return -EINTR;
 
     if (wq)
@@ -435,7 +435,7 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
         p->sleep_deadline = 0;
         p->state = PROC_RUNNING;
         proc_unlock(p);
-        if (interruptible && p->sig_pending)
+        if (interruptible && proc_has_unblocked_signal(p))
             return -EINTR;
         return 0;
     }
@@ -456,7 +456,7 @@ int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
         p->state = PROC_RUNNING;
     proc_unlock(p);
 
-    if (interruptible && p->sig_pending)
+    if (interruptible && proc_has_unblocked_signal(p))
         return -EINTR;
     return 0;
 }
@@ -466,7 +466,7 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (interruptible && p->sig_pending)
+    if (interruptible && proc_has_unblocked_signal(p))
         return -EINTR;
 
     if (wq)
@@ -481,7 +481,7 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
         p->sleep_deadline = 0;
         p->state = PROC_RUNNING;
         proc_unlock(p);
-        if (interruptible && p->sig_pending)
+        if (interruptible && proc_has_unblocked_signal(p))
             return -EINTR;
         return 0;
     }
@@ -508,7 +508,7 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
         p->state = PROC_RUNNING;
     proc_unlock(p);
 
-    if (interruptible && p->sig_pending)
+    if (interruptible && proc_has_unblocked_signal(p))
         return -EINTR;
     return 0;
 }
@@ -519,7 +519,7 @@ int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (interruptible && p->sig_pending)
+    if (interruptible && proc_has_unblocked_signal(p))
         return -EINTR;
 
     if (wq)
@@ -534,7 +534,7 @@ int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
         p->sleep_deadline = 0;
         p->state = PROC_RUNNING;
         proc_unlock(p);
-        if (interruptible && p->sig_pending)
+        if (interruptible && proc_has_unblocked_signal(p))
             return -EINTR;
         return 0;
     }
@@ -562,7 +562,7 @@ int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
         p->state = PROC_RUNNING;
     proc_unlock(p);
 
-    if (interruptible && p->sig_pending)
+    if (interruptible && proc_has_unblocked_signal(p))
         return -EINTR;
     if (dl != 0 && arch_timer_get_ticks() >= dl)
         return -ETIMEDOUT;
