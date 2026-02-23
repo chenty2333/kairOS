@@ -104,6 +104,8 @@ struct process *proc_alloc(void) {
     p->umask = 022;
     p->syscall_abi = SYSCALL_ABI_LINUX;
     p->name[0] = '\0';
+    p->sched_flags = PROC_SCHEDF_STEALABLE;
+    p->sched_affinity = proc_sched_all_cpus_mask();
     p->mm = NULL;
     p->parent = NULL;
     p->kstack_top = 0;
@@ -334,6 +336,14 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name) {
     struct process *p = proc_alloc();
     if (!p)
         return NULL;
+    proc_sched_mark_kthread(p);
+    int cpu = arch_cpu_id();
+    if (cpu >= 0 && cpu < CONFIG_MAX_CPUS) {
+        p->se.cpu = cpu;
+        uint64_t cpu_mask = proc_sched_cpu_mask(cpu);
+        if (cpu_mask)
+            proc_sched_set_affinity_mask(p, cpu_mask);
+    }
     proc_set_name(p, name);
     arch_context_init(p->context, (vaddr_t)fn, (vaddr_t)arg, true);
     return p;
@@ -370,6 +380,7 @@ struct process *proc_idle_init(void) {
     struct process *p = proc_alloc();
     if (!p)
         panic("idle alloc fail");
+    proc_sched_mark_kthread(p);
     proc_set_name(p, "idle");
     if (!p->context)
         panic("idle ctx missing");

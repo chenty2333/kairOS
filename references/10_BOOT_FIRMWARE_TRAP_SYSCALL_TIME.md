@@ -39,6 +39,7 @@ trap_core.c:trap_core_dispatch() is the architecture-independent dispatch bounda
 - Calls architecture handle_event() (dispatches to interrupt handler / exception handler / syscall)
 - Delivers pending signals
 - Restores per-CPU current_tf
+- RISC-V page-fault diagnostics now log unresolved fault context with `pid/comm/sepc/fault-addr/access-type` before signal/panic path, and MM fault logs include the same context.
 
 Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses GIC.
 
@@ -77,7 +78,8 @@ Two-layer structure:
   - Linux sleep ABI compatibility:
     - `nanosleep` on `EINTR` now fills remaining time (`rem`) when provided
     - `clock_nanosleep` supports both relative sleep and `TIMER_ABSTIME` absolute deadlines
-    - `clock_nanosleep(TIMER_ABSTIME)` now re-checks current time by `clockid` after wakeups; this keeps `CLOCK_REALTIME` and `CLOCK_MONOTONIC` paths separated for future realtime offset support
+    - `CLOCK_REALTIME` is implemented as `CLOCK_MONOTONIC + realtime_offset`; `clock_settime(CLOCK_REALTIME, ...)` updates this offset while `CLOCK_MONOTONIC` remains non-settable
+    - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
 BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. tick_policy_init() designates the timekeeper CPU.

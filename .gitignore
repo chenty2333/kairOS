@@ -24,3 +24,13 @@ third_party/
 # OS-specific
 .DS_Store
 Thumbs.db
+
+# Local workflow artifacts
+.claude/
+.claudeignore
+CLAUDE.md
+AGENTS.md
+busybox
+qemu-virt.dtb
+docs/*
+!docs/build.md

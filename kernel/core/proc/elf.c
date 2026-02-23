@@ -376,15 +376,32 @@ struct auxv_entry {
     uint64_t a_val;
 };
 
+static int stack_reserve(vaddr_t *sp, vaddr_t floor, size_t len) {
+    if (!sp)
+        return -EINVAL;
+    if (*sp < floor)
+        return -EFAULT;
+    if ((vaddr_t)len > (*sp - floor))
+        return -E2BIG;
+    *sp -= len;
+    return 0;
+}
+
 static int stack_write(struct mm_struct *mm, vaddr_t dst, const void *src,
                        size_t len) {
     size_t off = 0;
     while (off < len) {
         vaddr_t va = dst + off;
-        paddr_t pa =
-            arch_mmu_translate(mm->pgdir, ALIGN_DOWN(va, CONFIG_PAGE_SIZE));
-        if (!pa)
-            return -EFAULT;
+        vaddr_t page_va = ALIGN_DOWN(va, CONFIG_PAGE_SIZE);
+        paddr_t pa = arch_mmu_translate(mm->pgdir, page_va);
+        if (!pa) {
+            int fret = mm_handle_fault(mm, va, PTE_WRITE);
+            if (fret < 0)
+                return fret;
+            pa = arch_mmu_translate(mm->pgdir, page_va);
+            if (!pa)
+                return -EFAULT;
+        }
         size_t chunk = MIN(len - off, CONFIG_PAGE_SIZE - (va % CONFIG_PAGE_SIZE));
         memcpy((uint8_t *)phys_to_virt(pa) + (va % CONFIG_PAGE_SIZE),
                (const uint8_t *)src + off, chunk);
@@ -399,24 +416,29 @@ static int stack_write(struct mm_struct *mm, vaddr_t dst, const void *src,
 int elf_setup_stack(struct mm_struct *mm, char *const argv[],
                     char *const envp[], vaddr_t *sp_out,
                     const struct elf_auxv_info *aux) {
+    if (USER_STACK_SIZE <= CONFIG_PAGE_SIZE)
+        return -EINVAL;
+
     vaddr_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
+    vaddr_t stack_floor = stack_bottom + CONFIG_PAGE_SIZE;
+    vaddr_t stack_initial = USER_STACK_TOP - CONFIG_PAGE_SIZE;
     int ret;
 
-    ret = mm_add_vma(mm, stack_bottom, USER_STACK_TOP,
+    ret = mm_add_vma(mm, stack_initial, USER_STACK_TOP,
                      VM_READ | VM_WRITE | VM_STACK, NULL, 0);
     if (ret < 0) {
         return ret;
     }
 
-    /* 1. Map stack pages */
-    for (vaddr_t va = stack_bottom; va < USER_STACK_TOP; va += CONFIG_PAGE_SIZE) {
-        paddr_t pa = pmm_alloc_page();
-        if (!pa) return -ENOMEM;
-        memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
-        if (arch_mmu_map(mm->pgdir, va, pa, PTE_USER | PTE_READ | PTE_WRITE) < 0) {
-            pmm_free_page(pa);
-            return -ENOMEM;
-        }
+    /* Map only the top page. Lower pages are faulted in on demand. */
+    paddr_t pa = pmm_alloc_page();
+    if (!pa)
+        return -ENOMEM;
+    memset(phys_to_virt(pa), 0, CONFIG_PAGE_SIZE);
+    ret = arch_mmu_map(mm->pgdir, stack_initial, pa, PTE_USER | PTE_READ | PTE_WRITE);
+    if (ret < 0) {
+        pmm_free_page(pa);
+        return ret;
     }
 
     /* 2. Push arguments to stack */
@@ -437,31 +459,42 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
     /* Push strings first */
     for (int i = argc - 1; i >= 0; i--) {
         size_t len = strlen(argv[i]) + 1;
-        sp -= len;
+        ret = stack_reserve(&sp, stack_floor, len);
+        if (ret < 0)
+            return ret;
         
-        if (stack_write(mm, sp, argv[i], len) < 0)
-            return -EFAULT;
+        ret = stack_write(mm, sp, argv[i], len);
+        if (ret < 0)
+            return ret;
         u_argv[i] = sp;
     }
     u_argv[argc] = 0;
 
     for (int i = envc - 1; i >= 0; i--) {
         size_t len = strlen(envp[i]) + 1;
-        sp -= len;
-        if (stack_write(mm, sp, envp[i], len) < 0)
-            return -EFAULT;
+        ret = stack_reserve(&sp, stack_floor, len);
+        if (ret < 0)
+            return ret;
+        ret = stack_write(mm, sp, envp[i], len);
+        if (ret < 0)
+            return ret;
         u_envp[i] = sp;
     }
     u_envp[envc] = 0;
 
     /* Align SP to 16 bytes */
     sp = ALIGN_DOWN(sp, 16);
+    if (sp < stack_floor)
+        return -E2BIG;
 
     /* random bytes for AT_RANDOM */
     uint8_t rand_bytes[16] = {0};
-    sp -= sizeof(rand_bytes);
-    if (stack_write(mm, sp, rand_bytes, sizeof(rand_bytes)) < 0)
-        return -EFAULT;
+    ret = stack_reserve(&sp, stack_floor, sizeof(rand_bytes));
+    if (ret < 0)
+        return ret;
+    ret = stack_write(mm, sp, rand_bytes, sizeof(rand_bytes));
+    if (ret < 0)
+        return ret;
     vaddr_t rand_addr = sp;
 
     struct auxv_entry auxv[12];
@@ -487,26 +520,37 @@ int elf_setup_stack(struct mm_struct *mm, char *const argv[],
     size_t env_sz = (envc + 1) * sizeof(vaddr_t);
     size_t aux_sz = (size_t)auxc * sizeof(struct auxv_entry);
     size_t ptr_bytes = sizeof(vaddr_t) + argv_sz + env_sz + aux_sz;
-    sp = ALIGN_DOWN(sp - ptr_bytes, 16);
+    ret = stack_reserve(&sp, stack_floor, ptr_bytes);
+    if (ret < 0)
+        return ret;
+    sp = ALIGN_DOWN(sp, 16);
+    if (sp < stack_floor)
+        return -E2BIG;
 
     vaddr_t p = sp;
     uint64_t argc64 = (uint64_t)argc;
-    if (stack_write(mm, p, &argc64, sizeof(argc64)) < 0)
-        return -EFAULT;
+    ret = stack_write(mm, p, &argc64, sizeof(argc64));
+    if (ret < 0)
+        return ret;
     p += sizeof(vaddr_t);
-    if (stack_write(mm, p, u_argv, argv_sz) < 0)
-        return -EFAULT;
+    ret = stack_write(mm, p, u_argv, argv_sz);
+    if (ret < 0)
+        return ret;
     p += argv_sz;
-    if (stack_write(mm, p, u_envp, env_sz) < 0)
-        return -EFAULT;
+    ret = stack_write(mm, p, u_envp, env_sz);
+    if (ret < 0)
+        return ret;
     p += env_sz;
-    if (stack_write(mm, p, auxv, aux_sz) < 0)
-        return -EFAULT;
+    ret = stack_write(mm, p, auxv, aux_sz);
+    if (ret < 0)
+        return ret;
 
     /* Final alignment */
     sp = ALIGN_DOWN(sp, 16);
+    if (sp < stack_floor)
+        return -E2BIG;
 
-    mm->start_stack = sp;
+    mm->start_stack = stack_floor;
     *sp_out = sp;
     return 0;
 }

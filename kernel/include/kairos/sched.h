@@ -119,6 +119,7 @@ struct percpu_data {
     void *ipi_call_arg;
     uint64_t ticks;
     bool resched_needed;
+    uint32_t steal_cooldown;
     struct sched_cpu_stats stats;
     /* Per-CPU trace buffer — only written by local CPU with IRQs off */
     struct sched_trace_entry trace_buf[SCHED_TRACE_PER_CPU];

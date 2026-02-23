@@ -10,6 +10,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/string.h>
 #include <kairos/wait.h>
 
 static int tests_failed;
@@ -26,7 +27,7 @@ static int reap_children_bounded(int expected, const char *tag) {
     int reaped = 0;
     int status = 0;
     uint64_t start = arch_timer_ticks();
-    uint64_t timeout_ticks = arch_timer_ns_to_ticks(10ULL * 1000 * 1000 * 1000);
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(60ULL * 1000 * 1000 * 1000);
 
     while (reaped < expected) {
         pid_t pid = proc_wait(-1, &status, WNOHANG);
@@ -118,6 +119,186 @@ static void test_sched_fork_exit_storm(void) {
         test_fail("sched_stress: fork_exit_storm FAIL: reaped %d/%d\n",
                   reaped, created);
     pr_info("sched_stress: fork_exit_storm done (%d/%d created)\n", created, FORK_STORM_N);
+}
+
+/* ---------- test_sched_kthread_steal_policy ---------- */
+
+#define STEAL_POLICY_TASKS_PER_CPU 4
+#define STEAL_POLICY_ROUNDS 600
+#define STEAL_POLICY_MAX_TASKS (CONFIG_MAX_CPUS * STEAL_POLICY_TASKS_PER_CPU)
+
+struct steal_policy_ctx {
+    int home_cpu;
+    int rounds;
+    volatile int saw_remote_cpu;
+};
+
+static struct steal_policy_ctx steal_policy_ctx[STEAL_POLICY_MAX_TASKS];
+
+static uint64_t sched_total_steal_success(void) {
+    struct sched_stats stats;
+    sched_get_stats(&stats);
+    uint64_t total = 0;
+    int cpus = (int)stats.cpu_count;
+    if (cpus < 1)
+        cpus = 1;
+    if (cpus > CONFIG_MAX_CPUS)
+        cpus = CONFIG_MAX_CPUS;
+    for (int i = 0; i < cpus; i++)
+        total += stats.cpu[i].steal_success_count;
+    return total;
+}
+
+static int steal_policy_worker(void *arg) {
+    struct steal_policy_ctx *ctx = (struct steal_policy_ctx *)arg;
+    for (int i = 0; i < ctx->rounds; i++) {
+        int cpu = arch_cpu_id();
+        if (cpu != ctx->home_cpu)
+            __atomic_store_n(&ctx->saw_remote_cpu, 1, __ATOMIC_RELEASE);
+        proc_yield();
+    }
+    proc_exit(0);
+    return 0;
+}
+
+static void test_sched_kthread_steal_policy(void) {
+    int cpu_count = sched_cpu_count();
+    if (cpu_count < 2) {
+        pr_info("sched_stress: kthread_steal_policy skipped (cpu_count=%d)\n",
+                cpu_count);
+        return;
+    }
+
+    sched_set_steal_enabled(true);
+    int home_cpu = arch_cpu_id();
+    int target = cpu_count * STEAL_POLICY_TASKS_PER_CPU;
+    if (target > STEAL_POLICY_MAX_TASKS)
+        target = STEAL_POLICY_MAX_TASKS;
+
+    pr_info("sched_stress: kthread_steal_policy nonstealable\n");
+    memset(steal_policy_ctx, 0, sizeof(steal_policy_ctx));
+    int created = 0;
+    for (int i = 0; i < target; i++) {
+        steal_policy_ctx[i].home_cpu = home_cpu;
+        steal_policy_ctx[i].rounds = STEAL_POLICY_ROUNDS;
+        struct process *p = kthread_create_joinable(steal_policy_worker,
+                                                    &steal_policy_ctx[i],
+                                                    "kst0");
+        if (!p) {
+            pr_warn("sched_stress: kthread_steal_policy nonstealable create failed at i=%d\n",
+                    i);
+            break;
+        }
+        if (proc_sched_is_stealable(p)) {
+            test_fail("sched_stress: kthread_steal_policy FAIL: kthread default stealable pid=%d\n",
+                      p->pid);
+            return;
+        }
+        sched_enqueue(p);
+        created++;
+    }
+    int reaped = reap_children_bounded(created, "kthread_steal_policy_nonstealable");
+    if (reaped != created) {
+        test_fail("sched_stress: kthread_steal_policy FAIL: nonstealable reaped %d/%d\n",
+                  reaped, created);
+        return;
+    }
+    int nonsteal_remote = 0;
+    for (int i = 0; i < created; i++) {
+        if (__atomic_load_n(&steal_policy_ctx[i].saw_remote_cpu, __ATOMIC_ACQUIRE))
+            nonsteal_remote++;
+    }
+    if (nonsteal_remote != 0) {
+        test_fail("sched_stress: kthread_steal_policy FAIL: nonstealable migrated=%d\n",
+                  nonsteal_remote);
+        return;
+    }
+
+    pr_info("sched_stress: kthread_steal_policy stealable_pinned\n");
+    memset(steal_policy_ctx, 0, sizeof(steal_policy_ctx));
+    uint64_t steal_before = sched_total_steal_success();
+    created = 0;
+    for (int i = 0; i < target; i++) {
+        steal_policy_ctx[i].home_cpu = home_cpu;
+        steal_policy_ctx[i].rounds = STEAL_POLICY_ROUNDS;
+        struct process *p = kthread_create_joinable(steal_policy_worker,
+                                                    &steal_policy_ctx[i],
+                                                    "kst1");
+        if (!p) {
+            pr_warn("sched_stress: kthread_steal_policy stealable_pinned create failed at i=%d\n",
+                    i);
+            break;
+        }
+        proc_sched_set_stealable(p, true);
+        if (!proc_sched_is_stealable(p)) {
+            test_fail("sched_stress: kthread_steal_policy FAIL: optin not applied pid=%d\n",
+                      p->pid);
+            return;
+        }
+        sched_enqueue(p);
+        created++;
+    }
+    reaped = reap_children_bounded(created, "kthread_steal_policy_stealable_pinned");
+    if (reaped != created) {
+        test_fail("sched_stress: kthread_steal_policy FAIL: stealable_pinned reaped %d/%d\n",
+                  reaped, created);
+        return;
+    }
+    int pinned_remote = 0;
+    int pinned_created = created;
+    for (int i = 0; i < created; i++) {
+        if (__atomic_load_n(&steal_policy_ctx[i].saw_remote_cpu, __ATOMIC_ACQUIRE))
+            pinned_remote++;
+    }
+    uint64_t steal_after = sched_total_steal_success();
+    uint64_t pinned_steal_delta = steal_after - steal_before;
+    if (pinned_remote != 0 || pinned_steal_delta != 0) {
+        test_fail("sched_stress: kthread_steal_policy FAIL: stealable_pinned migrated=%d steal_delta=%llu\n",
+                  pinned_remote, (unsigned long long)pinned_steal_delta);
+        return;
+    }
+
+    pr_info("sched_stress: kthread_steal_policy stealable_unbound\n");
+    memset(steal_policy_ctx, 0, sizeof(steal_policy_ctx));
+    steal_before = sched_total_steal_success();
+    created = 0;
+    for (int i = 0; i < target; i++) {
+        steal_policy_ctx[i].home_cpu = home_cpu;
+        steal_policy_ctx[i].rounds = STEAL_POLICY_ROUNDS;
+        struct process *p = kthread_create_joinable(steal_policy_worker,
+                                                    &steal_policy_ctx[i],
+                                                    "kst2");
+        if (!p) {
+            pr_warn("sched_stress: kthread_steal_policy stealable_unbound create failed at i=%d\n",
+                    i);
+            break;
+        }
+        proc_sched_set_stealable(p, true);
+        proc_sched_set_affinity_mask(p, proc_sched_all_cpus_mask());
+        sched_enqueue(p);
+        created++;
+    }
+    reaped = reap_children_bounded(created, "kthread_steal_policy_stealable_unbound");
+    if (reaped != created) {
+        test_fail("sched_stress: kthread_steal_policy FAIL: stealable_unbound reaped %d/%d\n",
+                  reaped, created);
+        return;
+    }
+    int unbound_remote = 0;
+    for (int i = 0; i < created; i++) {
+        if (__atomic_load_n(&steal_policy_ctx[i].saw_remote_cpu, __ATOMIC_ACQUIRE))
+            unbound_remote++;
+    }
+    steal_after = sched_total_steal_success();
+    uint64_t unbound_steal_delta = steal_after - steal_before;
+    if (unbound_remote == 0 && unbound_steal_delta == 0) {
+        test_fail("sched_stress: kthread_steal_policy FAIL: optin showed no steal activity\n");
+        return;
+    }
+
+    pr_info("sched_stress: kthread_steal_policy done (pinned_remote=%d/%d pinned_steal_delta=%llu unbound_remote=%d/%d unbound_steal_delta=%llu)\n",
+            pinned_remote, pinned_created, (unsigned long long)pinned_steal_delta,
+            unbound_remote, created, (unsigned long long)unbound_steal_delta);
 }
 
 /* ---------- test_sched_sleep_wakeup_stress ---------- */
@@ -572,6 +753,8 @@ int run_sched_stress_tests(void) {
         test_sched_yield_storm();
     if (tests_failed == 0)
         test_sched_preempt_stress();
+    if (tests_failed == 0)
+        test_sched_kthread_steal_policy();
     if (tests_failed == 0)
         test_eevdf_deadline_ordering();
     if (tests_failed == 0)

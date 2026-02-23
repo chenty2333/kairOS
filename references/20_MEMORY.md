@@ -56,12 +56,15 @@ Address space layout:
 - USER_SPACE_START: 0x0
 - USER_HEAP_START: 0x1000000 (16MB)
 - USER_STACK_TOP: 0x3FF0000000
+- USER_STACK_SIZE: `CONFIG_USER_STACK_SIZE` (default 8MB)
+- User stack guard: lowest stack page is intentionally left unmapped (guard page)
 - USER_SPACE_END: 0x3FFFFFFFFF
 
 mm_struct manages each process's address space:
 - pgdir: page table root physical address
 - vma_list + mm_rb: VMA dual index (linked list + red-black tree)
 - brk: heap top
+- start_stack: lowest valid stack VA (just above guard page), used as heap/mmap upper bound
 - refcount: reference count (atomic), supports sharing (CLONE_VM)
 
 VMA management (vma.c):
@@ -74,6 +77,7 @@ COW (Copy-on-Write):
 - mm_clone() marks writable non-shared pages as PTE_COW when copying address spaces, shares physical pages and increments refcount
 - mm_handle_fault() handles copy-on-write: if refcount==1, directly changes permissions; otherwise allocates new page and copies
 - File-mapped page faults: reads content from vnode into newly allocated page
+- Stack faults: `VM_STACK` mappings now grow down on demand in the fault path; ELF stack setup maps only the top page initially and relies on demand paging for deeper stack pages.
 
 Related references:
 - references/00_REPO_MAP.md

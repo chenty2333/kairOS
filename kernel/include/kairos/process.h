@@ -70,6 +70,17 @@ enum syscall_abi {
     SYSCALL_ABI_LEGACY = 1,
 };
 
+enum proc_sched_flags {
+    PROC_SCHEDF_STEALABLE = (1U << 0),
+    PROC_SCHEDF_KTHREAD   = (1U << 1),
+};
+
+#if CONFIG_MAX_CPUS >= 64
+#define PROC_SCHED_AFFINITY_ALL UINT64_MAX
+#else
+#define PROC_SCHED_AFFINITY_ALL ((1ULL << CONFIG_MAX_CPUS) - 1ULL)
+#endif
+
 struct process {
     pid_t pid, ppid;
     pid_t pgid, sid;
@@ -80,6 +91,8 @@ struct process {
     mode_t umask;
     enum syscall_abi syscall_abi;
     enum proc_state state;
+    uint32_t sched_flags;
+    uint64_t sched_affinity;
     int exit_code;
     spinlock_t lock;
     bool irq_flags;         /* saved IRQ state for proc_lock/proc_unlock */
@@ -127,6 +140,77 @@ static inline void proc_set_state_release(struct process *p,
                                           enum proc_state s) {
     _Static_assert(sizeof(p->state) == sizeof(int), "enum proc_state size");
     __atomic_store_n((int *)&p->state, (int)s, __ATOMIC_RELEASE);
+}
+
+static inline bool proc_sched_is_stealable(const struct process *p) {
+    if (!p)
+        return false;
+    return (__atomic_load_n(&p->sched_flags, __ATOMIC_ACQUIRE) &
+            PROC_SCHEDF_STEALABLE) != 0;
+}
+
+static inline uint64_t proc_sched_all_cpus_mask(void) {
+    return PROC_SCHED_AFFINITY_ALL;
+}
+
+static inline uint64_t proc_sched_cpu_mask(int cpu) {
+    if (cpu < 0 || cpu >= 64)
+        return 0;
+    return (1ULL << cpu);
+}
+
+static inline uint64_t proc_sched_sanitize_affinity_mask(uint64_t mask) {
+    mask &= PROC_SCHED_AFFINITY_ALL;
+    if (!mask)
+        mask = PROC_SCHED_AFFINITY_ALL;
+    return mask;
+}
+
+static inline uint64_t proc_sched_get_affinity_mask(const struct process *p) {
+    if (!p)
+        return 0;
+    uint64_t mask = __atomic_load_n(&p->sched_affinity, __ATOMIC_ACQUIRE);
+    mask &= PROC_SCHED_AFFINITY_ALL;
+    if (!mask)
+        mask = PROC_SCHED_AFFINITY_ALL;
+    return mask;
+}
+
+static inline void proc_sched_set_affinity_mask(struct process *p,
+                                                uint64_t mask) {
+    if (!p)
+        return;
+    __atomic_store_n(&p->sched_affinity,
+                     proc_sched_sanitize_affinity_mask(mask),
+                     __ATOMIC_RELEASE);
+}
+
+static inline bool proc_sched_cpu_allowed(const struct process *p, int cpu) {
+    if (!p || cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        return false;
+    if (cpu >= 64)
+        return proc_sched_get_affinity_mask(p) == UINT64_MAX;
+    return (proc_sched_get_affinity_mask(p) & (1ULL << cpu)) != 0;
+}
+
+static inline void proc_sched_set_stealable(struct process *p, bool enabled) {
+    if (!p)
+        return;
+    uint32_t flags = __atomic_load_n(&p->sched_flags, __ATOMIC_RELAXED);
+    if (enabled)
+        flags |= PROC_SCHEDF_STEALABLE;
+    else
+        flags &= ~PROC_SCHEDF_STEALABLE;
+    __atomic_store_n(&p->sched_flags, flags, __ATOMIC_RELEASE);
+}
+
+static inline void proc_sched_mark_kthread(struct process *p) {
+    if (!p)
+        return;
+    uint32_t flags = __atomic_load_n(&p->sched_flags, __ATOMIC_RELAXED);
+    flags |= PROC_SCHEDF_KTHREAD;
+    flags &= ~PROC_SCHEDF_STEALABLE;
+    __atomic_store_n(&p->sched_flags, flags, __ATOMIC_RELEASE);
 }
 
 void proc_init(void);
