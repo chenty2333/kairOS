@@ -55,7 +55,9 @@ fi
 IMG_SIZE_MB="${IMG_SIZE_MB:-64}"
 
 rm -f "$BOOT_IMG"
-dd if=/dev/zero of="$BOOT_IMG" bs=1M count="$IMG_SIZE_MB" status=none
+if ! truncate -s "${IMG_SIZE_MB}M" "$BOOT_IMG" 2>/dev/null; then
+    dd if=/dev/zero of="$BOOT_IMG" bs=1M count="$IMG_SIZE_MB" status=none
+fi
 "$MKFS_FAT" -F 32 "$BOOT_IMG" >/dev/null
 
 MNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kairos-uefi-XXXXXX")"

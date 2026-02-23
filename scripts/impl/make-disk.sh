@@ -177,7 +177,9 @@ fi
 [[ "$QUIET" != "1" ]] && echo "Creating ext2 disk image: $DISK_IMG"
 mkdir -p "$(dirname "$DISK_IMG")"
 
-dd if=/dev/zero of="$DISK_IMG" bs=1M count=$DISK_SIZE 2>/dev/null
+if ! truncate -s "${DISK_SIZE}M" "$DISK_IMG" 2>/dev/null; then
+  dd if=/dev/zero of="$DISK_IMG" bs=1M count=$DISK_SIZE 2>/dev/null
+fi
 mke2fs -t ext2 -F -d "$ROOTFS_DIR" "$DISK_IMG" >/dev/null 2>&1
 
 if [[ "$QUIET" == "1" ]]; then

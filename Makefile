@@ -256,7 +256,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-tcc-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -648,6 +648,9 @@ symbols: $(KERNEL)
 TEST_EXTRA_CFLAGS := -DCONFIG_KERNEL_TESTS=1
 TEST_TIMEOUT ?= 180
 TEST_LOG ?= $(BUILD_DIR)/test.log
+TCC_SMOKE_TIMEOUT ?= 240
+TCC_SMOKE_LOG ?= $(BUILD_DIR)/tcc-smoke.log
+TCC_SMOKE_EXTRA_CFLAGS ?=
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
@@ -667,6 +670,14 @@ RUN_REQUIRE_BOOT ?= 1
 LOCK_WAIT ?= 0
 RUN_LOCK_WAIT ?= $(LOCK_WAIT)
 TEST_LOCK_WAIT ?= $(LOCK_WAIT)
+TEST_LOG_FWD :=
+TCC_SMOKE_LOG_FWD :=
+ifneq ($(origin TEST_LOG),file)
+TEST_LOG_FWD := TEST_LOG="$(TEST_LOG)"
+endif
+ifneq ($(origin TCC_SMOKE_LOG),file)
+TCC_SMOKE_LOG_FWD := TCC_SMOKE_LOG="$(TCC_SMOKE_LOG)"
+endif
 ifndef RUN_ID
 RUN_ID := $(shell sh -c 'ts="$$(date +%y%m%d-%H%M)"; rnd="$$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d "[[:space:]]")"; if [ -z "$$rnd" ]; then rnd="$$(printf "%04x" "$$$$")"; fi; printf "%s-%s" "$$ts" "$$rnd"')
 endif
@@ -682,9 +693,27 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
 		fi; \
 		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
-			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" TEST_TIMEOUT="$(TEST_TIMEOUT)" test; \
-	else \
-		RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
+			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" \
+			TEST_TIMEOUT="$(TEST_TIMEOUT)" $(TEST_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test; \
+			else \
+				RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
+			fi
+
+test-tcc-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+	$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
+		if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+		fi; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TCC_SMOKE_EXTRA_CFLAGS="$(TCC_SMOKE_EXTRA_CFLAGS)" \
+			TCC_SMOKE_TIMEOUT="$(TCC_SMOKE_TIMEOUT)" $(TCC_SMOKE_LOG_FWD) \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-tcc-smoke; \
+			else \
+			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" \
+			TCC_SMOKE_BOOT_DELAY_SEC="$(TCC_SMOKE_BOOT_DELAY_SEC)" \
+			TCC_SMOKE_STEP_DELAY_SEC="$(TCC_SMOKE_STEP_DELAY_SEC)" \
+			$(KAIROS_CMD) run test-tcc-smoke --extra-cflags "$(TCC_SMOKE_EXTRA_CFLAGS)" \
+			--timeout "$(TCC_SMOKE_TIMEOUT)" --log "$(TCC_SMOKE_LOG)"; \
 	fi
 
 test-isolated:
@@ -845,6 +874,7 @@ help:
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests (isolated by default)"
+	@echo "  test-tcc-smoke - Run tcc interactive smoke regression"
 	@echo "  test-isolated - Alias of isolated test mode"
 	@echo "  test-driver - Run driver test module only"
 	@echo "  test-mm  - Run memory test module only"

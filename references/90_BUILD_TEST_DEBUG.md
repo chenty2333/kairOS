@@ -42,6 +42,7 @@ Userspace and rootfs:
 - `make compiler-rt` — build clang compiler-rt builtins
 - `make rootfs` — full rootfs (base + busybox + init; includes tcc when WITH_TCC=1, which is the default)
 - `make disk` — create ext2 disk image
+- Image allocation prefers `truncate` and falls back to `dd if=/dev/zero`, improving compatibility in restricted containers
 
 Boot image:
 - `make uefi` — prepare UEFI firmware + Limine boot image
@@ -86,6 +87,7 @@ QEMU configuration:
 - `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module only
 - `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo/isig semantics, blocking read wakeup and EINTR paths, controlling-tty `/dev/tty` attach/detach lifecycle, pty pair EOF + reopen stability)
 - `make test-soak-pr` — PR-level soak module only (default 15 min, low-rate fault injection, deterministic round-based suite scheduling, summary-based pass/fail)
+- `test-soak-pr` log path is controlled by `SOAK_PR_LOG` (default `build/<arch>/soak-pr.log`, even when tests run in isolated mode)
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
@@ -102,11 +104,13 @@ For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - `manifest.json` (command, arch, build root, git sha, timestamps)
 - `result.json` (status/reason/verdict source + structured test summary + marker flags + log path)
 - `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
+- Default isolated test logs live under the run directory; explicit `TEST_LOG` / `SOAK_PR_LOG` / `TCC_SMOKE_LOG` overrides keep caller-provided paths
 
 Concurrency and locking:
 - Global locks live at `build/.locks/global-<name>.lock` (current shared resource: `global-deps-fetch.lock`).
 - Local locks live at `<BUILD_ROOT>/<arch>/.locks/<name>.lock` (current: `image.lock`, `qemu.lock`, `test.lock`).
 - `scripts/run-qemu-session.sh` uses `qemu.lock`; `scripts/run-qemu-test.sh` (via `scripts/kairos.sh run test*`) uses `test.lock` to avoid nested `qemu.lock` self-contention.
+- `scripts/kairos.sh run test*` forces non-interactive QEMU stdin (`QEMU_STDIN=`); interactive stdin remains for explicit run/interactive flows.
 - Lock metadata is written to `<lock>.meta` (`pid/start_utc/start_epoch/cwd/cmd`) for observability.
 - On lock contention, stale metadata (dead pid) is reclaimed automatically and lock acquisition is retried once.
 - Different `BUILD_ROOT` runs are parallel-safe; same `BUILD_ROOT` conflicting actions are blocked and return `lock_busy`.

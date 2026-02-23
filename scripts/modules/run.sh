@@ -75,10 +75,10 @@ kairos_run_test_once() {
 
     local qemu_cmd
     printf -v qemu_cmd \
-        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
+        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q QEMU_STDIN= RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
         "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" ""
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" "" 1
 }
 
 kairos_run_test_tcc_smoke_once() {
@@ -87,21 +87,41 @@ kairos_run_test_tcc_smoke_once() {
     local log_path="$3"
     local boot_delay="${TCC_SMOKE_BOOT_DELAY_SEC:-8}"
     local step_delay="${TCC_SMOKE_STEP_DELAY_SEC:-1}"
+    local ready_wait="${TCC_SMOKE_READY_WAIT_SEC:-180}"
+    local run_log="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/run.log"
+    local make_jobs="${KAIROS_JOBS:-$(nproc)}"
     local inner_make_cmd=""
+    local smoke_cmd=""
     local qemu_cmd=""
     local required_any="Usage: tcc"
-    local required_all=$'Usage: tcc\n__TCC_SMOKE_DONE__\nkairos\\$ '
+    local required_all=$'Usage: tcc\n# echo __TCC_SMOKE_DONE__\n__TCC_SMOKE_DONE__'
     local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma'
 
     printf -v inner_make_cmd \
-        'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q QEMU_STDIN= RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
-        "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
+        'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0' \
+        "${make_jobs}" "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
+
+    printf -v smoke_cmd '%s' \
+        "fifo=\"\$(mktemp -u /tmp/kairos-tcc-smoke.XXXXXX)\"; " \
+        "mkfifo \"\$fifo\"; " \
+        "( exec 3<>\"\$fifo\"; " \
+        "for _ in \$(seq 1 ${ready_wait}); do " \
+        "grep -Eiq 'init: starting shell|BusyBox v' \"${run_log}\" 2>/dev/null && break; " \
+        "sleep 1; " \
+        "done; " \
+        "sleep ${boot_delay}; printf 'tcc\\n' >&3; " \
+        "sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n' >&3; " \
+        "sleep ${step_delay}; printf 'poweroff\\n' >&3; " \
+        "exec 3>&- ) & " \
+        "feeder=\$!; " \
+        "${inner_make_cmd} QEMU_STDIN=\"<\$fifo\" run-direct; rc=\$?; " \
+        "wait \"\$feeder\" 2>/dev/null || true; rm -f \"\$fifo\"; exit \$rc"
 
     printf -v qemu_cmd \
         'bash -lc %q' \
-        "(sleep ${boot_delay}; printf 'tcc\\n'; sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n'; sleep ${step_delay}; printf 'poweroff\\n') | ${inner_make_cmd}"
+        "${smoke_cmd}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}"
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}" 0
 }
 
 kairos_run_test_locked() {
@@ -113,9 +133,12 @@ kairos_run_test_locked() {
     local required_marker_regex="${6:-}"
     local required_markers_all="${7:-}"
     local forbidden_marker_regex="${8:-}"
+    local clean_artifacts="${9:-1}"
     local test_lock_file="${TEST_LOCK_FILE:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/.locks/test.lock}"
 
-    kairos_run_clean_kernel_artifacts
+    if [[ "${clean_artifacts}" -eq 1 ]]; then
+        kairos_run_clean_kernel_artifacts
+    fi
 
     local rc=0
     set +e
@@ -140,7 +163,9 @@ kairos_run_test_locked() {
     rc=$?
     set -e
 
-    kairos_run_clean_kernel_artifacts
+    if [[ "${clean_artifacts}" -eq 1 ]]; then
+        kairos_run_clean_kernel_artifacts
+    fi
     return "$rc"
 }
 
@@ -196,7 +221,7 @@ kairos_run_dispatch() {
             ;;
         test-tcc-smoke)
             extra="${TCC_SMOKE_EXTRA_CFLAGS:-}"
-            timeout_s="${TCC_SMOKE_TIMEOUT:-180}"
+            timeout_s="${TCC_SMOKE_TIMEOUT:-240}"
             log_path="${TCC_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/tcc-smoke.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_tcc_smoke_once "$extra" "$timeout_s" "$log_path"
