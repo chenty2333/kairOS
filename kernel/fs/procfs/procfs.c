@@ -80,6 +80,17 @@ static int gen_pid_status(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz);
 
+static size_t procfs_self_target(char *buf, size_t bufsz) {
+    struct process *cur = proc_current();
+    pid_t pid = cur ? cur->pid : 1;
+    int n = snprintf(buf, bufsz, "%d", pid);
+    if (n < 0)
+        return 0;
+    if ((size_t)n >= bufsz)
+        return bufsz ? (bufsz - 1) : 0;
+    return (size_t)n;
+}
+
 static struct file_ops procfs_dir_ops = {
     .readdir = procfs_readdir,
     .poll = procfs_dir_poll,
@@ -451,16 +462,17 @@ static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz) {
 static ssize_t procfs_self_read(struct vnode *vn __attribute__((unused)),
                                 void *buf, size_t len, off_t off,
                                 uint32_t flags __attribute__((unused))) {
-    struct process *cur = proc_current();
-    pid_t pid = cur ? cur->pid : 1;
     char tmp[16];
-    int total = snprintf(tmp, sizeof(tmp), "%d", pid);
-    if (off >= total)
+    size_t total = procfs_self_target(tmp, sizeof(tmp));
+    if (off < 0)
+        return -EINVAL;
+    size_t offu = (size_t)off;
+    if (offu >= total)
         return 0;
-    size_t avail = (size_t)(total - (int)off);
+    size_t avail = total - offu;
     if (len > avail)
         len = avail;
-    memcpy(buf, tmp + off, len);
+    memcpy(buf, tmp + offu, len);
     return (ssize_t)len;
 }
 
@@ -525,6 +537,7 @@ static const struct pid_entry_def pid_entries[] = {
     {"stat",    gen_pid_stat},
     {"status",  gen_pid_status},
     {"cmdline", gen_pid_cmdline},
+    {"mounts",  gen_mounts},
     {"maps",    gen_pid_maps},
 };
 
@@ -696,6 +709,8 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
             spin_lock(&pm->lock);
             for (struct procfs_entry *e = pm->entries; e; e = e->next) {
                 if (e->type == PROCFS_SELF_LINK) {
+                    char tmp[16];
+                    e->vn.size = procfs_self_target(tmp, sizeof(tmp));
                     vnode_get(&e->vn);
                     spin_unlock(&pm->lock);
                     return &e->vn;
@@ -808,7 +823,7 @@ static int procfs_mount_op(struct mount *mnt) {
     if (self_ent) {
         procfs_init_vnode(&self_ent->vn, mnt, self_ent, VNODE_SYMLINK,
                           S_IFLNK | 0777, &procfs_symlink_ops);
-        self_ent->vn.size = 10; /* max PID string length */
+        self_ent->vn.size = 1; /* updated dynamically on lookup */
     }
 
     mnt->fs_data = pm;

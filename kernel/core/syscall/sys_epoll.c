@@ -48,7 +48,13 @@ int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
 
 int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
                        uint64_t timeout_ms, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
+    if (a4) {
+        if (a5 != sizeof(sigset_t))
+            return -EINVAL;
+        sigset_t mask;
+        if (copy_from_user(&mask, (void *)a4, sizeof(mask)) < 0)
+            return -EFAULT;
+    }
     if (maxevents == 0)
         return -EINVAL;
     if (!events_ptr)

@@ -69,6 +69,8 @@ Disk filesystems:
 Pseudo filesystems:
 - devfs (fs/devfs/): device filesystem
 - procfs (fs/procfs/): process information filesystem
+  - exposes `/proc/mounts` and `/proc/<pid>/mounts`
+  - `/proc/self` symlink target is generated per lookup from current task pid
 - sysfs (fs/sysfs/): device model filesystem
 - tmpfs (fs/tmpfs/): in-memory filesystem
 

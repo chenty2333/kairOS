@@ -243,7 +243,14 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
 int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
                   uint64_t sigmask_ptr, uint64_t sigsetsize,
                   uint64_t a5) {
-    (void)sigmask_ptr; (void)sigsetsize; (void)a5;
+    (void)a5;
+    if (sigmask_ptr) {
+        if (sigsetsize != sizeof(sigset_t))
+            return -EINVAL;
+        sigset_t mask;
+        if (copy_from_user(&mask, (void *)sigmask_ptr, sizeof(mask)) < 0)
+            return -EFAULT;
+    }
     int timeout_ms = -1;
     if (tsp_ptr) {
         struct timespec ts;
@@ -260,7 +267,22 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
 int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
                      uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                      uint64_t timeout_ptr, uint64_t sigmask_ptr) {
-    (void)exceptfds_ptr; (void)sigmask_ptr;
+    (void)exceptfds_ptr;
+    if (sigmask_ptr) {
+        struct {
+            uint64_t sigmask;
+            uint64_t sigsetsize;
+        } ss;
+        if (copy_from_user(&ss, (void *)sigmask_ptr, sizeof(ss)) < 0)
+            return -EFAULT;
+        if (ss.sigmask) {
+            if (ss.sigsetsize != sizeof(sigset_t))
+                return -EINVAL;
+            sigset_t mask;
+            if (copy_from_user(&mask, (void *)ss.sigmask, sizeof(mask)) < 0)
+                return -EFAULT;
+        }
+    }
     int timeout_ms = -1;
     if (timeout_ptr) {
         struct timespec ts;

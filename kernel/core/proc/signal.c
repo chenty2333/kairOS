@@ -334,12 +334,16 @@ int64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
 
 int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
                       uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a3; (void)a4; (void)a5;
+    (void)a4; (void)a5;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (p->syscall_abi == SYSCALL_ABI_LINUX &&
+        a3 != sizeof(sigset_t))
+        return -EINVAL;
     if (sig == 0 || sig > NSIG) return -EINVAL;
     if ((sig == SIGKILL || sig == SIGSTOP) && act_ptr) return -EINVAL;
 
-    struct process *p = proc_current();
-    if (!p) return -EINVAL;
     if (!p->sighand) return -ENOMEM;
 
     struct sigaction act = {0};
@@ -366,9 +370,12 @@ int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
 
 int64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr, uint64_t old_ptr,
                         uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a3; (void)a4; (void)a5;
+    (void)a4; (void)a5;
     struct process *p = proc_current();
     if (!p) return -EINVAL;
+    if (p->syscall_abi == SYSCALL_ABI_LINUX &&
+        a3 != sizeof(sigset_t))
+        return -EINVAL;
 
     if (old_ptr) {
         sigset_t old = p->sig_blocked;
