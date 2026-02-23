@@ -15,6 +15,7 @@
 
 static volatile uint64_t system_ticks;
 static int tick_timekeeper_cpu;
+extern void timerfd_tick(uint64_t now_ticks);
 
 void tick_policy_init(int timekeeper_cpu) {
     __atomic_store_n(&system_ticks, 0, __ATOMIC_RELAXED);
@@ -36,6 +37,7 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
     }
     if (tick) {
         poll_sleep_tick(tick);
+        timerfd_tick(tick);
     }
 
     sched_tick();

@@ -184,6 +184,12 @@ int64_t sys_gettimeofday(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint6
 int64_t sys_times(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_getitimer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_setitimer(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_timerfd_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                           uint64_t);
+int64_t sys_timerfd_settime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
+int64_t sys_timerfd_gettime(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
 int64_t sys_getrusage(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sysinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_syslog(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -203,6 +209,7 @@ int64_t sys_prlimit64(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 int64_t sys_execveat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                      uint64_t);
 int64_t sys_futex(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_eventfd2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pipe2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
