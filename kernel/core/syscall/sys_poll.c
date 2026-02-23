@@ -159,6 +159,20 @@ static int timespec_to_timeout_ms(const struct timespec *ts) {
     return (int)ms;
 }
 
+static int poll_copy_sigmask_from_user(sigset_t *out, uint64_t mask_ptr,
+                                       uint64_t sigsetsize) {
+    if (!out)
+        return -EINVAL;
+    *out = 0;
+    if (!mask_ptr)
+        return 0;
+    if (sigsetsize == 0 || sigsetsize > sizeof(sigset_t))
+        return -EINVAL;
+    if (copy_from_user(out, (void *)mask_ptr, (size_t)sigsetsize) < 0)
+        return -EFAULT;
+    return 1;
+}
+
 static int poll_sleep_timeout(int timeout_ms) {
     if (timeout_ms == 0)
         return 0;
@@ -233,16 +247,20 @@ int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
 }
 
 static int do_select_common(uint64_t nfds, uint64_t readfds_ptr,
-                            uint64_t writefds_ptr, int timeout_ms) {
+                            uint64_t writefds_ptr, uint64_t exceptfds_ptr,
+                            int timeout_ms) {
     if (nfds > FD_SETSIZE)
         return -EINVAL;
 
-    fd_set rfds = {0}, wfds = {0};
+    fd_set rfds = {0}, wfds = {0}, efds = {0};
     if (readfds_ptr &&
         copy_from_user(&rfds, (void *)readfds_ptr, sizeof(rfds)) < 0)
         return -EFAULT;
     if (writefds_ptr &&
         copy_from_user(&wfds, (void *)writefds_ptr, sizeof(wfds)) < 0)
+        return -EFAULT;
+    if (exceptfds_ptr &&
+        copy_from_user(&efds, (void *)exceptfds_ptr, sizeof(efds)) < 0)
         return -EFAULT;
 
     struct pollfd fds[FD_SETSIZE];
@@ -254,6 +272,8 @@ static int do_select_common(uint64_t nfds, uint64_t readfds_ptr,
             events |= POLLIN;
         if (writefds_ptr && (wfds.bits & mask))
             events |= POLLOUT;
+        if (exceptfds_ptr && (efds.bits & mask))
+            events |= POLLPRI;
         if (events) {
             fds[count].fd = (int)fd;
             fds[count].events = events;
@@ -273,11 +293,15 @@ static int do_select_common(uint64_t nfds, uint64_t readfds_ptr,
         rfds.bits = 0;
     if (writefds_ptr)
         wfds.bits = 0;
+    if (exceptfds_ptr)
+        efds.bits = 0;
     for (size_t i = 0; i < count; i++) {
         if (fds[i].revents & POLLIN)
             rfds.bits |= (1ULL << fds[i].fd);
         if (fds[i].revents & POLLOUT)
             wfds.bits |= (1ULL << fds[i].fd);
+        if (fds[i].revents & (POLLPRI | POLLERR | POLLHUP))
+            efds.bits |= (1ULL << fds[i].fd);
     }
 
     if (readfds_ptr &&
@@ -286,13 +310,16 @@ static int do_select_common(uint64_t nfds, uint64_t readfds_ptr,
     if (writefds_ptr &&
         copy_to_user((void *)writefds_ptr, &wfds, sizeof(wfds)) < 0)
         ready = -EFAULT;
+    if (exceptfds_ptr &&
+        copy_to_user((void *)exceptfds_ptr, &efds, sizeof(efds)) < 0)
+        ready = -EFAULT;
 
     return ready;
 }
 
 int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
                    uint64_t exceptfds_ptr, uint64_t timeout_ptr, uint64_t a5) {
-    (void)exceptfds_ptr; (void)a5;
+    (void)a5;
 
     int timeout_ms = -1;
     if (timeout_ptr) {
@@ -304,7 +331,8 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
         timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
     }
 
-    return do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    return do_select_common(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr,
+                            timeout_ms);
 }
 
 int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
@@ -314,11 +342,10 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
     bool have_sigmask = false;
     sigset_t mask = 0;
     if (sigmask_ptr) {
-        if (sigsetsize != sizeof(sigset_t))
-            return -EINVAL;
-        if (copy_from_user(&mask, (void *)sigmask_ptr, sizeof(mask)) < 0)
-            return -EFAULT;
-        have_sigmask = true;
+        int rc = poll_copy_sigmask_from_user(&mask, sigmask_ptr, sigsetsize);
+        if (rc < 0)
+            return rc;
+        have_sigmask = rc > 0;
     }
     int timeout_ms = -1;
     if (tsp_ptr) {
@@ -345,7 +372,6 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
 int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
                      uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                      uint64_t timeout_ptr, uint64_t sigmask_ptr) {
-    (void)exceptfds_ptr;
     bool have_sigmask = false;
     sigset_t mask = 0;
     if (sigmask_ptr) {
@@ -356,11 +382,11 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
         if (copy_from_user(&ss, (void *)sigmask_ptr, sizeof(ss)) < 0)
             return -EFAULT;
         if (ss.sigmask) {
-            if (ss.sigsetsize != sizeof(sigset_t))
-                return -EINVAL;
-            if (copy_from_user(&mask, (void *)ss.sigmask, sizeof(mask)) < 0)
-                return -EFAULT;
-            have_sigmask = true;
+            int rc = poll_copy_sigmask_from_user(&mask, ss.sigmask,
+                                                 ss.sigsetsize);
+            if (rc < 0)
+                return rc;
+            have_sigmask = rc > 0;
         }
     }
     int timeout_ms = -1;
@@ -380,7 +406,9 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
         if (rc < 0)
             return rc;
     }
-    int64_t ret = do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    int64_t ret =
+        do_select_common(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr,
+                         timeout_ms);
     poll_sigmask_restore(&ctx);
     return ret;
 }
