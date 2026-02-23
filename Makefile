@@ -256,7 +256,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -629,6 +629,9 @@ TEST_LOG ?= $(BUILD_DIR)/test.log
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
+SOAK_PR_TIMEOUT ?= 1800
+SOAK_PR_LOG ?= $(BUILD_DIR)/soak-pr.log
+SOAK_PR_EXTRA_CFLAGS ?= -DCONFIG_KERNEL_FAULT_INJECT=1 -DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=900 -DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=3
 TEST_RUNS_ROOT ?= build/runs
 RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
@@ -710,6 +713,10 @@ test-tty:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x400" test
 
+test-soak-pr:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(SOAK_PR_TIMEOUT)" TEST_LOG="$(SOAK_PR_LOG)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x800 $(SOAK_PR_EXTRA_CFLAGS)" test
+
 gc-runs:
 	$(Q)mkdir -p "$(TEST_RUNS_ROOT)"
 	$(Q)keep="$(RUNS_KEEP)"; \
@@ -782,6 +789,7 @@ help:
 	@echo "  test-device-virtio - Run device model + virtio probe-path module only"
 	@echo "  test-devmodel - Alias of test-device-virtio"
 	@echo "  test-tty - Run tty stack module only (tty_core/n_tty/pty)"
+	@echo "  test-soak-pr - Run PR soak + low-rate fault injection module only"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"

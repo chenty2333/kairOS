@@ -4,6 +4,9 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#if CONFIG_KERNEL_FAULT_INJECT
+#include <kairos/fault_inject.h>
+#endif
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
@@ -141,6 +144,10 @@ void kmem_cache_free(struct kmem_cache *c, void *obj) {
 void *kmalloc(size_t size) {
     if (unlikely(!size))
         return NULL;
+#if CONFIG_KERNEL_FAULT_INJECT
+    if (unlikely(fault_inject_should_fail(FAULT_INJECT_POINT_KMALLOC)))
+        return NULL;
+#endif
     if (size > 2048) {
         unsigned int order = 0;
         while (((size_t)CONFIG_PAGE_SIZE << order) < size)

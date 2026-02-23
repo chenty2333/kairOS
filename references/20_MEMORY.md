@@ -36,6 +36,7 @@ Runtime reservations:
 - Bootstrap phase uses a static buffer (64KB) to avoid recursive dependency
 - kfree() checks page's PG_SLAB flag to distinguish slab objects from large page allocations
 - kmalloc_aligned() / kfree_aligned() provide aligned allocations (power-of-two alignment).
+- Fault injection hook exists in `kmalloc()` (`fault_inject_should_fail(FAULT_INJECT_POINT_KMALLOC)`), gated by `CONFIG_KERNEL_FAULT_INJECT`; even when enabled it still requires explicit test scope enablement.
 
 ## MMU and Page Tables
 

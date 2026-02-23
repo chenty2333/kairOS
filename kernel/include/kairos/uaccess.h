@@ -1,6 +1,10 @@
 #ifndef _KAIROS_UACCESS_H
 #define _KAIROS_UACCESS_H
 
+#include <kairos/config.h>
+#if CONFIG_KERNEL_FAULT_INJECT
+#include <kairos/fault_inject.h>
+#endif
 #include <kairos/types.h>
 
 /* Include architecture-specific implementation */
@@ -15,6 +19,11 @@
  * Returns 0 on success, or -EFAULT on error.
  */
 static inline int copy_from_user(void *to, const void *from, size_t n) {
+#if CONFIG_KERNEL_FAULT_INJECT
+    if (fault_inject_should_fail(FAULT_INJECT_POINT_COPY_FROM_USER)) {
+        return -EFAULT;
+    }
+#endif
     if (!access_ok(from, n)) {
         return -EFAULT;
     }
@@ -34,6 +43,11 @@ static inline int copy_from_user(void *to, const void *from, size_t n) {
  * Returns 0 on success, or -EFAULT on error.
  */
 static inline int copy_to_user(void *to, const void *from, size_t n) {
+#if CONFIG_KERNEL_FAULT_INJECT
+    if (fault_inject_should_fail(FAULT_INJECT_POINT_COPY_TO_USER)) {
+        return -EFAULT;
+    }
+#endif
     if (!access_ok(to, n)) {
         return -EFAULT;
     }
