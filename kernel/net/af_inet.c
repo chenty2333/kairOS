@@ -73,6 +73,14 @@ struct inet_pending {
     struct sockaddr_in addr;
 };
 
+static inline void inet_lwip_lock(void) {
+    LOCK_TCPIP_CORE();
+}
+
+static inline void inet_lwip_unlock(void) {
+    UNLOCK_TCPIP_CORE();
+}
+
 static struct inet_sock *inet_sock_alloc(struct socket *sock, int proto) {
     struct inet_sock *is = kzalloc(sizeof(*is));
     if (!is) {
@@ -320,7 +328,9 @@ static int inet_tcp_bind(struct socket *sock, const struct sockaddr *addr,
     }
 
     if (!is->pcb.tcp) {
+        inet_lwip_lock();
         is->pcb.tcp = tcp_new();
+        inet_lwip_unlock();
         if (!is->pcb.tcp) {
             return -ENOMEM;
         }
@@ -330,7 +340,9 @@ static int inet_tcp_bind(struct socket *sock, const struct sockaddr *addr,
     u16_t port;
     sockaddr_to_lwip(addr, &ip, &port);
 
+    inet_lwip_lock();
     err_t err = tcp_bind(is->pcb.tcp, &ip, port);
+    inet_lwip_unlock();
     if (err != ERR_OK) {
         return -EADDRINUSE;
     }
@@ -348,13 +360,16 @@ static int inet_tcp_listen(struct socket *sock, int backlog) {
     }
 
     (void)backlog;
+    inet_lwip_lock();
     struct tcp_pcb *lpcb = tcp_listen(is->pcb.tcp);
     if (!lpcb) {
+        inet_lwip_unlock();
         return -ENOMEM;
     }
     is->pcb.tcp = lpcb;
     tcp_arg(lpcb, is);
     tcp_accept(lpcb, inet_tcp_accept_cb);
+    inet_lwip_unlock();
     sock->state = SS_LISTENING;
 
     int ret = inet_recv_buf_init(is);
@@ -379,7 +394,9 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
     }
 
     if (!is->pcb.tcp) {
+        inet_lwip_lock();
         is->pcb.tcp = tcp_new();
+        inet_lwip_unlock();
         if (!is->pcb.tcp) {
             return -ENOMEM;
         }
@@ -390,6 +407,7 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
         return ret;
     }
 
+    inet_lwip_lock();
     tcp_arg(is->pcb.tcp, is);
     tcp_recv(is->pcb.tcp, inet_tcp_recv_cb);
     tcp_sent(is->pcb.tcp, inet_tcp_sent_cb);
@@ -401,6 +419,7 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
 
     is->connect_done = false;
     err_t err = tcp_connect(is->pcb.tcp, &ip, port, inet_tcp_connected_cb);
+    inet_lwip_unlock();
     if (err != ERR_OK) {
         return -ECONNREFUSED;
     }
@@ -454,14 +473,18 @@ static int inet_tcp_accept(struct socket *sock, struct socket **newsock) {
     struct socket *nsock = NULL;
     int ret = sock_create(AF_INET, SOCK_STREAM, 0, &nsock);
     if (ret < 0) {
+        inet_lwip_lock();
         tcp_abort(pend->pcb);
+        inet_lwip_unlock();
         kfree(pend);
         return ret;
     }
 
     struct inet_sock *nis = inet_ensure(nsock);
     if (!nis) {
+        inet_lwip_lock();
         tcp_abort(pend->pcb);
+        inet_lwip_unlock();
         kfree(pend);
         sock_destroy(nsock);
         return -ENOMEM;
@@ -469,17 +492,21 @@ static int inet_tcp_accept(struct socket *sock, struct socket **newsock) {
 
     ret = inet_recv_buf_init(nis);
     if (ret < 0) {
+        inet_lwip_lock();
         tcp_abort(pend->pcb);
+        inet_lwip_unlock();
         kfree(pend);
         sock_destroy(nsock);
         return ret;
     }
 
     nis->pcb.tcp = pend->pcb;
+    inet_lwip_lock();
     tcp_arg(pend->pcb, nis);
     tcp_recv(pend->pcb, inet_tcp_recv_cb);
     tcp_sent(pend->pcb, inet_tcp_sent_cb);
     tcp_err(pend->pcb, inet_tcp_err_cb);
+    inet_lwip_unlock();
     nsock->state = SS_CONNECTED;
 
     kfree(pend);
@@ -507,8 +534,19 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
 
     size_t total = 0;
     while (total < len) {
-        u16_t sndbuf = tcp_sndbuf(is->pcb.tcp);
+        u16_t sndbuf = 0;
+        size_t chunk = 0;
+        err_t err = ERR_OK;
+
+        inet_lwip_lock();
+        struct tcp_pcb *pcb = is->pcb.tcp;
+        if (!pcb) {
+            inet_lwip_unlock();
+            return total ? (ssize_t)total : -EPIPE;
+        }
+        sndbuf = tcp_sndbuf(pcb);
         if (sndbuf == 0) {
+            inet_lwip_unlock();
             /* Wait for send space */
             is->send_ready = false;
             mutex_lock(&is->lock);
@@ -527,7 +565,7 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
             continue;
         }
 
-        size_t chunk = len - total;
+        chunk = len - total;
         if (chunk > sndbuf) {
             chunk = sndbuf;
         }
@@ -535,12 +573,15 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
             chunk = 0xFFFF;
         }
 
-        err_t err = tcp_write(is->pcb.tcp, (const uint8_t *)buf + total,
+        err = tcp_write(pcb, (const uint8_t *)buf + total,
                                (u16_t)chunk, TCP_WRITE_FLAG_COPY);
+        if (err == ERR_OK) {
+            err = tcp_output(pcb);
+        }
+        inet_lwip_unlock();
         if (err != ERR_OK) {
             return total ? (ssize_t)total : -EIO;
         }
-        tcp_output(is->pcb.tcp);
         total += chunk;
     }
 
@@ -585,12 +626,15 @@ static int inet_tcp_poll(struct socket *sock, uint32_t events) {
     }
     uint32_t revents = 0;
 
-    mutex_lock(&is->lock);
     if (sock->state == SS_LISTENING) {
+        mutex_lock(&is->lock);
         if (!list_empty(&is->accept_queue)) {
             revents |= POLLIN;
         }
+        mutex_unlock(&is->lock);
     } else if (sock->state == SS_CONNECTED) {
+        inet_lwip_lock();
+        mutex_lock(&is->lock);
         if (is->recv_count > 0 || is->peer_closed) {
             revents |= POLLIN;
         }
@@ -600,8 +644,9 @@ static int inet_tcp_poll(struct socket *sock, uint32_t events) {
         if (is->peer_closed) {
             revents |= POLLHUP;
         }
+        mutex_unlock(&is->lock);
+        inet_lwip_unlock();
     }
-    mutex_unlock(&is->lock);
 
     return (int)(revents & events);
 }
@@ -618,11 +663,15 @@ static int inet_udp_bind(struct socket *sock, const struct sockaddr *addr,
         return -EINVAL;
     }
     if (!is->pcb.udp) {
+        inet_lwip_lock();
         is->pcb.udp = udp_new();
+        if (is->pcb.udp) {
+            udp_recv(is->pcb.udp, inet_udp_recv_cb, is);
+        }
+        inet_lwip_unlock();
         if (!is->pcb.udp) {
             return -ENOMEM;
         }
-        udp_recv(is->pcb.udp, inet_udp_recv_cb, is);
     }
 
     int ret = inet_recv_buf_init(is);
@@ -634,7 +683,9 @@ static int inet_udp_bind(struct socket *sock, const struct sockaddr *addr,
     u16_t port;
     sockaddr_to_lwip(addr, &ip, &port);
 
+    inet_lwip_lock();
     err_t err = udp_bind(is->pcb.udp, &ip, port);
+    inet_lwip_unlock();
     if (err != ERR_OK) {
         return -EADDRINUSE;
     }
@@ -652,11 +703,15 @@ static int inet_udp_connect(struct socket *sock, const struct sockaddr *addr,
         return -EINVAL;
     }
     if (!is->pcb.udp) {
+        inet_lwip_lock();
         is->pcb.udp = udp_new();
+        if (is->pcb.udp) {
+            udp_recv(is->pcb.udp, inet_udp_recv_cb, is);
+        }
+        inet_lwip_unlock();
         if (!is->pcb.udp) {
             return -ENOMEM;
         }
-        udp_recv(is->pcb.udp, inet_udp_recv_cb, is);
         inet_recv_buf_init(is);
     }
 
@@ -664,7 +719,9 @@ static int inet_udp_connect(struct socket *sock, const struct sockaddr *addr,
     u16_t port;
     sockaddr_to_lwip(addr, &ip, &port);
 
+    inet_lwip_lock();
     err_t err = udp_connect(is->pcb.udp, &ip, port);
+    inet_lwip_unlock();
     if (err != ERR_OK) {
         return -EINVAL;
     }
@@ -681,11 +738,15 @@ static ssize_t inet_udp_sendto(struct socket *sock, const void *buf,
         return -ENOMEM;
     }
     if (!is->pcb.udp) {
+        inet_lwip_lock();
         is->pcb.udp = udp_new();
+        if (is->pcb.udp) {
+            udp_recv(is->pcb.udp, inet_udp_recv_cb, is);
+        }
+        inet_lwip_unlock();
         if (!is->pcb.udp) {
             return -ENOMEM;
         }
-        udp_recv(is->pcb.udp, inet_udp_recv_cb, is);
         inet_recv_buf_init(is);
     }
 
@@ -696,6 +757,7 @@ static ssize_t inet_udp_sendto(struct socket *sock, const void *buf,
     memcpy(p->payload, buf, len);
 
     err_t err;
+    inet_lwip_lock();
     if (dest && addrlen >= (int)sizeof(struct sockaddr_in)) {
         ip_addr_t ip;
         u16_t port;
@@ -704,6 +766,7 @@ static ssize_t inet_udp_sendto(struct socket *sock, const void *buf,
     } else {
         err = udp_send(is->pcb.udp, p);
     }
+    inet_lwip_unlock();
     pbuf_free(p);
 
     return (err == ERR_OK) ? (ssize_t)len : -EIO;
@@ -772,7 +835,9 @@ static int inet_shutdown(struct socket *sock, int how) {
     if (is->proto == IPPROTO_TCP && is->pcb.tcp) {
         int shut_rx = (how == SHUT_RD || how == SHUT_RDWR) ? 1 : 0;
         int shut_tx = (how == SHUT_WR || how == SHUT_RDWR) ? 1 : 0;
+        inet_lwip_lock();
         tcp_shutdown(is->pcb.tcp, shut_rx, shut_tx);
+        inet_lwip_unlock();
     }
     wait_queue_wakeup_all(&is->recv_wait);
     wait_queue_wakeup_all(&is->send_wait);
@@ -787,42 +852,48 @@ static int inet_close(struct socket *sock) {
     }
 
     if (is->proto == IPPROTO_TCP && is->pcb.tcp) {
+        inet_lwip_lock();
         struct tcp_pcb *pcb = is->pcb.tcp;
         bool listening = (pcb->state == LISTEN);
         tcp_arg(pcb, NULL);
         if (listening) {
             tcp_accept(pcb, NULL);
-            tcp_close(pcb);
+            if (tcp_close(pcb) != ERR_OK) {
+                tcp_abort(pcb);
+            }
         } else {
             tcp_recv(pcb, NULL);
             tcp_sent(pcb, NULL);
             tcp_err(pcb, NULL);
-
-            for (int i = 0; i < 2000; i++) {
-                if (!pcb->unsent && !pcb->unacked)
-                    break;
-                tcp_output(pcb);
-                proc_yield();
-            }
-
-            if (pcb->unsent || pcb->unacked) {
+            if (tcp_close(pcb) != ERR_OK) {
                 tcp_abort(pcb);
-            } else {
-                tcp_close(pcb);
             }
         }
         is->pcb.tcp = NULL;
+        inet_lwip_unlock();
     } else if (is->proto == IPPROTO_UDP && is->pcb.udp) {
+        inet_lwip_lock();
         udp_remove(is->pcb.udp);
+        inet_lwip_unlock();
         is->pcb.udp = NULL;
     }
 
     /* Drain accept queue */
-    struct list_head *pos, *tmp;
-    list_for_each_safe(pos, tmp, &is->accept_queue) {
-        struct inet_pending *pend = list_entry(pos, struct inet_pending, node);
-        list_del(&pend->node);
+    while (1) {
+        struct inet_pending *pend = NULL;
+        mutex_lock(&is->lock);
+        if (!list_empty(&is->accept_queue)) {
+            pend = list_first_entry(&is->accept_queue, struct inet_pending, node);
+            list_del(&pend->node);
+            is->accept_count--;
+        }
+        mutex_unlock(&is->lock);
+        if (!pend) {
+            break;
+        }
+        inet_lwip_lock();
         tcp_abort(pend->pcb);
+        inet_lwip_unlock();
         kfree(pend);
     }
 
@@ -846,11 +917,15 @@ static int inet_getsockname(struct socket *sock, struct sockaddr *addr,
     sin->sin_family = AF_INET;
 
     if (is->proto == IPPROTO_TCP && is->pcb.tcp) {
+        inet_lwip_lock();
         lwip_to_sockaddr(sin, &is->pcb.tcp->local_ip,
                          is->pcb.tcp->local_port);
+        inet_lwip_unlock();
     } else if (is->proto == IPPROTO_UDP && is->pcb.udp) {
+        inet_lwip_lock();
         lwip_to_sockaddr(sin, &is->pcb.udp->local_ip,
                          is->pcb.udp->local_port);
+        inet_lwip_unlock();
     }
     *addrlen = sizeof(struct sockaddr_in);
     return 0;
@@ -868,11 +943,15 @@ static int inet_getpeername(struct socket *sock, struct sockaddr *addr,
     sin->sin_family = AF_INET;
 
     if (is->proto == IPPROTO_TCP && is->pcb.tcp) {
+        inet_lwip_lock();
         lwip_to_sockaddr(sin, &is->pcb.tcp->remote_ip,
                          is->pcb.tcp->remote_port);
+        inet_lwip_unlock();
     } else if (is->proto == IPPROTO_UDP && is->pcb.udp) {
+        inet_lwip_lock();
         lwip_to_sockaddr(sin, &is->pcb.udp->remote_ip,
                          is->pcb.udp->remote_port);
+        inet_lwip_unlock();
     }
     *addrlen = sizeof(struct sockaddr_in);
     return 0;

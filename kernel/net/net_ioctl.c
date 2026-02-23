@@ -14,6 +14,7 @@
 
 #include "lwip/netif.h"
 #include "lwip/ip_addr.h"
+#include "lwip/tcpip.h"
 
 /* AF_INET from socket headers */
 #define AF_INET 2
@@ -93,7 +94,9 @@ int net_ioctl(struct file *f __attribute__((unused)),
 
         struct netif *nif = find_lwip_netif();
         if (nif) {
+            LOCK_TCPIP_CORE();
             sockaddr_from_ip4(&resp.ifr_addr, ip_addr_get_ip4_u32(&nif->ip_addr));
+            UNLOCK_TCPIP_CORE();
         }
 
         if (copy_to_user(ifc.ifc_req, &resp, sizeof(resp)) < 0)
@@ -113,8 +116,12 @@ int net_ioctl(struct file *f __attribute__((unused)),
 
         short flags = IFF_BROADCAST | IFF_MULTICAST;
         struct netif *nif = find_lwip_netif();
-        if (nif && (nif->flags & NETIF_FLAG_UP)) {
-            flags |= IFF_UP | IFF_RUNNING;
+        if (nif) {
+            LOCK_TCPIP_CORE();
+            if (nif->flags & NETIF_FLAG_UP) {
+                flags |= IFF_UP | IFF_RUNNING;
+            }
+            UNLOCK_TCPIP_CORE();
         }
         ifr.ifr_flags = flags;
         if (copy_to_user((void *)arg, &ifr, sizeof(ifr)) < 0)
@@ -128,11 +135,13 @@ int net_ioctl(struct file *f __attribute__((unused)),
         struct netif *nif = find_lwip_netif();
         if (!nif)
             return -ENODEV;
+        LOCK_TCPIP_CORE();
         if (ifr.ifr_flags & IFF_UP) {
             netif_set_up(nif);
         } else {
             netif_set_down(nif);
         }
+        UNLOCK_TCPIP_CORE();
         return 0;
     }
 
@@ -145,7 +154,9 @@ int net_ioctl(struct file *f __attribute__((unused)),
         struct netif *nif = find_lwip_netif();
         if (!nif)
             return -ENODEV;
+        LOCK_TCPIP_CORE();
         sockaddr_from_ip4(&ifr.ifr_addr, ip_addr_get_ip4_u32(&nif->ip_addr));
+        UNLOCK_TCPIP_CORE();
         if (copy_to_user((void *)arg, &ifr, sizeof(ifr)) < 0)
             return -EFAULT;
         return 0;
@@ -159,7 +170,9 @@ int net_ioctl(struct file *f __attribute__((unused)),
             return -ENODEV;
         ip4_addr_t addr;
         addr.addr = ip4_from_sockaddr(&ifr.ifr_addr);
+        LOCK_TCPIP_CORE();
         netif_set_ipaddr(nif, &addr);
+        UNLOCK_TCPIP_CORE();
         return 0;
     }
 
@@ -172,7 +185,9 @@ int net_ioctl(struct file *f __attribute__((unused)),
         struct netif *nif = find_lwip_netif();
         if (!nif)
             return -ENODEV;
+        LOCK_TCPIP_CORE();
         sockaddr_from_ip4(&ifr.ifr_netmask, ip_addr_get_ip4_u32(&nif->netmask));
+        UNLOCK_TCPIP_CORE();
         if (copy_to_user((void *)arg, &ifr, sizeof(ifr)) < 0)
             return -EFAULT;
         return 0;
@@ -186,7 +201,9 @@ int net_ioctl(struct file *f __attribute__((unused)),
             return -ENODEV;
         ip4_addr_t mask;
         mask.addr = ip4_from_sockaddr(&ifr.ifr_netmask);
+        LOCK_TCPIP_CORE();
         netif_set_netmask(nif, &mask);
+        UNLOCK_TCPIP_CORE();
         return 0;
     }
 
@@ -225,7 +242,9 @@ int net_ioctl(struct file *f __attribute__((unused)),
         dev->mtu = (uint32_t)ifr.ifr_mtu;
         struct netif *nif = find_lwip_netif();
         if (nif) {
+            LOCK_TCPIP_CORE();
             nif->mtu = (u16_t)dev->mtu;
+            UNLOCK_TCPIP_CORE();
         }
         return 0;
     }

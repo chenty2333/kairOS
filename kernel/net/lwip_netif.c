@@ -113,12 +113,14 @@ void lwip_net_init(void) {
     ip4_addr_set_zero(&mask);
     ip4_addr_set_zero(&gw);
 
+    LOCK_TCPIP_CORE();
     netif_add(&lwip_netif, &ip, &mask, &gw, dev,
               kairos_netif_init, tcpip_input);
     netif_set_default(&lwip_netif);
     netif_set_up(&lwip_netif);
 
     dhcp_start(&lwip_netif);
+    UNLOCK_TCPIP_CORE();
 
     pr_info("lwip: attached to %s, DHCP started\n", dev->name);
 }

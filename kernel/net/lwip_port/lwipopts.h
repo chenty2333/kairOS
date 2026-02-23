@@ -7,7 +7,7 @@
 
 /* --- Threading model --- */
 #define NO_SYS                  0
-#define LWIP_TCPIP_CORE_LOCKING 0
+#define LWIP_TCPIP_CORE_LOCKING 1
 #define SYS_LIGHTWEIGHT_PROT    1
 
 /* --- Memory --- */

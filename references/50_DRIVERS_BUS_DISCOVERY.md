@@ -87,6 +87,7 @@ lwIP integration:
 - net/lwip_netif.c: network interface adapter; lwip_netif_input() is implemented but not yet called from virtio_net RX interrupt
 - net/lwip_port/: lwIP system adaptation layer (threads, semaphores, timers)
 - net/net_ioctl.c: network ioctl
+- LWIP_TCPIP_CORE_LOCKING is enabled; AF_INET raw API paths and net_ioctl netif mutations are serialized with LWIP core lock
 
 ## Current Limitations
 
