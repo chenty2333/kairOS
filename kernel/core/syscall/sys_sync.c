@@ -17,7 +17,7 @@ extern int do_sem_post(int sem_id);
 int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_ptr,
                   uint64_t uaddr2, uint64_t val3) {
     (void)uaddr2; (void)val3;
-    uint32_t cmd = (uint32_t)(op & ~FUTEX_PRIVATE_FLAG);
+    uint32_t cmd = (uint32_t)(op & ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME));
     switch (cmd) {
     case FUTEX_WAIT: {
         struct timespec ts;
@@ -29,7 +29,23 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_pt
             tsp = &ts;
         return futex_wait(uaddr, (uint32_t)val, tsp);
     }
+    case FUTEX_WAIT_BITSET: {
+        struct timespec ts;
+        struct timespec *tsp = NULL;
+        if ((uint32_t)val3 == 0)
+            return -EINVAL;
+        int rc = sys_copy_timespec(timeout_ptr, &ts, true);
+        if (rc < 0)
+            return rc;
+        if (rc > 0)
+            tsp = &ts;
+        return futex_wait(uaddr, (uint32_t)val, tsp);
+    }
     case FUTEX_WAKE:
+        return futex_wake(uaddr, (int)val);
+    case FUTEX_WAKE_BITSET:
+        if ((uint32_t)val3 == 0)
+            return -EINVAL;
         return futex_wake(uaddr, (int)val);
     default:
         return -EINVAL;

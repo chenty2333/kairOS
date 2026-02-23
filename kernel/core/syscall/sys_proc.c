@@ -460,7 +460,7 @@ int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
 
     uint64_t kflags = flags & ~0xFFULL;
     uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
-                         CLONE_VFORK | CLONE_THREAD | CLONE_SETTLS |
+                         CLONE_SYSVSEM | CLONE_VFORK | CLONE_THREAD | CLONE_SETTLS |
                          CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
                          CLONE_CHILD_SETTID;
 
