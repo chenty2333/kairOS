@@ -62,7 +62,10 @@ void wait_queue_remove(struct wait_queue *wq __attribute__((unused)),
 }
 
 static void wait_queue_wakeup(struct wait_queue *wq, bool all) {
-    while (1) {
+    if (!wq)
+        return;
+
+    if (!all) {
         struct wait_queue_entry *entry = NULL;
         bool flags;
         spin_lock_irqsave(&wq->lock, &flags);
@@ -74,14 +77,37 @@ static void wait_queue_wakeup(struct wait_queue *wq, bool all) {
             entry->wq = NULL;
         }
         spin_unlock_irqrestore(&wq->lock, flags);
-        if (!entry)
+        if (entry && entry->proc) {
+            entry->proc->wait_channel = NULL;
+            proc_wakeup(entry->proc);
+        }
+        return;
+    }
+
+    struct wait_queue_entry *snapshot = NULL;
+    bool flags;
+    spin_lock_irqsave(&wq->lock, &flags);
+    while (1) {
+        if (list_empty(&wq->head))
             break;
+        struct wait_queue_entry *entry =
+            list_first_entry(&wq->head, struct wait_queue_entry, node);
+        list_del(&entry->node);
+        entry->wq = NULL;
+        entry->node.next = (struct list_head *)snapshot;
+        snapshot = entry;
+    }
+    spin_unlock_irqrestore(&wq->lock, flags);
+
+    while (snapshot) {
+        struct wait_queue_entry *entry = snapshot;
+        snapshot = (struct wait_queue_entry *)entry->node.next;
+        INIT_LIST_HEAD(&entry->node);
+        entry->active = false;
         if (entry->proc) {
             entry->proc->wait_channel = NULL;
             proc_wakeup(entry->proc);
         }
-        if (!all)
-            break;
     }
 }
 

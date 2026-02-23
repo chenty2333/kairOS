@@ -81,7 +81,13 @@ static inline bool sched_cpu_needs_kick(int cpu) {
     struct process *curr =
         __atomic_load_n(&cpu_data[cpu].curr_proc, __ATOMIC_ACQUIRE);
     struct process *idle = cpu_data[cpu].idle_proc;
-    return !curr || curr == idle;
+    if (!curr || curr == idle)
+        return true;
+    uint32_t se_state = __atomic_load_n(&curr->se.run_state, __ATOMIC_ACQUIRE);
+    if (se_state != SE_STATE_RUNNING || curr->state != PROC_RUNNING ||
+        curr->se.cpu != cpu)
+        return true;
+    return false;
 }
 
 static inline bool sched_steal_is_enabled(void) {
@@ -834,9 +840,18 @@ void sched_tick(void) {
     cpu->ticks++;
     if (spin_trylock(&rq->lock)) {
         if (curr && curr != cpu->idle_proc) {
-            const struct sched_class *cls = curr->se.sched_class;
-            if (cls)
-                cls->task_tick(rq, curr);
+            uint32_t se_state = se_state_load(&curr->se);
+            if (curr->state == PROC_RUNNING && se_state == SE_STATE_RUNNING &&
+                curr->se.cpu == cpu->cpu_id) {
+                const struct sched_class *cls = curr->se.sched_class;
+                if (cls)
+                    cls->task_tick(rq, curr);
+            } else {
+                __atomic_store_n(&cpu->curr_proc, cpu->idle_proc,
+                                 __ATOMIC_RELEASE);
+                rq->cfs.curr_se = NULL;
+                cpu->resched_needed = true;
+            }
         } else if (rq->nr_running > 0) {
             cpu->resched_needed = true;
         }
@@ -927,6 +942,10 @@ void sched_debug_dump_cpu(int cpu_id) {
     struct sched_stats snapshot;
     sched_get_stats(&snapshot);
     struct percpu_data *cpu = &cpu_data[cpu_id];
+    struct process *curr =
+        __atomic_load_n(&cpu->curr_proc, __ATOMIC_ACQUIRE);
+    struct process *prev =
+        __atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE);
     struct sched_cpu_stats *stats = &snapshot.cpu[cpu_id];
     uint32_t nr_running = sched_rq_nr_running(cpu_id);
     uint64_t min_vruntime = sched_rq_min_vruntime(cpu_id);
@@ -943,6 +962,13 @@ void sched_debug_dump_cpu(int cpu_id) {
             (unsigned long long)stats->steal_success_count,
             (unsigned long long)stats->steal_attempt_count,
             (unsigned long long)stats->state_violation_count);
+    pr_info("sched: cpu%d curr=%p(pid=%d state=%d se=%s cpu=%d) prev=%p(pid=%d state=%d se=%s cpu=%d)\n",
+            cpu_id, curr, curr ? curr->pid : -1, curr ? curr->state : -1,
+            curr ? sched_se_state_name(se_state_load(&curr->se)) : "?",
+            curr ? curr->se.cpu : -1, prev, prev ? prev->pid : -1,
+            prev ? prev->state : -1,
+            prev ? sched_se_state_name(se_state_load(&prev->se)) : "?",
+            prev ? prev->se.cpu : -1);
 }
 
 void sched_cpu_online(int cpu) {
@@ -976,15 +1002,17 @@ bool sched_is_on_cpu(const struct process *p) {
     for (int i = 0; i < cpu_count; i++) {
         struct process *curr =
             __atomic_load_n(&cpu_data[i].curr_proc, __ATOMIC_ACQUIRE);
-        if (curr == p)
-            return true;
+        if (curr == p) {
+            if (p->state == PROC_RUNNING || p->se.cpu == i)
+                return true;
+        }
         struct process *prev =
             __atomic_load_n(&cpu_data[i].prev_task, __ATOMIC_ACQUIRE);
         if (prev == p)
             return true;
     }
 
-    return se_is_on_cpu(&p->se);
+    return se_is_on_cpu(&p->se) && p->state == PROC_RUNNING;
 }
 
 int sched_entity_cpu(const struct process *p) {
@@ -1112,9 +1140,7 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
 
 static void fair_task_tick(struct rq *rq, struct process *p) {
     struct cfs_rq *cfs = &rq->cfs;
-    int cpu_id = p->se.cpu;
-    struct percpu_data *cpu = (cpu_id >= 0 && cpu_id < CONFIG_MAX_CPUS)
-                              ? &cpu_data[cpu_id] : arch_get_percpu();
+    struct percpu_data *cpu = arch_get_percpu();
 
     cfs->curr_se = &p->se;
     uint64_t delta = update_curr(cfs);
@@ -1186,6 +1212,14 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
         in_switch = __atomic_load_n(&cpu_data[src_cpu].prev_task, __ATOMIC_ACQUIRE);
         curr = __atomic_load_n(&cpu_data[src_cpu].curr_proc, __ATOMIC_ACQUIRE);
     }
+    if (in_switch)
+        return NULL;
+    if (curr) {
+        uint32_t curr_se = se_state_load(&curr->se);
+        if (curr_se != SE_STATE_RUNNING || curr->state != PROC_RUNNING ||
+            curr->se.cpu != src_cpu)
+            return NULL;
+    }
 
     /*
      * Steal strategy: take the rightmost node (largest vruntime) —
@@ -1210,6 +1244,8 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
             continue;
         if (se_state_load(se) != SE_STATE_QUEUED)
             continue;
+        if (src_cpu >= 0 && cand->se.cpu != src_cpu)
+            continue;
         best_se = se;
         best = cand;
         break;
@@ -1230,9 +1266,14 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
     sched_validate_entity(best, "fair_steal_task");
 
     if (src_cpu >= 0 && src_cpu < CONFIG_MAX_CPUS) {
+        struct percpu_data *src = &cpu_data[src_cpu];
         struct process *expected = best;
-        __atomic_compare_exchange_n(&cpu_data[src_cpu].prev_task, &expected,
-                                    NULL, false, __ATOMIC_ACQ_REL,
+        __atomic_compare_exchange_n(&src->prev_task, &expected, NULL, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        expected = best;
+        struct process *replacement = src->idle_proc;
+        __atomic_compare_exchange_n(&src->curr_proc, &expected, replacement,
+                                    false, __ATOMIC_ACQ_REL,
                                     __ATOMIC_ACQUIRE);
     }
 

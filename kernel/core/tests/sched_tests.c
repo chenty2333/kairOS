@@ -49,6 +49,7 @@ static int reap_children_bounded(int expected, const char *tag) {
             cpus = 1;
         for (int c = 0; c < cpus; c++)
             sched_debug_dump_cpu(c);
+        sched_trace_dump_recent(128);
         for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
             pid_t pid = proc_get_nth_pid(i);
             if (pid <= 0)
@@ -62,6 +63,9 @@ static int reap_children_bounded(int expected, const char *tag) {
                         se_is_on_rq(&p->se) ? 1 : 0,
                         se_is_on_cpu(&p->se) ? 1 : 0,
                         sched_is_on_cpu(p) ? 1 : 0);
+                pr_warn("sched_stress: %s pending child pid=%d wait_active=%d wait_channel=%p\n",
+                        tag, p->pid, p->wait_entry.active ? 1 : 0,
+                        p->wait_channel);
                 sched_debug_dump_process(p);
             }
         }
@@ -123,6 +127,9 @@ static void test_sched_fork_exit_storm(void) {
 
 static struct wait_queue sw_wq;
 static int sw_live_sleepers;
+static volatile int sw_waker_phase;
+static volatile int sw_waker_for_iter;
+static volatile int sw_waker_while_iter;
 
 static int sleeper_thread(void *arg) {
     (void)arg;
@@ -136,15 +143,22 @@ static int sleeper_thread(void *arg) {
 
 static int waker_thread(void *arg) {
     (void)arg;
+    __atomic_store_n(&sw_waker_phase, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&sw_waker_for_iter, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sw_waker_while_iter, 0, __ATOMIC_RELEASE);
     for (int i = 0; i < SLEEP_WAKE_ROUNDS; i++) {
+        __atomic_store_n(&sw_waker_for_iter, i + 1, __ATOMIC_RELEASE);
         wait_queue_wakeup_all(&sw_wq);
         proc_yield();
     }
     /* Keep waking until all sleepers have exited */
+    __atomic_store_n(&sw_waker_phase, 2, __ATOMIC_RELEASE);
     while (__atomic_load_n(&sw_live_sleepers, __ATOMIC_ACQUIRE) > 0) {
+        __atomic_fetch_add(&sw_waker_while_iter, 1, __ATOMIC_RELEASE);
         wait_queue_wakeup_all(&sw_wq);
         proc_yield();
     }
+    __atomic_store_n(&sw_waker_phase, 3, __ATOMIC_RELEASE);
     proc_exit(0);
     return 0;
 }
@@ -153,6 +167,9 @@ static void test_sched_sleep_wakeup_stress(void) {
     pr_info("sched_stress: sleep_wakeup_stress\n");
     wait_queue_init(&sw_wq);
     __atomic_store_n(&sw_live_sleepers, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sw_waker_phase, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sw_waker_for_iter, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sw_waker_while_iter, 0, __ATOMIC_RELEASE);
 
     int created = 0;
     for (int i = 0; i < SLEEP_WAKE_SLEEPERS; i++) {
@@ -176,7 +193,12 @@ static void test_sched_sleep_wakeup_stress(void) {
     int reaped = reap_children_bounded(created_total, "sleep_wakeup_stress");
     if (reaped != created_total) {
         int live = __atomic_load_n(&sw_live_sleepers, __ATOMIC_ACQUIRE);
+        int wkr_phase = __atomic_load_n(&sw_waker_phase, __ATOMIC_ACQUIRE);
+        int wkr_for = __atomic_load_n(&sw_waker_for_iter, __ATOMIC_ACQUIRE);
+        int wkr_while = __atomic_load_n(&sw_waker_while_iter, __ATOMIC_ACQUIRE);
         pr_warn("sched_stress: sleep_wakeup_stress live_sleepers=%d\n", live);
+        pr_warn("sched_stress: sleep_wakeup_stress wkr phase=%d for_iter=%d while_iter=%d\n",
+                wkr_phase, wkr_for, wkr_while);
         for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
             pid_t pid = proc_get_nth_pid(i);
             if (pid <= 0)
@@ -194,6 +216,8 @@ static void test_sched_sleep_wakeup_stress(void) {
                     p->pid, p->ppid, p->parent ? p->parent->pid : -1, p->state,
                     se_is_on_rq(&p->se) ? 1 : 0, se_is_on_cpu(&p->se) ? 1 : 0,
                     sched_is_on_cpu(p) ? 1 : 0);
+            pr_warn("sched_stress: sleep_wakeup_stress proc pid=%d wait_active=%d wait_channel=%p\n",
+                    p->pid, p->wait_entry.active ? 1 : 0, p->wait_channel);
             sched_debug_dump_process(p);
         }
         test_fail("sched_stress: sleep_wakeup_stress FAIL: reaped %d/%d\n",
@@ -206,18 +230,24 @@ static void test_sched_sleep_wakeup_stress(void) {
 /* ---------- test_sched_yield_storm ---------- */
 
 #define YIELD_ROUNDS 500
+static volatile int yield_iters_total;
+static volatile int yield_done_count;
 
 static int yield_thread(void *arg) {
     (void)arg;
     for (int i = 0; i < YIELD_ROUNDS; i++) {
+        __atomic_fetch_add(&yield_iters_total, 1, __ATOMIC_RELAXED);
         proc_yield();
     }
+    __atomic_fetch_add(&yield_done_count, 1, __ATOMIC_RELEASE);
     proc_exit(0);
     return 0;
 }
 
 static void test_sched_yield_storm(void) {
     pr_info("sched_stress: yield_storm\n");
+    __atomic_store_n(&yield_iters_total, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&yield_done_count, 0, __ATOMIC_RELEASE);
     int n = sched_cpu_count() * 2;
     int created = 0;
     for (int i = 0; i < n; i++) {
@@ -230,9 +260,14 @@ static void test_sched_yield_storm(void) {
         }
     }
     int reaped = reap_children_bounded(created, "yield_storm");
-    if (reaped != created)
+    if (reaped != created) {
+        int iters = __atomic_load_n(&yield_iters_total, __ATOMIC_ACQUIRE);
+        int done = __atomic_load_n(&yield_done_count, __ATOMIC_ACQUIRE);
+        pr_warn("sched_stress: yield_storm progress iters=%d done=%d expected_iters=%d expected_done=%d\n",
+                iters, done, created * YIELD_ROUNDS, created);
         test_fail("sched_stress: yield_storm FAIL: reaped %d/%d\n",
                   reaped, created);
+    }
     pr_info("sched_stress: yield_storm done (%d/%d created)\n", created, n);
 }
 
