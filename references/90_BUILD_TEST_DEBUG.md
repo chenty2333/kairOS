@@ -111,12 +111,14 @@ Concurrency and locking:
 - Different `BUILD_ROOT` runs are parallel-safe; same `BUILD_ROOT` conflicting actions are blocked and return `lock_busy`.
 - Lock wait is configurable: `LOCK_WAIT` (shared default), with per-flow overrides `RUN_LOCK_WAIT` and `TEST_LOCK_WAIT` (default `0` seconds).
 - `make lock-status` lists lock files and metadata pid liveness (`alive`/`dead`).
+- `make lock-clean-stale` removes dead `.lock.meta` and legacy `qemu-run.lock*`.
 
 Concurrency troubleshooting:
 - If you see `lock_busy`, run `make lock-status` first.
 - On `lock_busy`, run/test output still prints `manifest.json` and `result.json` paths for the failed attempt.
 - If metadata pid is `dead`, rerun the same command once; stale lock is reclaimed on the next lock attempt.
 - If metadata pid is `alive`, another run/test is still active for the same build directory; wait or switch to a different `BUILD_ROOT`.
+- Quick wait tuning examples: `make LOCK_WAIT=5 test-mm`, `make RUN_LOCK_WAIT=10 run`.
 
 Run retention:
 - `make gc-runs` keeps latest `RUNS_KEEP` runs (default `20`)

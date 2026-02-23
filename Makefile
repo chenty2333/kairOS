@@ -256,7 +256,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs lock-status user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -785,6 +785,31 @@ lock-status:
 		esac; \
 	done
 
+lock-clean-stale:
+	@echo "lock-clean-stale: cleaning stale lock metadata and legacy qemu-run locks"
+	@legacy=0; dead=0; missing=0; kept=0; \
+	while IFS= read -r -d '' p; do \
+		rm -f "$$p"; \
+		legacy=$$((legacy+1)); \
+	done < <(find build -type f \( -path '*/.locks/qemu-run.lock' -o -path '*/.locks/qemu-run.lock.meta' \) -print0 2>/dev/null); \
+	while IFS= read -r -d '' meta; do \
+		lock="$${meta%.meta}"; \
+		pid="$$(awk -F= '$$1=="pid"{print $$2; exit}' "$$meta" 2>/dev/null)"; \
+		if [ ! -f "$$lock" ]; then \
+			rm -f "$$meta"; \
+			missing=$$((missing+1)); \
+		elif [ -z "$$pid" ]; then \
+			rm -f "$$meta"; \
+			dead=$$((dead+1)); \
+		elif kill -0 "$$pid" >/dev/null 2>&1; then \
+			kept=$$((kept+1)); \
+		else \
+			rm -f "$$meta"; \
+			dead=$$((dead+1)); \
+		fi; \
+	done < <(find build -type f -path '*/.locks/*.lock.meta' -print0 2>/dev/null); \
+	echo "lock-clean-stale: removed legacy=$$legacy dead_meta=$$dead missing_lock_meta=$$missing kept_live_meta=$$kept"
+
 test-soak: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" $(KAIROS_CMD) run test-soak --extra-cflags "$(SOAK_EXTRA_CFLAGS)" --timeout "$(SOAK_TIMEOUT)" --log "$(SOAK_LOG)"
 
@@ -837,6 +862,7 @@ help:
 	@echo "  test-soak-pr - Run PR soak + low-rate fault injection module only"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  lock-status - List lock files and metadata (pid/state)"
+	@echo "  lock-clean-stale - Remove dead .lock.meta and legacy qemu-run locks"
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
 	@echo "  test-matrix - Run SMP x DEBUG test matrix"
@@ -865,4 +891,6 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make ARCH=x86_64 run"
+	@echo "  make LOCK_WAIT=5 test-mm"
+	@echo "  make RUN_LOCK_WAIT=10 run"
 	@echo "  make V=1"
