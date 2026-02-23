@@ -57,10 +57,13 @@ struct fdt_iter {
     int depth;
 };
 
+#define FDT_ROOT_COMPAT_MAX 64
+
 static struct mem_region mem_regions[MAX_MEM_REGIONS];
 static struct mem_region reserved_regions[MAX_RESERVED_REGIONS];
 static int num_mem_regions;
 static int num_reserved_regions;
+static char root_compatible[FDT_ROOT_COMPAT_MAX];
 
 static inline uint32_t fdt_be32(uint32_t val) {
     return ((val & 0xff000000) >> 24) | ((val & 0x00ff0000) >> 8) |
@@ -251,6 +254,7 @@ int fdt_parse(const void *fdt) {
 
     num_mem_regions = 0;
     num_reserved_regions = 0;
+    root_compatible[0] = '\0';
 
     if (fdt_parse_reserved(&view))
         return -EINVAL;
@@ -298,6 +302,13 @@ int fdt_parse(const void *fdt) {
                 addr_cells_stack[it.depth] = fdt_be32(*(const uint32_t *)prop_data);
             } else if (strcmp(prop_name, "#size-cells") == 0 && prop_len >= 4) {
                 size_cells_stack[it.depth] = fdt_be32(*(const uint32_t *)prop_data);
+            } else if (it.depth == 1 && strcmp(prop_name, "compatible") == 0 &&
+                       prop_len > 0 && !root_compatible[0]) {
+                size_t len = strnlen(prop_data, prop_len);
+                if (len >= FDT_ROOT_COMPAT_MAX)
+                    len = FDT_ROOT_COMPAT_MAX - 1;
+                memcpy(root_compatible, prop_data, len);
+                root_compatible[len] = '\0';
             } else if (in_memory && strcmp(prop_name, "reg") == 0) {
                 if (it.depth <= 0)
                     break;
@@ -329,6 +340,11 @@ int fdt_parse(const void *fdt) {
             return -EINVAL;
         }
     }
+}
+
+const char *fdt_root_compatible(void)
+{
+    return root_compatible[0] ? root_compatible : NULL;
 }
 
 int fdt_get_memory(int index, paddr_t *base, size_t *size) {

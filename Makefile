@@ -164,6 +164,7 @@ CORE_SRCS += $(wildcard kernel/fs/*/*.c)
 CORE_SRCS += $(wildcard kernel/bus/*.c)
 CORE_SRCS += $(wildcard kernel/drivers/*/*.c)
 CORE_SRCS += $(wildcard kernel/net/*.c) kernel/net/lwip_port/sys_arch.c
+CORE_SRCS += $(wildcard kernel/platform/*.c)
 CORE_SRCS += kernel/boot/boot.c kernel/boot/limine.c
 
 ifeq ($(CONFIG_DRM_LITE),0)
@@ -661,6 +662,7 @@ TEST_RUNS_ROOT ?= build/runs
 RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
 TEST_ISOLATED ?= 1
+TCC_SMOKE_ISOLATED ?= 0
 RUN_RUNS_ROOT ?= build/runs/run
 RUNS_KEEP_RUN ?= 5
 RUN_GC_AUTO ?= 1
@@ -700,12 +702,12 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 			fi
 
 test-tcc-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
-	$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
+	$(Q)if [ "$(TCC_SMOKE_ISOLATED)" = "1" ]; then \
 		if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
 			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
 		fi; \
 		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
-			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TCC_SMOKE_EXTRA_CFLAGS="$(TCC_SMOKE_EXTRA_CFLAGS)" \
+			TCC_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" TCC_SMOKE_EXTRA_CFLAGS="$(TCC_SMOKE_EXTRA_CFLAGS)" \
 			TCC_SMOKE_TIMEOUT="$(TCC_SMOKE_TIMEOUT)" $(TCC_SMOKE_LOG_FWD) \
 			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-tcc-smoke; \
 			else \

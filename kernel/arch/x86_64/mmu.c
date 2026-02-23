@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/boot.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -22,9 +23,6 @@
 #define PTE_PCD (1ULL << 4)  /* Page Cache Disable */
 #define PTE_NX (1ULL << 63)
 #define PTE_ADDR_MASK 0x000ffffffffff000ULL
-
-#define IOAPIC_BASE_PHYS 0xFEC00000UL
-#define LAPIC_BASE_PHYS  0xFEE00000UL
 
 static paddr_t kernel_pgdir;
 extern char _kernel_start[], _kernel_end[];
@@ -123,13 +121,16 @@ void arch_mmu_init(const struct boot_info *bi) {
         panic("mmu: kernel map failed");
     }
 
-    /* Map local APIC + IOAPIC MMIO into the HHDM. */
-    mmu_map_region(kernel_pgdir, bi->hhdm_offset + IOAPIC_BASE_PHYS,
-               IOAPIC_BASE_PHYS, PAGE_SIZE,
-               PTE_READ | PTE_WRITE | PTE_GLOBAL);
-    mmu_map_region(kernel_pgdir, bi->hhdm_offset + LAPIC_BASE_PHYS,
-               LAPIC_BASE_PHYS, PAGE_SIZE,
-               PTE_READ | PTE_WRITE | PTE_GLOBAL);
+    const struct platform_desc *plat = platform_get();
+    if (plat) {
+        for (int i = 0; i < plat->num_early_mmio; i++) {
+            paddr_t base = plat->early_mmio[i].base;
+            size_t  size = plat->early_mmio[i].size;
+            mmu_map_region(kernel_pgdir, bi->hhdm_offset + base,
+                           base, size,
+                           PTE_READ | PTE_WRITE | PTE_GLOBAL);
+        }
+    }
 
     arch_mmu_switch(kernel_pgdir);
     pr_info("MMU: x86_64 paging enabled (HHDM=%p)\n",

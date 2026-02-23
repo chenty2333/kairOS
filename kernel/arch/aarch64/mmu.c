@@ -9,6 +9,7 @@
 #include <kairos/arch.h>
 #include <kairos/boot.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -259,24 +260,19 @@ void arch_mmu_init(const struct boot_info *bi) {
         panic("mmu: kernel map failed");
     }
 
-    /* 3. MMIO identity maps for QEMU virt platform (via HHDM) */
-    /* GIC Distributor + Redistributor */
-    if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + 0x08000000UL,
-                       0x08000000UL, 0x100000,
-                       PTE_READ | PTE_WRITE | PTE_DEVICE) < 0) {
-        panic("mmu: GIC map failed");
-    }
-    /* PL011 UART */
-    if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + 0x09000000UL,
-                       0x09000000UL, 0x1000,
-                       PTE_READ | PTE_WRITE | PTE_DEVICE) < 0) {
-        panic("mmu: UART map failed");
-    }
-    /* VirtIO MMIO region */
-    if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + 0x0A000000UL,
-                       0x0A000000UL, 0x4000,
-                       PTE_READ | PTE_WRITE | PTE_DEVICE) < 0) {
-        panic("mmu: virtio-mmio map failed");
+    const struct platform_desc *plat = platform_get();
+    if (plat) {
+        for (int i = 0; i < plat->num_early_mmio; i++) {
+            paddr_t base = plat->early_mmio[i].base;
+            size_t  size = plat->early_mmio[i].size;
+            if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + base,
+                               base, size,
+                               PTE_READ | PTE_WRITE | PTE_DEVICE) < 0) {
+                panic("mmu: platform MMIO map failed (%p)", (void *)base);
+            }
+        }
+    } else {
+        panic("mmu: no platform selected");
     }
 
     /* 4. Program MAIR, TCR, TTBR1 and enable MMU */

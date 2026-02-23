@@ -5,6 +5,7 @@
 #include <kairos/boot.h>
 #include <kairos/fdt.h>
 #include <kairos/init.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 
 /* Kernel version */
@@ -45,4 +46,12 @@ void init_boot(const struct boot_info *bi) {
             (void *)bi->hhdm_offset,
             (void *)bi->kernel_phys_base,
             (void *)bi->kernel_virt_base);
+
+#if defined(ARCH_aarch64)
+    platform_select("aarch64");
+#elif defined(ARCH_riscv64)
+    platform_select("riscv64");
+#elif defined(ARCH_x86_64)
+    platform_select("x86_64");
+#endif
 }

@@ -26,6 +26,11 @@ SECTIONS
         *(.srodata .srodata.*)
 
         . = ALIGN(8);
+        __platform_table_start = .;
+        KEEP(*(.platform_table))
+        __platform_table_end = .;
+
+        . = ALIGN(8);
         __ex_table_start = .;
         KEEP(*(__ex_table))
         __ex_table_end = .;

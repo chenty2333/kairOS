@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/boot.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -243,11 +244,15 @@ void arch_mmu_init(const struct boot_info *bi) {
     mmu_map_region(kernel_pgdir, kvirt, kphys, ksize,
                PTE_READ | PTE_WRITE | PTE_EXEC);
 
-    /* 3. Identity-map common MMIO for early drivers */
-    mmu_map_region(kernel_pgdir, 0x0c000000UL, 0x0c000000UL, 4 << 20,
-               PTE_READ | PTE_WRITE);
-    mmu_map_region(kernel_pgdir, 0x10000000UL, 0x10000000UL, 1 << 20,
-               PTE_READ | PTE_WRITE);
+    const struct platform_desc *plat = platform_get();
+    if (plat) {
+        for (int i = 0; i < plat->num_early_mmio; i++) {
+            paddr_t base = plat->early_mmio[i].base;
+            size_t  size = plat->early_mmio[i].size;
+            mmu_map_region(kernel_pgdir, base, base, size,
+                           PTE_READ | PTE_WRITE);
+        }
+    }
 
     arch_mmu_switch(kernel_pgdir);
     pr_info("MMU: Sv39 paging enabled (HHDM=%p)\n",

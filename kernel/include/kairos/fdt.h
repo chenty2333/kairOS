@@ -10,6 +10,8 @@
 int fdt_parse(const void *fdt);
 int fdt_scan_devices(const void *fdt);
 
+const char *fdt_root_compatible(void);
+
 int fdt_get_memory(int index, paddr_t *base, size_t *size);
 int fdt_memory_count(void);
 int fdt_get_reserved(int index, paddr_t *base, size_t *size);
