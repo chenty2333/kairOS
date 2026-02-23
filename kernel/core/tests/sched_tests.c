@@ -57,10 +57,11 @@ static int reap_children_bounded(int expected, const char *tag) {
             if (!p || p == self)
                 continue;
             if (p->parent == self) {
-                pr_warn("sched_stress: %s pending child pid=%d state=%d on_rq=%d on_cpu=%d\n",
+                pr_warn("sched_stress: %s pending child pid=%d state=%d on_rq=%d on_cpu=%d api_on_cpu=%d\n",
                         tag, p->pid, p->state,
                         se_is_on_rq(&p->se) ? 1 : 0,
-                        se_is_on_cpu(&p->se) ? 1 : 0);
+                        se_is_on_cpu(&p->se) ? 1 : 0,
+                        sched_is_on_cpu(p) ? 1 : 0);
                 sched_debug_dump_process(p);
             }
         }
@@ -173,9 +174,31 @@ static void test_sched_sleep_wakeup_stress(void) {
 
     int created_total = created + (w ? 1 : 0);
     int reaped = reap_children_bounded(created_total, "sleep_wakeup_stress");
-    if (reaped != created_total)
+    if (reaped != created_total) {
+        int live = __atomic_load_n(&sw_live_sleepers, __ATOMIC_ACQUIRE);
+        pr_warn("sched_stress: sleep_wakeup_stress live_sleepers=%d\n", live);
+        for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+            pid_t pid = proc_get_nth_pid(i);
+            if (pid <= 0)
+                break;
+            struct process *p = proc_find(pid);
+            if (!p)
+                continue;
+            bool is_slp = p->name[0] == 's' && p->name[1] == 'l' &&
+                          p->name[2] == 'p' && p->name[3] == '\0';
+            bool is_wkr = p->name[0] == 'w' && p->name[1] == 'k' &&
+                          p->name[2] == 'r' && p->name[3] == '\0';
+            if (!is_slp && !is_wkr)
+                continue;
+            pr_warn("sched_stress: sleep_wakeup_stress proc pid=%d ppid=%d parent=%d state=%d on_rq=%d on_cpu=%d api_on_cpu=%d\n",
+                    p->pid, p->ppid, p->parent ? p->parent->pid : -1, p->state,
+                    se_is_on_rq(&p->se) ? 1 : 0, se_is_on_cpu(&p->se) ? 1 : 0,
+                    sched_is_on_cpu(p) ? 1 : 0);
+            sched_debug_dump_process(p);
+        }
         test_fail("sched_stress: sleep_wakeup_stress FAIL: reaped %d/%d\n",
                   reaped, created_total);
+    }
     pr_info("sched_stress: sleep_wakeup_stress done (%d/%d sleepers created)\n",
             created, SLEEP_WAKE_SLEEPERS);
 }

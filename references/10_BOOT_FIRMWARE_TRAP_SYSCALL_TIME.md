@@ -30,6 +30,7 @@ Unified path: hardware interrupt/exception → trapasm.S saves context → arch 
 
 Per-architecture entry:
 - riscv64: stvec → trap_entry, switches to kernel stack via sscratch
+  - trap_return keeps `sscratch=0` when returning to S-mode, and sets `sscratch` to kernel stack top only for U-mode return
 - x86_64: IDT → isr_common (syscall goes through IDT 0x80), switches to kernel stack via TSS
 - aarch64: VBAR_EL1 → vector_table, distinguishes EL0/EL1 origin
 

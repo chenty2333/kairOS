@@ -52,14 +52,16 @@ Per-CPU run queue (percpu_data.runqueue):
 - cfs_rq embedded CFS run queue (red-black tree + min_vruntime + rb_rightmost cache for O(1) steal)
 
 SMP support:
-- sched_steal_enabled flag, currently kept disabled after smp_init() while investigating SMP running-state leaks under stress
+- sched_steal_enabled runtime flag controls pull-based work stealing
 - Work stealing (pull): idle CPU steals task with largest vruntime (least owed) via cached rb_rightmost pointer
+- Steal path clears source CPU `prev_task` when it still points to the stolen task, avoiding stale on-CPU observations in wait/reap paths
 - Push migration: sched_enqueue redirects tasks to idle CPUs when preferred CPU is busy (randomized scan, lockless pre-check)
 - sched_trace ring buffer for debugging (per-CPU, records enqueue/dequeue/pick/switch/steal/migrate events)
 
 Core functions:
 - schedule(): pick next task and context switch
-- schedule() entry drains pending prev_task cleanup before next switch to avoid lost zombie cleanup events across fresh-task switches
+- schedule() and sched_tick() use local per-CPU `curr_proc` as the scheduler truth source
+- schedule() entry drains pending `prev_task` cleanup on the local CPU before new switches
 - sched_tick(): driven by timer interrupt, updates vruntime, checks preemption
 - sched_enqueue() / sched_dequeue(): enqueue/dequeue
 - sched_wake(): wake BLOCKED tasks, or set wake_pending for RUNNING tasks and request resched

@@ -66,11 +66,14 @@ trap_return:
     ld t0, 31*8(sp); csrw sepc, t0
     ld t1, 32*8(sp); csrw sstatus, t1
 
-    /* Set sscratch if returning to user */
+    /* Keep sscratch=0 in kernel mode; set it only for user return */
     andi t0, t1, (1 << 8)
     bnez t0, 1f
     addi t0, sp, TF_SIZE; csrw sscratch, t0
+    j 2f
 1:
+    csrw sscratch, zero
+2:
     do_regs ld, sp
     ld sp, 1*8(sp)
     sret

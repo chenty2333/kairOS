@@ -88,16 +88,6 @@ static inline bool sched_steal_is_enabled(void) {
     return __atomic_load_n(&sched_steal_enabled, __ATOMIC_ACQUIRE);
 }
 
-static inline struct percpu_data *sched_cpu_from_current(struct process *curr) {
-    struct percpu_data *cpu = arch_get_percpu();
-    if (!curr)
-        return cpu;
-    int se_cpu = curr->se.cpu;
-    if (se_cpu >= 0 && se_cpu < CONFIG_MAX_CPUS && se_cpu != cpu->cpu_id)
-        return &cpu_data[se_cpu];
-    return cpu;
-}
-
 static int sched_rq_cpu_id(const struct rq *rq) {
     if (!rq)
         return -1;
@@ -539,7 +529,7 @@ void sched_init_cpu(int cpu) {
 }
 
 void sched_post_switch_cleanup(void) {
-    struct percpu_data *cpu = sched_cpu_from_current(proc_current());
+    struct percpu_data *cpu = arch_get_percpu();
     struct process *prev =
         __atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE);
     if (prev) {
@@ -711,8 +701,10 @@ static struct process *sched_steal_task(int self_id) {
 }
 
 void schedule(void) {
-    struct process *prev = proc_current(), *next;
-    struct percpu_data *cpu = sched_cpu_from_current(prev);
+    struct percpu_data *cpu = arch_get_percpu();
+    struct process *prev =
+        __atomic_load_n(&cpu->curr_proc, __ATOMIC_ACQUIRE);
+    struct process *next;
     struct sched_cpu_stats *stats = &cpu->stats;
     struct rq *rq = &cpu->runqueue;
     bool state = arch_irq_save();
@@ -834,8 +826,9 @@ void schedule(void) {
 }
 
 void sched_tick(void) {
-    struct process *curr = proc_current();
-    struct percpu_data *cpu = sched_cpu_from_current(curr);
+    struct percpu_data *cpu = arch_get_percpu();
+    struct process *curr =
+        __atomic_load_n(&cpu->curr_proc, __ATOMIC_ACQUIRE);
     struct rq *rq = &cpu->runqueue;
 
     cpu->ticks++;
@@ -1235,6 +1228,14 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
     rq->nr_running--;
     update_min_vruntime(cfs);
     sched_validate_entity(best, "fair_steal_task");
+
+    if (src_cpu >= 0 && src_cpu < CONFIG_MAX_CPUS) {
+        struct process *expected = best;
+        __atomic_compare_exchange_n(&cpu_data[src_cpu].prev_task, &expected,
+                                    NULL, false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE);
+    }
+
     return best;
 }
 
