@@ -141,6 +141,10 @@ Result decision policy:
 - `TEST_RESULT_JSON` (kernel-emitted single-line JSON) is the primary verdict source for marker-required test runs.
 - When structured result is complete and passed, `qemu_rc=0/124/2` are accepted (`2` covers firmware-reset style exits seen on some runs).
 - If structured output is missing/invalid, the runner uses timeout/failure markers as guarded fallback and reports non-pass status.
+- `run-qemu-session.sh` / `run-qemu-test.sh` emit signal telemetry in `result.json` under `signals`:
+  `qemu_exit_signal`, `qemu_term_signal`, `qemu_term_sender_pid` (nullable when unavailable)
+- When no kernel failure markers are present and the runner exits by signal (`qemu_rc` in 128+N, non-timeout),
+  verdict is treated as infrastructure interruption (`external_sigterm` / `external_sigkill` / `external_signal`).
 - `run-qemu-test.sh` also supports optional log assertions:
   - `TEST_REQUIRED_MARKER_REGEX`: at least one required regex
   - `TEST_REQUIRED_MARKERS_ALL`: newline-delimited required regex list (all must match)

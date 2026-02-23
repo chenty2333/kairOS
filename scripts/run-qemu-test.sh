@@ -104,6 +104,25 @@ print(f"ok {schema} {failed} {1 if done else 0} {enabled_mask}")
 PY
 }
 
+extract_qemu_signal_meta() {
+    local log_path="$1"
+    local line=""
+
+    if [[ -f "${log_path}" ]]; then
+        line="$(grep -Eo 'terminating on signal [0-9]+( from pid [0-9]+)?' "${log_path}" | tail -n 1 || true)"
+    fi
+
+    if [[ "${line}" =~ signal[[:space:]]+([0-9]+)[[:space:]]+from[[:space:]]+pid[[:space:]]+([0-9]+) ]]; then
+        printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    if [[ "${line}" =~ signal[[:space:]]+([0-9]+) ]]; then
+        printf '%s -1\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    printf '%s %s\n' "-1" "-1"
+}
+
 write_manifest() {
     local start_time_utc="$1"
     local git_sha="unknown"
@@ -147,6 +166,9 @@ write_result() {
     local structured_enabled_mask="${15}"
     local has_required_markers="${16}"
     local has_forbidden_markers="${17}"
+    local qemu_exit_signal="${18}"
+    local qemu_term_signal="${19}"
+    local qemu_term_sender_pid="${20}"
 
     cat >"${TEST_RESULT}" <<JSON
 {
@@ -157,6 +179,11 @@ write_result() {
   "verdict_source": $(json_quote "${verdict_source}"),
   "exit_code": ${exit_code},
   "qemu_exit_code": ${qemu_rc},
+  "signals": {
+    "qemu_exit_signal": $(json_int_or_null "${qemu_exit_signal}"),
+    "qemu_term_signal": $(json_int_or_null "${qemu_term_signal}"),
+    "qemu_term_sender_pid": $(json_int_or_null "${qemu_term_sender_pid}")
+  },
   "log_path": $(json_quote "${TEST_LOG}"),
   "end_time_utc": $(json_quote "${end_time_utc}"),
   "duration_ms": ${duration_ms},
@@ -183,6 +210,7 @@ run_test_main() {
     local old_pid wrapped_qemu_cmd qemu_rc
     local has_boot_marker has_fatal_markers has_failure_markers
     local has_required_markers has_forbidden_markers
+    local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
     local structured_status structured_schema structured_failed structured_done structured_enabled_mask
     local status reason exit_code verdict_source
 
@@ -198,7 +226,7 @@ run_test_main() {
             end_ms="$(date +%s%3N)"
             end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             duration_ms="$((end_ms - start_ms))"
-            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 1 0
+            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 1 0 -1 -1 -1
             echo "test: existing qemu pid is still running (${old_pid})" >&2
             return 2
         fi
@@ -257,6 +285,12 @@ run_test_main() {
         grep -Eiq "${TEST_FORBIDDEN_MARKER_REGEX}" "${TEST_LOG}"; then
         has_forbidden_markers=1
     fi
+
+    qemu_exit_signal=-1
+    if [[ ${qemu_rc} -gt 128 && ${qemu_rc} -le 255 ]]; then
+        qemu_exit_signal="$((qemu_rc - 128))"
+    fi
+    read -r qemu_term_signal qemu_term_sender_pid < <(extract_qemu_signal_meta "${TEST_LOG}")
 
     structured_status="missing"
     structured_schema=-1
@@ -380,6 +414,18 @@ run_test_main() {
         fi
     fi
 
+    if [[ ${has_fatal_markers} -eq 0 ]] && [[ ${has_failure_markers} -eq 0 ]] && [[ "${status}" != "pass" ]] && [[ ${qemu_exit_signal} -gt 0 ]] && [[ ${qemu_rc} -ne 124 ]]; then
+        status="infra_fail"
+        verdict_source="infra"
+        if [[ ${qemu_exit_signal} -eq 15 ]]; then
+            reason="external_sigterm"
+        elif [[ ${qemu_exit_signal} -eq 9 ]]; then
+            reason="external_sigkill"
+        else
+            reason="external_signal"
+        fi
+    fi
+
     if [[ "${status}" == "pass" ]]; then
         exit_code=0
     elif [[ "${status}" == "error" || "${status}" == "infra_fail" ]]; then
@@ -391,7 +437,7 @@ run_test_main() {
     end_ms="$(date +%s%3N)"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     duration_ms="$((end_ms - start_ms))"
-    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}" "${has_required_markers}" "${has_forbidden_markers}"
+    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}" "${has_required_markers}" "${has_forbidden_markers}" "${qemu_exit_signal}" "${qemu_term_signal}" "${qemu_term_sender_pid}"
 
     if [[ "${status}" == "pass" ]]; then
         echo "test: PASS (${reason}, qemu_rc=${qemu_rc})"
@@ -445,7 +491,7 @@ if kairos_lock_is_busy_rc "${rc}"; then
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     write_manifest "${start_time_utc}"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 1 0
+    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 1 0 -1 -1 -1
     echo "test: manifest -> ${TEST_MANIFEST}"
     echo "test: result -> ${TEST_RESULT}"
     echo "test: lock_busy (lock: ${TEST_LOCK_FILE})" >&2

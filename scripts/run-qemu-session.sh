@@ -40,6 +40,15 @@ json_bool() {
     fi
 }
 
+json_int_or_null() {
+    local value="$1"
+    if [[ "${value}" =~ ^-?[0-9]+$ ]] && [[ "${value}" -ge 0 ]]; then
+        echo "${value}"
+    else
+        echo "null"
+    fi
+}
+
 validate_boot_drive_cmd() {
     local cmd="$1"
     local boot_spec boot_path
@@ -64,6 +73,25 @@ validate_boot_drive_cmd() {
     fi
 
     return 0
+}
+
+extract_qemu_signal_meta() {
+    local log_path="$1"
+    local line=""
+
+    if [[ -f "${log_path}" ]]; then
+        line="$(grep -Eo 'terminating on signal [0-9]+( from pid [0-9]+)?' "${log_path}" | tail -n 1 || true)"
+    fi
+
+    if [[ "${line}" =~ signal[[:space:]]+([0-9]+)[[:space:]]+from[[:space:]]+pid[[:space:]]+([0-9]+) ]]; then
+        printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    if [[ "${line}" =~ signal[[:space:]]+([0-9]+) ]]; then
+        printf '%s -1\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    printf '%s %s\n' "-1" "-1"
 }
 
 write_manifest() {
@@ -101,6 +129,9 @@ write_result() {
     local qemu_rc="$6"
     local has_fail_markers="$7"
     local has_boot_marker="$8"
+    local qemu_exit_signal="$9"
+    local qemu_term_signal="${10}"
+    local qemu_term_sender_pid="${11}"
 
     cat >"${SESSION_RESULT}" <<JSON
 {
@@ -111,6 +142,11 @@ write_result() {
   "reason": $(json_quote "${reason}"),
   "exit_code": ${exit_code},
   "qemu_exit_code": ${qemu_rc},
+  "signals": {
+    "qemu_exit_signal": $(json_int_or_null "${qemu_exit_signal}"),
+    "qemu_term_signal": $(json_int_or_null "${qemu_term_signal}"),
+    "qemu_term_sender_pid": $(json_int_or_null "${qemu_term_sender_pid}")
+  },
   "log_path": $(json_quote "${SESSION_LOG}"),
   "end_time_utc": $(json_quote "${end_time_utc}"),
   "duration_ms": ${duration_ms},
@@ -125,6 +161,7 @@ JSON
 run_session_main() {
     local start_ms start_time_utc end_ms end_time_utc duration_ms
     local old_pid wrapped_qemu_cmd qemu_rc has_boot_marker has_fail_markers
+    local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
     local status reason exit_code
 
     rm -f "${SESSION_LOG}"
@@ -136,7 +173,7 @@ run_session_main() {
         end_ms="$(date +%s%3N)"
         end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
         duration_ms="$((end_ms - start_ms))"
-        write_result "${end_time_utc}" "${duration_ms}" "error" "missing_boot_media" 2 2 0 0
+        write_result "${end_time_utc}" "${duration_ms}" "error" "missing_boot_media" 2 2 0 0 -1 -1 -1
         echo "run: manifest -> ${SESSION_MANIFEST}"
         echo "run: result -> ${SESSION_RESULT}"
         return 2
@@ -150,7 +187,7 @@ run_session_main() {
             end_ms="$(date +%s%3N)"
             end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             duration_ms="$((end_ms - start_ms))"
-            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 0 0
+            write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 0 0 -1 -1 -1
             echo "run: existing qemu pid is still running (${old_pid})" >&2
             return 2
         fi
@@ -197,6 +234,12 @@ run_session_main() {
         has_fail_markers=1
     fi
 
+    qemu_exit_signal=-1
+    if [[ ${qemu_rc} -gt 128 && ${qemu_rc} -le 255 ]]; then
+        qemu_exit_signal="$((qemu_rc - 128))"
+    fi
+    read -r qemu_term_signal qemu_term_sender_pid < <(extract_qemu_signal_meta "${SESSION_LOG}")
+
     status="fail"
     reason="unexpected_exit"
     exit_code=1
@@ -238,10 +281,22 @@ run_session_main() {
         fi
     fi
 
+    if [[ ${has_fail_markers} -eq 0 ]] && [[ "${status}" != "pass" ]] && [[ ${qemu_exit_signal} -gt 0 ]] && [[ ${qemu_rc} -ne 124 ]]; then
+        status="error"
+        exit_code=2
+        if [[ ${qemu_exit_signal} -eq 15 ]]; then
+            reason="external_sigterm"
+        elif [[ ${qemu_exit_signal} -eq 9 ]]; then
+            reason="external_sigkill"
+        else
+            reason="external_signal"
+        fi
+    fi
+
     end_ms="$(date +%s%3N)"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     duration_ms="$((end_ms - start_ms))"
-    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${has_fail_markers}" "${has_boot_marker}"
+    write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${has_fail_markers}" "${has_boot_marker}" "${qemu_exit_signal}" "${qemu_term_signal}" "${qemu_term_sender_pid}"
 
     if [[ "${status}" == "pass" ]]; then
         echo "run: PASS (${reason}, qemu_rc=${qemu_rc})"
@@ -290,7 +345,7 @@ if kairos_lock_is_busy_rc "${rc}"; then
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     write_manifest "${start_time_utc}"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 0 0
+    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 0 0 -1 -1 -1
     echo "run: manifest -> ${SESSION_MANIFEST}"
     echo "run: result -> ${SESSION_RESULT}"
     echo "run: lock_busy (lock: ${SESSION_LOCK_FILE})" >&2
