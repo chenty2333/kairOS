@@ -249,7 +249,9 @@ if kairos_lock_is_busy_rc "${rc}"; then
     write_manifest "${start_time_utc}"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 0 0
-    echo "run: session is busy (lock: ${SESSION_LOCK_FILE})" >&2
+    echo "run: manifest -> ${SESSION_MANIFEST}"
+    echo "run: result -> ${SESSION_RESULT}"
+    echo "run: lock_busy (lock: ${SESSION_LOCK_FILE})" >&2
     exit 2
 fi
 

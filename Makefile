@@ -664,8 +664,9 @@ RUN_GC_AUTO ?= 1
 RUN_ISOLATED ?= 1
 RUN_TIMEOUT ?= 0
 RUN_REQUIRE_BOOT ?= 1
-RUN_LOCK_WAIT ?= 0
-TEST_LOCK_WAIT ?= 0
+LOCK_WAIT ?= 0
+RUN_LOCK_WAIT ?= $(LOCK_WAIT)
+TEST_LOCK_WAIT ?= $(LOCK_WAIT)
 ifndef RUN_ID
 RUN_ID := $(shell sh -c 'ts="$$(date +%y%m%d-%H%M)"; rnd="$$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d "[[:space:]]")"; if [ -z "$$rnd" ]; then rnd="$$(printf "%04x" "$$$$")"; fi; printf "%s-%s" "$$ts" "$$rnd"')
 endif
@@ -855,6 +856,7 @@ help:
 	@echo "  RUN_ISOLATED - Enable isolated run session (default: 1)"
 	@echo "  RUN_TIMEOUT - Session timeout seconds for run (0 means no timeout)"
 	@echo "  RUN_REQUIRE_BOOT - Require boot marker for run success (default: 1)"
+	@echo "  LOCK_WAIT - Default lock wait seconds for run/test lock acquisition (default: 0)"
 	@echo "  RUN_LOCK_WAIT - Seconds to wait for run qemu lock before lock_busy (default: 0)"
 	@echo "  TEST_LOCK_WAIT - Seconds to wait for test qemu lock before lock_busy (default: 0)"
 	@echo "  RUN_ID - Explicit isolated session id for run/test (default: YYMMDD-HHMM-xxxx)"

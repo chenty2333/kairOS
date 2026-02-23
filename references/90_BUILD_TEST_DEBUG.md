@@ -109,11 +109,12 @@ Concurrency and locking:
 - Lock metadata is written to `<lock>.meta` (`pid/start_utc/start_epoch/cwd/cmd`) for observability.
 - On lock contention, stale metadata (dead pid) is reclaimed automatically and lock acquisition is retried once.
 - Different `BUILD_ROOT` runs are parallel-safe; same `BUILD_ROOT` conflicting actions are blocked and return `lock_busy`.
-- Lock wait is configurable: `RUN_LOCK_WAIT` (run), `TEST_LOCK_WAIT` (test/soak/debug), both default `0` seconds.
+- Lock wait is configurable: `LOCK_WAIT` (shared default), with per-flow overrides `RUN_LOCK_WAIT` and `TEST_LOCK_WAIT` (default `0` seconds).
 - `make lock-status` lists lock files and metadata pid liveness (`alive`/`dead`).
 
 Concurrency troubleshooting:
 - If you see `lock_busy`, run `make lock-status` first.
+- On `lock_busy`, run/test output still prints `manifest.json` and `result.json` paths for the failed attempt.
 - If metadata pid is `dead`, rerun the same command once; stale lock is reclaimed on the next lock attempt.
 - If metadata pid is `alive`, another run/test is still active for the same build directory; wait or switch to a different `BUILD_ROOT`.
 
