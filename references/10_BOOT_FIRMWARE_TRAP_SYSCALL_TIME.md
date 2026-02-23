@@ -77,6 +77,7 @@ Two-layer structure:
   - Linux sleep ABI compatibility:
     - `nanosleep` on `EINTR` now fills remaining time (`rem`) when provided
     - `clock_nanosleep` supports both relative sleep and `TIMER_ABSTIME` absolute deadlines
+    - `clock_nanosleep(TIMER_ABSTIME)` now re-checks current time by `clockid` after wakeups; this keeps `CLOCK_REALTIME` and `CLOCK_MONOTONIC` paths separated for future realtime offset support
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
 BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. tick_policy_init() designates the timekeeper CPU.

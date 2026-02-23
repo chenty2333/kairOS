@@ -57,6 +57,25 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
     return ticks ? ticks : 1;
 }
 
+static int clockid_now_ns(uint64_t clockid, uint64_t *out_ns) {
+    if (!out_ns)
+        return -EINVAL;
+    switch (clockid) {
+    case CLOCK_MONOTONIC:
+        *out_ns = time_now_ns();
+        return 0;
+    case CLOCK_REALTIME:
+        /*
+         * Current time core does not maintain a separate realtime offset yet.
+         * Keep this split to preserve ABI behavior when realtime is introduced.
+         */
+        *out_ns = time_now_ns();
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
 static int64_t sleep_until_deadline(uint64_t deadline, uint64_t rem_ptr,
                                     bool report_remaining) {
     struct process *curr = proc_current();
@@ -107,10 +126,10 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!tp_ptr)
         return -EFAULT;
-    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
-        return -EINVAL;
-
-    uint64_t ns = time_now_ns();
+    uint64_t ns = 0;
+    int rc = clockid_now_ns(clockid, &ns);
+    if (rc < 0)
+        return rc;
     struct timespec ts = {
         .tv_sec = (time_t)(ns / NS_PER_SEC),
         .tv_nsec = (int64_t)(ns % NS_PER_SEC),
@@ -174,19 +193,32 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
     (void)a4; (void)a5;
     if (flags & ~TIMER_ABSTIME)
         return -EINVAL;
-    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
-        return -EINVAL;
+    uint64_t now_ns = 0;
+    int rc = clockid_now_ns(clockid, &now_ns);
+    if (rc < 0)
+        return rc;
     struct timespec req;
-    int rc = sys_copy_timespec(req_ptr, &req, false);
+    rc = sys_copy_timespec(req_ptr, &req, false);
     if (rc < 0)
         return rc;
 
     uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
     if (flags & TIMER_ABSTIME) {
-        uint64_t now_ns = time_now_ns();
-        if (req_ns <= now_ns)
-            return 0;
-        req_ns -= now_ns;
+        while (1) {
+            rc = clockid_now_ns(clockid, &now_ns);
+            if (rc < 0)
+                return rc;
+            if (req_ns <= now_ns)
+                return 0;
+            uint64_t rem_ns = req_ns - now_ns;
+            uint64_t delta = ns_to_sched_ticks(rem_ns);
+            if (delta == 0)
+                return 0;
+            uint64_t deadline = arch_timer_get_ticks() + delta;
+            rc = sleep_until_deadline(deadline, 0, false);
+            if (rc < 0)
+                return rc;
+        }
     }
 
     uint64_t delta = ns_to_sched_ticks(req_ns);

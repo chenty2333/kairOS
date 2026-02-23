@@ -101,6 +101,7 @@ Special:
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks) and `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`)
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
+- `ppoll`/`pselect6` now temporarily install the provided signal mask during wait and restore the original mask on return
 
 Related references:
 - references/00_REPO_MAP.md

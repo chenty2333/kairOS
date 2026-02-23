@@ -14,6 +14,39 @@
 #include <kairos/vfs.h>
 
 #define NS_PER_SEC 1000000000ULL
+#define SIG_UNBLOCKABLE_MASK \
+    ((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)))
+
+struct poll_sigmask_ctx {
+    struct process *proc;
+    sigset_t old_mask;
+    bool active;
+};
+
+static sigset_t poll_sanitize_sigmask(sigset_t mask) {
+    return mask & ~SIG_UNBLOCKABLE_MASK;
+}
+
+static int poll_sigmask_apply(const sigset_t *new_mask,
+                              struct poll_sigmask_ctx *ctx) {
+    if (!new_mask || !ctx)
+        return -EINVAL;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    ctx->proc = p;
+    ctx->old_mask = p->sig_blocked;
+    p->sig_blocked = poll_sanitize_sigmask(*new_mask);
+    ctx->active = true;
+    return 0;
+}
+
+static void poll_sigmask_restore(struct poll_sigmask_ctx *ctx) {
+    if (!ctx || !ctx->active || !ctx->proc)
+        return;
+    ctx->proc->sig_blocked = ctx->old_mask;
+    ctx->active = false;
+}
 
 static int poll_check_fds(struct pollfd *fds, size_t nfds) {
     int ready = 0;
@@ -278,12 +311,14 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
                   uint64_t sigmask_ptr, uint64_t sigsetsize,
                   uint64_t a5) {
     (void)a5;
+    bool have_sigmask = false;
+    sigset_t mask = 0;
     if (sigmask_ptr) {
         if (sigsetsize != sizeof(sigset_t))
             return -EINVAL;
-        sigset_t mask;
         if (copy_from_user(&mask, (void *)sigmask_ptr, sizeof(mask)) < 0)
             return -EFAULT;
+        have_sigmask = true;
     }
     int timeout_ms = -1;
     if (tsp_ptr) {
@@ -295,13 +330,24 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
             return rc;
         timeout_ms = rc;
     }
-    return sys_poll(fds_ptr, nfds, (uint64_t)timeout_ms, 0, 0, 0);
+
+    struct poll_sigmask_ctx ctx = {0};
+    if (have_sigmask) {
+        int rc = poll_sigmask_apply(&mask, &ctx);
+        if (rc < 0)
+            return rc;
+    }
+    int64_t ret = sys_poll(fds_ptr, nfds, (uint64_t)timeout_ms, 0, 0, 0);
+    poll_sigmask_restore(&ctx);
+    return ret;
 }
 
 int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
                      uint64_t writefds_ptr, uint64_t exceptfds_ptr,
                      uint64_t timeout_ptr, uint64_t sigmask_ptr) {
     (void)exceptfds_ptr;
+    bool have_sigmask = false;
+    sigset_t mask = 0;
     if (sigmask_ptr) {
         struct {
             uint64_t sigmask;
@@ -312,9 +358,9 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
         if (ss.sigmask) {
             if (ss.sigsetsize != sizeof(sigset_t))
                 return -EINVAL;
-            sigset_t mask;
             if (copy_from_user(&mask, (void *)ss.sigmask, sizeof(mask)) < 0)
                 return -EFAULT;
+            have_sigmask = true;
         }
     }
     int timeout_ms = -1;
@@ -327,5 +373,14 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
             return rc;
         timeout_ms = rc;
     }
-    return do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+
+    struct poll_sigmask_ctx ctx = {0};
+    if (have_sigmask) {
+        int rc = poll_sigmask_apply(&mask, &ctx);
+        if (rc < 0)
+            return rc;
+    }
+    int64_t ret = do_select_common(nfds, readfds_ptr, writefds_ptr, timeout_ms);
+    poll_sigmask_restore(&ctx);
+    return ret;
 }
