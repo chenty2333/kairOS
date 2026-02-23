@@ -52,6 +52,42 @@ int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_pt
     }
 }
 
+int64_t sys_futex_waitv(uint64_t waiters_ptr, uint64_t nr_futexes, uint64_t flags,
+                        uint64_t timeout_ptr, uint64_t clockid, uint64_t a5) {
+    (void)a5;
+    if (flags != 0)
+        return -EINVAL;
+    if (!waiters_ptr)
+        return -EFAULT;
+    if (nr_futexes == 0 || nr_futexes > FUTEX_WAITV_MAX)
+        return -EINVAL;
+
+    if (nr_futexes > SIZE_MAX / sizeof(struct futex_waitv))
+        return -EINVAL;
+    size_t bytes = (size_t)nr_futexes * sizeof(struct futex_waitv);
+    struct futex_waitv *waiters = kmalloc(bytes);
+    if (!waiters)
+        return -ENOMEM;
+    if (copy_from_user(waiters, (const void *)waiters_ptr, bytes) < 0) {
+        kfree(waiters);
+        return -EFAULT;
+    }
+
+    struct timespec ts = {0};
+    struct timespec *tsp = NULL;
+    if (timeout_ptr) {
+        if (copy_from_user(&ts, (const void *)timeout_ptr, sizeof(ts)) < 0) {
+            kfree(waiters);
+            return -EFAULT;
+        }
+        tsp = &ts;
+    }
+
+    int rc = futex_waitv(waiters, (uint32_t)nr_futexes, tsp, (int)clockid);
+    kfree(waiters);
+    return rc;
+}
+
 int64_t sys_sem_init(uint64_t count, uint64_t a1, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;

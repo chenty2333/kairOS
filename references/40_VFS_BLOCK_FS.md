@@ -100,6 +100,7 @@ Special:
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
+- Linux ABI compatibility also includes `eventfd2`, `timerfd_create/settime/gettime`, and `signalfd4` via anon-vnode pollable file descriptors
 - `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior; timeout argument is currently ignored
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately

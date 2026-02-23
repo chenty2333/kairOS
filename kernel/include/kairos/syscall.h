@@ -209,6 +209,8 @@ int64_t sys_prlimit64(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 int64_t sys_execveat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                      uint64_t);
 int64_t sys_futex(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_futex_waitv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t);
 int64_t sys_eventfd2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -340,6 +342,8 @@ int64_t sys_rt_sigtimedwait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                             uint64_t);
 int64_t sys_rt_sigqueueinfo(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                             uint64_t);
+int64_t sys_signalfd4(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
 int64_t sys_poll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_select(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_ppoll(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

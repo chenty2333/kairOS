@@ -20,13 +20,42 @@
 #define TFD_CLOEXEC O_CLOEXEC
 #define TFD_NONBLOCK O_NONBLOCK
 
+#define SFD_CLOEXEC O_CLOEXEC
+#define SFD_NONBLOCK O_NONBLOCK
+
 #define EVENTFD_COUNTER_MAX (UINT64_MAX - 1ULL)
 #define EVENTFD_MAGIC 0x65766466U
 #define TIMERFD_MAGIC 0x746d6664U
+#define SIGNALFD_MAGIC 0x73666466U
 
 struct linux_itimerspec {
     struct timespec it_interval;
     struct timespec it_value;
+};
+
+struct linux_signalfd_siginfo {
+    uint32_t ssi_signo;
+    int32_t ssi_errno;
+    int32_t ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t ssi_status;
+    int32_t ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint16_t __pad2;
+    int32_t ssi_syscall;
+    uint64_t ssi_call_addr;
+    uint32_t ssi_arch;
+    uint8_t __pad[128 - 14 * 4 - 5 * 8 - 2 * 2];
 };
 
 struct eventfd_ctx {
@@ -54,6 +83,14 @@ struct timerfd_ctx {
     bool closed;
 };
 
+struct signalfd_ctx {
+    uint32_t magic;
+    spinlock_t lock;
+    struct vnode *vnode;
+    sigset_t mask;
+    bool closed;
+};
+
 static LIST_HEAD(timerfd_list);
 static spinlock_t timerfd_list_lock = SPINLOCK_INIT;
 
@@ -77,6 +114,16 @@ static struct file_ops timerfd_file_ops = {
     .close = timerfd_close,
     .fread = timerfd_fread,
     .poll = timerfd_poll,
+};
+
+static int signalfd_close(struct vnode *vn);
+static int signalfd_poll(struct file *file, uint32_t events);
+static ssize_t signalfd_fread(struct file *file, void *buf, size_t len);
+
+static struct file_ops signalfd_file_ops = {
+    .close = signalfd_close,
+    .fread = signalfd_fread,
+    .poll = signalfd_poll,
 };
 
 static uint64_t u64_add_sat(uint64_t lhs, uint64_t rhs) {
@@ -265,6 +312,171 @@ static int eventfd_create_file(uint32_t initval, uint64_t flags, struct file **o
     file->vnode = vn;
     file->flags = O_RDWR;
     if (flags & EFD_NONBLOCK)
+        file->flags |= O_NONBLOCK;
+    *out = file;
+    return 0;
+}
+
+static sigset_t signalfd_sanitize_mask(sigset_t mask) {
+    sigset_t allowed = UINT64_MAX;
+    if (NSIG < 64)
+        allowed = (1ULL << NSIG) - 1ULL;
+    mask &= allowed;
+    mask &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+    return mask;
+}
+
+static bool signalfd_take_signal(struct process *p, sigset_t mask, int *sig_out) {
+    if (!p || !sig_out)
+        return false;
+
+    while (1) {
+        sigset_t pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+        sigset_t ready = pending & mask;
+        if (!ready)
+            return false;
+        int bit = __builtin_ctzll(ready);
+        sigset_t clear = ~(1ULL << bit);
+        sigset_t expected = pending;
+        sigset_t desired = pending & clear;
+        if (__atomic_compare_exchange_n(&p->sig_pending, &expected, desired,
+                                        false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE)) {
+            *sig_out = bit + 1;
+            return true;
+        }
+    }
+}
+
+static int signalfd_close(struct vnode *vn) {
+    if (!vn)
+        return 0;
+    struct signalfd_ctx *ctx = (struct signalfd_ctx *)vn->fs_data;
+    if (ctx && ctx->magic == SIGNALFD_MAGIC) {
+        bool irq;
+        spin_lock_irqsave(&ctx->lock, &irq);
+        ctx->closed = true;
+        spin_unlock_irqrestore(&ctx->lock, irq);
+        ctx->magic = 0;
+        kfree(ctx);
+    }
+    kfree(vn);
+    return 0;
+}
+
+static int signalfd_poll(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+    struct signalfd_ctx *ctx = (struct signalfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != SIGNALFD_MAGIC)
+        return POLLNVAL;
+
+    struct process *p = proc_current();
+    if (!p)
+        return POLLNVAL;
+
+    sigset_t mask;
+    bool closed;
+    bool irq;
+    spin_lock_irqsave(&ctx->lock, &irq);
+    mask = ctx->mask;
+    closed = ctx->closed;
+    spin_unlock_irqrestore(&ctx->lock, irq);
+
+    sigset_t pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+    uint32_t revents = 0;
+    if (pending & mask)
+        revents |= POLLIN;
+    if (closed)
+        revents |= POLLHUP;
+    return (int)(revents & events);
+}
+
+static void signalfd_fill_siginfo(struct linux_signalfd_siginfo *info, int sig) {
+    memset(info, 0, sizeof(*info));
+    info->ssi_signo = (uint32_t)sig;
+}
+
+static ssize_t signalfd_fread(struct file *file, void *buf, size_t len) {
+    if (!file || !file->vnode || !buf)
+        return -EINVAL;
+    if (len < sizeof(struct linux_signalfd_siginfo))
+        return -EINVAL;
+
+    struct signalfd_ctx *ctx = (struct signalfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != SIGNALFD_MAGIC)
+        return -EINVAL;
+
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+
+    size_t max_entries = len / sizeof(struct linux_signalfd_siginfo);
+    while (1) {
+        sigset_t mask = 0;
+        bool closed = false;
+        bool irq;
+        spin_lock_irqsave(&ctx->lock, &irq);
+        mask = ctx->mask;
+        closed = ctx->closed;
+        spin_unlock_irqrestore(&ctx->lock, irq);
+        if (closed)
+            return -EINVAL;
+
+        size_t emitted = 0;
+        uint8_t *dst = (uint8_t *)buf;
+        while (emitted < max_entries) {
+            int sig = 0;
+            if (!signalfd_take_signal(p, mask, &sig))
+                break;
+            struct linux_signalfd_siginfo info;
+            signalfd_fill_siginfo(&info, sig);
+            memcpy(dst + emitted * sizeof(info), &info, sizeof(info));
+            emitted++;
+        }
+        if (emitted > 0)
+            return (ssize_t)(emitted * sizeof(struct linux_signalfd_siginfo));
+
+        if (file->flags & O_NONBLOCK)
+            return -EAGAIN;
+        int rc = proc_sleep_on(NULL, p, true);
+        if (rc < 0)
+            return rc;
+    }
+}
+
+static int signalfd_create_file(sigset_t mask, uint64_t flags, struct file **out) {
+    struct signalfd_ctx *ctx = kzalloc(sizeof(*ctx));
+    struct vnode *vn = kzalloc(sizeof(*vn));
+    struct file *file = vfs_file_alloc();
+    if (!ctx || !vn || !file) {
+        kfree(ctx);
+        kfree(vn);
+        if (file)
+            vfs_file_free(file);
+        return -ENOMEM;
+    }
+
+    ctx->magic = SIGNALFD_MAGIC;
+    spin_init(&ctx->lock);
+    ctx->vnode = vn;
+    ctx->mask = signalfd_sanitize_mask(mask);
+    ctx->closed = false;
+
+    vn->type = VNODE_FILE;
+    vn->mode = S_IFREG | 0600;
+    vn->nlink = 1;
+    vn->ops = &signalfd_file_ops;
+    vn->fs_data = ctx;
+    atomic_init(&vn->refcount, 1);
+    vn->parent = NULL;
+    vn->name[0] = '\0';
+    rwlock_init(&vn->lock, "signalfd_vnode");
+    poll_wait_head_init(&vn->pollers);
+
+    file->vnode = vn;
+    file->flags = O_RDONLY;
+    if (flags & SFD_NONBLOCK)
         file->flags |= O_NONBLOCK;
     *out = file;
     return 0;
@@ -628,4 +840,57 @@ int64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_ptr, uint64_t a2,
     }
     file_put(file);
     return 0;
+}
+
+int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
+                      uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (!mask_ptr)
+        return -EFAULT;
+    if (sigsetsize != sizeof(sigset_t))
+        return -EINVAL;
+    if (flags & ~(SFD_CLOEXEC | SFD_NONBLOCK))
+        return -EINVAL;
+
+    sigset_t mask = 0;
+    if (copy_from_user(&mask, (const void *)mask_ptr, sizeof(mask)) < 0)
+        return -EFAULT;
+    mask = signalfd_sanitize_mask(mask);
+
+    if ((int64_t)fd == -1) {
+        struct file *file = NULL;
+        int rc = signalfd_create_file(mask, flags, &file);
+        if (rc < 0)
+            return rc;
+
+        uint32_t fd_flags = (flags & SFD_CLOEXEC) ? FD_CLOEXEC : 0;
+        int newfd = fd_alloc_flags(proc_current(), file, fd_flags);
+        if (newfd < 0) {
+            vfs_close(file);
+            return newfd;
+        }
+        return newfd;
+    }
+
+    if (fd > (uint64_t)INT32_MAX)
+        return -EBADF;
+    struct file *file = fd_get(proc_current(), (int)fd);
+    if (!file)
+        return -EBADF;
+    if (!file->vnode) {
+        file_put(file);
+        return -EINVAL;
+    }
+    struct signalfd_ctx *ctx = (struct signalfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != SIGNALFD_MAGIC) {
+        file_put(file);
+        return -EINVAL;
+    }
+
+    bool irq;
+    spin_lock_irqsave(&ctx->lock, &irq);
+    ctx->mask = mask;
+    spin_unlock_irqrestore(&ctx->lock, irq);
+    file_put(file);
+    return (int64_t)(int)fd;
 }

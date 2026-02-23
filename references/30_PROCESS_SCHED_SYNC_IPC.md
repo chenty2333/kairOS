@@ -94,6 +94,7 @@ completion.c:
 
 futex.c:
 - futex_wait / futex_wake: 128 hash buckets, multiplicative hash
+- futex_waitv: vectorized wait (`FUTEX_WAITV_MAX=128`), returns awakened waiter index
 - Supports timeout (via poll_sleep mechanism)
 - Used for userspace fast locks (pthread mutex, etc.)
 
@@ -116,6 +117,8 @@ Current IPC mechanisms:
 - Unix domain sockets: kernel/net/af_unix.c
 - Futex: userspace synchronization
 - Signals: inter-process notification
+- Event FDs: `eventfd2` and `timerfd_*` are exposed as anon-vnode file descriptors (pollable, Linux ABI wiring)
+- Signal FDs: `signalfd4` is wired; read consumes matching pending signals from the task signal bitmap
 
 Related references:
 - references/00_REPO_MAP.md
