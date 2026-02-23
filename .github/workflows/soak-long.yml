@@ -10,7 +10,7 @@ on:
       soak_duration_sec:
         description: "CONFIG_KERNEL_SOAK_PR_DURATION_SEC"
         required: false
-        default: "10800"
+        default: "19800"
       soak_fault_permille:
         description: "CONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE"
         required: false
@@ -30,7 +30,7 @@ on:
       soak_test_timeout_sec:
         description: "make SOAK_PR_TIMEOUT (runner-side timeout)"
         required: false
-        default: "14400"
+        default: "20400"
 
 concurrency:
   group: soak-long-${{ github.ref }}
@@ -42,12 +42,12 @@ jobs:
     timeout-minutes: 360
     env:
       ARCH: riscv64
-      SOAK_DURATION_SEC: ${{ github.event.inputs.soak_duration_sec || '10800' }}
+      SOAK_DURATION_SEC: ${{ github.event.inputs.soak_duration_sec || '19800' }}
       SOAK_FAULT_PERMILLE: ${{ github.event.inputs.soak_fault_permille || '1' }}
       SOAK_SUITE_MASK: ${{ github.event.inputs.soak_suite_mask || '0xFF' }}
       SOAK_MIN_RUNS_PER_SUITE: ${{ github.event.inputs.soak_min_runs_per_suite || '2' }}
       SOAK_SUITE_TIMEOUT_SEC: ${{ github.event.inputs.soak_suite_timeout_sec || '180' }}
-      SOAK_TEST_TIMEOUT_SEC: ${{ github.event.inputs.soak_test_timeout_sec || '14400' }}
+      SOAK_TEST_TIMEOUT_SEC: ${{ github.event.inputs.soak_test_timeout_sec || '20400' }}
 
     steps:
       - name: Checkout
