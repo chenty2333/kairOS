@@ -91,6 +91,7 @@ Pseudo filesystems:
 Special:
 - initramfs (fs/initramfs/): CPIO format initramfs parsing and mounting
 - pipe (fs/ipc/pipe.c): pipes, accessed through VFS interface
+  - Blocking `read()` now returns once any bytes are available; it does not wait to fill the full requested length when the pipe already has data
 
 ## poll/epoll (fs/poll/)
 

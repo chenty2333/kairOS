@@ -6,6 +6,7 @@
  * DGRAM mode uses a simple message queue.
  */
 
+#include <kairos/atomic.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
@@ -22,6 +23,10 @@
 #define UNIX_BUF_SIZE 16384
 #define UNIX_DGRAM_MAX 65536
 #define UNIX_BACKLOG_MAX 128
+#define UNIX_SHUT_RD_BIT (1u << 0)
+#define UNIX_SHUT_WR_BIT (1u << 1)
+
+struct unix_sock;
 
 /* Per-direction stream buffer */
 struct unix_buf {
@@ -44,7 +49,7 @@ struct unix_dgram_msg {
 /* Pending connection for accept queue */
 struct unix_pending {
     struct list_head node;
-    struct socket *sock;
+    struct unix_sock *client;
 };
 
 struct unix_sock {
@@ -69,6 +74,9 @@ struct unix_sock {
     struct wait_queue dgram_wait;
 
     struct mutex lock;
+    atomic_t refcount;
+    bool closing;
+    int connect_err;
 };
 
 /* Global bound socket registry (simple linear scan) */
@@ -79,6 +87,35 @@ static struct {
     bool init;
 } unix_bind_table;
 
+static void unix_sock_get(struct unix_sock *us) {
+    if (us)
+        atomic_inc(&us->refcount);
+}
+
+static void unix_sock_put(struct unix_sock *us) {
+    if (!us)
+        return;
+    uint32_t cur = atomic_read(&us->refcount);
+    if (cur == 0)
+        panic("af_unix: unix_sock refcount underflow");
+    uint32_t old = atomic_fetch_sub(&us->refcount, 1);
+    if (old == 1)
+        kfree(us);
+}
+
+static uint32_t unix_shutdown_mask(int how) {
+    switch (how) {
+    case SHUT_RD:
+        return UNIX_SHUT_RD_BIT;
+    case SHUT_WR:
+        return UNIX_SHUT_WR_BIT;
+    case SHUT_RDWR:
+        return UNIX_SHUT_RD_BIT | UNIX_SHUT_WR_BIT;
+    default:
+        return 0;
+    }
+}
+
 static void unix_bind_table_init(void) {
     if (unix_bind_table.init) {
         return;
@@ -88,7 +125,7 @@ static void unix_bind_table_init(void) {
     unix_bind_table.init = true;
 }
 
-static struct unix_sock *unix_find_bound(const char *path) {
+static struct unix_sock *unix_find_bound_locked(const char *path) {
     for (int i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
         struct unix_sock *us = unix_bind_table.entries[i];
         if (us && strcmp(us->path, path) == 0) {
@@ -98,10 +135,18 @@ static struct unix_sock *unix_find_bound(const char *path) {
     return NULL;
 }
 
+static struct unix_sock *unix_find_bound_get_locked(const char *path) {
+    struct unix_sock *us = unix_find_bound_locked(path);
+    if (us)
+        unix_sock_get(us);
+    return us;
+}
+
 static int unix_add_bound(struct unix_sock *us) {
     for (int i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
         if (!unix_bind_table.entries[i]) {
             unix_bind_table.entries[i] = us;
+            unix_sock_get(us);
             return 0;
         }
     }
@@ -112,6 +157,7 @@ static void unix_remove_bound(struct unix_sock *us) {
     for (int i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
         if (unix_bind_table.entries[i] == us) {
             unix_bind_table.entries[i] = NULL;
+            unix_sock_put(us);
             return;
         }
     }
@@ -161,6 +207,9 @@ static struct unix_sock *unix_sock_alloc(struct socket *sock) {
     us->dgram_count = 0;
     wait_queue_init(&us->dgram_wait);
     mutex_init(&us->lock, "unix_sock");
+    atomic_init(&us->refcount, 1);
+    us->closing = false;
+    us->connect_err = 0;
     sock->proto_data = us;
     return us;
 }
@@ -175,7 +224,7 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
     mutex_lock(lock);
     while (total < len) {
         while (b->count == 0) {
-            if ((shutdown & SHUT_RD) || !peer) {
+            if ((shutdown & (int)UNIX_SHUT_RD_BIT) || !peer || peer->closing) {
                 mutex_unlock(lock);
                 return (ssize_t)total;
             }
@@ -222,7 +271,7 @@ static ssize_t unix_buf_write(struct unix_buf *b, struct mutex *lock,
 
     mutex_lock(lock);
     while (total < len) {
-        if (*shutdown_flags & SHUT_RD) {
+        if (*shutdown_flags & (int)UNIX_SHUT_RD_BIT) {
             mutex_unlock(lock);
             struct process *curr = proc_current();
             if (curr) {
@@ -288,8 +337,10 @@ static int unix_bind(struct socket *sock, const struct sockaddr *addr,
         mutex_unlock(&unix_bind_table.lock);
         return -EINVAL;
     }
-    if (unix_find_bound(sun->sun_path)) {
+    struct unix_sock *existing = unix_find_bound_get_locked(sun->sun_path);
+    if (existing) {
         mutex_unlock(&unix_bind_table.lock);
+        unix_sock_put(existing);
         return -EADDRINUSE;
     }
 
@@ -339,6 +390,9 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
                                 int addrlen) {
     struct unix_sock *us = sock->proto_data;
     const struct sockaddr_un *sun = (const struct sockaddr_un *)addr;
+    struct unix_sock *listener = NULL;
+    struct unix_pending *pend = NULL;
+    int ret = 0;
 
     if (!sun || addrlen < (int)sizeof(sun->sun_family) + 1) {
         return -EINVAL;
@@ -351,53 +405,79 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
     }
 
     mutex_lock(&unix_bind_table.lock);
-    struct unix_sock *listener = unix_find_bound(sun->sun_path);
-    if (!listener || listener->sock->state != SS_LISTENING) {
-        mutex_unlock(&unix_bind_table.lock);
+    listener = unix_find_bound_get_locked(sun->sun_path);
+    mutex_unlock(&unix_bind_table.lock);
+    if (!listener) {
         return -ECONNREFUSED;
     }
-    mutex_unlock(&unix_bind_table.lock);
-
-    /* Allocate recv buffer for this socket */
-    int ret = unix_buf_init(&us->buf);
-    if (ret < 0) {
-        return ret;
-    }
-
-    /* Enqueue ourselves on the listener's accept queue */
-    struct unix_pending *pend = kzalloc(sizeof(*pend));
-    if (!pend) {
-        unix_buf_destroy(&us->buf);
-        return -ENOMEM;
-    }
-    pend->sock = sock;
 
     mutex_lock(&listener->lock);
-    if (listener->pending_count >= listener->backlog) {
+    bool listener_ok =
+        !listener->closing && listener->sock &&
+        listener->sock->state == SS_LISTENING &&
+        listener->pending_count < listener->backlog;
+    mutex_unlock(&listener->lock);
+    if (!listener_ok) {
+        unix_sock_put(listener);
+        return -ECONNREFUSED;
+    }
+
+    if (!us->buf.data) {
+        ret = unix_buf_init(&us->buf);
+        if (ret < 0) {
+            unix_sock_put(listener);
+            return ret;
+        }
+    }
+
+    pend = kzalloc(sizeof(*pend));
+    if (!pend) {
+        unix_sock_put(listener);
+        return -ENOMEM;
+    }
+    pend->client = us;
+    unix_sock_get(us);
+    INIT_LIST_HEAD(&pend->node);
+
+    mutex_lock(&listener->lock);
+    if (listener->closing || !listener->sock ||
+        listener->sock->state != SS_LISTENING ||
+        listener->pending_count >= listener->backlog) {
         mutex_unlock(&listener->lock);
+        unix_sock_put(us);
         kfree(pend);
-        unix_buf_destroy(&us->buf);
+        unix_sock_put(listener);
         return -ECONNREFUSED;
     }
     list_add_tail(&pend->node, &listener->accept_queue);
     listener->pending_count++;
     wait_queue_wakeup_one(&listener->accept_wait);
-    poll_wait_wake(&listener->sock->pollers, POLLIN);
+    if (listener->sock)
+        poll_wait_wake(&listener->sock->pollers, POLLIN);
     mutex_unlock(&listener->lock);
 
-    /* Wait for the listener to accept us (peer will be set) */
     mutex_lock(&us->lock);
+    us->connect_err = 0;
     while (!us->peer) {
+        if (us->closing) {
+            ret = -ECONNABORTED;
+            break;
+        }
+        if (us->connect_err != 0) {
+            ret = us->connect_err;
+            break;
+        }
         int rc = proc_sleep_on_mutex(&us->buf.rwait, &us->buf.rwait,
                                      &us->lock, true);
         if (rc == -EINTR) {
-            mutex_unlock(&us->lock);
-            return -EINTR;
+            continue;
         }
     }
-    sock->state = SS_CONNECTED;
+    if (!ret && us->peer)
+        sock->state = SS_CONNECTED;
     mutex_unlock(&us->lock);
-    return 0;
+    unix_sock_put(listener);
+    return ret;
 }
 
 static int unix_stream_accept(struct socket *sock, struct socket **newsock) {
@@ -407,103 +487,168 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock) {
         return -EINVAL;
     }
 
-    /* Wait for a pending connection */
-    mutex_lock(&us->lock);
-    while (list_empty(&us->accept_queue)) {
-        int rc = proc_sleep_on_mutex(&us->accept_wait, &us->accept_wait,
-                                     &us->lock, true);
-        if (rc == -EINTR) {
-            mutex_unlock(&us->lock);
-            return -EINTR;
+    while (1) {
+        mutex_lock(&us->lock);
+        while (list_empty(&us->accept_queue)) {
+            int rc = proc_sleep_on_mutex(&us->accept_wait, &us->accept_wait,
+                                         &us->lock, true);
+            if (rc == -EINTR) {
+                mutex_unlock(&us->lock);
+                return -EINTR;
+            }
         }
-    }
 
-    /* Dequeue */
-    struct unix_pending *pend = list_first_entry(&us->accept_queue,
-                                                  struct unix_pending, node);
-    list_del(&pend->node);
-    us->pending_count--;
-    struct socket *client_sock = pend->sock;
-    kfree(pend);
-    mutex_unlock(&us->lock);
+        struct unix_pending *pend = list_first_entry(&us->accept_queue,
+                                                     struct unix_pending, node);
+        list_del(&pend->node);
+        us->pending_count--;
+        mutex_unlock(&us->lock);
 
-    struct unix_sock *client = client_sock->proto_data;
+        struct unix_sock *client = pend->client;
+        pend->client = NULL;
+        kfree(pend);
+        if (!client)
+            continue;
 
-    /* Create the server-side socket */
-    struct socket *svr = NULL;
-    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &svr);
-    if (ret < 0) {
-        return ret;
-    }
+        mutex_lock(&client->lock);
+        bool client_closing = client->closing;
+        mutex_unlock(&client->lock);
+        if (client_closing) {
+            unix_sock_put(client);
+            continue;
+        }
 
-    struct unix_sock *svr_us = svr->proto_data;
-    if (!svr_us) {
-        svr_us = unix_sock_alloc(svr);
+        struct socket *svr = NULL;
+        int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &svr);
+        if (ret < 0) {
+            mutex_lock(&client->lock);
+            if (!client->peer && client->connect_err == 0)
+                client->connect_err = -ECONNABORTED;
+            wait_queue_wakeup_all(&client->buf.rwait);
+            mutex_unlock(&client->lock);
+            unix_sock_put(client);
+            return ret;
+        }
+
+        struct unix_sock *svr_us = svr->proto_data;
         if (!svr_us) {
-            sock_destroy(svr);
-            return -ENOMEM;
+            svr_us = unix_sock_alloc(svr);
+            if (!svr_us) {
+                sock_destroy(svr);
+                mutex_lock(&client->lock);
+                if (!client->peer && client->connect_err == 0)
+                    client->connect_err = -ECONNABORTED;
+                wait_queue_wakeup_all(&client->buf.rwait);
+                mutex_unlock(&client->lock);
+                unix_sock_put(client);
+                return -ENOMEM;
+            }
         }
+
+        ret = unix_buf_init(&svr_us->buf);
+        if (ret < 0) {
+            sock_destroy(svr);
+            mutex_lock(&client->lock);
+            if (!client->peer && client->connect_err == 0)
+                client->connect_err = ret;
+            wait_queue_wakeup_all(&client->buf.rwait);
+            mutex_unlock(&client->lock);
+            unix_sock_put(client);
+            return ret;
+        }
+
+        mutex_lock(&client->lock);
+        if (client->closing) {
+            mutex_unlock(&client->lock);
+            sock_destroy(svr);
+            unix_sock_put(client);
+            continue;
+        }
+        unix_sock_get(svr_us);
+        client->peer = svr_us;
+        client->connect_err = 0;
+        unix_sock_get(client);
+        svr_us->peer = client;
+        svr->state = SS_CONNECTED;
+        wait_queue_wakeup_all(&client->buf.rwait);
+        if (client->sock)
+            poll_wait_wake(&client->sock->pollers, POLLOUT | POLLIN);
+        mutex_unlock(&client->lock);
+
+        unix_sock_put(client);
+        *newsock = svr;
+        return 0;
     }
-
-    /* Allocate recv buffer for the server side */
-    ret = unix_buf_init(&svr_us->buf);
-    if (ret < 0) {
-        sock_destroy(svr);
-        return ret;
-    }
-
-    /* Cross-connect peers */
-    mutex_lock(&client->lock);
-    client->peer = svr_us;
-    svr_us->peer = client;
-    svr->state = SS_CONNECTED;
-    /* Wake the connecting client */
-    wait_queue_wakeup_one(&client->buf.rwait);
-    mutex_unlock(&client->lock);
-
-    *newsock = svr;
-    return 0;
 }
 
 static ssize_t unix_stream_sendto(struct socket *sock, const void *buf,
                                    size_t len, int flags,
                                    const struct sockaddr *dest, int addrlen) {
-    (void)flags; (void)dest; (void)addrlen;
+    (void)dest;
+    (void)addrlen;
     struct unix_sock *us = sock->proto_data;
+    struct unix_sock *peer = NULL;
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
 
-    if (sock->state != SS_CONNECTED || !us->peer) {
+    mutex_lock(&us->lock);
+    if (sock->state != SS_CONNECTED || us->closing || !us->peer) {
+        mutex_unlock(&us->lock);
         return -ENOTCONN;
     }
-    if (us->shutdown_flags & SHUT_WR) {
+    if (us->shutdown_flags & (int)UNIX_SHUT_WR_BIT) {
+        mutex_unlock(&us->lock);
         struct process *curr = proc_current();
         if (curr) {
             signal_send(curr->pid, SIGPIPE);
         }
         return -EPIPE;
     }
+    peer = us->peer;
+    unix_sock_get(peer);
+    mutex_unlock(&us->lock);
 
-    /* Write into peer's recv buffer */
-    struct unix_sock *peer = us->peer;
-    return unix_buf_write(&peer->buf, &peer->lock, buf, len,
-                          &peer->shutdown_flags, false);
+    if (peer->closing || !peer->buf.data) {
+        unix_sock_put(peer);
+        return -ENOTCONN;
+    }
+
+    ssize_t ret = unix_buf_write(&peer->buf, &peer->lock, buf, len,
+                                 &peer->shutdown_flags, nonblock);
+    unix_sock_put(peer);
+    return ret;
 }
 
 static ssize_t unix_stream_recvfrom(struct socket *sock, void *buf,
                                      size_t len, int flags,
                                      struct sockaddr *src, int *addrlen) {
-    (void)flags; (void)src; (void)addrlen;
+    (void)src;
+    (void)addrlen;
     struct unix_sock *us = sock->proto_data;
+    struct unix_sock *peer = NULL;
+    int shutdown_flags = 0;
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
 
-    if (sock->state != SS_CONNECTED) {
+    mutex_lock(&us->lock);
+    if (sock->state != SS_CONNECTED || us->closing) {
+        mutex_unlock(&us->lock);
         return -ENOTCONN;
     }
+    shutdown_flags = us->shutdown_flags;
+    peer = us->peer;
+    if (peer)
+        unix_sock_get(peer);
+    mutex_unlock(&us->lock);
 
-    return unix_buf_read(&us->buf, &us->lock, buf, len,
-                         us->shutdown_flags, us->peer, false);
+    ssize_t ret = unix_buf_read(&us->buf, &us->lock, buf, len,
+                                shutdown_flags, peer, nonblock);
+    if (peer)
+        unix_sock_put(peer);
+    return ret;
 }
 
 static int unix_stream_poll(struct socket *sock, uint32_t events) {
     struct unix_sock *us = sock->proto_data;
+    struct unix_sock *peer = NULL;
     uint32_t revents = 0;
 
     mutex_lock(&us->lock);
@@ -512,19 +657,27 @@ static int unix_stream_poll(struct socket *sock, uint32_t events) {
             revents |= POLLIN;
         }
     } else if (sock->state == SS_CONNECTED) {
-        /* Readable: data in our recv buffer, or peer gone */
-        if (us->buf.count > 0 || !us->peer) {
+        if (us->buf.count > 0 || !us->peer || us->closing)
             revents |= POLLIN;
-        }
-        /* Writable: space in peer's recv buffer */
-        if (us->peer && us->peer->buf.count < UNIX_BUF_SIZE) {
-            revents |= POLLOUT;
-        }
-        if (!us->peer || (us->shutdown_flags & SHUT_RD)) {
+        if (!us->peer || (us->shutdown_flags & (int)UNIX_SHUT_RD_BIT) ||
+            us->closing) {
             revents |= POLLHUP;
         }
+        peer = us->peer;
+        if (peer)
+            unix_sock_get(peer);
     }
     mutex_unlock(&us->lock);
+
+    if (peer) {
+        mutex_lock(&peer->lock);
+        if (!peer->closing && peer->buf.count < UNIX_BUF_SIZE)
+            revents |= POLLOUT;
+        if (peer->closing)
+            revents |= POLLHUP;
+        mutex_unlock(&peer->lock);
+        unix_sock_put(peer);
+    }
 
     return (int)(revents & events);
 }
@@ -538,13 +691,23 @@ static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
     struct unix_sock *us = sock->proto_data;
     const struct sockaddr_un *sun = (const struct sockaddr_un *)dest;
     struct unix_sock *target = NULL;
+    char sender_path[UNIX_PATH_MAX];
+    bool sender_bound = false;
 
-    /* Connected DGRAM: use peer */
-    if (!dest && us->peer) {
+    if (!dest) {
+        mutex_lock(&us->lock);
+        if (us->closing) {
+            mutex_unlock(&us->lock);
+            return -ENOTCONN;
+        }
         target = us->peer;
-    } else if (sun && addrlen >= (int)sizeof(sun->sun_family) + 1) {
+        if (target)
+            unix_sock_get(target);
+        mutex_unlock(&us->lock);
+    } else if (sun && addrlen >= (int)sizeof(sun->sun_family) + 1 &&
+               sun->sun_family == AF_UNIX) {
         mutex_lock(&unix_bind_table.lock);
-        target = unix_find_bound(sun->sun_path);
+        target = unix_find_bound_get_locked(sun->sun_path);
         mutex_unlock(&unix_bind_table.lock);
     }
 
@@ -557,39 +720,64 @@ static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
 
     struct unix_dgram_msg *msg = kmalloc(sizeof(*msg) + len);
     if (!msg) {
+        unix_sock_put(target);
         return -ENOMEM;
     }
     msg->len = len;
     memset(&msg->sender, 0, sizeof(msg->sender));
     msg->sender.sun_family = AF_UNIX;
-    if (us->bound) {
-        size_t plen = strlen(us->path);
+
+    mutex_lock(&us->lock);
+    sender_bound = us->bound;
+    if (sender_bound) {
+        strncpy(sender_path, us->path, sizeof(sender_path) - 1);
+        sender_path[sizeof(sender_path) - 1] = '\0';
+    }
+    mutex_unlock(&us->lock);
+    if (sender_bound) {
+        size_t plen = strlen(sender_path);
         if (plen >= UNIX_PATH_MAX) {
             plen = UNIX_PATH_MAX - 1;
         }
-        memcpy(msg->sender.sun_path, us->path, plen);
+        memcpy(msg->sender.sun_path, sender_path, plen);
         msg->sender.sun_path[plen] = '\0';
     }
     memcpy(msg->data, buf, len);
 
     mutex_lock(&target->lock);
+    if (target->closing) {
+        mutex_unlock(&target->lock);
+        kfree(msg);
+        unix_sock_put(target);
+        return -ECONNREFUSED;
+    }
     list_add_tail(&msg->node, &target->dgram_queue);
     target->dgram_count++;
     wait_queue_wakeup_one(&target->dgram_wait);
-    poll_wait_wake(&target->sock->pollers, POLLIN);
+    if (target->sock)
+        poll_wait_wake(&target->sock->pollers, POLLIN);
     mutex_unlock(&target->lock);
 
+    unix_sock_put(target);
     return (ssize_t)len;
 }
 
 static ssize_t unix_dgram_recvfrom(struct socket *sock, void *buf,
                                     size_t len, int flags,
                                     struct sockaddr *src, int *addrlen) {
-    (void)flags;
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
     struct unix_sock *us = sock->proto_data;
 
     mutex_lock(&us->lock);
     while (list_empty(&us->dgram_queue)) {
+        if (us->closing) {
+            mutex_unlock(&us->lock);
+            return -ENOTCONN;
+        }
+        if (nonblock) {
+            mutex_unlock(&us->lock);
+            return -EAGAIN;
+        }
         int rc = proc_sleep_on_mutex(&us->dgram_wait, &us->dgram_wait,
                                      &us->lock, true);
         if (rc == -EINTR) {
@@ -626,22 +814,41 @@ static int unix_dgram_connect(struct socket *sock, const struct sockaddr *addr,
     struct unix_sock *us = sock->proto_data;
     const struct sockaddr_un *sun = (const struct sockaddr_un *)addr;
 
-    if (!sun || addrlen < (int)sizeof(sun->sun_family) + 1) {
+    if (!sun || addrlen < (int)sizeof(sun->sun_family) + 1 ||
+        sun->sun_family != AF_UNIX) {
         return -EINVAL;
     }
 
     mutex_lock(&unix_bind_table.lock);
-    struct unix_sock *target = unix_find_bound(sun->sun_path);
+    struct unix_sock *target = unix_find_bound_get_locked(sun->sun_path);
     mutex_unlock(&unix_bind_table.lock);
 
     if (!target) {
         return -ECONNREFUSED;
     }
+    mutex_lock(&target->lock);
+    bool target_closing = target->closing;
+    mutex_unlock(&target->lock);
+    if (target_closing) {
+        unix_sock_put(target);
+        return -ECONNREFUSED;
+    }
 
+    struct unix_sock *old_peer = NULL;
     mutex_lock(&us->lock);
+    if (us->closing) {
+        mutex_unlock(&us->lock);
+        unix_sock_put(target);
+        return -ENOTCONN;
+    }
+    old_peer = us->peer;
     us->peer = target;
     sock->state = SS_CONNECTED;
     mutex_unlock(&us->lock);
+    if (old_peer && old_peer != target)
+        unix_sock_put(old_peer);
+    if (old_peer == target)
+        unix_sock_put(target);
     return 0;
 }
 
@@ -650,10 +857,13 @@ static int unix_dgram_poll(struct socket *sock, uint32_t events) {
     uint32_t revents = 0;
 
     mutex_lock(&us->lock);
-    if (!list_empty(&us->dgram_queue)) {
+    if (!list_empty(&us->dgram_queue) || us->closing) {
         revents |= POLLIN;
     }
-    revents |= POLLOUT; /* DGRAM send is always "ready" */
+    if (!us->closing)
+        revents |= POLLOUT;
+    else
+        revents |= POLLHUP;
     mutex_unlock(&us->lock);
 
     return (int)(revents & events);
@@ -663,19 +873,35 @@ static int unix_dgram_poll(struct socket *sock, uint32_t events) {
 
 static int unix_shutdown(struct socket *sock, int how) {
     struct unix_sock *us = sock->proto_data;
+    struct unix_sock *peer = NULL;
+    uint32_t mask = unix_shutdown_mask(how);
+    if (mask == 0)
+        return -EINVAL;
 
     mutex_lock(&us->lock);
-    us->shutdown_flags |= how;
-    /* Wake blocked readers/writers */
+    if (us->closing) {
+        mutex_unlock(&us->lock);
+        return -ENOTCONN;
+    }
+    us->shutdown_flags |= (int)mask;
+    peer = us->peer;
+    if (peer)
+        unix_sock_get(peer);
     wait_queue_wakeup_all(&us->buf.rwait);
     wait_queue_wakeup_all(&us->buf.wwait);
-    if (us->peer) {
-        wait_queue_wakeup_all(&us->peer->buf.rwait);
-        wait_queue_wakeup_all(&us->peer->buf.wwait);
-        poll_wait_wake(&us->peer->sock->pollers, POLLHUP);
-    }
-    poll_wait_wake(&sock->pollers, POLLHUP);
     mutex_unlock(&us->lock);
+
+    if (peer) {
+        mutex_lock(&peer->lock);
+        wait_queue_wakeup_all(&peer->buf.rwait);
+        wait_queue_wakeup_all(&peer->buf.wwait);
+        if (peer->sock)
+            poll_wait_wake(&peer->sock->pollers, POLLHUP);
+        mutex_unlock(&peer->lock);
+        unix_sock_put(peer);
+    }
+    if (sock)
+        poll_wait_wake(&sock->pollers, POLLHUP);
     return 0;
 }
 
@@ -685,52 +911,80 @@ static int unix_close(struct socket *sock) {
         return 0;
     }
 
-    /* Disconnect peer — avoid nested locking by breaking into two steps:
-     * 1. Under our lock, snapshot and clear the peer pointer.
-     * 2. Under peer's lock, notify it that we're gone. */
     struct unix_sock *peer = NULL;
+    bool drop_peer_ref_on_us = false;
     mutex_lock(&us->lock);
+    if (us->closing) {
+        mutex_unlock(&us->lock);
+        sock->proto_data = NULL;
+        return 0;
+    }
+    us->closing = true;
     peer = us->peer;
     us->peer = NULL;
+    wait_queue_wakeup_all(&us->buf.rwait);
+    wait_queue_wakeup_all(&us->buf.wwait);
+    wait_queue_wakeup_all(&us->dgram_wait);
     mutex_unlock(&us->lock);
+
+    if (us->bound) {
+        mutex_lock(&unix_bind_table.lock);
+        if (us->bound) {
+            us->bound = false;
+            unix_remove_bound(us);
+        }
+        mutex_unlock(&unix_bind_table.lock);
+    }
 
     if (peer) {
         mutex_lock(&peer->lock);
         if (peer->peer == us) {
             peer->peer = NULL;
+            drop_peer_ref_on_us = true;
         }
         wait_queue_wakeup_all(&peer->buf.rwait);
         wait_queue_wakeup_all(&peer->buf.wwait);
-        poll_wait_wake(&peer->sock->pollers, POLLHUP | POLLIN);
+        if (peer->sock)
+            poll_wait_wake(&peer->sock->pollers, POLLHUP | POLLIN);
         mutex_unlock(&peer->lock);
+        unix_sock_put(peer);
     }
+    if (drop_peer_ref_on_us)
+        unix_sock_put(us);
 
-    /* Remove from bind table */
-    if (us->bound) {
-        mutex_lock(&unix_bind_table.lock);
-        unix_remove_bound(us);
-        mutex_unlock(&unix_bind_table.lock);
-    }
-
-    /* Drain pending accept queue */
     struct list_head *pos, *tmp;
+    mutex_lock(&us->lock);
     list_for_each_safe(pos, tmp, &us->accept_queue) {
         struct unix_pending *pend = list_entry(pos, struct unix_pending, node);
         list_del(&pend->node);
+        if (us->pending_count > 0)
+            us->pending_count--;
+        if (pend->client) {
+            mutex_lock(&pend->client->lock);
+            if (!pend->client->peer && pend->client->connect_err == 0)
+                pend->client->connect_err = -ECONNREFUSED;
+            wait_queue_wakeup_all(&pend->client->buf.rwait);
+            mutex_unlock(&pend->client->lock);
+            unix_sock_put(pend->client);
+            pend->client = NULL;
+        }
         kfree(pend);
     }
 
-    /* Drain DGRAM queue */
     list_for_each_safe(pos, tmp, &us->dgram_queue) {
         struct unix_dgram_msg *msg = list_entry(pos, struct unix_dgram_msg,
                                                  node);
         list_del(&msg->node);
         kfree(msg);
     }
-
     unix_buf_destroy(&us->buf);
+    mutex_unlock(&us->lock);
+
+    if (sock)
+        poll_wait_wake(&sock->pollers, POLLHUP | POLLIN);
+    us->sock = NULL;
     sock->proto_data = NULL;
-    kfree(us);
+    unix_sock_put(us);
     return 0;
 }
 
@@ -738,15 +992,25 @@ static int unix_getsockname(struct socket *sock, struct sockaddr *addr,
                              int *addrlen) {
     struct unix_sock *us = sock->proto_data;
     struct sockaddr_un *sun = (struct sockaddr_un *)addr;
+    char path[UNIX_PATH_MAX];
+    bool bound = false;
+
+    mutex_lock(&us->lock);
+    bound = us->bound;
+    if (bound) {
+        strncpy(path, us->path, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+    mutex_unlock(&us->lock);
 
     memset(sun, 0, sizeof(*sun));
     sun->sun_family = AF_UNIX;
-    if (us->bound) {
-        size_t plen = strlen(us->path);
+    if (bound) {
+        size_t plen = strlen(path);
         if (plen >= UNIX_PATH_MAX) {
             plen = UNIX_PATH_MAX - 1;
         }
-        memcpy(sun->sun_path, us->path, plen);
+        memcpy(sun->sun_path, path, plen);
         sun->sun_path[plen] = '\0';
     }
     *addrlen = (int)sizeof(struct sockaddr_un);
@@ -756,25 +1020,41 @@ static int unix_getsockname(struct socket *sock, struct sockaddr *addr,
 static int unix_getpeername(struct socket *sock, struct sockaddr *addr,
                              int *addrlen) {
     struct unix_sock *us = sock->proto_data;
+    struct unix_sock *peer = NULL;
+    char path[UNIX_PATH_MAX];
+    bool bound = false;
 
-    if (!us->peer) {
+    mutex_lock(&us->lock);
+    if (!us->peer || us->closing) {
+        mutex_unlock(&us->lock);
         return -ENOTCONN;
     }
+    peer = us->peer;
+    unix_sock_get(peer);
+    mutex_unlock(&us->lock);
 
     struct sockaddr_un *sun = (struct sockaddr_un *)addr;
     memset(sun, 0, sizeof(*sun));
     sun->sun_family = AF_UNIX;
 
-    struct unix_sock *peer = us->peer;
-    if (peer->bound) {
-        size_t plen = strlen(peer->path);
+    mutex_lock(&peer->lock);
+    bound = peer->bound;
+    if (bound) {
+        strncpy(path, peer->path, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+    mutex_unlock(&peer->lock);
+
+    if (bound) {
+        size_t plen = strlen(path);
         if (plen >= UNIX_PATH_MAX) {
             plen = UNIX_PATH_MAX - 1;
         }
-        memcpy(sun->sun_path, peer->path, plen);
+        memcpy(sun->sun_path, path, plen);
         sun->sun_path[plen] = '\0';
     }
     *addrlen = (int)sizeof(struct sockaddr_un);
+    unix_sock_put(peer);
     return 0;
 }
 
@@ -985,24 +1265,58 @@ static const struct proto_ops unix_dgram_wrap_ops = {
 int unix_socketpair_connect(struct socket *sock0, struct socket *sock1) {
     struct unix_sock *us0 = unix_ensure_proto_data(sock0);
     struct unix_sock *us1 = unix_ensure_proto_data(sock1);
+    bool us0_buf_alloc = false;
+    bool us1_buf_alloc = false;
     if (!us0 || !us1) {
         return -ENOMEM;
     }
 
-    int ret = unix_buf_init(&us0->buf);
-    if (ret < 0) {
-        return ret;
+    mutex_lock(&us0->lock);
+    mutex_lock(&us1->lock);
+    if (us0->closing || us1->closing || us0->peer || us1->peer) {
+        mutex_unlock(&us1->lock);
+        mutex_unlock(&us0->lock);
+        return -EISCONN;
     }
-    ret = unix_buf_init(&us1->buf);
-    if (ret < 0) {
-        unix_buf_destroy(&us0->buf);
-        return ret;
+    mutex_unlock(&us1->lock);
+    mutex_unlock(&us0->lock);
+
+    int ret = 0;
+    if (!us0->buf.data) {
+        ret = unix_buf_init(&us0->buf);
+        if (ret < 0)
+            return ret;
+        us0_buf_alloc = true;
+    }
+    if (!us1->buf.data) {
+        ret = unix_buf_init(&us1->buf);
+        if (ret < 0) {
+            if (us0_buf_alloc)
+                unix_buf_destroy(&us0->buf);
+            return ret;
+        }
+        us1_buf_alloc = true;
     }
 
+    mutex_lock(&us0->lock);
+    mutex_lock(&us1->lock);
+    if (us0->closing || us1->closing || us0->peer || us1->peer) {
+        mutex_unlock(&us1->lock);
+        mutex_unlock(&us0->lock);
+        if (us1_buf_alloc)
+            unix_buf_destroy(&us1->buf);
+        if (us0_buf_alloc)
+            unix_buf_destroy(&us0->buf);
+        return -EISCONN;
+    }
+    unix_sock_get(us1);
     us0->peer = us1;
+    unix_sock_get(us0);
     us1->peer = us0;
     sock0->state = SS_CONNECTED;
     sock1->state = SS_CONNECTED;
+    mutex_unlock(&us1->lock);
+    mutex_unlock(&us0->lock);
     return 0;
 }
 

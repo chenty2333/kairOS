@@ -77,6 +77,8 @@ Socket layer (net/socket.c):
 AF_UNIX (net/af_unix.c):
 - Supports SOCK_STREAM (bidirectional ring buffer, 16KB) and SOCK_DGRAM (message queue)
 - Connection mode: bind/listen/accept/connect
+- Stream/Dgram peer and bind-table object lifetime is refcounted internally to avoid close/connect/send race UAFs
+- Listener close now propagates connect errors to pending clients instead of leaving blocked connectors indefinitely
 
 AF_INET (net/af_inet.c):
 - Based on lwIP raw/callback API

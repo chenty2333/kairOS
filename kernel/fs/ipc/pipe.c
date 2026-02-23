@@ -87,7 +87,7 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
         mutex_unlock(&p->lock);
         poll_wait_wake(&p->pollers, revents);
         mutex_lock(&p->lock);
-        if (nonblock)
+        if (nonblock || read > 0)
             break;
     }
     mutex_unlock(&p->lock);
