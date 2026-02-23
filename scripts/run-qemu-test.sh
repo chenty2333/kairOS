@@ -13,7 +13,7 @@ TEST_ARCH="${TEST_ARCH:-unknown}"
 TEST_RUN_ID="${TEST_RUN_ID:-$(basename "$TEST_BUILD_ROOT")}"
 TEST_MANIFEST="${TEST_MANIFEST:-${TEST_BUILD_ROOT}/manifest.json}"
 TEST_RESULT="${TEST_RESULT:-${TEST_BUILD_ROOT}/result.json}"
-TEST_QEMU_PID_FILE="${TEST_QEMU_PID_FILE:-${TEST_BUILD_ROOT}/qemu.pid}"
+TEST_QEMU_PID_FILE="${TEST_QEMU_PID_FILE:-${TEST_BUILD_ROOT}/test-runner.pid}"
 
 json_quote() {
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"

@@ -69,23 +69,13 @@ kairos_run_test_once() {
     local log_path="$3"
     local require_markers="$4"
     local expect_timeout="$5"
-    local build_dir="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}"
 
     local qemu_cmd
     printf -v qemu_cmd \
         'make --no-print-directory -j1 ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 run-direct' \
         "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}"
 
-    local rc=0
-    if ! kairos_lock_buildroot "${build_dir}" "qemu-run" \
-        kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}"; then
-        rc=$?
-        if [[ "$rc" -eq 75 ]]; then
-            kairos_die "test run is busy for BUILD_ROOT=${build_dir} (lock: qemu-run)"
-        fi
-    fi
-
-    return "$rc"
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}"
 }
 
 kairos_run_test_locked() {

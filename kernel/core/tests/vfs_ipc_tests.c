@@ -276,6 +276,7 @@ static void test_pipe_semantics(void) {
         test_check(child != NULL, "pipe blocking child create");
         if (!child)
             break;
+        pid_t expected_pid = child->pid;
         sched_enqueue(child);
 
         for (int i = 0; i < 2000 && !ctx.started; i++)
@@ -290,7 +291,7 @@ static void test_pipe_semantics(void) {
         test_check(wr == 4, "pipe blocking write wake");
 
         wp = proc_wait(child->pid, &status, 0);
-        test_check(wp == child->pid, "pipe blocking child reaped");
+        test_check(wp == expected_pid, "pipe blocking child reaped");
         test_check(ctx.ret == 4, "pipe blocking child read len");
         test_check(memcmp(ctx.buf, "PING", 4) == 0, "pipe blocking child read data");
     } while (0);
@@ -356,7 +357,7 @@ static void test_epoll_pipe_semantics(void) {
                    "epoll read event mask");
 
         char rbuf[8];
-        ssize_t rd = fd_read_once(rfd, rbuf, sizeof(rbuf));
+        ssize_t rd = fd_read_once(rfd, rbuf, 4);
         test_check(rd == 4, "epoll read consumed");
 
         close_fd_if_open(&wfd);

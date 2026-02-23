@@ -28,6 +28,7 @@ endif
 
 # Build directory
 BUILD_ROOT ?= build
+BUILD_ROOT_ABS := $(abspath $(BUILD_ROOT))
 BUILD_DIR := $(BUILD_ROOT)/$(ARCH)
 
 # Output files
@@ -284,12 +285,12 @@ $(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) $(KAIROS_DEPS)
 	@touch $@
 
 $(USER_INIT): $(MUSL_STAMP) user/init/main.c user/Makefile
-	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) USE_GCC=$(USE_GCC) V=$(V)
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V)
 
 initramfs: $(INITRAMFS_STAMP)
 
 $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
-	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) USE_GCC=$(USE_GCC) V=$(V) initramfs
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
@@ -639,7 +640,7 @@ RUN_ISOLATED ?= 1
 RUN_TIMEOUT ?= 0
 RUN_REQUIRE_BOOT ?= 1
 ifndef RUN_ID
-RUN_ID := $(shell sh -c 'printf "%s-%s" "$$(date +%s%N)" "$$$$"')
+RUN_ID := $(shell sh -c 'ts="$$(date +%y%m%d-%H%M)"; rnd="$$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d "[[:space:]]")"; if [ -z "$$rnd" ]; then rnd="$$(printf "%04x" "$$$$")"; fi; printf "%s-%s" "$$ts" "$$rnd"')
 endif
 TEST_BUILD_ROOT ?= $(TEST_RUNS_ROOT)/$(RUN_ID)
 RUN_BUILD_ROOT ?= $(RUN_RUNS_ROOT)/$(RUN_ID)
@@ -788,7 +789,7 @@ help:
 	@echo "  RUN_ISOLATED - Enable isolated run session (default: 1)"
 	@echo "  RUN_TIMEOUT - Session timeout seconds for run (0 means no timeout)"
 	@echo "  RUN_REQUIRE_BOOT - Require boot marker for run success (default: 1)"
-	@echo "  RUN_ID - Explicit isolated session id for run/test (optional)"
+	@echo "  RUN_ID - Explicit isolated session id for run/test (default: YYMMDD-HHMM-xxxx)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"
 	@echo ""

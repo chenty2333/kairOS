@@ -49,6 +49,7 @@ Boot image:
 Variables:
 - `V=1` — verbose output
 - `BUILD_ROOT=...` — override build root (default `build`)
+- Top-level userspace sub-make passes absolute `BUILD_ROOT` to avoid relative-path drift under `make -C user`
 - `EMBEDDED_INIT=1` — embedded init (riscv64 only)
 - `WITH_TCC=0` — exclude tcc from rootfs
 - `CONFIG_DRM_LITE=0` — disable drm_lite
@@ -90,8 +91,10 @@ QEMU configuration:
 
 Run/test sessions are executed via `scripts/run-qemu-session.sh` and `scripts/run-qemu-test.sh`, orchestrated by Make + `scripts/kairos.sh`.
 For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
+- Default `<run_id>` format is short-readable `YYMMDD-HHMM-xxxx` (example: `250222-2315-7f3a`)
 - `manifest.json` (command, arch, build root, git sha, timestamps)
 - `result.json` (pass/fail/timeout/error + reason + marker summary + log path)
+- `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
 
 Concurrency and locking:
 - Shared-resource operations use a global lock.
