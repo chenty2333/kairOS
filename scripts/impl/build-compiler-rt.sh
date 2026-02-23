@@ -20,6 +20,9 @@ OUT_DIR="${OUT_DIR:-$BUILD_ROOT/${ARCH}/compiler-rt/lib}"
 JOBS="${JOBS:-$(nproc)}"
 LOG_DIR="${BUILD_ROOT}/${ARCH}/logs"
 LOG_FILE="${LOG_DIR}/compiler-rt.log"
+LLVM_LOCK_WAIT="${TOOLCHAIN_LLVM_LOCK_WAIT:-${TOOLCHAIN_LOCK_WAIT:-900}}"
+LLVM_LOCK_ROOT="${KAIROS_GLOBAL_LOCK_ROOT:-$ROOT_DIR/build/.locks}"
+LLVM_LOCK_FILE="${LLVM_LOCK_ROOT}/global-llvm-project.lock"
 
 ensure_log_file() {
   mkdir -p "$LOG_DIR"
@@ -48,6 +51,42 @@ run_cmd() {
   else
     "$@"
   fi
+}
+
+prepare_llvm_source() {
+  if [[ ! -d "$LLVM_SRC" ]]; then
+    [[ "$QUIET" != "1" ]] && echo "=== Fetching llvm-project ($LLVM_TAG) ==="
+    run_cmd git clone --depth=1 --filter=blob:none --sparse \
+      https://github.com/llvm/llvm-project.git \
+      --branch="$LLVM_TAG" "$LLVM_SRC"
+  fi
+
+  if [[ -d "$LLVM_SRC/.git" ]]; then
+    run_cmd git -C "$LLVM_SRC" sparse-checkout init --cone
+    run_cmd git -C "$LLVM_SRC" sparse-checkout set llvm compiler-rt cmake third-party
+  fi
+}
+
+with_llvm_source_lock() {
+  if ! [[ "${LLVM_LOCK_WAIT}" =~ ^[0-9]+$ ]]; then
+    kairos_die "invalid TOOLCHAIN_LLVM_LOCK_WAIT=${LLVM_LOCK_WAIT} (expected non-negative integer)"
+  fi
+  mkdir -p "${LLVM_LOCK_ROOT}"
+
+  local lock_fd
+  exec {lock_fd}> "${LLVM_LOCK_FILE}"
+  if ! flock -w "${LLVM_LOCK_WAIT}" "${lock_fd}"; then
+    kairos_die "llvm source lock is busy (lock=${LLVM_LOCK_FILE}, wait=${LLVM_LOCK_WAIT}s)"
+  fi
+
+  set +e
+  "$@"
+  local rc=$?
+  set -e
+
+  flock -u "${lock_fd}" || true
+  exec {lock_fd}>&-
+  return "${rc}"
 }
 
 ARCH_FLAGS=""
@@ -95,17 +134,7 @@ if [[ ! -f "$SYSROOT/lib/libc.a" ]] || [[ ! -f "$SYSROOT/include/stdlib.h" ]]; t
     "$ROOT_DIR/scripts/impl/build-musl.sh" "$ARCH"
 fi
 
-if [[ ! -d "$LLVM_SRC" ]]; then
-  [[ "$QUIET" != "1" ]] && echo "=== Fetching llvm-project ($LLVM_TAG) ==="
-  run_cmd git clone --depth=1 --filter=blob:none --sparse \
-    https://github.com/llvm/llvm-project.git \
-    --branch="$LLVM_TAG" "$LLVM_SRC"
-fi
-
-if [[ -d "$LLVM_SRC/.git" ]]; then
-  run_cmd git -C "$LLVM_SRC" sparse-checkout init --cone
-  run_cmd git -C "$LLVM_SRC" sparse-checkout set llvm compiler-rt cmake third-party
-fi
+with_llvm_source_lock prepare_llvm_source
 
 if [[ ! -f "$LLVM_SRC/llvm/CMakeLists.txt" ]]; then
   echo "Error: missing llvm source tree at $LLVM_SRC/llvm" >&2

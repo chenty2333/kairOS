@@ -257,7 +257,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-tcc-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-tcc-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -277,12 +277,12 @@ compiler-rt: $(COMPILER_RT_STAMP)
 
 $(COMPILER_RT_STAMP): $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain compiler-rt
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) TOOLCHAIN_LOCK_WAIT=$(TOOLCHAIN_LOCK_WAIT) $(KAIROS_CMD) toolchain compiler-rt
 	@touch $@
 
 $(MUSL_STAMP): $(USER_TOOLCHAIN_DEPS) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain musl
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) TOOLCHAIN_LOCK_WAIT=$(TOOLCHAIN_LOCK_WAIT) $(KAIROS_CMD) toolchain musl
 	@touch $@
 
 $(USER_INIT): $(MUSL_STAMP) user/init/main.c user/Makefile
@@ -302,14 +302,14 @@ busybox: $(BUSYBOX_STAMP)
 
 $(BUSYBOX_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS) tools/busybox/kairos_defconfig
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain busybox
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) TOOLCHAIN_LOCK_WAIT=$(TOOLCHAIN_LOCK_WAIT) $(KAIROS_CMD) toolchain busybox
 	@touch $@
 
 tcc: $(TCC_STAMP)
 
 $(TCC_STAMP): $(MUSL_STAMP) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
-	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) $(KAIROS_CMD) toolchain tcc
+	$(Q)USE_GCC=$(USE_GCC) TOOLCHAIN_MODE=$(TOOLCHAIN_MODE) TOOLCHAIN_LOCK_WAIT=$(TOOLCHAIN_LOCK_WAIT) $(KAIROS_CMD) toolchain tcc
 	@touch $@
 
 rootfs-base: $(ROOTFS_BASE_STAMP)
@@ -710,6 +710,10 @@ RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
 TEST_ISOLATED ?= 1
 TCC_SMOKE_ISOLATED ?= 0
+TEST_CONCURRENCY ?= 3
+TEST_ROUNDS ?= 3
+TEST_CONCURRENT_TARGET ?= test-vfs-ipc
+TEST_CONCURRENT_TIMEOUT ?= $(TEST_TIMEOUT)
 RUN_RUNS_ROOT ?= build/runs/run
 RUNS_KEEP_RUN ?= 5
 RUN_GC_AUTO ?= 1
@@ -719,6 +723,7 @@ RUN_REQUIRE_BOOT ?= 1
 LOCK_WAIT ?= 0
 RUN_LOCK_WAIT ?= $(LOCK_WAIT)
 TEST_LOCK_WAIT ?= $(LOCK_WAIT)
+TOOLCHAIN_LOCK_WAIT ?= 900
 TEST_LOG_FWD :=
 TCC_SMOKE_LOG_FWD :=
 ifneq ($(origin TEST_LOG),file)
@@ -901,6 +906,16 @@ test-debug: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 		$(KAIROS_CMD) run test-debug --extra-cflags "$(TEST_EXTRA_CFLAGS) -DCONFIG_DEBUG=1" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"
 
+test-concurrent-smoke: check-tools scripts/test-concurrent.sh
+	$(Q)ARCH="$(ARCH)" TEST_TARGET="$(TEST_CONCURRENT_TARGET)" TEST_CONCURRENCY="$(TEST_CONCURRENCY)" \
+		TEST_ROUNDS="$(TEST_ROUNDS)" TEST_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" \
+		bash ./scripts/test-concurrent.sh
+
+test-concurrent-vfs-ipc:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_CONCURRENT_TARGET="test-vfs-ipc" \
+		TEST_CONCURRENCY="$(TEST_CONCURRENCY)" TEST_ROUNDS="$(TEST_ROUNDS)" \
+		TEST_CONCURRENT_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" test-concurrent-smoke
+
 # Show help
 help:
 	@echo "Kairos Kernel Build System"
@@ -949,6 +964,8 @@ help:
 	@echo "  test-soak - Run long SMP soak test (timeout-driven)"
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
 	@echo "  test-matrix - Run SMP x DEBUG test matrix"
+	@echo "  test-concurrent-smoke - Run configurable concurrent test smoke"
+	@echo "  test-concurrent-vfs-ipc - Concurrent smoke preset for test-vfs-ipc"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
@@ -959,6 +976,10 @@ help:
 	@echo "  RUNS_KEEP - Number of isolated runs to keep on GC (default: 20)"
 	@echo "  GC_RUNS_AUTO - Auto run gc-runs before test (default: 1)"
 	@echo "  TEST_ISOLATED - Enable isolated test run (default: 1)"
+	@echo "  TEST_CONCURRENCY - Parallel jobs per concurrent smoke round (default: 3)"
+	@echo "  TEST_ROUNDS - Rounds for concurrent smoke (default: 3)"
+	@echo "  TEST_CONCURRENT_TARGET - Target used by concurrent smoke (default: test-vfs-ipc)"
+	@echo "  TEST_CONCURRENT_TIMEOUT - TEST_TIMEOUT override for concurrent smoke jobs"
 	@echo "  RUN_RUNS_ROOT - Isolated run sessions root (default: build/runs/run)"
 	@echo "  RUNS_KEEP_RUN - Number of isolated run sessions to keep (default: 5)"
 	@echo "  RUN_GC_AUTO - Auto run gc-runs before run (default: 1)"
@@ -968,6 +989,7 @@ help:
 	@echo "  LOCK_WAIT - Default lock wait seconds for run/test lock acquisition (default: 0)"
 	@echo "  RUN_LOCK_WAIT - Seconds to wait for run qemu lock before lock_busy (default: 0)"
 	@echo "  TEST_LOCK_WAIT - Seconds to wait for test qemu lock before lock_busy (default: 0)"
+	@echo "  TOOLCHAIN_LOCK_WAIT - Seconds to wait for global toolchain lock (default: 900)"
 	@echo "  RUN_ID - Explicit isolated session id for run/test (default: YYMMDD-HHMM-xxxx)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  V        - Verbose mode (V=1)"

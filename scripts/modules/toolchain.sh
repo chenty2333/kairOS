@@ -17,6 +17,31 @@ Actions:
 EOF
 }
 
+kairos_toolchain_with_global_lock() {
+    local action="$1"
+    shift
+
+    local wait_s="${TOOLCHAIN_LOCK_WAIT:-900}"
+    local lock_name="toolchain-${KAIROS_ARCH}"
+    local rc=0
+
+    if ! [[ "${wait_s}" =~ ^[0-9]+$ ]]; then
+        kairos_die "invalid TOOLCHAIN_LOCK_WAIT=${wait_s} (expected non-negative integer)"
+    fi
+
+    set +e
+    KAIROS_LOCK_WAIT="${wait_s}" kairos_lock_global "${lock_name}" "$@"
+    rc=$?
+    set -e
+    if ((rc != 0)); then
+        if kairos_lock_is_busy_rc "${rc}"; then
+            kairos_die "toolchain ${action} is busy for ARCH=${KAIROS_ARCH} (global lock: ${lock_name}, wait=${wait_s}s)"
+        fi
+        return "${rc}"
+    fi
+    return 0
+}
+
 kairos_toolchain_dispatch() {
     local action="${1:-}"
     if [[ -z "$action" ]]; then
@@ -26,19 +51,24 @@ kairos_toolchain_dispatch() {
 
     case "$action" in
         compiler-rt)
-            kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-compiler-rt.sh" "${KAIROS_ARCH}"
+            kairos_toolchain_with_global_lock "compiler-rt" \
+                kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-compiler-rt.sh" "${KAIROS_ARCH}"
             ;;
         musl)
-            kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-musl.sh" "${KAIROS_ARCH}"
+            kairos_toolchain_with_global_lock "musl" \
+                kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-musl.sh" "${KAIROS_ARCH}"
             ;;
         busybox)
-            kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-busybox.sh" "${KAIROS_ARCH}"
+            kairos_toolchain_with_global_lock "busybox" \
+                kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-busybox.sh" "${KAIROS_ARCH}"
             ;;
         tcc)
-            kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-tcc.sh" "${KAIROS_ARCH}"
+            kairos_toolchain_with_global_lock "tcc" \
+                kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-tcc.sh" "${KAIROS_ARCH}"
             ;;
         musl-cross)
-            kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-musl-cross.sh" "${KAIROS_ARCH}"
+            kairos_toolchain_with_global_lock "musl-cross" \
+                kairos_exec_script "toolchain" "${KAIROS_ROOT_DIR}/scripts/impl/build-musl-cross.sh" "${KAIROS_ARCH}"
             ;;
         all)
             case "${TOOLCHAIN_MODE:-auto}" in

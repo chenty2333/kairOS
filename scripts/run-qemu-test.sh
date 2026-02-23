@@ -123,6 +123,32 @@ extract_qemu_signal_meta() {
     printf '%s %s\n' "-1" "-1"
 }
 
+detect_pre_qemu_failure_reason() {
+    local log_path="$1"
+
+    if [[ ! -f "${log_path}" ]]; then
+        echo "pre_qemu_failure_no_log"
+        return 0
+    fi
+
+    if grep -Eiq 'ld(\.lld)?: error:|undefined symbol:|collect2: error:' "${log_path}"; then
+        echo "build_fail_link"
+        return 0
+    fi
+
+    if grep -Eiq 'Error: toolchain failed \(rc=[0-9]+\)|stamps/(musl|compiler-rt|busybox|tcc)\.stamp.*Error [0-9]+' "${log_path}"; then
+        echo "build_fail_toolchain"
+        return 0
+    fi
+
+    if grep -Eiq 'make(\[[0-9]+\])?: \*\*\* .* Error [0-9]+' "${log_path}"; then
+        echo "build_fail_make"
+        return 0
+    fi
+
+    echo "pre_qemu_failure"
+}
+
 write_manifest() {
     local start_time_utc="$1"
     local git_sha="unknown"
@@ -212,6 +238,7 @@ run_test_main() {
     local has_required_markers has_forbidden_markers
     local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
     local structured_status structured_schema structured_failed structured_done structured_enabled_mask
+    local pre_qemu_reason
     local status reason exit_code verdict_source
 
     rm -f "${TEST_LOG}"
@@ -298,6 +325,7 @@ run_test_main() {
     structured_done=0
     structured_enabled_mask=-1
     read -r structured_status structured_schema structured_failed structured_done structured_enabled_mask < <(extract_structured_result)
+    pre_qemu_reason=""
 
     status="fail"
     reason="unknown"
@@ -319,6 +347,10 @@ run_test_main() {
             if [[ ${has_failure_markers} -eq 1 ]]; then
                 status="fail"
                 reason="failure_markers_without_structured"
+            elif [[ ${has_boot_marker} -eq 0 ]]; then
+                pre_qemu_reason="$(detect_pre_qemu_failure_reason "${TEST_LOG}")"
+                status="infra_fail"
+                reason="${pre_qemu_reason}"
             elif [[ ${qemu_rc} -eq 124 ]]; then
                 status="timeout"
                 reason="timeout_without_structured"
