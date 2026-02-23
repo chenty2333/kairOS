@@ -25,6 +25,30 @@ static time_t current_time_sec(void)
 
 #include "sys_fs_helpers.h"
 
+static uint32_t sysfs_translate_open_flags(uint64_t flags_raw) {
+    uint32_t flags = (uint32_t)flags_raw;
+#if defined(ARCH_aarch64)
+    /*
+     * AArch64 Linux O_* bit assignments differ from the generic values used by
+     * the in-kernel VFS layer. Translate user ABI bits at syscall boundary.
+     */
+    const uint32_t ABI_O_DIRECTORY = 040000;
+    const uint32_t ABI_O_NOFOLLOW = 0100000;
+    const uint32_t ABI_O_LARGEFILE = 0400000;
+
+    uint32_t out = flags & ~(ABI_O_DIRECTORY | ABI_O_NOFOLLOW | ABI_O_LARGEFILE);
+    if (flags & ABI_O_DIRECTORY)
+        out |= O_DIRECTORY;
+    if (flags & ABI_O_NOFOLLOW)
+        out |= O_NOFOLLOW;
+    if (flags & ABI_O_LARGEFILE)
+        out |= O_LARGEFILE;
+    return out;
+#else
+    return flags;
+#endif
+}
+
 int64_t sys_getcwd(uint64_t buf_ptr, uint64_t size, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
@@ -268,9 +292,10 @@ int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
     int ret = sysfs_get_base_path((int64_t)dirfd, kpath, &base, &basep);
     if (ret < 0)
         return ret;
-    mode_t umode = (flags & O_CREAT) ? sysfs_apply_umask((mode_t)mode)
+    uint32_t kflags = sysfs_translate_open_flags(flags);
+    mode_t umode = (kflags & O_CREAT) ? sysfs_apply_umask((mode_t)mode)
                                      : (mode_t)mode;
-    ret = vfs_open_at_path(basep, kpath, (int)flags, umode, &f);
+    ret = vfs_open_at_path(basep, kpath, (int)kflags, umode, &f);
     if (ret < 0) {
         if (strcmp(kpath, "/bin/busybox") == 0 ||
             strcmp(kpath, "/oldroot/bin/busybox") == 0) {
@@ -279,7 +304,7 @@ int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
         return ret;
     }
 
-    uint32_t fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (kflags & O_CLOEXEC) ? FD_CLOEXEC : 0;
     int fd_out = fd_alloc_flags(proc_current(), f, fd_flags);
     if (fd_out < 0) {
         vfs_close(f);
