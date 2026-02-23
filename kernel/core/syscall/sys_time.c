@@ -55,6 +55,7 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
 }
 
 static char uts_domainname[65] = "kairos";
+static char uts_nodename[65] = "kairos";
 
 static const char *uname_machine(void) {
 #if defined(ARCH_aarch64)
@@ -97,6 +98,26 @@ int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
         return rc;
     /* No RTC or time-setting support yet. */
     return -EPERM;
+}
+
+int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (!tp_ptr)
+        return -EFAULT;
+    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
+        return -EINVAL;
+
+    uint64_t res_ns = (NS_PER_SEC + CONFIG_HZ - 1) / CONFIG_HZ;
+    if (res_ns == 0)
+        res_ns = 1;
+    struct timespec ts = {
+        .tv_sec = 0,
+        .tv_nsec = (int64_t)res_ns,
+    };
+    if (copy_to_user((void *)tp_ptr, &ts, sizeof(ts)) < 0)
+        return -EFAULT;
+    return 0;
 }
 
 int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
@@ -255,13 +276,31 @@ int64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
     struct linux_utsname uts;
     memset(&uts, 0, sizeof(uts));
     strcpy(uts.sysname, "Kairos");
-    strcpy(uts.nodename, "kairos");
+    strncpy(uts.nodename, uts_nodename, sizeof(uts.nodename) - 1);
     strcpy(uts.release, "0.1.0");
     strcpy(uts.version, "kairos");
     strncpy(uts.machine, uname_machine(), sizeof(uts.machine) - 1);
     strncpy(uts.domainname, uts_domainname, sizeof(uts.domainname) - 1);
     if (copy_to_user((void *)buf_ptr, &uts, sizeof(uts)) < 0)
         return -EFAULT;
+    return 0;
+}
+
+int64_t sys_sethostname(uint64_t name_ptr, uint64_t len, uint64_t a2,
+                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (len > sizeof(uts_nodename) - 1)
+        return -EINVAL;
+    if (len > 0 && !name_ptr)
+        return -EFAULT;
+    char tmp[65];
+    memset(tmp, 0, sizeof(tmp));
+    if (len > 0) {
+        if (copy_from_user(tmp, (const void *)name_ptr, (size_t)len) < 0)
+            return -EFAULT;
+    }
+    memset(uts_nodename, 0, sizeof(uts_nodename));
+    memcpy(uts_nodename, tmp, (size_t)len);
     return 0;
 }
 

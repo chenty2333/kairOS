@@ -257,6 +257,11 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     return 0;
 }
 
+int64_t sys_fchmodat2(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
+                      uint64_t flags, uint64_t a4, uint64_t a5) {
+    return sys_fchmodat(dirfd, path_ptr, mode, flags, a4, a5);
+}
+
 int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
                      uint64_t group, uint64_t flags, uint64_t a5) {
     (void)a5;

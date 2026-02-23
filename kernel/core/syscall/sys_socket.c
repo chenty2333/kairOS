@@ -125,9 +125,11 @@ int64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t a2,
     return ret;
 }
 
-int64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
-                   uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a3; (void)a4; (void)a5;
+static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
+                                 uint64_t addrlen_ptr, uint64_t flags) {
+    if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
+        return -EINVAL;
+
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
@@ -171,8 +173,11 @@ int64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
     file->vnode = newsock->vnode;
     vnode_get(newsock->vnode);
     file->flags = O_RDWR;
+    if (flags & SOCK_NONBLOCK)
+        file->flags |= O_NONBLOCK;
 
-    int newfd = fd_alloc(p, file);
+    uint32_t fd_flags = (flags & SOCK_CLOEXEC) ? FD_CLOEXEC : 0;
+    int newfd = fd_alloc_flags(p, file, fd_flags);
     if (newfd < 0) {
         vfs_close(file);
         sock_destroy(newsock);
@@ -181,6 +186,18 @@ int64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
     }
     file_put(sock_file);
     return newfd;
+}
+
+int64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
+                   uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    return sys_accept_common(fd, addr, addrlen_ptr, 0);
+}
+
+int64_t sys_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
+                    uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    return sys_accept_common(fd, addr, addrlen_ptr, flags);
 }
 
 int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,

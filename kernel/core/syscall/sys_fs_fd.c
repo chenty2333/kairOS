@@ -286,6 +286,27 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
     return ret;
 }
 
+int64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
+                   uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f || !f->vnode) {
+        if (f)
+            file_put(f);
+        return -EBADF;
+    }
+    rwlock_write_lock(&f->vnode->lock);
+    f->vnode->mode = (f->vnode->mode & S_IFMT) | ((mode_t)mode & 07777);
+    f->vnode->ctime = time_now_sec();
+    if (f->vnode->mount && f->vnode->mount->ops &&
+        f->vnode->mount->ops->chmod) {
+        f->vnode->mount->ops->chmod(f->vnode, f->vnode->mode);
+    }
+    rwlock_write_unlock(&f->vnode->lock);
+    file_put(f);
+    return 0;
+}
+
 int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;

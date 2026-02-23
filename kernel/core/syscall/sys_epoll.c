@@ -10,6 +10,8 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
+#define NS_PER_SEC 1000000000ULL
+
 int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -82,4 +84,23 @@ int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
 
     kfree(out);
     return ret;
+}
+
+int64_t sys_epoll_pwait2(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
+                         uint64_t timeout_ptr, uint64_t sigmask_ptr,
+                         uint64_t sigsetsize) {
+    int64_t timeout_ms = -1;
+    if (timeout_ptr) {
+        struct timespec ts;
+        if (copy_from_user(&ts, (void *)timeout_ptr, sizeof(ts)) < 0)
+            return -EFAULT;
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 ||
+            ts.tv_nsec >= (int64_t)NS_PER_SEC)
+            return -EINVAL;
+        uint64_t ms = (uint64_t)ts.tv_sec * 1000ULL +
+                      ((uint64_t)ts.tv_nsec + 999999ULL) / 1000000ULL;
+        timeout_ms = (ms > 0x7fffffffULL) ? 0x7fffffffLL : (int64_t)ms;
+    }
+    return sys_epoll_wait(epfd, events_ptr, maxevents, (uint64_t)timeout_ms,
+                          sigmask_ptr, sigsetsize);
 }

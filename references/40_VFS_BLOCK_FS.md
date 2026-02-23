@@ -29,6 +29,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `statx` is wired to the same path resolution and returns `STATX_BASIC_STATS` data
   - `faccessat2`/`faccessat` support `AT_EMPTY_PATH` on fd targets
   - `fchmodat`/`fchownat`/`utimensat` accept `AT_EMPTY_PATH` for fd-target metadata updates
+  - `fchmodat2` is wired to `fchmodat` semantics and flag validation
   - `openat2` supports `struct open_how` parsing and currently maps to `openat` when `resolve=0`
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 
@@ -56,6 +57,10 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - vfs_read/vfs_write guard against NULL vnode and NULL ops before dispatching
 - vfs_seek returns -ESPIPE for VNODE_PIPE and VNODE_SOCKET
 - Linux `close_range` supports range close and `CLOSE_RANGE_CLOEXEC`; `CLOSE_RANGE_UNSHARE` triggers fdtable copy-on-write before applying the range
+- Linux ABI read/write extensions:
+  - `pread64`/`pwrite64` and `preadv2`/`pwritev2` are wired through existing positional I/O paths
+  - `preadv`/`pwritev` and `preadv2`/`pwritev2` follow Linux split-offset ABI (`pos_l`/`pos_h`)
+  - `preadv2`/`pwritev2` currently support `flags=0` only
 
 ## Block I/O Layer (fs/bio/bio.c)
 
@@ -90,6 +95,7 @@ Special:
 - vfs_poll.c: VFS poll infrastructure, based on pollwait mechanism
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
+- Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks) and `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`)
 
 Related references:
 - references/00_REPO_MAP.md

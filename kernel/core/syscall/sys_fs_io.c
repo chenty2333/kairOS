@@ -120,6 +120,108 @@ int64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3,
     return ret;
 }
 
+static int64_t sys_pread_write(uint64_t fd, uint64_t buf, uint64_t count,
+                               uint64_t offset, bool is_write) {
+    if ((int64_t)offset < 0)
+        return -EINVAL;
+
+    struct file *f = fd_get(proc_current(), (int)fd);
+    if (!f)
+        return -EBADF;
+    if (!f->vnode || f->vnode->type == VNODE_PIPE) {
+        file_put(f);
+        return -ESPIPE;
+    }
+    if (f->vnode->type == VNODE_DIR) {
+        file_put(f);
+        return -EISDIR;
+    }
+
+    int accmode = (int)(f->flags & O_ACCMODE);
+    if (!is_write && accmode == O_WRONLY) {
+        file_put(f);
+        return -EBADF;
+    }
+    if (is_write && accmode == O_RDONLY) {
+        file_put(f);
+        return -EBADF;
+    }
+
+    if (!is_write && (f->flags & O_NONBLOCK)) {
+        if (!(vfs_poll(f, POLLIN) & POLLIN)) {
+            file_put(f);
+            return -EAGAIN;
+        }
+    }
+
+    if (!f->vnode->ops ||
+        (!is_write && !f->vnode->ops->read) ||
+        (is_write && !f->vnode->ops->write)) {
+        file_put(f);
+        return -EINVAL;
+    }
+
+    uint8_t kbuf[512];
+    size_t done = 0;
+    off_t off = (off_t)offset;
+    while (done < count) {
+        size_t chunk = (count - done > sizeof(kbuf)) ? sizeof(kbuf)
+                                                     : (size_t)(count - done);
+        if (is_write) {
+            if (copy_from_user(kbuf, (const void *)(buf + done), chunk) < 0) {
+                file_put(f);
+                return done ? (int64_t)done : -EFAULT;
+            }
+            rwlock_write_lock(&f->vnode->lock);
+            ssize_t n = f->vnode->ops->write(f->vnode, kbuf, chunk, off, f->flags);
+            rwlock_write_unlock(&f->vnode->lock);
+            if (n < 0) {
+                file_put(f);
+                return done ? (int64_t)done : (int64_t)n;
+            }
+            if (n == 0)
+                break;
+            off += n;
+            done += (size_t)n;
+            if ((size_t)n < chunk)
+                break;
+        } else {
+            rwlock_read_lock(&f->vnode->lock);
+            ssize_t n = f->vnode->ops->read(f->vnode, kbuf, chunk, off, f->flags);
+            rwlock_read_unlock(&f->vnode->lock);
+            if (n < 0) {
+                file_put(f);
+                return done ? (int64_t)done : (int64_t)n;
+            }
+            if (n == 0)
+                break;
+            if (copy_to_user((void *)(buf + done), kbuf, (size_t)n) < 0) {
+                file_put(f);
+                return done ? (int64_t)done : -EFAULT;
+            }
+            off += n;
+            done += (size_t)n;
+            if ((size_t)n < chunk)
+                break;
+        }
+    }
+
+    file_put(f);
+    return (int64_t)done;
+}
+
+int64_t sys_pread64(uint64_t fd, uint64_t buf, uint64_t count,
+                    uint64_t offset, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    return sys_pread_write(fd, buf, count, offset, false);
+}
+
+int64_t sys_pwrite64(uint64_t fd, uint64_t buf, uint64_t count,
+                     uint64_t offset, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    return sys_pread_write(fd, buf, count, offset, true);
+}
+
 struct iovec {
     void *iov_base;
     size_t iov_len;
@@ -328,15 +430,37 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
     return (int64_t)total;
 }
 
+static uint64_t sysfs_linux_split_off(uint64_t pos_l, uint64_t pos_h) {
+    return (pos_l & 0xffffffffULL) | (pos_h << 32);
+}
+
 int64_t sys_preadv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
-                   uint64_t offset, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
+                   uint64_t pos_l, uint64_t pos_h, uint64_t a5) {
+    (void)a5;
+    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
     return sys_pread_writev(fd, iov_ptr, iovcnt, offset, false);
 }
 
 int64_t sys_pwritev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
-                    uint64_t offset, uint64_t a4, uint64_t a5) {
-    (void)a4; (void)a5;
+                    uint64_t pos_l, uint64_t pos_h, uint64_t a5) {
+    (void)a5;
+    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
+    return sys_pread_writev(fd, iov_ptr, iovcnt, offset, true);
+}
+
+int64_t sys_preadv2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
+                    uint64_t pos_l, uint64_t pos_h, uint64_t flags) {
+    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
+    if (flags != 0)
+        return -EOPNOTSUPP;
+    return sys_pread_writev(fd, iov_ptr, iovcnt, offset, false);
+}
+
+int64_t sys_pwritev2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
+                     uint64_t pos_l, uint64_t pos_h, uint64_t flags) {
+    uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
+    if (flags != 0)
+        return -EOPNOTSUPP;
     return sys_pread_writev(fd, iov_ptr, iovcnt, offset, true);
 }
 

@@ -49,6 +49,9 @@ Path: userspace trap instruction → trapasm.S → arch trap.c identifies as sys
 - riscv64: ecall instruction, syscall number in a7, args a0-a5
 - x86_64: int 0x80, syscall number in rax, args rdi/rsi/rdx/r10/r8/r9
 - aarch64: svc #0, syscall number in x8, args x0-x5
+- Linux `clone` ABI argument order differs by architecture:
+  - x86_64: `(flags, newsp, ptid, ctid, tls)`
+  - riscv64/aarch64: `(flags, newsp, ptid, tls, ctid)`
 
 syscall_dispatch() (core/syscall/syscall.c):
 - Checks process ABI flag

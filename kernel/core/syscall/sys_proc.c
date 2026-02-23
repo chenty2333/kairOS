@@ -381,8 +381,16 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
 }
 
 int64_t sys_clone(uint64_t flags, uint64_t newsp, uint64_t parent_tid,
-                  uint64_t child_tid, uint64_t tls, uint64_t a5) {
+                  uint64_t arg3, uint64_t arg4, uint64_t a5) {
     (void)a5;
+
+#if defined(ARCH_aarch64) || defined(ARCH_riscv64)
+    uint64_t tls = arg3;
+    uint64_t child_tid = arg4;
+#else
+    uint64_t child_tid = arg3;
+    uint64_t tls = arg4;
+#endif
 
     uint64_t kflags = flags & ~0xFFULL;
     uint64_t supported = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
