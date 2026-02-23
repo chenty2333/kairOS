@@ -25,15 +25,18 @@ static void test_fail(const char *fmt, ...) {
 static int reap_children_bounded(int expected, const char *tag) {
     int reaped = 0;
     int status = 0;
-    const int max_loops = 200000;
+    uint64_t start = arch_timer_ticks();
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(10ULL * 1000 * 1000 * 1000);
 
-    for (int i = 0; i < max_loops && reaped < expected; i++) {
+    while (reaped < expected) {
         pid_t pid = proc_wait(-1, &status, WNOHANG);
         if (pid > 0) {
             reaped++;
             continue;
         }
         if (pid < 0)
+            break;
+        if ((arch_timer_ticks() - start) > timeout_ticks)
             break;
         proc_yield();
     }
@@ -77,16 +80,32 @@ static int fork_exit_child(void *arg) {
 
 static void test_sched_fork_exit_storm(void) {
     pr_info("sched_stress: fork_exit_storm\n");
+    struct process *self = proc_current();
     int created = 0;
     for (int i = 0; i < FORK_STORM_N; i++) {
         struct process *p = kthread_create_joinable(fork_exit_child, NULL, "fes");
         if (p) {
+            if (p->parent != self) {
+                pr_warn("sched_stress: fork_exit_storm parent mismatch pid=%d parent=%d self=%d\n",
+                        p->pid, p->parent ? p->parent->pid : -1,
+                        self ? self->pid : -1);
+            }
             sched_enqueue(p);
             created++;
         } else {
             pr_warn("sched_stress: fork_exit_storm: kthread_create failed at i=%d\n", i);
         }
     }
+    int linked = 0;
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        pid_t pid = proc_get_nth_pid(i);
+        if (pid <= 0)
+            break;
+        struct process *p = proc_find(pid);
+        if (p && p->parent == self)
+            linked++;
+    }
+    pr_info("sched_stress: fork_exit_storm linked=%d created=%d\n", linked, created);
     int reaped = reap_children_bounded(created, "fork_exit_storm");
     if (reaped != created)
         test_fail("sched_stress: fork_exit_storm FAIL: reaped %d/%d\n",
@@ -487,13 +506,22 @@ int run_sched_stress_tests(void) {
     tests_failed = 0;
     pr_info("sched_stress: starting\n");
     test_sched_fork_exit_storm();
-    test_sched_sleep_wakeup_stress();
-    test_sched_yield_storm();
-    test_sched_preempt_stress();
-    test_eevdf_deadline_ordering();
-    test_eevdf_lag_fairness();
-    test_eevdf_nice_isolation();
-    test_eevdf_fork_penalty();
+    if (tests_failed == 0)
+        test_sched_sleep_wakeup_stress();
+    if (tests_failed == 0)
+        test_sched_yield_storm();
+    if (tests_failed == 0)
+        test_sched_preempt_stress();
+    if (tests_failed == 0)
+        test_eevdf_deadline_ordering();
+    if (tests_failed == 0)
+        test_eevdf_lag_fairness();
+    if (tests_failed == 0)
+        test_eevdf_nice_isolation();
+    if (tests_failed == 0)
+        test_eevdf_fork_penalty();
+    if (tests_failed > 0)
+        pr_warn("sched_stress: aborting after first failure\n");
     if (tests_failed == 0)
         pr_info("sched_stress: all passed\n");
     else

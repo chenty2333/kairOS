@@ -40,34 +40,10 @@ static const char *exc_names[] = {
     [12] = "Inst page fault",       [13] = "Load page fault",
     [15] = "Store page fault"};
 
-static const char *proc_state_name(enum proc_state s) {
-    switch (s) {
-    case PROC_UNUSED: return "unused";
-    case PROC_EMBRYO: return "embryo";
-    case PROC_RUNNABLE: return "runnable";
-    case PROC_RUNNING: return "running";
-    case PROC_SLEEPING: return "sleeping";
-    case PROC_ZOMBIE: return "zombie";
-    case PROC_REAPING: return "reaping";
-    default: return "?";
-    }
-}
-
-static const char *se_state_name(uint32_t s) {
-    switch (s) {
-    case SE_STATE_BLOCKED: return "blocked";
-    case SE_STATE_RUNNABLE: return "runnable";
-    case SE_STATE_QUEUED: return "queued";
-    case SE_STATE_RUNNING: return "running";
-    default: return "?";
-    }
-}
-
 static void dump_trap_frame(struct trap_frame *tf, bool from_user) {
     struct process *p = proc_current();
-    pr_err("Trap dump: cpu=%d mode=%s pid=%d name=%s\n", arch_cpu_id(),
-           from_user ? "user" : "kernel", p ? p->pid : -1,
-           p ? p->name : "-");
+    pr_err("Trap dump: cpu=%d mode=%s proc=%p\n", arch_cpu_id(),
+           from_user ? "user" : "kernel", p);
     pr_err("  sepc=%p stval=%p scause=%p sstatus=%p\n",
            (void *)tf->sepc, (void *)tf->stval, (void *)tf->scause,
            (void *)tf->sstatus);
@@ -76,19 +52,13 @@ static void dump_trap_frame(struct trap_frame *tf, bool from_user) {
            (void *)tf->tf_a1, (void *)tf->tf_a2, (void *)tf->tf_a3,
            (void *)tf->tf_a4, (void *)tf->tf_a5, (void *)tf->tf_a6,
            (void *)tf->tf_a7);
-    if (p) {
-        pr_err("  proc_state=%s se_state=%s se_cpu=%d wait=%p sleep_deadline=%llu\n",
-               proc_state_name(p->state), se_state_name(p->se.run_state),
-               sched_entity_cpu(p), p->wait_channel,
-               (unsigned long long)p->sleep_deadline);
-    }
     struct percpu_data *cpu = arch_get_percpu();
     if (cpu) {
         struct process *curr = cpu->curr_proc;
-        pr_err("  rq_nr_running=%u rq_min_vruntime=%llu curr_pid=%d curr_name=%s resched=%d ticks=%llu\n",
+        pr_err("  rq_nr_running=%u rq_min_vruntime=%llu curr_proc=%p resched=%d ticks=%llu\n",
                sched_rq_nr_running(cpu->cpu_id),
                (unsigned long long)sched_rq_min_vruntime(cpu->cpu_id),
-               curr ? curr->pid : -1, curr ? curr->name : "-",
+               curr,
                cpu->resched_needed, (unsigned long long)cpu->ticks);
     }
 }
@@ -158,12 +128,10 @@ static void handle_exception(struct trap_frame *tf) {
     pr_err("Exception: %s (cause=%lu, epc=%p, val=%p)\n",
            cause < 16 ? exc_names[cause] : "Unknown", cause, (void *)tf->sepc,
            (void *)tf->stval);
-    sched_trace_event(SCHED_TRACE_TRAP, cur, cause, tf->sepc);
+    sched_trace_event(SCHED_TRACE_TRAP, NULL, cause, tf->sepc);
     sched_debug_dump_cpu(arch_cpu_id());
-    if (cur && sched_entity_cpu(cur) >= 0 && sched_entity_cpu(cur) < sched_cpu_count() &&
-        sched_entity_cpu(cur) != arch_cpu_id())
-        sched_debug_dump_cpu(sched_entity_cpu(cur));
     sched_trace_dump_recent(64);
+    arch_backtrace();
     panic(from_user ? "User exception" : "Kernel exception");
 }
 

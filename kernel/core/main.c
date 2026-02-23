@@ -58,7 +58,7 @@ static void smp_init(void) {
         arch_cpu_relax();
     }
     pr_info("SMP: %d CPUs active\n", started + 1);
-    // FIXME: Re-enable work stealing after fairness/starvation in sched_stress is resolved.
+    // FIXME: Re-enable steal after fixing running-state leak under SMP stress.
     sched_set_steal_enabled(false);
 }
 

@@ -19,6 +19,7 @@
 #define SCHED_SLICE_NS          3000000UL   /* 3ms default time slice */
 #define SCHED_LATENCY_NS        6000000UL   /* 6ms scheduling latency target */
 #define SCHED_MIN_GRANULARITY_NS 500000UL   /* 0.5ms minimum granularity */
+#define SCHED_RB_WALK_LIMIT     (CONFIG_MAX_PROCESSES * 4)
 
 static inline uint64_t sched_clock_ns(void) {
     return arch_timer_ticks_to_ns(arch_timer_ticks());
@@ -60,6 +61,27 @@ static inline void sched_stat_inc(uint64_t *counter) {
 
 static inline uint64_t sched_stat_load(const uint64_t *counter) {
     return __atomic_load_n(counter, __ATOMIC_RELAXED);
+}
+
+static inline bool sched_rb_walk_limit_reached(int *steps, const char *where) {
+    (*steps)++;
+    if (*steps <= SCHED_RB_WALK_LIMIT)
+        return false;
+#if CONFIG_DEBUG
+    int cpu = arch_cpu_id();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    sched_stat_inc(&cpu_data[cpu].stats.state_violation_count);
+#endif
+    pr_err("sched: rb walk limit exceeded in %s\n", where);
+    return true;
+}
+
+static inline bool sched_cpu_needs_kick(int cpu) {
+    struct process *curr =
+        __atomic_load_n(&cpu_data[cpu].curr_proc, __ATOMIC_ACQUIRE);
+    struct process *idle = cpu_data[cpu].idle_proc;
+    return !curr || curr == idle;
 }
 
 static inline bool sched_steal_is_enabled(void) {
@@ -384,8 +406,11 @@ static inline bool se_update_min_deadline(struct sched_entity *se) {
 
 static void se_recompute_min_deadline(struct rb_node *node) {
     struct rb_node *prev = NULL;
+    int steps = 0;
 
     while (node) {
+        if (sched_rb_walk_limit_reached(&steps, "se_recompute_min_deadline"))
+            break;
         struct rb_node *parent = rb_parent(node);
         if (prev == parent) {
             if (node->rb_left) {
@@ -424,8 +449,11 @@ static bool sched_rb_erase(struct sched_entity *se, struct cfs_rq *cfs_rq) {
 
 static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq) {
     struct sched_entity *best = NULL;
+    int steps = 0;
     for (struct rb_node *node = rb_first(&cfs_rq->tasks_timeline);
          node; node = rb_next(node)) {
+        if (sched_rb_walk_limit_reached(&steps, "pick_eevdf"))
+            break;
         struct sched_entity *se = rb_entry(node, struct sched_entity, sched_node);
         if (!entity_eligible(cfs_rq, se))
             continue;
@@ -571,6 +599,8 @@ void sched_enqueue(struct process *p) {
 
         /* Check preemption via class */
         p->se.sched_class->check_preempt_curr(rq, p);
+        if (sched_cpu_needs_kick(cpu))
+            cpu_data[cpu].resched_needed = true;
     }
     bool need_resched = cpu_data[cpu].resched_needed;
 
@@ -607,6 +637,8 @@ void sched_wake(struct process *p) {
     if (enqueued) {
         sched_stat_inc(&cpu_data[cpu].stats.enqueue_count);
         p->se.sched_class->check_preempt_curr(rq, p);
+        if (sched_cpu_needs_kick(cpu))
+            cpu_data[cpu].resched_needed = true;
     }
     bool need_resched = cpu_data[cpu].resched_needed;
 
@@ -665,7 +697,7 @@ static struct process *sched_steal_task(int self_id) {
         if (i == self_id) continue;
         sched_stat_inc(&self_stats->steal_attempt_count);
 
-        /* Lockless pre-check: skip if remote has <= 1 task */
+        /* Lockless pre-check: skip if remote has <= 1 queued task */
         if (__atomic_load_n(&cpu_data[i].runqueue.cfs.nr_running,
                             __ATOMIC_RELAXED) <= 1)
             continue;
@@ -689,9 +721,9 @@ static struct process *sched_steal_task(int self_id) {
 }
 
 void schedule(void) {
+    struct process *prev = proc_current(), *next;
     struct percpu_data *cpu = arch_get_percpu();
     struct sched_cpu_stats *stats = &cpu->stats;
-    struct process *prev = proc_current(), *next;
     struct rq *rq = &cpu->runqueue;
     bool state = arch_irq_save();
 
@@ -774,7 +806,6 @@ void schedule(void) {
         next->state = PROC_RUNNING;
         se_mark_running(&next->se);
         __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
-        proc_set_current(next);
         sched_validate_entity(next, "schedule-next");
 
         if (next->mm) {
@@ -804,6 +835,7 @@ void schedule(void) {
         next->state = PROC_RUNNING;
         se_mark_running(&next->se);
         rq->cfs.curr_se = &next->se;
+        __atomic_store_n(&cpu->curr_proc, next, __ATOMIC_RELEASE);
         if (__atomic_load_n(&cpu->prev_task, __ATOMIC_ACQUIRE))
             sched_post_switch_cleanup();
         spin_unlock(&rq->lock);
@@ -813,8 +845,8 @@ void schedule(void) {
 
 void sched_tick(void) {
     struct percpu_data *cpu = arch_get_percpu();
-    struct rq *rq = &cpu->runqueue;
     struct process *curr = proc_current();
+    struct rq *rq = &cpu->runqueue;
 
     cpu->ticks++;
     if (spin_trylock(&rq->lock)) {
@@ -829,7 +861,7 @@ void sched_tick(void) {
     }
 
     /* Wake processes whose sleep deadline has expired (CPU 0 only) */
-    if (arch_cpu_id() == 0)
+    if (cpu->cpu_id == 0)
         proc_wake_expired_sleepers(arch_timer_get_ticks());
 }
 
@@ -931,8 +963,16 @@ void sched_debug_dump_cpu(int cpu_id) {
 }
 
 void sched_cpu_online(int cpu) {
-    if (cpu >= 0 && cpu < CONFIG_MAX_CPUS && cpu >= sched_nr_cpus())
-        __atomic_store_n(&nr_cpus_online, cpu + 1, __ATOMIC_RELEASE);
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        return;
+
+    int target = cpu + 1;
+    int seen = __atomic_load_n(&nr_cpus_online, __ATOMIC_ACQUIRE);
+    while (seen < target) {
+        if (__atomic_compare_exchange_n(&nr_cpus_online, &seen, target, false,
+                                        __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+            break;
+    }
 }
 struct percpu_data *sched_cpu_data(int cpu) {
     return (cpu < 0 || cpu >= CONFIG_MAX_CPUS) ? NULL : &cpu_data[cpu];
@@ -1163,9 +1203,12 @@ static struct process *fair_steal_task(struct rq *rq, int dst_cpu) {
      */
     struct sched_entity *best_se = NULL;
     struct process *best = NULL;
+    int steps = 0;
 
     for (struct rb_node *node = cfs->rb_rightmost;
          node; node = rb_prev(node)) {
+        if (sched_rb_walk_limit_reached(&steps, "fair_steal_task"))
+            break;
         struct sched_entity *se =
             rb_entry(node, struct sched_entity, sched_node);
         struct process *cand = container_of(se, struct process, se);
