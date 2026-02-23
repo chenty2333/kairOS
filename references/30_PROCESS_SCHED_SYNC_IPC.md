@@ -59,6 +59,7 @@ SMP support:
 - sched_steal_enabled runtime flag controls pull-based work stealing
 - Work stealing (pull) is enabled in normal boot path (`sched_set_steal_enabled(true)`)
 - `fair_steal_task()` steals queued RUNNABLE entities from remote CFS runqueues (rightmost scan), with source/destination CPU state checks
+- schedule() reinserts stolen entities after normalizing to RUNNABLE and force-detaching stale RB links before local enqueue, avoiding dropped runnable tasks on steal handoff
 - Steal candidacy is explicit and requires both `proc_sched_is_stealable()` and destination-CPU affinity allowance
 - Default policy: user processes are stealable with full affinity; kernel threads (`kthread_create*`, idle) are marked `PROC_SCHEDF_KTHREAD`, non-stealable, and affinity-pinned to creator CPU
 - Failed steal attempts use per-CPU cooldown to reduce hot-loop lock pressure on empty/imbalanced systems
