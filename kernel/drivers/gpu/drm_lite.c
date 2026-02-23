@@ -40,6 +40,15 @@ struct drm_lite_buffer {
     struct list_head list;
 };
 
+struct drm_lite_device;
+
+struct drm_lite_ops {
+    int (*present)(struct drm_lite_device *dev, struct drm_lite_buffer *buf,
+                   uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    int (*get_info)(struct drm_lite_device *dev, struct drm_lite_info *info);
+    void (*cleanup)(struct drm_lite_device *dev);
+};
+
 struct drm_lite_device {
     struct device *dev;
     struct boot_framebuffer fb;
@@ -49,14 +58,8 @@ struct drm_lite_device {
     uint32_t buffer_count;
     struct mutex lock;              /* protects buffers list */
     struct list_head buffers;
-    struct drm_lite_fb_ops *ops;
-};
-
-/* Pluggable framebuffer backend (unused for now, wired in future) */
-struct drm_lite_fb_ops {
-    int (*present)(struct drm_lite_device *dev, struct drm_lite_buffer *buf,
-                   uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-    int (*get_info)(struct drm_lite_device *dev, struct drm_lite_info *info);
+    const struct drm_lite_ops *ops;
+    void *backend_data;
 };
 
 static uint32_t drm_lite_next_card = 0;
@@ -188,10 +191,10 @@ static void drm_lite_copy_from_pages(uint8_t *dst,
     }
 }
 
-static int drm_lite_present(struct drm_lite_device *ldev,
-                            struct drm_lite_buffer *buf,
-                            uint32_t x, uint32_t y,
-                            uint32_t w, uint32_t h)
+static int limine_fb_present(struct drm_lite_device *ldev,
+                             struct drm_lite_buffer *buf,
+                             uint32_t x, uint32_t y,
+                             uint32_t w, uint32_t h)
 {
     if (!ldev || !buf) {
         return -EINVAL;
@@ -245,6 +248,23 @@ static int drm_lite_present(struct drm_lite_device *ldev,
     return 0;
 }
 
+static int limine_fb_get_info(struct drm_lite_device *ldev,
+                              struct drm_lite_info *info)
+{
+    info->width = ldev->fb.width;
+    info->height = ldev->fb.height;
+    info->pitch = ldev->fb.pitch;
+    info->bpp = ldev->fb.bpp;
+    info->format = DRM_LITE_FORMAT_XRGB8888;
+    info->max_buffers = DRM_LITE_MAX_BUFFERS;
+    return 0;
+}
+
+static const struct drm_lite_ops limine_fb_ops = {
+    .present  = limine_fb_present,
+    .get_info = limine_fb_get_info,
+};
+
 static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
     struct drm_lite_device *ldev =
         (struct drm_lite_device *)devfs_get_priv(file->vnode);
@@ -256,14 +276,12 @@ static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
         if (!arg) {
             return -EFAULT;
         }
-        struct drm_lite_info info = {
-            .width = ldev->fb.width,
-            .height = ldev->fb.height,
-            .pitch = ldev->fb.pitch,
-            .bpp = ldev->fb.bpp,
-            .format = DRM_LITE_FORMAT_XRGB8888,
-            .max_buffers = DRM_LITE_MAX_BUFFERS,
-        };
+        struct drm_lite_info info;
+        memset(&info, 0, sizeof(info));
+        int ret = ldev->ops->get_info(ldev, &info);
+        if (ret < 0) {
+            return ret;
+        }
         if (copy_to_user((void *)arg, &info, sizeof(info)) < 0) {
             return -EFAULT;
         }
@@ -432,8 +450,8 @@ static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
             return -ENOENT;
         }
 
-        int ret = drm_lite_present(ldev, buf,
-                                   req.x, req.y, req.width, req.height);
+        int ret = ldev->ops->present(ldev, buf,
+                                      req.x, req.y, req.width, req.height);
         mutex_unlock(&ldev->lock);
         return ret;
     }
@@ -548,6 +566,7 @@ static int drm_lite_probe(struct device *dev) {
     ldev->next_handle = 1;
     mutex_init(&ldev->lock, "drm_lite_lock");
     INIT_LIST_HEAD(&ldev->buffers);
+    ldev->ops = &limine_fb_ops;
 
     dev_set_drvdata(dev, ldev);
 
@@ -572,7 +591,9 @@ static int drm_lite_probe(struct device *dev) {
 }
 
 static void drm_lite_remove(struct device *dev) {
-    (void)dev;
+    struct drm_lite_device *ldev = dev_get_drvdata(dev);
+    if (ldev && ldev->ops && ldev->ops->cleanup)
+        ldev->ops->cleanup(ldev);
 }
 
 struct driver drm_lite_driver = {
