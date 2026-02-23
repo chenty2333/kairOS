@@ -114,10 +114,10 @@ kairos_run_test_tcc_smoke_once() {
         "done; " \
         "sleep ${boot_delay}; " \
         "printf 'printf '\\''int main(void){return 0;}\\\\n'\\'' > /tmp/tcc_smoke_exec.c\\n' >&3; " \
-        "sleep ${step_delay}; printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_exec\\n' >&3; " \
+        "sleep ${step_delay}; printf 'tcc -static /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_exec\\n' >&3; " \
         "sleep ${step_delay}; printf 'test -x /tmp/tcc_smoke_exec && echo TCC_BIN_OK\\n' >&3; " \
         "sleep ${step_delay}; printf '/tmp/tcc_smoke_exec\\n' >&3; " \
-        "sleep ${step_delay}; printf 'echo RC_EXEC:$?\\n' >&3; " \
+        "sleep ${step_delay}; printf 'echo RC_EXEC:\$?\\n' >&3; " \
         "sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n' >&3; " \
         "sleep ${step_delay}; printf 'poweroff\\n' >&3; " \
         "exec 3>&- ) & " \

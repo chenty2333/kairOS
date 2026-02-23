@@ -71,6 +71,7 @@ unset CROSS_COMPILE CFLAGS LDFLAGS 2>/dev/null || true
 kairos_tc_prepare_libgcc_compat "$ARCH" "$SYSROOT"
 kairos_tc_select "$TARGET" "$SYSROOT" "$ARCH_CFLAGS" 1
 CC="$KAIROS_TC_CC"
+AR="$KAIROS_TC_AR"
 CROSS_PREFIX="$KAIROS_TC_CROSS_PREFIX"
 CFLAGS="$KAIROS_TC_CFLAGS"
 LDFLAGS="$KAIROS_TC_LDFLAGS"
@@ -114,6 +115,9 @@ if [[ -n "$CROSS_PREFIX" ]]; then
 fi
 if [[ -n "$CC" ]]; then
   CONFIGURE_ARGS+=(--cc="$CC")
+fi
+if [[ -n "$AR" ]]; then
+  CONFIGURE_ARGS+=(--ar="$AR")
 fi
 
 cd "$BUILD_DIR"

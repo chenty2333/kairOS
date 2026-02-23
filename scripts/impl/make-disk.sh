@@ -130,6 +130,9 @@ stage_tcc() {
   # libtcc1.a + tcc built-in headers (stdarg.h, stddef.h, etc.)
   if [[ -d "$TCC_LIB" ]]; then
     cp -rf "$TCC_LIB"/* "$ROOTFS_DIR/usr/lib/tcc/"
+    if [[ -f "$TCC_LIB/libtcc1.a" ]]; then
+      cp -f "$TCC_LIB/libtcc1.a" "$ROOTFS_DIR/usr/lib/libtcc1.a"
+    fi
   fi
 
   # musl sysroot: headers + static lib + CRT objects

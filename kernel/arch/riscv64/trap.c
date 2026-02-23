@@ -40,6 +40,14 @@ static const char *exc_names[] = {
     [12] = "Inst page fault",       [13] = "Load page fault",
     [15] = "Store page fault"};
 
+static const char *pf_access_type(uint64_t cause) {
+    if (cause == EXC_STORE_PAGE_FAULT)
+        return "write";
+    if (cause == EXC_INST_PAGE_FAULT)
+        return "exec";
+    return "read";
+}
+
 static void dump_trap_frame(struct trap_frame *tf, bool from_user) {
     struct process *p = proc_current();
     pr_err("Trap dump: cpu=%d mode=%s proc=%p\n", arch_cpu_id(),
