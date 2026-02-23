@@ -18,6 +18,7 @@
 #define MM_TEST_PROBE_MAX 1024
 
 static int tests_failed;
+static paddr_t reserve_probe_pages[MM_TEST_PROBE_MAX];
 
 static void test_check(bool cond, const char *name) {
     if (!cond) {
@@ -261,20 +262,19 @@ static void test_pmm_reserve_range_nonallocatable(void) {
     size_t after = pmm_num_free_pages();
     test_check(before == after + 1, "reserve free_count_drop");
 
-    paddr_t pages[MM_TEST_PROBE_MAX];
     size_t n = 0;
     bool seen = false;
     while (n < MM_TEST_PROBE_MAX) {
         paddr_t pa = pmm_alloc_page();
         if (!pa)
             break;
-        pages[n++] = pa;
+        reserve_probe_pages[n++] = pa;
         if (pa == target)
             seen = true;
     }
     test_check(!seen, "reserve target_not_reallocated");
     for (size_t i = 0; i < n; i++)
-        pmm_free_page(pages[i]);
+        pmm_free_page(reserve_probe_pages[i]);
 }
 
 static void test_kmalloc_aligned_basic(void) {

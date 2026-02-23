@@ -222,14 +222,38 @@ void arch_trap_init(void) {
     pr_info("Trap: initialized\n");
 }
 
+static bool backtrace_fp_valid(uint64_t fp, uint64_t stack_bottom,
+                               uint64_t stack_top) {
+    if (!stack_top)
+        return false;
+    if (fp < stack_bottom + 16)
+        return false;
+    if (fp > stack_top)
+        return false;
+    return true;
+}
+
 void arch_backtrace(void) {
+    struct process *p = proc_current();
+    uint64_t stack_top = p ? (p->kstack_top + 8) : 0;
+    uint64_t stack_bottom =
+        stack_top ? (stack_top - (2ULL * CONFIG_PAGE_SIZE)) : 0;
+
     uint64_t fp;
     __asm__ __volatile__("mv %0, s0" : "=r"(fp));
     pr_info("Backtrace:\n");
-    for (int i = 0; i < 16 && fp; i++) {
-        uint64_t ra = *(uint64_t *)(fp - 8), prev = *(uint64_t *)(fp - 16);
+    if (!backtrace_fp_valid(fp, stack_bottom, stack_top)) {
+        pr_info("  [0] unavailable (fp=%p outside kstack %p..%p)\n", (void *)fp,
+                (void *)stack_bottom, (void *)stack_top);
+        return;
+    }
+    for (int i = 0; i < 16 &&
+                    backtrace_fp_valid(fp, stack_bottom, stack_top);
+         i++) {
+        uint64_t ra = *(uint64_t *)(fp - 8);
+        uint64_t prev = *(uint64_t *)(fp - 16);
         pr_info("  [%d] %p\n", i, (void *)ra);
-        if (prev <= fp)
+        if (!backtrace_fp_valid(prev, stack_bottom, stack_top) || prev <= fp)
             break;
         fp = prev;
     }
