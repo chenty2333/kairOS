@@ -127,6 +127,24 @@ static int open_pty_pair(struct file **master, struct file **slave) {
     return -ENXIO;
 }
 
+static int open_dev_tty(struct file **fp) {
+    if (!fp)
+        return -EINVAL;
+    *fp = NULL;
+
+    static const char *paths[] = {
+        "/dev/tty",
+        "/tty",
+    };
+    int ret = -ENOENT;
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        ret = vfs_open(paths[i], O_RDWR, 0, fp);
+        if (ret == 0 && *fp)
+            return 0;
+    }
+    return ret;
+}
+
 struct tty_blocking_read_ctx {
     struct file *f;
     volatile int started;
@@ -192,6 +210,16 @@ static void test_pty_open_read_write_ioctl(void) {
     test_check(ret == 0, "pty ioctl tcsbrkp");
     ret = vfs_ioctl(slave, TCGETS, 0);
     test_check(ret == -EFAULT, "pty ioctl tcgets efault");
+    ret = vfs_ioctl(slave, TIOCGPGRP, 0);
+    test_check(ret == -EFAULT, "pty ioctl tiocgpgrp efault");
+    ret = vfs_ioctl(slave, TIOCSPGRP, 0);
+    test_check(ret == -EFAULT, "pty ioctl tiocspgrp efault");
+    ret = vfs_ioctl(slave, TIOCGSID, 0);
+    test_check(ret == -EFAULT, "pty ioctl tiocgsid efault");
+    ret = vfs_ioctl(slave, TIOCGWINSZ, 0);
+    test_check(ret == -EFAULT, "pty ioctl tiocgwinsz efault");
+    ret = vfs_ioctl(slave, TIOCSWINSZ, 0);
+    test_check(ret == -EFAULT, "pty ioctl tiocswinsz efault");
     ret = vfs_ioctl(slave, 0x5a5aU, 0);
     test_check(ret == -ENOTTY, "pty ioctl unknown enotty");
 
@@ -413,6 +441,63 @@ static void test_n_tty_blocking_read_paths(void) {
     close_file_if_open(&master);
 }
 
+static void test_ctty_dev_tty_lifecycle(void) {
+    struct file *master = NULL;
+    struct file *slave = NULL;
+    struct file *devtty = NULL;
+    uint8_t buf[16];
+
+    int ret = open_pty_pair(&master, &slave);
+    test_check(ret == 0, "ctty open pty pair");
+    if (ret < 0)
+        return;
+
+    set_nonblock(master, true);
+    set_nonblock(slave, true);
+    drain_nonblock(master);
+    drain_nonblock(slave);
+
+    ret = vfs_ioctl(slave, TIOCNOTTY, 0);
+    test_check(ret == -ENOTTY, "ctty tiocnotty before attach");
+
+    ret = vfs_ioctl(slave, TIOCSCTTY, 0);
+    test_check(ret == 0, "ctty tiocsctty attach");
+
+    ret = vfs_ioctl(slave, TIOCSCTTY, 0);
+    test_check(ret == 0, "ctty tiocsctty idempotent");
+
+    ret = open_dev_tty(&devtty);
+    test_check(ret == 0, "ctty open /dev/tty attached");
+    if (ret == 0 && devtty) {
+        set_nonblock(devtty, true);
+        ssize_t wr = vfs_write(devtty, "D\n", 2);
+        test_check(wr == 2, "ctty /dev/tty write");
+        memset(buf, 0, sizeof(buf));
+        ssize_t rd = read_collect(master, buf, 3, 128);
+        test_check(rd == 3, "ctty master sees /dev/tty write");
+        if (rd == 3)
+            test_check(memcmp(buf, "D\r\n", 3) == 0, "ctty /dev/tty write data");
+    }
+
+    ret = vfs_ioctl(devtty, TIOCNOTTY, 0);
+    test_check(ret == 0, "ctty tiocnotty detach via /dev/tty");
+
+    close_file_if_open(&devtty);
+    ret = open_dev_tty(&devtty);
+    test_check(ret == 0, "ctty open /dev/tty detached");
+    if (ret == 0 && devtty) {
+        ret = vfs_write(devtty, "x", 1);
+        test_check(ret == -ENXIO, "ctty /dev/tty write after detach enxio");
+    }
+    close_file_if_open(&devtty);
+
+    ret = vfs_ioctl(slave, TIOCNOTTY, 0);
+    test_check(ret == -ENOTTY, "ctty tiocnotty on detached slave");
+
+    close_file_if_open(&slave);
+    close_file_if_open(&master);
+}
+
 static void test_pty_reopen_stability(void) {
     for (int i = 0; i < 96; i++) {
         struct file *master = NULL;
@@ -450,6 +535,7 @@ int run_tty_tests(void) {
     test_n_tty_canonical_echo();
     test_n_tty_isig_behavior();
     test_n_tty_blocking_read_paths();
+    test_ctty_dev_tty_lifecycle();
     test_pty_reopen_stability();
 
     if (tests_failed == 0)
