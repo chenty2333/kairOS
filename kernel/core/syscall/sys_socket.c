@@ -11,6 +11,33 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
+#define SOCKET_MSG_IOV_MAX 1024
+#define SOCKET_MSG_MAX_LEN 65536
+#define MSG_WAITFORONE 0x10000
+
+struct socket_iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct socket_msghdr {
+    void *msg_name;
+    uint32_t msg_namelen;
+    uint32_t __pad0;
+    void *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    uint32_t msg_flags;
+    uint32_t __pad1;
+};
+
+struct socket_mmsghdr {
+    struct socket_msghdr msg_hdr;
+    uint32_t msg_len;
+    uint32_t __pad;
+};
+
 static struct socket *sock_from_fd(struct process *p, int fd,
                                    struct file **filep) {
     struct file *f = fd_get(p, fd);
@@ -41,6 +68,209 @@ static int copy_sockaddr_from_user(struct sockaddr_storage *kaddr,
         return -EFAULT;
     }
     return len;
+}
+
+static int socket_msg_sum_iov(uint64_t iov_ptr, size_t iovcnt, size_t *total_out) {
+    if (!iovcnt) {
+        *total_out = 0;
+        return 0;
+    }
+    if (!iov_ptr) {
+        return -EFAULT;
+    }
+
+    size_t total = 0;
+    for (size_t i = 0; i < iovcnt; i++) {
+        struct socket_iovec iov;
+        if (copy_from_user(&iov,
+                           (const void *)(iov_ptr + i * sizeof(iov)),
+                           sizeof(iov)) < 0) {
+            return -EFAULT;
+        }
+        if (iov.iov_len > (size_t)-1 - total) {
+            return -EINVAL;
+        }
+        total += iov.iov_len;
+    }
+    *total_out = total;
+    return 0;
+}
+
+static int socket_msg_copyin_iov(uint64_t iov_ptr, size_t iovcnt,
+                                 void *dst, size_t max_len, size_t *copied_out) {
+    size_t done = 0;
+    for (size_t i = 0; i < iovcnt && done < max_len; i++) {
+        struct socket_iovec iov;
+        if (copy_from_user(&iov,
+                           (const void *)(iov_ptr + i * sizeof(iov)),
+                           sizeof(iov)) < 0) {
+            return -EFAULT;
+        }
+        if (!iov.iov_len) {
+            continue;
+        }
+        size_t chunk = iov.iov_len;
+        if (chunk > (max_len - done)) {
+            chunk = max_len - done;
+        }
+        if (copy_from_user((uint8_t *)dst + done,
+                           iov.iov_base, chunk) < 0) {
+            return -EFAULT;
+        }
+        done += chunk;
+    }
+    *copied_out = done;
+    return 0;
+}
+
+static int socket_msg_copyout_iov(uint64_t iov_ptr, size_t iovcnt,
+                                  const void *src, size_t src_len) {
+    size_t done = 0;
+    for (size_t i = 0; i < iovcnt && done < src_len; i++) {
+        struct socket_iovec iov;
+        if (copy_from_user(&iov,
+                           (const void *)(iov_ptr + i * sizeof(iov)),
+                           sizeof(iov)) < 0) {
+            return -EFAULT;
+        }
+        if (!iov.iov_len) {
+            continue;
+        }
+        size_t chunk = iov.iov_len;
+        if (chunk > (src_len - done)) {
+            chunk = src_len - done;
+        }
+        if (copy_to_user(iov.iov_base,
+                         (const uint8_t *)src + done, chunk) < 0) {
+            return -EFAULT;
+        }
+        done += chunk;
+    }
+    return 0;
+}
+
+static int64_t socket_sendmsg(struct socket *sock,
+                              const struct socket_msghdr *msg, uint64_t flags,
+                              uint32_t *sent_out) {
+    if (!sock || !sock->ops || !sock->ops->sendto) {
+        return -EOPNOTSUPP;
+    }
+    if (msg->msg_iovlen > SOCKET_MSG_IOV_MAX) {
+        return -EINVAL;
+    }
+    if (msg->msg_controllen) {
+        return -EOPNOTSUPP;
+    }
+
+    struct sockaddr_storage kaddr;
+    struct sockaddr *destp = NULL;
+    int dlen = 0;
+    if (msg->msg_name) {
+        dlen = copy_sockaddr_from_user(&kaddr, (uint64_t)(uintptr_t)msg->msg_name,
+                                       msg->msg_namelen);
+        if (dlen < 0) {
+            return (int64_t)dlen;
+        }
+        destp = (struct sockaddr *)&kaddr;
+    }
+
+    uint64_t iov_ptr = (uint64_t)(uintptr_t)msg->msg_iov;
+    size_t total = 0;
+    int rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
+    if (rc < 0) {
+        return rc;
+    }
+    if (total > SOCKET_MSG_MAX_LEN) {
+        total = SOCKET_MSG_MAX_LEN;
+    }
+    if (!total) {
+        ssize_t ret = sock->ops->sendto(sock, NULL, 0, (int)flags, destp, dlen);
+        if (ret >= 0 && sent_out) {
+            *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
+        }
+        return ret;
+    }
+
+    void *kbuf = kmalloc(total);
+    if (!kbuf) {
+        return -ENOMEM;
+    }
+    size_t copied = 0;
+    rc = socket_msg_copyin_iov(iov_ptr, msg->msg_iovlen, kbuf, total, &copied);
+    if (rc < 0) {
+        kfree(kbuf);
+        return rc;
+    }
+
+    ssize_t ret = sock->ops->sendto(sock, kbuf, copied, (int)flags, destp, dlen);
+    kfree(kbuf);
+    if (ret >= 0 && sent_out) {
+        *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
+    }
+    return ret;
+}
+
+static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
+                              uint64_t flags, uint32_t *recv_out) {
+    if (!sock || !sock->ops || !sock->ops->recvfrom) {
+        return -EOPNOTSUPP;
+    }
+    if (msg->msg_iovlen > SOCKET_MSG_IOV_MAX) {
+        return -EINVAL;
+    }
+    if (msg->msg_controllen) {
+        return -EOPNOTSUPP;
+    }
+
+    uint64_t iov_ptr = (uint64_t)(uintptr_t)msg->msg_iov;
+    size_t total = 0;
+    int rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
+    if (rc < 0) {
+        return rc;
+    }
+    if (total > SOCKET_MSG_MAX_LEN) {
+        total = SOCKET_MSG_MAX_LEN;
+    }
+
+    void *kbuf = NULL;
+    if (total) {
+        kbuf = kmalloc(total);
+        if (!kbuf) {
+            return -ENOMEM;
+        }
+    }
+
+    struct sockaddr_storage kaddr;
+    int alen = (int)sizeof(kaddr);
+    ssize_t ret = sock->ops->recvfrom(sock, kbuf, total, (int)flags,
+                                      msg->msg_name ? (struct sockaddr *)&kaddr : NULL,
+                                      msg->msg_name ? &alen : NULL);
+    if (ret > 0) {
+        rc = socket_msg_copyout_iov(iov_ptr, msg->msg_iovlen, kbuf, (size_t)ret);
+        if (rc < 0) {
+            kfree(kbuf);
+            return rc;
+        }
+    }
+    kfree(kbuf);
+
+    if (ret >= 0 && msg->msg_name) {
+        size_t user_len = msg->msg_namelen;
+        size_t copylen = (alen < (int)user_len) ? (size_t)alen : user_len;
+        if (copylen &&
+            copy_to_user(msg->msg_name, &kaddr, copylen) < 0) {
+            return -EFAULT;
+        }
+        msg->msg_namelen = (alen < 0) ? 0 : (uint32_t)alen;
+    }
+    if (ret >= 0) {
+        msg->msg_controllen = 0;
+        msg->msg_flags = 0;
+        if (recv_out) {
+            *recv_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
+        }
+    }
+    return ret;
 }
 
 int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
@@ -345,6 +575,137 @@ int64_t sys_shutdown(uint64_t fd, uint64_t how, uint64_t a2,
     int64_t ret = (int64_t)sock->ops->shutdown(sock, (int)how);
     file_put(sock_file);
     return ret;
+}
+
+int64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
+                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    struct file *sock_file = NULL;
+    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    if (!sock) {
+        return -ENOTSOCK;
+    }
+
+    struct socket_msghdr msg;
+    if (copy_from_user(&msg, (const void *)msg_ptr, sizeof(msg)) < 0) {
+        file_put(sock_file);
+        return -EFAULT;
+    }
+    int64_t ret = socket_sendmsg(sock, &msg, flags, NULL);
+    file_put(sock_file);
+    return ret;
+}
+
+int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
+                    uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    struct process *p = proc_current();
+    struct file *sock_file = NULL;
+    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    if (!sock) {
+        return -ENOTSOCK;
+    }
+
+    struct socket_msghdr msg;
+    if (copy_from_user(&msg, (const void *)msg_ptr, sizeof(msg)) < 0) {
+        file_put(sock_file);
+        return -EFAULT;
+    }
+    int64_t ret = socket_recvmsg(sock, &msg, flags, NULL);
+    if (ret >= 0 &&
+        copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0) {
+        file_put(sock_file);
+        return -EFAULT;
+    }
+    file_put(sock_file);
+    return ret;
+}
+
+int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
+                     uint64_t flags, uint64_t a4, uint64_t a5) {
+    (void)a4; (void)a5;
+    if (!vlen) {
+        return 0;
+    }
+    if (vlen > SOCKET_MSG_IOV_MAX) {
+        return -EINVAL;
+    }
+
+    struct process *p = proc_current();
+    struct file *sock_file = NULL;
+    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    if (!sock) {
+        return -ENOTSOCK;
+    }
+
+    int sent = 0;
+    for (uint64_t i = 0; i < vlen; i++) {
+        uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
+        struct socket_mmsghdr msg;
+        if (copy_from_user(&msg, (const void *)ent_ptr, sizeof(msg)) < 0) {
+            file_put(sock_file);
+            return sent ? sent : -EFAULT;
+        }
+        int64_t ret = socket_sendmsg(sock, &msg.msg_hdr, flags, &msg.msg_len);
+        if (ret < 0) {
+            file_put(sock_file);
+            return sent ? sent : ret;
+        }
+        if (copy_to_user((void *)ent_ptr, &msg, sizeof(msg)) < 0) {
+            file_put(sock_file);
+            return sent ? sent : -EFAULT;
+        }
+        sent++;
+    }
+
+    file_put(sock_file);
+    return sent;
+}
+
+int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
+                     uint64_t flags, uint64_t timeout_ptr, uint64_t a5) {
+    (void)timeout_ptr; (void)a5;
+    if (!vlen) {
+        return 0;
+    }
+    if (vlen > SOCKET_MSG_IOV_MAX) {
+        return -EINVAL;
+    }
+
+    struct process *p = proc_current();
+    struct file *sock_file = NULL;
+    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    if (!sock) {
+        return -ENOTSOCK;
+    }
+
+    int recved = 0;
+    for (uint64_t i = 0; i < vlen; i++) {
+        uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
+        struct socket_mmsghdr msg;
+        if (copy_from_user(&msg, (const void *)ent_ptr, sizeof(msg)) < 0) {
+            file_put(sock_file);
+            return recved ? recved : -EFAULT;
+        }
+        uint64_t recv_flags = flags;
+        if (recved > 0 && (flags & MSG_WAITFORONE)) {
+            recv_flags |= MSG_DONTWAIT;
+        }
+        int64_t ret = socket_recvmsg(sock, &msg.msg_hdr, recv_flags, &msg.msg_len);
+        if (ret < 0) {
+            file_put(sock_file);
+            return recved ? recved : ret;
+        }
+        if (copy_to_user((void *)ent_ptr, &msg, sizeof(msg)) < 0) {
+            file_put(sock_file);
+            return recved ? recved : -EFAULT;
+        }
+        recved++;
+    }
+
+    file_put(sock_file);
+    return recved;
 }
 
 int64_t sys_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,

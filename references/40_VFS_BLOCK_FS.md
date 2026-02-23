@@ -63,6 +63,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `preadv`/`pwritev` and `preadv2`/`pwritev2` follow Linux split-offset ABI (`pos_l`/`pos_h`)
   - `preadv2` supports `RWF_HIPRI|RWF_NOWAIT`; `pwritev2` supports `RWF_HIPRI|RWF_DSYNC|RWF_SYNC|RWF_NOWAIT`
   - `preadv2`/`pwritev2` with offset `-1` follow non-positional `readv`/`writev` fallback
+  - `copy_file_range` is wired through vnode read/write paths; `flags` must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
 
 ## Block I/O Layer (fs/bio/bio.c)
 
@@ -98,7 +99,9 @@ Special:
 - vfs_poll.c: VFS poll infrastructure, based on pollwait mechanism
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
-- Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks) and `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`)
+- Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
+- `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
+- `recvmmsg` supports `MSG_WAITFORONE` batching behavior; timeout argument is currently ignored
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
 - `ppoll`/`pselect6` now temporarily install the provided signal mask during wait and restore the original mask on return

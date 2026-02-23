@@ -475,6 +475,154 @@ int64_t sys_pwritev2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
     return sys_pread_writev(fd, iov_ptr, iovcnt, offset, true);
 }
 
+int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
+                            uint64_t fd_out, uint64_t off_out_ptr,
+                            uint64_t len, uint64_t flags) {
+    if (flags != 0)
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+
+    struct process *p = proc_current();
+    struct file *fin = fd_get(p, (int)fd_in);
+    if (!fin)
+        return -EBADF;
+    struct file *fout = fd_get(p, (int)fd_out);
+    if (!fout) {
+        file_put(fin);
+        return -EBADF;
+    }
+
+    int in_accmode = (int)(fin->flags & O_ACCMODE);
+    int out_accmode = (int)(fout->flags & O_ACCMODE);
+    if (in_accmode == O_WRONLY || out_accmode == O_RDONLY) {
+        file_put(fout);
+        file_put(fin);
+        return -EBADF;
+    }
+    if (!fin->vnode || !fout->vnode ||
+        !fin->vnode->ops || !fout->vnode->ops ||
+        !fin->vnode->ops->read || !fout->vnode->ops->write) {
+        file_put(fout);
+        file_put(fin);
+        return -EINVAL;
+    }
+    if (fin->vnode->type == VNODE_DIR || fout->vnode->type == VNODE_DIR) {
+        file_put(fout);
+        file_put(fin);
+        return -EISDIR;
+    }
+    if (fin->vnode->type == VNODE_PIPE || fin->vnode->type == VNODE_SOCKET ||
+        fout->vnode->type == VNODE_PIPE || fout->vnode->type == VNODE_SOCKET) {
+        file_put(fout);
+        file_put(fin);
+        return -EINVAL;
+    }
+
+    off_t in_pos = fin->offset;
+    off_t out_pos = fout->offset;
+    if (off_in_ptr) {
+        if (copy_from_user(&in_pos, (const void *)off_in_ptr, sizeof(in_pos)) < 0) {
+            file_put(fout);
+            file_put(fin);
+            return -EFAULT;
+        }
+        if (in_pos < 0) {
+            file_put(fout);
+            file_put(fin);
+            return -EINVAL;
+        }
+    }
+    if (off_out_ptr) {
+        if (copy_from_user(&out_pos, (const void *)off_out_ptr, sizeof(out_pos)) < 0) {
+            file_put(fout);
+            file_put(fin);
+            return -EFAULT;
+        }
+        if (out_pos < 0) {
+            file_put(fout);
+            file_put(fin);
+            return -EINVAL;
+        }
+    }
+
+    size_t remain = (size_t)len;
+    size_t done = 0;
+    uint8_t buf[4096];
+
+    while (remain > 0) {
+        size_t chunk = remain > sizeof(buf) ? sizeof(buf) : remain;
+
+        rwlock_read_lock(&fin->vnode->lock);
+        ssize_t nr = fin->vnode->ops->read(fin->vnode, buf, chunk, in_pos, fin->flags);
+        rwlock_read_unlock(&fin->vnode->lock);
+        if (nr < 0) {
+            file_put(fout);
+            file_put(fin);
+            return done ? (int64_t)done : (int64_t)nr;
+        }
+        if (nr == 0)
+            break;
+
+        size_t copied = 0;
+        while (copied < (size_t)nr) {
+            rwlock_write_lock(&fout->vnode->lock);
+            ssize_t nw = fout->vnode->ops->write(fout->vnode, buf + copied,
+                                                 (size_t)nr - copied,
+                                                 out_pos + (off_t)copied,
+                                                 fout->flags);
+            rwlock_write_unlock(&fout->vnode->lock);
+            if (nw < 0) {
+                done += copied;
+                in_pos += (off_t)copied;
+                out_pos += (off_t)copied;
+                if (!off_in_ptr)
+                    fin->offset = in_pos;
+                if (!off_out_ptr)
+                    fout->offset = out_pos;
+                file_put(fout);
+                file_put(fin);
+                return done ? (int64_t)done : (int64_t)nw;
+            }
+            if (nw == 0)
+                break;
+            copied += (size_t)nw;
+        }
+
+        if (copied == 0)
+            break;
+        in_pos += (off_t)copied;
+        out_pos += (off_t)copied;
+        done += copied;
+        remain -= copied;
+        if (copied < (size_t)nr)
+            break;
+    }
+
+    if (off_in_ptr) {
+        if (copy_to_user((void *)off_in_ptr, &in_pos, sizeof(in_pos)) < 0) {
+            file_put(fout);
+            file_put(fin);
+            return -EFAULT;
+        }
+    } else {
+        fin->offset = in_pos;
+    }
+    if (off_out_ptr) {
+        if (copy_to_user((void *)off_out_ptr, &out_pos, sizeof(out_pos)) < 0) {
+            file_put(fout);
+            file_put(fin);
+            return -EFAULT;
+        }
+    } else {
+        fout->offset = out_pos;
+    }
+
+    file_put(fout);
+    file_put(fin);
+    return (int64_t)done;
+}
+
 int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;

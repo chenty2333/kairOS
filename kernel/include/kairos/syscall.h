@@ -149,6 +149,8 @@ int64_t sys_preadv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pwritev(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_preadv2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pwritev2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_copy_file_range(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                            uint64_t);
 int64_t sys_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_open(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_openat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -246,6 +248,10 @@ int64_t sys_getpeername(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 int64_t sys_sendto(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_recvfrom(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                      uint64_t);
+int64_t sys_sendmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_recvmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_sendmmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_recvmmsg(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_setsockopt(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                        uint64_t);
 int64_t sys_getsockopt(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
@@ -267,6 +273,8 @@ int64_t sys_setsid(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 int64_t sys_getrlimit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_setrlimit(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_sched_getaffinity(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                              uint64_t);
+int64_t sys_sched_setaffinity(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                               uint64_t);
 int64_t sys_sched_setparam(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                            uint64_t);
