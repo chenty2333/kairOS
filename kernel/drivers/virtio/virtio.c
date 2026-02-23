@@ -23,6 +23,14 @@ static int virtio_drv_probe(struct device *dev) {
     return vdrv->probe(vdev);
 }
 
+static void virtio_drv_remove(struct device *dev) {
+    struct virtio_device *vdev = (struct virtio_device *)dev;
+    struct virtio_driver *vdrv = container_of(dev->driver, struct virtio_driver, drv);
+
+    if (vdrv->remove)
+        vdrv->remove(vdev);
+}
+
 struct bus_type virtio_bus_type = {
     .name = "virtio",
     .match = virtio_bus_match,
@@ -31,6 +39,7 @@ struct bus_type virtio_bus_type = {
 int virtio_register_driver(struct virtio_driver *vdrv) {
     vdrv->drv.bus = &virtio_bus_type;
     vdrv->drv.probe = virtio_drv_probe;
+    vdrv->drv.remove = virtio_drv_remove;
     return driver_register(&vdrv->drv);
 }
 
