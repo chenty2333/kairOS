@@ -27,6 +27,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - Linux ABI path-stat/access compatibility:
   - `newfstatat` supports `AT_EMPTY_PATH` and treats empty path without it as `ENOENT`
   - `faccessat2`/`faccessat` support `AT_EMPTY_PATH` on fd targets
+  - `fchmodat`/`fchownat`/`utimensat` accept `AT_EMPTY_PATH` for fd-target metadata updates
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 
 ## Dentry Cache (fs/vfs/dentry.c)

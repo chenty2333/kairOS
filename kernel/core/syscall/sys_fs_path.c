@@ -163,13 +163,46 @@ int64_t sys_fchdir(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                      uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~AT_SYMLINK_NOFOLLOW)
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
+    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+        return -ENOENT;
+
+    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        struct vnode *vn = NULL;
+        struct file *f = NULL;
+        if ((int64_t)dirfd == AT_FDCWD) {
+            vn = sysfs_proc_cwd_vnode(p);
+            if (!vn)
+                return -ENOENT;
+        } else {
+            f = fd_get(p, (int)dirfd);
+            if (!f)
+                return -EBADF;
+            vn = f->vnode;
+            if (!vn) {
+                file_put(f);
+                return -ENOENT;
+            }
+        }
+        rwlock_write_lock(&vn->lock);
+        vn->mode = (vn->mode & S_IFMT) | ((mode_t)mode & 07777);
+        vn->ctime = current_time_sec();
+        if (vn->mount && vn->mount->ops && vn->mount->ops->chmod)
+            vn->mount->ops->chmod(vn, vn->mode);
+        rwlock_write_unlock(&vn->lock);
+        if (f)
+            file_put(f);
+        return 0;
+    }
 
     int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
     struct path resolved;
@@ -197,13 +230,49 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
 int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
                      uint64_t group, uint64_t flags, uint64_t a5) {
     (void)a5;
-    if (flags & ~AT_SYMLINK_NOFOLLOW)
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
+    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+        return -ENOENT;
+
+    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        struct vnode *vn = NULL;
+        struct file *f = NULL;
+        if ((int64_t)dirfd == AT_FDCWD) {
+            vn = sysfs_proc_cwd_vnode(p);
+            if (!vn)
+                return -ENOENT;
+        } else {
+            f = fd_get(p, (int)dirfd);
+            if (!f)
+                return -EBADF;
+            vn = f->vnode;
+            if (!vn) {
+                file_put(f);
+                return -ENOENT;
+            }
+        }
+        rwlock_write_lock(&vn->lock);
+        if (owner != (uint64_t)-1)
+            vn->uid = (uid_t)owner;
+        if (group != (uint64_t)-1)
+            vn->gid = (gid_t)group;
+        vn->ctime = current_time_sec();
+        if (vn->mount && vn->mount->ops && vn->mount->ops->chown)
+            vn->mount->ops->chown(vn, vn->uid, vn->gid);
+        rwlock_write_unlock(&vn->lock);
+        if (f)
+            file_put(f);
+        return 0;
+    }
 
     int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
     struct path resolved;
@@ -236,7 +305,7 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
 int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
                       uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~AT_SYMLINK_NOFOLLOW) {
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) {
         return -EINVAL;
     }
     if (!path_ptr) {
@@ -246,27 +315,59 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0) {
         return -EFAULT;
     }
-
-    int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
-    struct path resolved;
-    path_init(&resolved);
-    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
-    if (ret < 0) {
-        return ret;
-    }
-    if (!resolved.dentry || !resolved.dentry->vnode) {
-        if (resolved.dentry) {
-            dentry_put(resolved.dentry);
-        }
+    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
         return -ENOENT;
-    }
 
-    struct vnode *vn = resolved.dentry->vnode;
+    struct vnode *vn = NULL;
+    struct mount *mnt = NULL;
+    struct dentry *hold_d = NULL;
+    struct file *hold_f = NULL;
+    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        if ((int64_t)dirfd == AT_FDCWD) {
+            vn = sysfs_proc_cwd_vnode(p);
+            if (!vn)
+                return -ENOENT;
+            mnt = vn->mount;
+        } else {
+            hold_f = fd_get(p, (int)dirfd);
+            if (!hold_f)
+                return -EBADF;
+            vn = hold_f->vnode;
+            if (!vn) {
+                file_put(hold_f);
+                return -ENOENT;
+            }
+            mnt = vn->mount;
+        }
+    } else {
+        int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+        struct path resolved;
+        path_init(&resolved);
+        int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+        if (ret < 0) {
+            return ret;
+        }
+        if (!resolved.dentry || !resolved.dentry->vnode) {
+            if (resolved.dentry) {
+                dentry_put(resolved.dentry);
+            }
+            return -ENOENT;
+        }
+        hold_d = resolved.dentry;
+        vn = resolved.dentry->vnode;
+        mnt = resolved.mnt;
+    }
     time_t now = current_time_sec();
     struct timespec ts[2];
     if (times_ptr) {
         if (copy_from_user(ts, (const void *)times_ptr, sizeof(ts)) < 0) {
-            dentry_put(resolved.dentry);
+            if (hold_d)
+                dentry_put(hold_d);
+            if (hold_f)
+                file_put(hold_f);
             return -EFAULT;
         }
     } else {
@@ -288,11 +389,14 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
         vn->mtime = ts[1].tv_sec;
     }
     vn->ctime = now;
-    if (resolved.mnt && resolved.mnt->ops && resolved.mnt->ops->utimes) {
-        resolved.mnt->ops->utimes(vn, &ts[0], &ts[1]);
+    if (mnt && mnt->ops && mnt->ops->utimes) {
+        mnt->ops->utimes(vn, &ts[0], &ts[1]);
     }
     rwlock_write_unlock(&vn->lock);
-    dentry_put(resolved.dentry);
+    if (hold_d)
+        dentry_put(hold_d);
+    if (hold_f)
+        file_put(hold_f);
     return 0;
 }
 
