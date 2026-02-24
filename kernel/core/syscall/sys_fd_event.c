@@ -883,6 +883,24 @@ static uint64_t timerfd_now_ns(int clockid, uint64_t mono_ns, uint64_t realtime_
     return mono_ns;
 }
 
+static int timerfd_normalize_clockid(uint64_t clockid, int *out_clockid) {
+    if (!out_clockid)
+        return -EINVAL;
+    switch (clockid) {
+    case CLOCK_REALTIME:
+    case CLOCK_REALTIME_ALARM:
+        *out_clockid = CLOCK_REALTIME;
+        return 0;
+    case CLOCK_MONOTONIC:
+    case CLOCK_BOOTTIME:
+    case CLOCK_BOOTTIME_ALARM:
+        *out_clockid = CLOCK_MONOTONIC;
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
 static bool timerfd_refresh_locked(struct timerfd_ctx *ctx, uint64_t mono_ns,
                                    uint64_t realtime_ns) {
     if (!ctx || !ctx->armed)
@@ -1100,13 +1118,16 @@ int64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2, uint64_t a3,
 int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
-        return -EINVAL;
     if (flags & ~(TFD_CLOEXEC | TFD_NONBLOCK))
         return -EINVAL;
 
+    int norm_clockid = 0;
+    int clock_rc = timerfd_normalize_clockid(clockid, &norm_clockid);
+    if (clock_rc < 0)
+        return clock_rc;
+
     struct file *file = NULL;
-    int rc = timerfd_create_file((int)clockid, flags, &file);
+    int rc = timerfd_create_file(norm_clockid, flags, &file);
     if (rc < 0)
         return rc;
 
