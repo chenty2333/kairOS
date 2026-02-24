@@ -88,6 +88,11 @@ jobs:
           set -euo pipefail
           make --no-print-directory ARCH=riscv64 test
 
+      - name: Run BusyBox applet smoke regression
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 test-busybox-applets-smoke
+
       - name: Capture latest isolated run
         id: latest_run
         if: always()
