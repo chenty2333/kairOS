@@ -25,21 +25,11 @@ If you only run one module test first, use:
 make test-vfs-ipc
 ```
 
-## Daily Commands
-
-```bash
-# build only
-make
-
-# run kernel
-make run
-
-# module tests
-make test-mm
-make test-sched
-make test-vfs-ipc
-make test-device-virtio
-```
+Common module-focused test targets:
+- `make test-mm`
+- `make test-sched`
+- `make test-vfs-ipc`
+- `make test-device-virtio`
 
 ## The 4 Knobs You Usually Need
 
