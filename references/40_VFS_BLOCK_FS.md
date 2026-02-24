@@ -109,6 +109,7 @@ Special:
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
+- `select` updates user `timeval` with remaining time on return (`success`/`EINTR`)
 - `ppoll`/`pselect6` now temporarily install the provided signal mask during wait and restore the original mask on return
 
 Related references:
