@@ -67,6 +67,10 @@ static uint64_t sched_ticks_to_ns(uint64_t ticks) {
     return (ticks * NS_PER_SEC) / CONFIG_HZ;
 }
 
+static inline int32_t systime_abi_i32(uint64_t raw) {
+    return (int32_t)(uint32_t)raw;
+}
+
 static uint64_t realtime_to_tai_ns(uint64_t realtime_ns) {
     if (realtime_ns > UINT64_MAX - CLOCK_TAI_OFFSET_NS)
         return UINT64_MAX;
@@ -79,7 +83,7 @@ static uint64_t tai_to_realtime_ns(uint64_t tai_ns) {
     return tai_ns - CLOCK_TAI_OFFSET_NS;
 }
 
-static int clockid_sleep_base(uint64_t clockid, uint64_t *base_clockid) {
+static int clockid_sleep_base(int32_t clockid, int32_t *base_clockid) {
     if (!base_clockid)
         return -EINVAL;
 
@@ -100,7 +104,7 @@ static int clockid_sleep_base(uint64_t clockid, uint64_t *base_clockid) {
     }
 }
 
-static int clockid_now_ns(uint64_t clockid, uint64_t *out_ns) {
+static int clockid_now_ns(int32_t clockid, uint64_t *out_ns) {
     if (!out_ns)
         return -EINVAL;
     switch (clockid) {
@@ -166,7 +170,7 @@ static int64_t sleep_until_deadline(uint64_t deadline, uint64_t rem_ptr,
     return 0;
 }
 
-static int64_t clock_nanosleep_abstime(uint64_t clockid, uint64_t req_ns) {
+static int64_t clock_nanosleep_abstime(int32_t clockid, uint64_t req_ns) {
     while (1) {
         uint64_t now_ns = 0;
         int rc = clockid_now_ns(clockid, &now_ns);
@@ -213,8 +217,9 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!tp_ptr)
         return -EFAULT;
+    int32_t kclockid = systime_abi_i32(clockid);
     uint64_t ns = 0;
-    int rc = clockid_now_ns(clockid, &ns);
+    int rc = clockid_now_ns(kclockid, &ns);
     if (rc < 0)
         return rc;
     struct timespec ts = {
@@ -229,7 +234,8 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
 int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (clockid != CLOCK_REALTIME)
+    int32_t kclockid = systime_abi_i32(clockid);
+    if (kclockid != CLOCK_REALTIME)
         return -EINVAL;
     struct timespec ts;
     int rc = sys_copy_timespec(tp_ptr, &ts, false);
@@ -246,8 +252,9 @@ int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!tp_ptr)
         return -EFAULT;
+    int32_t kclockid = systime_abi_i32(clockid);
     uint64_t probe_ns = 0;
-    if (clockid_now_ns(clockid, &probe_ns) < 0)
+    if (clockid_now_ns(kclockid, &probe_ns) < 0)
         return -EINVAL;
 
     uint64_t res_ns = (NS_PER_SEC + CONFIG_HZ - 1) / CONFIG_HZ;
@@ -282,10 +289,11 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
                             uint64_t rem_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
     uint32_t uflags = (uint32_t)flags;
+    int32_t kclockid = systime_abi_i32(clockid);
     if (uflags & ~TIMER_ABSTIME)
         return -EINVAL;
-    uint64_t sleep_clockid = 0;
-    int rc = clockid_sleep_base(clockid, &sleep_clockid);
+    int32_t sleep_clockid = 0;
+    int rc = clockid_sleep_base(kclockid, &sleep_clockid);
     if (rc < 0)
         return rc;
     struct timespec req;
@@ -294,7 +302,7 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
         return rc;
 
     uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
-    if ((uflags & TIMER_ABSTIME) && clockid == CLOCK_TAI)
+    if ((uflags & TIMER_ABSTIME) && kclockid == CLOCK_TAI)
         req_ns = tai_to_realtime_ns(req_ns);
     if (uflags & TIMER_ABSTIME)
         return clock_nanosleep_abstime(sleep_clockid, req_ns);
@@ -342,7 +350,8 @@ int64_t sys_times(uint64_t tms_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_getitimer(uint64_t which, uint64_t value_ptr, uint64_t a2,
                       uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (which != ITIMER_REAL)
+    int32_t kwhich = systime_abi_i32(which);
+    if (kwhich != ITIMER_REAL)
         return -EINVAL;
     if (!value_ptr)
         return -EFAULT;
@@ -358,7 +367,8 @@ int64_t sys_getitimer(uint64_t which, uint64_t value_ptr, uint64_t a2,
 int64_t sys_setitimer(uint64_t which, uint64_t new_ptr, uint64_t old_ptr,
                       uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (which != ITIMER_REAL)
+    int32_t kwhich = systime_abi_i32(which);
+    if (kwhich != ITIMER_REAL)
         return -EINVAL;
     if (!new_ptr)
         return -EFAULT;
