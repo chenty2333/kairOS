@@ -18,6 +18,14 @@
 #define MSG_WAITFORONE 0x10000
 #define NS_PER_SEC 1000000000ULL
 
+static inline int32_t syssock_abi_i32(uint64_t raw) {
+    return (int32_t)(uint32_t)raw;
+}
+
+static inline uint32_t syssock_abi_u32(uint64_t raw) {
+    return (uint32_t)raw;
+}
+
 struct socket_iovec {
     void *iov_base;
     size_t iov_len;
@@ -128,7 +136,7 @@ static int socket_wait_readable(struct socket *sock, struct file *sock_file,
 
 static struct socket *sock_from_fd(struct process *p, uint64_t fd_arg,
                                    struct file **filep) {
-    int fd = (int32_t)(uint32_t)fd_arg;
+    int fd = syssock_abi_i32(fd_arg);
     struct file *f = fd_get(p, fd);
     if (!f || !f->vnode) {
         if (f) file_put(f);
@@ -148,7 +156,7 @@ static int copy_sockaddr_from_user(struct sockaddr_storage *kaddr,
     if (!uaddr || !ulen) {
         return 0;
     }
-    int len = (int32_t)(uint32_t)ulen;
+    int len = syssock_abi_i32(ulen);
     if (len < 0 || (size_t)len > sizeof(*kaddr)) {
         return -EINVAL;
     }
@@ -373,9 +381,9 @@ int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol,
         return -EINVAL;
     }
 
-    int sock_domain = (int32_t)(uint32_t)domain;
-    int sock_type = (int32_t)(uint32_t)type;
-    int sock_protocol = (int32_t)(uint32_t)protocol;
+    int sock_domain = syssock_abi_i32(domain);
+    int sock_type = syssock_abi_i32(type);
+    int sock_protocol = syssock_abi_i32(protocol);
     int extra_flags = sock_type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
 
     struct socket *sock = NULL;
@@ -434,7 +442,7 @@ int64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t addrlen,
 int64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t a2,
                    uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    int kbacklog = (int32_t)(uint32_t)backlog;
+    int kbacklog = syssock_abi_i32(backlog);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -548,7 +556,7 @@ int64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
 int64_t sys_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
                     uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    return sys_accept_common(fd, addr, addrlen_ptr, (uint32_t)flags);
+    return sys_accept_common(fd, addr, addrlen_ptr, syssock_abi_u32(flags));
 }
 
 int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
@@ -578,7 +586,7 @@ int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
 
 int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
                    uint64_t flags, uint64_t dest, uint64_t addrlen) {
-    uint32_t uflags = (uint32_t)flags;
+    uint32_t uflags = syssock_abi_u32(flags);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -633,7 +641,7 @@ int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
 
 int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
                      uint64_t flags, uint64_t src, uint64_t addrlen_ptr) {
-    uint32_t uflags = (uint32_t)flags;
+    uint32_t uflags = syssock_abi_u32(flags);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -689,7 +697,7 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
 int64_t sys_shutdown(uint64_t fd, uint64_t how, uint64_t a2,
                      uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    int khow = (int32_t)(uint32_t)how;
+    int khow = syssock_abi_i32(how);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -720,7 +728,7 @@ int64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
         file_put(sock_file);
         return -EFAULT;
     }
-    uint32_t uflags = (uint32_t)flags;
+    uint32_t uflags = syssock_abi_u32(flags);
     int64_t ret = socket_sendmsg(sock, &msg, uflags, NULL);
     file_put(sock_file);
     return ret;
@@ -741,7 +749,7 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
         file_put(sock_file);
         return -EFAULT;
     }
-    uint32_t uflags = (uint32_t)flags;
+    uint32_t uflags = syssock_abi_u32(flags);
     int64_t ret = socket_recvmsg(sock, &msg, uflags, NULL);
     if (ret >= 0 &&
         copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0) {
@@ -755,8 +763,8 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
 int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    uint32_t uflags = (uint32_t)flags;
-    uint32_t uvlen = (uint32_t)vlen;
+    uint32_t uflags = syssock_abi_u32(flags);
+    uint32_t uvlen = syssock_abi_u32(vlen);
     if (!uvlen) {
         return 0;
     }
@@ -799,8 +807,8 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t timeout_ptr, uint64_t a5) {
     (void)a5;
-    uint32_t uflags = (uint32_t)flags;
-    uint32_t uvlen = (uint32_t)vlen;
+    uint32_t uflags = syssock_abi_u32(flags);
+    uint32_t uvlen = syssock_abi_u32(vlen);
     if (!uvlen) {
         return 0;
     }
@@ -969,9 +977,9 @@ int64_t sys_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
 int64_t sys_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
                        uint64_t optval, uint64_t optlen, uint64_t a5) {
     (void)a5;
-    int klevel = (int32_t)(uint32_t)level;
-    int koptname = (int32_t)(uint32_t)optname;
-    int klen = (int32_t)(uint32_t)optlen;
+    int klevel = syssock_abi_i32(level);
+    int koptname = syssock_abi_i32(optname);
+    int klen = syssock_abi_i32(optlen);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -1004,8 +1012,8 @@ int64_t sys_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
 int64_t sys_getsockopt(uint64_t fd, uint64_t level, uint64_t optname,
                        uint64_t optval, uint64_t optlen_ptr, uint64_t a5) {
     (void)a5;
-    int klevel = (int32_t)(uint32_t)level;
-    int koptname = (int32_t)(uint32_t)optname;
+    int klevel = syssock_abi_i32(level);
+    int koptname = syssock_abi_i32(optname);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -1057,9 +1065,9 @@ int64_t sys_socketpair(uint64_t domain, uint64_t type, uint64_t protocol,
         return -EINVAL;
     }
 
-    int sock_domain = (int32_t)(uint32_t)domain;
-    int sock_type = (int32_t)(uint32_t)type;
-    int sock_protocol = (int32_t)(uint32_t)protocol;
+    int sock_domain = syssock_abi_i32(domain);
+    int sock_type = syssock_abi_i32(type);
+    int sock_protocol = syssock_abi_i32(protocol);
     int extra_flags = sock_type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
 
     struct socket *sock0 = NULL, *sock1 = NULL;

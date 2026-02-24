@@ -4,6 +4,7 @@
 
 #include <kairos/mm.h>
 #include <kairos/net.h>
+#include <kairos/ioctl.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -1025,6 +1026,60 @@ out:
         user_map_end(&um);
 }
 
+static void test_socket_syscall_abi_width_edges(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int fd = -1;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "sockabi user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    int *u_on = (int *)user_map_ptr(&um, 0x0);
+    test_check(u_on != NULL, "sockabi user ptr");
+    if (!u_on)
+        goto out;
+    int on = 1;
+    rc = copy_to_user(u_on, &on, sizeof(on));
+    test_check(rc == 0, "sockabi copy on");
+    if (rc < 0)
+        goto out;
+
+    int64_t fd64 = sys_socket(((uint64_t)0xA5A5U << 32) | (uint32_t)AF_UNIX,
+                              (1ULL << 63) | (uint32_t)SOCK_DGRAM,
+                              ((uint64_t)0x5A5AU << 32), 0, 0, 0);
+    test_check(fd64 >= 0, "sockabi socket arg width");
+    if (fd64 < 0)
+        goto out;
+    fd = (int)fd64;
+
+    int64_t ret64 = sys_ioctl((uint64_t)fd, ((uint64_t)FIONBIO) | (1ULL << 32),
+                              (uint64_t)u_on, 0, 0, 0);
+    test_check(ret64 == 0, "sockabi ioctl cmd width");
+
+    ret64 = sys_ioctl((uint64_t)((1ULL << 32) | (uint32_t)fd),
+                      (uint64_t)FIONBIO, (uint64_t)u_on, 0, 0, 0);
+    test_check(ret64 == 0, "sockabi ioctl fd width");
+
+    struct file *f = fd_get(proc_current(), fd);
+    test_check(f != NULL, "sockabi fd get");
+    if (f) {
+        bool nonblock = false;
+        mutex_lock(&f->lock);
+        nonblock = (f->flags & O_NONBLOCK) != 0;
+        mutex_unlock(&f->lock);
+        test_check(nonblock, "sockabi fionbio toggled");
+        file_put(f);
+    }
+
+out:
+    close_fd_if_open(&fd);
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_unix_dgram_semantics(void) {
     struct socket *rx = NULL;
     struct socket *tx = NULL;
@@ -1410,6 +1465,7 @@ int run_socket_tests(void) {
     test_accept4_syscall_semantics();
     test_accept4_syscall_functional();
     test_socket_msg_syscall_semantics();
+    test_socket_syscall_abi_width_edges();
     test_unix_dgram_semantics();
     test_inet_tcp_primary();
     test_inet_udp_secondary();

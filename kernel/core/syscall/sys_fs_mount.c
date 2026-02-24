@@ -286,13 +286,11 @@ static int set_mount_propagation(struct mount *mnt, uint32_t flags) {
 int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
                   uint64_t flags, uint64_t data, uint64_t a5) {
     (void)data; (void)a5;
+    uint64_t allowed = (uint64_t)(MS_BIND | MS_REC | MS_PRIVATE | MS_SLAVE |
+                                  MS_SHARED | MS_UNBINDABLE);
+    if (flags & ~allowed)
+        return -EINVAL;
     uint32_t uflags = (uint32_t)flags;
-    uint32_t allowed = MS_BIND | MS_REC | MS_PRIVATE | MS_SLAVE |
-                       MS_SHARED | MS_UNBINDABLE;
-    if ((flags >> 32) != 0)
-        return -EINVAL;
-    if (uflags & ~allowed)
-        return -EINVAL;
     char source[CONFIG_PATH_MAX];
     char target[CONFIG_PATH_MAX];
     char fstype[CONFIG_NAME_MAX];

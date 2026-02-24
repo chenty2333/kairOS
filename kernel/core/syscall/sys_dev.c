@@ -11,11 +11,19 @@
 /* Network ioctl handler (kernel/net/net_ioctl.c) */
 int net_ioctl(struct file *f, uint32_t cmd, uint64_t arg);
 
+static inline int32_t sysdev_abi_i32(uint64_t raw) {
+    return (int32_t)(uint32_t)raw;
+}
+
+static inline uint32_t sysdev_abi_u32(uint64_t raw) {
+    return (uint32_t)raw;
+}
+
 int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    int kfd = (int32_t)(uint32_t)fd;
-    uint32_t ucmd = (uint32_t)cmd;
+    int kfd = sysdev_abi_i32(fd);
+    uint32_t ucmd = sysdev_abi_u32(cmd);
     struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
