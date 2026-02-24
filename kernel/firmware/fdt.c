@@ -485,6 +485,103 @@ int fdt_get_cpus(const void *fdt, uint64_t *cpu_ids, uint32_t max_ids,
     }
 }
 
+static bool fdt_prop_has_compat(const void *prop, uint32_t prop_len,
+                                const char *prefix) {
+    if (!prop || !prefix || prop_len == 0)
+        return false;
+
+    const char *s = (const char *)prop;
+    const char *end = s + prop_len;
+    size_t plen = strlen(prefix);
+    while (s < end) {
+        size_t left = (size_t)(end - s);
+        const char *nul = memchr(s, '\0', left);
+        if (!nul)
+            break;
+        size_t len = (size_t)(nul - s);
+        if (len >= plen && strncmp(s, prefix, plen) == 0)
+            return true;
+        s = nul + 1;
+    }
+    return false;
+}
+
+int fdt_get_psci_method(const void *fdt, char *method, size_t method_len) {
+    if (!fdt || !method || method_len < 2)
+        return -EINVAL;
+
+    struct fdt_view view;
+    if (fdt_init_view(fdt, &view))
+        return -EINVAL;
+
+    struct fdt_iter it = { .p = view.struct_blk, .depth = 0 };
+    bool in_node = false;
+    int node_depth = -1;
+    bool node_psci = false;
+    const char *found = NULL;
+    uint32_t found_len = 0;
+
+    while (1) {
+        uint32_t token = 0;
+        const char *node_name = NULL;
+        const char *prop_name = NULL;
+        const void *prop_data = NULL;
+        uint32_t prop_len = 0;
+
+        int ret = fdt_next_token(&view, &it, &token, &node_name,
+                                 &prop_name, &prop_data, &prop_len);
+        if (ret)
+            return ret;
+
+        switch (token) {
+        case FDT_BEGIN_NODE:
+            in_node = true;
+            node_depth = it.depth;
+            node_psci = (strcmp(node_name, "psci") == 0);
+            found = NULL;
+            found_len = 0;
+            break;
+        case FDT_END_NODE:
+            if (in_node && it.depth < node_depth) {
+                if (node_psci && found) {
+                    size_t copy_len = found_len;
+                    if (copy_len >= method_len)
+                        copy_len = method_len - 1;
+                    memcpy(method, found, copy_len);
+                    method[copy_len] = '\0';
+                    return 0;
+                }
+                in_node = false;
+                node_depth = -1;
+                node_psci = false;
+                found = NULL;
+                found_len = 0;
+            }
+            break;
+        case FDT_PROP:
+            if (!in_node)
+                break;
+            if (strcmp(prop_name, "compatible") == 0 &&
+                fdt_prop_has_compat(prop_data, prop_len, "arm,psci")) {
+                node_psci = true;
+            } else if (strcmp(prop_name, "method") == 0 && prop_len > 0) {
+                const char *nul = memchr(prop_data, '\0', prop_len);
+                if (nul) {
+                    found = (const char *)prop_data;
+                    found_len = (uint32_t)(nul - (const char *)prop_data);
+                }
+            }
+            break;
+        case FDT_END:
+            return -ENODEV;
+        case FDT_NOP:
+            break;
+        default:
+            return -EINVAL;
+        }
+    }
+}
+
 struct fdt_node_ctx {
     char name[64];
     const char *compatible;

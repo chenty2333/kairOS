@@ -10,6 +10,16 @@
 .section .text.boot
 .global _start
 .global _secondary_start
+.global _secondary_start_psci
+.global _secondary_start_psci_end
+
+#define PSCI_CTX_CPU_ID   8
+#define PSCI_CTX_TCR      16
+#define PSCI_CTX_MAIR     24
+#define PSCI_CTX_TTBR0    32
+#define PSCI_CTX_TTBR1    40
+#define PSCI_CTX_SCTLR    48
+#define PSCI_CTX_TARGET   56
 
 /*
  * Macro: drop from EL2 to EL1 if needed.
@@ -111,6 +121,39 @@ _secondary_start:
 4:
     wfi
     b 4b
+
+/*
+ * Secondary CPU entry (PSCI CPU_ON)
+ * x0 = physical address of struct aarch64_psci_boot_ctx.
+ */
+_secondary_start_psci:
+    mov x20, x0
+    DROP_TO_EL1
+
+    ldr x1, [x20, #PSCI_CTX_CPU_ID]
+    ldr x2, [x20, #PSCI_CTX_TCR]
+    ldr x3, [x20, #PSCI_CTX_MAIR]
+    ldr x4, [x20, #PSCI_CTX_TTBR0]
+    ldr x5, [x20, #PSCI_CTX_TTBR1]
+    ldr x6, [x20, #PSCI_CTX_SCTLR]
+    ldr x7, [x20, #PSCI_CTX_TARGET]
+
+    msr mair_el1, x3
+    msr tcr_el1, x2
+    msr ttbr0_el1, x4
+    msr ttbr1_el1, x5
+    isb
+
+    /* Keep AP caches off during bring-up; avoids coherency issues before EL1 init. */
+    bic x6, x6, #(1 << 2)   /* SCTLR_EL1.C */
+    bic x6, x6, #(1 << 12)  /* SCTLR_EL1.I */
+    msr sctlr_el1, x6
+    isb
+
+    mov x0, x1
+    br x7
+
+_secondary_start_psci_end:
 
 .section .bss
 .align 16

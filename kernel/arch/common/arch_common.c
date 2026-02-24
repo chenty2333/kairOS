@@ -8,6 +8,17 @@
 #include <kairos/arch.h>
 #include <kairos/boot.h>
 
+__attribute__((weak))
+int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
+                            unsigned long opaque,
+                            const struct boot_info *bi) {
+    (void)cpu;
+    (void)start_addr;
+    (void)opaque;
+    (void)bi;
+    return -ENODEV;
+}
+
 int arch_cpu_count(void) {
     const struct boot_info *bi = boot_info_get();
     if (bi && bi->cpu_count) {
@@ -24,7 +35,7 @@ int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque) {
 
     struct limine_mp_info *info = (struct limine_mp_info *)bi->cpus[cpu].mp_info;
     if (!info) {
-        return -ENODEV;
+        return arch_start_cpu_fallback(cpu, start_addr, opaque, bi);
     }
 
     info->extra_argument = opaque;

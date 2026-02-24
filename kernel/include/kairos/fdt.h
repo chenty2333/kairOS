@@ -18,5 +18,6 @@ int fdt_get_reserved(int index, paddr_t *base, size_t *size);
 int fdt_reserved_count(void);
 int fdt_get_cpus(const void *fdt, uint64_t *cpu_ids, uint32_t max_ids,
                  uint32_t *out_count);
+int fdt_get_psci_method(const void *fdt, char *method, size_t method_len);
 
 #endif

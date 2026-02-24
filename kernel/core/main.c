@@ -61,6 +61,7 @@ static void smp_init(void) {
                                 (unsigned long)cpu);
         if (rc == 0) {
             started++;
+            pr_info("SMP: cpu%d start requested\n", cpu);
         } else {
             pr_warn("SMP: cpu%d start failed rc=%d\n", cpu, rc);
         }
@@ -75,10 +76,10 @@ static void smp_init(void) {
     uint64_t wait_ticks = arch_timer_ns_to_ticks(2ULL * 1000 * 1000 * 1000);
     if (wait_ticks == 0)
         wait_ticks = CONFIG_HZ;
-    uint64_t deadline = arch_timer_get_ticks() + wait_ticks;
+    uint64_t deadline = arch_timer_ticks() + wait_ticks;
 
     while (secondary_cpus_online < started &&
-           arch_timer_get_ticks() < deadline) {
+           arch_timer_ticks() < deadline) {
         arch_cpu_relax();
     }
 
