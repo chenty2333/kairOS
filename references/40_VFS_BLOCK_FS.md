@@ -133,6 +133,7 @@ Special:
 - path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `linkat`) decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit
 - `dup3` and `pipe2` decode `flags` via Linux ABI width (`int`/32-bit)
 - `fcntl` decodes `cmd`/`arg` via Linux ABI `int` width (32-bit)
+- fd-based metadata/control syscalls (`dup`/`dup2`/`dup3`/`fcntl`/`ftruncate`/`fchmod`/`fchown`) decode `fd` as Linux ABI `int` (32-bit); `fchown` also uses Linux 32-bit sentinel semantics (`uid/gid == 0xffffffff` means no change)
 - `ioctl` decodes `fd`/`cmd` via Linux ABI width (`unsigned int`/32-bit) before in-kernel command routing
 
 Related references:

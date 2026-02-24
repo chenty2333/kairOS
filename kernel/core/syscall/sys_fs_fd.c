@@ -20,6 +20,10 @@
 #define CLOSE_RANGE_UNSHARE (1U << 1)
 #define CLOSE_RANGE_CLOEXEC (1U << 2)
 
+static inline int sysfs_fd_int(uint64_t fd) {
+    return (int32_t)(uint32_t)fd;
+}
+
 static int fdtable_unshare_current(void) {
     struct process *p = proc_current();
     if (!p || !p->fdtable)
@@ -40,25 +44,29 @@ static int fdtable_unshare_current(void) {
 int64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)fd_dup2(proc_current(), (int)oldfd, (int)newfd);
+    int koldfd = sysfs_fd_int(oldfd);
+    int knewfd = sysfs_fd_int(newfd);
+    return (int64_t)fd_dup2(proc_current(), koldfd, knewfd);
 }
 
 int64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
                 uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)fd_dup(proc_current(), (int)oldfd);
+    return (int64_t)fd_dup(proc_current(), sysfs_fd_int(oldfd));
 }
 
 int64_t sys_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    int koldfd = sysfs_fd_int(oldfd);
+    int knewfd = sysfs_fd_int(newfd);
     uint32_t uflags = (uint32_t)flags;
     if (uflags & ~O_CLOEXEC)
         return -EINVAL;
-    if (oldfd == newfd)
+    if (koldfd == knewfd)
         return -EINVAL;
     uint32_t fd_flags = (uflags & O_CLOEXEC) ? FD_CLOEXEC : 0;
-    return (int64_t)fd_dup2_flags(proc_current(), (int)oldfd, (int)newfd,
+    return (int64_t)fd_dup2_flags(proc_current(), koldfd, knewfd,
                                   fd_flags);
 }
 
@@ -182,24 +190,25 @@ int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
 int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    int kfd = sysfs_fd_int(fd);
     uint32_t ucmd = (uint32_t)cmd;
     uint32_t uarg = (uint32_t)arg;
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    struct file *f = fd_get(p, (int)fd);
+    struct file *f = fd_get(p, kfd);
     if (!f)
         return -EBADF;
 
     switch ((int32_t)ucmd) {
     case F_DUPFD: {
-        int64_t ret = (int64_t)fd_dup_min_flags(p, (int)fd, (int32_t)uarg, 0);
+        int64_t ret = (int64_t)fd_dup_min_flags(p, kfd, (int32_t)uarg, 0);
         file_put(f);
         return ret;
     }
     case F_DUPFD_CLOEXEC: {
         int64_t ret =
-            (int64_t)fd_dup_min_flags(p, (int)fd, (int32_t)uarg, FD_CLOEXEC);
+            (int64_t)fd_dup_min_flags(p, kfd, (int32_t)uarg, FD_CLOEXEC);
         file_put(f);
         return ret;
     }
@@ -211,13 +220,12 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
             return -EBADF;
         }
         mutex_lock(&fdt->lock);
-        if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
-            !fdt->files[(int)fd]) {
+        if (kfd < 0 || kfd >= CONFIG_MAX_FILES_PER_PROC || !fdt->files[kfd]) {
             mutex_unlock(&fdt->lock);
             file_put(f);
             return -EBADF;
         }
-        if (fdt->fd_flags[(int)fd] & FD_CLOEXEC)
+        if (fdt->fd_flags[kfd] & FD_CLOEXEC)
             flags |= FD_CLOEXEC;
         mutex_unlock(&fdt->lock);
         file_put(f);
@@ -234,13 +242,12 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
             return -EBADF;
         }
         mutex_lock(&fdt->lock);
-        if ((int)fd < 0 || (int)fd >= CONFIG_MAX_FILES_PER_PROC ||
-            !fdt->files[(int)fd]) {
+        if (kfd < 0 || kfd >= CONFIG_MAX_FILES_PER_PROC || !fdt->files[kfd]) {
             mutex_unlock(&fdt->lock);
             file_put(f);
             return -EBADF;
         }
-        fdt->fd_flags[(int)fd] = uarg & FD_CLOEXEC;
+        fdt->fd_flags[kfd] = uarg & FD_CLOEXEC;
         mutex_unlock(&fdt->lock);
         file_put(f);
         return 0;
@@ -271,7 +278,7 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if ((int64_t)length < 0)
         return -EINVAL;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    struct file *f = fd_get(proc_current(), sysfs_fd_int(fd));
     if (!f || !f->vnode) {
         if (f) file_put(f);
         return -EBADF;
@@ -294,7 +301,7 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
 int64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    struct file *f = fd_get(proc_current(), sysfs_fd_int(fd));
     if (!f || !f->vnode) {
         if (f)
             file_put(f);
@@ -315,16 +322,18 @@ int64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
 int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    uint32_t uowner = (uint32_t)owner;
+    uint32_t ugroup = (uint32_t)group;
+    struct file *f = fd_get(proc_current(), sysfs_fd_int(fd));
     if (!f || !f->vnode) {
         if (f) file_put(f);
         return -EBADF;
     }
     rwlock_write_lock(&f->vnode->lock);
-    if (owner != (uint64_t)-1)
-        f->vnode->uid = (uid_t)owner;
-    if (group != (uint64_t)-1)
-        f->vnode->gid = (gid_t)group;
+    if (uowner != UINT32_MAX)
+        f->vnode->uid = (uid_t)uowner;
+    if (ugroup != UINT32_MAX)
+        f->vnode->gid = (gid_t)ugroup;
     f->vnode->ctime = time_now_sec();
     if (f->vnode->mount && f->vnode->mount->ops &&
         f->vnode->mount->ops->chown) {
