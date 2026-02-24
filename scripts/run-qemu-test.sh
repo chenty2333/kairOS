@@ -145,6 +145,27 @@ else:
 PY
 }
 
+extract_first_smoke_fail_reason() {
+    local log_path="$1"
+    local line=""
+
+    if [[ ! -f "${log_path}" ]]; then
+        echo ""
+        return 0
+    fi
+
+    line="$(grep -Eo 'SMOKE_FAIL_FIRST:[A-Za-z0-9_.-]+' "${log_path}" | head -n 1 || true)"
+    if [[ -z "${line}" ]]; then
+        line="$(grep -Eo 'SMOKE_FAIL:[A-Za-z0-9_.-]+' "${log_path}" | head -n 1 || true)"
+    fi
+
+    if [[ -n "${line}" ]]; then
+        echo "${line#*:}"
+        return 0
+    fi
+    echo ""
+}
+
 extract_qemu_signal_meta() {
     local log_path="$1"
     local line=""
@@ -286,6 +307,7 @@ run_test_main() {
     local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
     local structured_status structured_schema structured_failed structured_done structured_enabled_mask
     local summary_status summary_failed
+    local smoke_fail_reason
     local pre_qemu_reason
     local status reason exit_code verdict_source
     local allow_signal_override
@@ -377,6 +399,7 @@ run_test_main() {
     summary_status="missing"
     summary_failed=-1
     read -r summary_status summary_failed < <(extract_summary_result)
+    smoke_fail_reason="$(extract_first_smoke_fail_reason "${TEST_LOG}")"
     pre_qemu_reason=""
 
     status="fail"
@@ -419,7 +442,11 @@ run_test_main() {
             reason="summary_result_mismatch"
         elif [[ "${structured_failed}" -gt 0 ]]; then
             status="fail"
-            reason="structured_failed"
+            if [[ -n "${smoke_fail_reason}" ]]; then
+                reason="smoke_${smoke_fail_reason}"
+            else
+                reason="structured_failed"
+            fi
         elif [[ ${qemu_rc} -eq 0 ]]; then
             status="pass"
             reason="structured_passed"

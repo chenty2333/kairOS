@@ -146,26 +146,36 @@ stage_tcc() {
   done
 
   # Dynamic loader/runtime for dynamically-linked ELF binaries.
-  if [[ -f "$SYSROOT_DIR/lib/libc.so" ]]; then
-    cp -f "$SYSROOT_DIR/lib/libc.so" "$ROOTFS_DIR/lib/libc.so"
+  if [[ -e "$SYSROOT_DIR/lib/libc.so" || -L "$SYSROOT_DIR/lib/libc.so" ]]; then
+    rm -f "$ROOTFS_DIR/lib/libc.so"
+    cp -a "$SYSROOT_DIR/lib/libc.so" "$ROOTFS_DIR/lib/libc.so"
   fi
-  for ldso in "$SYSROOT_DIR"/lib/ld-musl-*.so.1; do
+  local -a ldso_candidates=()
+  local -a rootfs_ldso=()
+  shopt -s nullglob
+  ldso_candidates=("$SYSROOT_DIR"/lib/ld-musl-*.so.1)
+  shopt -u nullglob
+  for ldso in "${ldso_candidates[@]}"; do
     local ldso_name
     ldso_name="$(basename "$ldso")"
     rm -f "$ROOTFS_DIR/lib/$ldso_name"
-    if [[ -f "$ldso" ]]; then
-      cp -f "$ldso" "$ROOTFS_DIR/lib/$ldso_name"
-      continue
-    fi
-    if [[ -L "$ldso" ]]; then
-      if [[ -f "$SYSROOT_DIR/lib/libc.so" ]]; then
-        cp -f "$SYSROOT_DIR/lib/libc.so" "$ROOTFS_DIR/lib/$ldso_name"
-      fi
+    if [[ -e "$ldso" || -L "$ldso" ]]; then
+      cp -a "$ldso" "$ROOTFS_DIR/lib/$ldso_name"
     fi
   done
-  if [[ "$ARCH" == "riscv64" && -f "$ROOTFS_DIR/lib/libc.so" &&
+  if [[ "$ARCH" == "riscv64" && -e "$ROOTFS_DIR/lib/libc.so" &&
         ! -e "$ROOTFS_DIR/lib/ld-musl-riscv64.so.1" ]]; then
-    cp -f "$ROOTFS_DIR/lib/libc.so" "$ROOTFS_DIR/lib/ld-musl-riscv64.so.1"
+    ln -sf libc.so "$ROOTFS_DIR/lib/ld-musl-riscv64.so.1"
+  fi
+
+  if [[ ! -e "$ROOTFS_DIR/lib/libc.so" ]]; then
+    kairos_warn "dynamic runtime missing: /lib/libc.so (dynamic binaries may fail)"
+  fi
+  shopt -s nullglob
+  rootfs_ldso=("$ROOTFS_DIR"/lib/ld-musl-*.so.1)
+  shopt -u nullglob
+  if [[ ${#rootfs_ldso[@]} -eq 0 ]]; then
+    kairos_warn "dynamic runtime missing: /lib/ld-musl-*.so.1 (PT_INTERP resolution may fail)"
   fi
 }
 

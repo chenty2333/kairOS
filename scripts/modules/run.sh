@@ -107,8 +107,10 @@ kairos_run_test_tcc_smoke_once() {
         expected_interp_strict=1
     fi
     local required_any=""
-    local required_all="__TCC_SMOKE_DONE__"
+    local required_all=""
     local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma|PT_INTERP not supported'
+
+    printf -v required_all 'RC_STATIC:0\nRC_DYN:0\nRC_DYN_HELLO:0\nHELLO_DYN_OK\n__TCC_SMOKE_DONE__'
 
     printf -v inner_make_cmd \
         'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
@@ -141,7 +143,9 @@ printf 'expected_interp_strict="%s"\n' "$expected_interp_strict" >&3
 sleep "$step_delay"
 printf 'failed=0\n' >&3
 sleep "$step_delay"
-printf 'mark_failed(){ failed=1; }\n' >&3
+printf 'first_fail=""\n' >&3
+sleep "$step_delay"
+printf 'mark_failed(){ failed=1; if [ -n "${1:-}" ]; then echo SMOKE_FAIL:$1; [ -z "$first_fail" ] && first_fail="$1"; fi; }\n' >&3
 sleep "$step_delay"
 printf 'arch="$(uname -m)"\n' >&3
 sleep "$step_delay"
@@ -151,11 +155,17 @@ printf 'for ld in /lib/ld-musl-${arch}*.so.1 /lib/ld-musl-*.so.1; do [ -e "$ld" 
 sleep "$step_delay"
 printf 'fi\n' >&3
 sleep "$step_delay"
+printf '[ -n "$expected_interp" ] && [ -e "$expected_interp" ] || mark_failed missing_dynamic_loader\n' >&3
+sleep "$step_delay"
+printf '[ -e /lib/libc.so ] || mark_failed missing_libc_so\n' >&3
+sleep "$step_delay"
+printf '[ -x /usr/bin/tcc ] || mark_failed missing_tcc_bin\n' >&3
+sleep "$step_delay"
 printf 'printf '\''int main(void){return 0;}\\n'\'' > /tmp/tcc_smoke_exec.c\n' >&3
 sleep "$step_delay"
-printf 'tcc -static /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_static || mark_failed\n' >&3
+printf 'tcc -static /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_static || mark_failed static_compile_failed\n' >&3
 sleep "$step_delay"
-printf '[ -x /tmp/tcc_smoke_static ] || mark_failed\n' >&3
+printf '[ -x /tmp/tcc_smoke_static ] || mark_failed static_output_missing\n' >&3
 sleep "$step_delay"
 printf '/tmp/tcc_smoke_static\n' >&3
 sleep "$step_delay"
@@ -163,11 +173,11 @@ printf 'rc_static=$?\n' >&3
 sleep "$step_delay"
 printf 'echo RC_STATIC:$rc_static\n' >&3
 sleep "$step_delay"
-printf '[ "$rc_static" -eq 0 ] || mark_failed\n' >&3
+printf '[ "$rc_static" -eq 0 ] || mark_failed static_exec_failed\n' >&3
 sleep "$step_delay"
-printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_dyn || mark_failed\n' >&3
+printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_dyn || mark_failed dyn_compile_failed\n' >&3
 sleep "$step_delay"
-printf '[ -x /tmp/tcc_smoke_dyn ] || mark_failed\n' >&3
+printf '[ -x /tmp/tcc_smoke_dyn ] || mark_failed dyn_output_missing\n' >&3
 sleep "$step_delay"
 printf '/tmp/tcc_smoke_dyn\n' >&3
 sleep "$step_delay"
@@ -175,7 +185,7 @@ printf 'rc_dyn=$?\n' >&3
 sleep "$step_delay"
 printf 'echo RC_DYN:$rc_dyn\n' >&3
 sleep "$step_delay"
-printf '[ "$rc_dyn" -eq 0 ] || mark_failed\n' >&3
+printf '[ "$rc_dyn" -eq 0 ] || mark_failed dyn_exec_failed\n' >&3
 sleep "$step_delay"
 printf 'tr '\''\\000'\'' '\''\\n'\'' < /tmp/tcc_smoke_dyn > /tmp/tcc_smoke_dyn.str\n' >&3
 sleep "$step_delay"
@@ -185,13 +195,29 @@ printf 'interp_line="$(head -n1 /tmp/tcc_interp.lines)"\n' >&3
 sleep "$step_delay"
 printf 'echo PT_INTERP:$interp_line\n' >&3
 sleep "$step_delay"
-printf '[ -n "$interp_line" ] || mark_failed\n' >&3
+printf '[ -n "$interp_line" ] || mark_failed pt_interp_missing\n' >&3
 sleep "$step_delay"
-printf '[ -n "$interp_line" ] && [ -e "$interp_line" ] || mark_failed\n' >&3
+printf '[ -n "$interp_line" ] && [ -e "$interp_line" ] || mark_failed pt_interp_unresolvable\n' >&3
 sleep "$step_delay"
-printf 'if [ "$expected_interp_strict" = "1" ]; then echo "$interp_line" | grep "$expected_interp" >/dev/null 2>&1 || mark_failed; fi\n' >&3
+printf 'if [ "$expected_interp_strict" = "1" ]; then echo "$interp_line" | grep "$expected_interp" >/dev/null 2>&1 || mark_failed pt_interp_mismatch_expected; fi\n' >&3
 sleep "$step_delay"
-printf 'if [ "$expected_interp_strict" = "1" ]; then [ -e "$expected_interp" ] || mark_failed; fi\n' >&3
+printf 'if [ "$expected_interp_strict" = "1" ]; then [ -e "$expected_interp" ] || mark_failed expected_interp_missing; fi\n' >&3
+sleep "$step_delay"
+printf 'printf '\''#include <stdio.h>\\nint main(void){puts("hello world");return 0;}\\n'\'' > /tmp/hello.c\n' >&3
+sleep "$step_delay"
+printf 'tcc /tmp/hello.c -o /tmp/hello_dyn || mark_failed dyn_hello_compile_failed\n' >&3
+sleep "$step_delay"
+printf '[ -x /tmp/hello_dyn ] || mark_failed dyn_hello_output_missing\n' >&3
+sleep "$step_delay"
+printf 'hello_out="$(/tmp/hello_dyn 2>&1)"; rc_dyn_hello=$?; echo RC_DYN_HELLO:$rc_dyn_hello; echo HELLO_OUT:$hello_out\n' >&3
+sleep "$step_delay"
+printf '[ "$rc_dyn_hello" -eq 0 ] || mark_failed dyn_hello_exec_failed\n' >&3
+sleep "$step_delay"
+printf 'echo "$hello_out" | grep -F "hello world" >/dev/null 2>&1 || mark_failed dyn_hello_output_mismatch\n' >&3
+sleep "$step_delay"
+printf 'if [ "$rc_dyn_hello" -eq 0 ] && echo "$hello_out" | grep -F "hello world" >/dev/null 2>&1; then echo HELLO_DYN_OK; fi\n' >&3
+sleep "$step_delay"
+printf '[ -z "$first_fail" ] || echo SMOKE_FAIL_FIRST:$first_fail\n' >&3
 sleep "$step_delay"
 printf 'done_tag=__TCC_\n' >&3
 sleep "$step_delay"
