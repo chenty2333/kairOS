@@ -1276,6 +1276,228 @@ out:
         user_map_end(&um);
 }
 
+static void test_unix_stream_msg_control_semantics(void) {
+    struct socket *tx = NULL;
+    struct socket *rx = NULL;
+    int txfd = -1;
+    int rxfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &tx);
+    test_check(ret == 0, "sockmsg_stream create tx");
+    ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &rx);
+    test_check(ret == 0, "sockmsg_stream create rx");
+    if (!tx || !rx)
+        goto out;
+
+    ret = unix_socketpair_connect(tx, rx);
+    test_check(ret == 0, "sockmsg_stream socketpair connect");
+    if (ret < 0)
+        goto out;
+
+    txfd = socket_install_fd(&tx);
+    rxfd = socket_install_fd(&rx);
+    test_check(txfd >= 0, "sockmsg_stream install tx fd");
+    test_check(rxfd >= 0, "sockmsg_stream install rx fd");
+    if (txfd < 0 || rxfd < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "sockmsg_stream user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    struct test_socket_iovec *u_send_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x000);
+    struct test_socket_iovec *u_recv_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x020);
+    struct test_socket_msghdr *u_send_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x040);
+    struct test_socket_msghdr *u_recv_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x080);
+    char *u_send_buf = (char *)user_map_ptr(&um, 0x0C0);
+    char *u_recv_buf = (char *)user_map_ptr(&um, 0x100);
+    struct test_socket_cmsghdr *u_ctrl =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x140);
+    int32_t *u_rights = (int32_t *)user_map_ptr(&um, 0x150);
+    struct test_socket_ucred *u_cred =
+        (struct test_socket_ucred *)user_map_ptr(&um, 0x150);
+    test_check(u_send_iov && u_recv_iov && u_send_msg && u_recv_msg &&
+                   u_send_buf && u_recv_buf && u_ctrl && u_rights && u_cred,
+               "sockmsg_stream user pointers");
+    if (!u_send_iov || !u_recv_iov || !u_send_msg || !u_recv_msg ||
+        !u_send_buf || !u_recv_buf || !u_ctrl || !u_rights || !u_cred) {
+        goto out;
+    }
+
+    struct test_socket_iovec send_iov = {
+        .iov_base = u_send_buf,
+        .iov_len = 4,
+    };
+    struct test_socket_iovec recv_iov = {
+        .iov_base = u_recv_buf,
+        .iov_len = 8,
+    };
+    ret = copy_to_user(u_send_iov, &send_iov, sizeof(send_iov));
+    test_check(ret == 0, "sockmsg_stream copy send iov");
+    ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+    test_check(ret == 0, "sockmsg_stream copy recv iov");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_msghdr send_msg = {
+        .msg_iov = u_send_iov,
+        .msg_iovlen = 1,
+    };
+    struct test_socket_msghdr recv_msg = {
+        .msg_iov = u_recv_iov,
+        .msg_iovlen = 1,
+    };
+
+    struct test_socket_cmsghdr ctrl_rights = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_RIGHTS,
+    };
+    int32_t rights_fd = txfd;
+    ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+    test_check(ret == 0, "sockmsg_stream copy rights hdr");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights), &rights_fd,
+                           sizeof(rights_fd));
+        test_check(ret == 0, "sockmsg_stream copy rights payload");
+    }
+    if (ret < 0)
+        goto out;
+
+    ret = copy_to_user(u_send_buf, "SFD0", 4);
+    test_check(ret == 0, "sockmsg_stream copy rights send buf");
+    if (ret < 0)
+        goto out;
+
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream copy rights send msg");
+    if (ret < 0)
+        goto out;
+
+    int64_t ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendmsg rights");
+
+    if (ret64 == 4) {
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy rights recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 4, "sockmsg_stream recvmsg rights");
+        }
+    }
+    if (ret64 == 4) {
+        char got[4] = {0};
+        struct test_socket_cmsghdr got_ctrl = {0};
+        int32_t got_fd = -1;
+        ret = copy_from_user(got, u_recv_buf, sizeof(got));
+        test_check(ret == 0, "sockmsg_stream read rights recv buf");
+        ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+        test_check(ret == 0, "sockmsg_stream read rights recv hdr");
+        ret = copy_from_user(&got_fd, u_rights, sizeof(got_fd));
+        test_check(ret == 0, "sockmsg_stream read rights recv fd");
+        if (ret == 0) {
+            test_check(memcmp(got, "SFD0", 4) == 0, "sockmsg_stream rights data");
+            test_check(got_ctrl.cmsg_type == TEST_SCM_RIGHTS,
+                       "sockmsg_stream rights type");
+            test_check(got_fd >= 0, "sockmsg_stream rights fd valid");
+        }
+        if (got_fd >= 0) {
+            struct file *srcf = fd_get(proc_current(), txfd);
+            struct file *gotf = fd_get(proc_current(), got_fd);
+            test_check(srcf != NULL, "sockmsg_stream rights src fd get");
+            test_check(gotf != NULL, "sockmsg_stream rights got fd get");
+            if (srcf && gotf)
+                test_check(srcf == gotf, "sockmsg_stream rights same file");
+            if (srcf)
+                file_put(srcf);
+            if (gotf)
+                file_put(gotf);
+            (void)fd_close(proc_current(), got_fd);
+        }
+    }
+
+    struct test_socket_cmsghdr ctrl_cred = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) +
+                    sizeof(struct test_socket_ucred),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_CREDENTIALS,
+    };
+    struct test_socket_ucred cred = {0};
+    ret = copy_to_user(u_ctrl, &ctrl_cred, sizeof(ctrl_cred));
+    test_check(ret == 0, "sockmsg_stream copy cred hdr");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_cred), &cred,
+                           sizeof(cred));
+        test_check(ret == 0, "sockmsg_stream copy cred payload");
+    }
+    if (ret < 0)
+        goto out;
+
+    ret = copy_to_user(u_send_buf, "SCRD", 4);
+    test_check(ret == 0, "sockmsg_stream copy cred send buf");
+    if (ret < 0)
+        goto out;
+
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_cred.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream copy cred send msg");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendmsg creds");
+
+    if (ret64 == 4) {
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_cred.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy cred recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 4, "sockmsg_stream recvmsg creds");
+        }
+    }
+    if (ret64 == 4) {
+        struct test_socket_cmsghdr got_ctrl = {0};
+        struct test_socket_ucred got_cred = {0};
+        ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+        test_check(ret == 0, "sockmsg_stream read cred recv hdr");
+        ret = copy_from_user(&got_cred, u_cred, sizeof(got_cred));
+        test_check(ret == 0, "sockmsg_stream read cred recv payload");
+        if (ret == 0) {
+            test_check(got_ctrl.cmsg_type == TEST_SCM_CREDENTIALS,
+                       "sockmsg_stream cred type");
+            test_check(got_cred.pid == proc_current()->pid,
+                       "sockmsg_stream cred pid");
+            test_check(got_cred.uid == proc_current()->uid,
+                       "sockmsg_stream cred uid");
+            test_check(got_cred.gid == proc_current()->gid,
+                       "sockmsg_stream cred gid");
+        }
+    }
+
+out:
+    close_fd_if_open(&txfd);
+    close_fd_if_open(&rxfd);
+    close_socket_if_open(&tx);
+    close_socket_if_open(&rx);
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_socket_syscall_abi_width_edges(void) {
     struct user_map_ctx um = {0};
     bool mapped = false;
@@ -2016,6 +2238,7 @@ int run_socket_tests(void) {
     test_accept4_syscall_semantics();
     test_accept4_syscall_functional();
     test_socket_msg_syscall_semantics();
+    test_unix_stream_msg_control_semantics();
     test_socket_syscall_abi_width_edges();
     test_socket_nonblock_syscall_semantics();
     test_unix_stream_connect_error_transitions();
