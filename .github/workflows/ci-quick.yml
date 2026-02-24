@@ -120,3 +120,124 @@ jobs:
             ${{ steps.latest_run.outputs.path }}/riscv64/run.log
             build/riscv64/test.log
             build/riscv64/run.log
+
+  aarch64-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(
+            clang
+            lld
+            llvm
+            make
+            python3
+            git
+            e2fsprogs
+            dosfstools
+            mtools
+            qemu-system-arm
+            qemu-system-misc
+            qemu-utils
+            ovmf
+          )
+          if apt-cache show qemu-efi-aarch64 >/dev/null 2>&1; then
+            pkgs+=(qemu-efi-aarch64)
+          fi
+          if apt-cache show qemu-efi-arm >/dev/null 2>&1; then
+            pkgs+=(qemu-efi-arm)
+          fi
+          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
+            pkgs+=(edk2-ovmf)
+          fi
+          sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Locate aarch64 UEFI firmware
+        run: |
+          set -euo pipefail
+          code_candidates=(
+            /usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw
+            /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
+            /usr/share/AAVMF/AAVMF_CODE.fd
+            /usr/share/AAVMF/AAVMF_CODE.ms.fd
+            /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+          )
+          vars_candidates=(
+            /usr/share/edk2/aarch64/vars-template-pflash.raw
+            /usr/share/AAVMF/AAVMF_VARS.fd
+            /usr/share/AAVMF/AAVMF_VARS.ms.fd
+            /usr/share/qemu-efi-aarch64/QEMU_VARS.fd
+          )
+          code_src=""
+          vars_src=""
+          for p in "${code_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              code_src="${p}"
+              break
+            fi
+          done
+          for p in "${vars_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              vars_src="${p}"
+              break
+            fi
+          done
+          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
+            echo "Unable to locate aarch64 UEFI firmware on runner" >&2
+            exit 2
+          fi
+          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
+          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
+          echo "Using UEFI_CODE_SRC=${code_src}"
+          echo "Using UEFI_VARS_SRC=${vars_src}"
+
+      - name: Run aarch64 syscall/trap gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 TEST_TIMEOUT=240 test-syscall-trap
+
+      - name: Run aarch64 tcc smoke gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
+
+      - name: Capture latest isolated run
+        id: latest_run_aarch64
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload aarch64 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-aarch64-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ steps.latest_run_aarch64.outputs.path }}/manifest.json
+            ${{ steps.latest_run_aarch64.outputs.path }}/result.json
+            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/logs/test.log
+            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/test.log
+            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/tcc-smoke.log
+            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/run.log
+            build/runs/*/manifest.json
+            build/runs/*/result.json
+            build/runs/*/aarch64/logs/*.log
+            build/runs/*/aarch64/*.log
+            build/aarch64/test.log
+            build/aarch64/tcc-smoke.log
+            build/aarch64/run.log
