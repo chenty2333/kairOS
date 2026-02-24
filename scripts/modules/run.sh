@@ -182,7 +182,19 @@ sleep "$step_delay"
 printf 'echo __TCC_SMOKE_DONE__\n' >&3
 sleep "$step_delay"
 for _ in $(seq 1 "$ready_wait"); do
-    grep -q '__TCC_SMOKE_DONE__' "$log_path" 2>/dev/null && break
+    if awk '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line ~ /^[[:space:]]*__TCC_SMOKE_DONE__[[:space:]]*$/) {
+                found = 1
+                exit 0
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$log_path" 2>/dev/null; then
+        break
+    fi
     sleep 1
 done
 printf '\001x' >&3
