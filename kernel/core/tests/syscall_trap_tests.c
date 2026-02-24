@@ -10,6 +10,7 @@
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/trap_core.h>
+#include <kairos/uaccess.h>
 
 #if CONFIG_KERNEL_TESTS
 
@@ -274,6 +275,97 @@ static void test_syscall_error_paths_legacy(void) {
     test_check(uname_ret == -EFAULT, "legacy_uname null_efault");
 }
 
+static void test_uaccess_cross_page_regression(void) {
+    struct process *p = proc_current();
+    test_check(p != NULL, "uaccess_cross_page proc_current");
+    if (!p)
+        return;
+
+    struct mm_struct *saved_mm = p->mm;
+    struct mm_struct *active_mm = saved_mm;
+    struct mm_struct *temp_mm = NULL;
+    paddr_t saved_pgdir = arch_mmu_current();
+    bool switched_pgdir = false;
+
+    if (!active_mm) {
+        temp_mm = mm_create();
+        test_check(temp_mm != NULL, "uaccess_cross_page mm_create");
+        if (!temp_mm)
+            return;
+        p->mm = temp_mm;
+        active_mm = temp_mm;
+    }
+
+    if (saved_pgdir != active_mm->pgdir) {
+        arch_mmu_switch(active_mm->pgdir);
+        switched_pgdir = true;
+    }
+
+    const size_t map_len = 3 * CONFIG_PAGE_SIZE;
+    const size_t span = CONFIG_PAGE_SIZE + 64;
+    vaddr_t map_start = 0;
+    vaddr_t user_ptr = 0;
+
+    int ret = mm_mmap(active_mm, 0, map_len, VM_READ | VM_WRITE, 0, NULL, 0,
+                      false, &map_start);
+    test_check(ret == 0, "uaccess_cross_page mmap");
+    if (ret < 0)
+        goto out_restore_mm;
+
+    uint8_t *src = kmalloc(span);
+    uint8_t *dst = kmalloc(span);
+    test_check(src != NULL, "uaccess_cross_page kmalloc_src");
+    test_check(dst != NULL, "uaccess_cross_page kmalloc_dst");
+    if (!src || !dst)
+        goto out_unmap;
+
+    for (size_t i = 0; i < span; i++)
+        src[i] = (uint8_t)((i * 131U + 7U) & 0xffU);
+
+    user_ptr = map_start + CONFIG_PAGE_SIZE - 16;
+    ret = copy_to_user((void *)user_ptr, src, span);
+    test_check(ret == 0, "uaccess_cross_page copy_to_user");
+    if (ret == 0) {
+        vaddr_t page1 = ALIGN_DOWN(user_ptr, CONFIG_PAGE_SIZE);
+        vaddr_t page2 = page1 + CONFIG_PAGE_SIZE;
+        vaddr_t page3 = page2 + CONFIG_PAGE_SIZE;
+        test_check(arch_mmu_translate(active_mm->pgdir, page1) != 0,
+                   "uaccess_cross_page page1_faulted");
+        test_check(arch_mmu_translate(active_mm->pgdir, page2) != 0,
+                   "uaccess_cross_page page2_faulted");
+        test_check(arch_mmu_translate(active_mm->pgdir, page3) != 0,
+                   "uaccess_cross_page page3_faulted");
+    }
+
+    memset(dst, 0, span);
+    ret = copy_from_user(dst, (const void *)user_ptr, span);
+    test_check(ret == 0, "uaccess_cross_page copy_from_user");
+    if (ret == 0)
+        test_check(memcmp(src, dst, span) == 0, "uaccess_cross_page data_match");
+
+out_unmap:
+    ret = mm_munmap(active_mm, map_start, map_len);
+    test_check(ret == 0, "uaccess_cross_page munmap");
+
+    if (user_ptr && dst) {
+        ret = copy_from_user(dst, (const void *)user_ptr, span);
+        test_check(ret == -EFAULT, "uaccess_cross_page post_unmap_efault");
+    }
+
+    if (src)
+        kfree(src);
+    if (dst)
+        kfree(dst);
+
+out_restore_mm:
+    if (switched_pgdir)
+        arch_mmu_switch(saved_pgdir);
+    if (temp_mm) {
+        p->mm = saved_mm;
+        mm_destroy(temp_mm);
+    }
+}
+
 static void test_trap_dispatch_guard_clauses(void) {
     struct trap_frame tf;
     memset(&tf, 0, sizeof(tf));
@@ -389,6 +481,7 @@ int run_syscall_trap_tests(void) {
     test_syscall_unimplemented_slot_legacy();
     test_syscall_identity_legacy();
     test_syscall_error_paths_legacy();
+    test_uaccess_cross_page_regression();
     test_trap_dispatch_guard_clauses();
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();
