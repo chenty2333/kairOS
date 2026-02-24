@@ -591,8 +591,11 @@ int blkdev_for_each(blkdev_iter_fn_t fn, void *arg)
  *
  * @dev: Block device to probe
  *
- * This is a placeholder for now. In a real implementation, this would
- * read the partition table (GPT, MBR) and create partition devices.
+ * The probe path:
+ * 1) Clears previously discovered child partitions for this parent
+ * 2) Reads MBR sector 0 and records valid non-protective entries
+ * 3) If protective MBR is present, scans GPT entries and registers children
+ * 4) Falls back to registering valid MBR entries when GPT yields no partitions
  *
  * Returns 0 on success, negative error on failure.
  */

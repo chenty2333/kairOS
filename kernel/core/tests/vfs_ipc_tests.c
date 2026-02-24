@@ -29,6 +29,8 @@
 #define TEST_TFD_TIMER_ABSTIME 0x1U
 #define TEST_TFD_TIMER_CANCEL_ON_SET 0x2U
 #define TEST_NS_PER_SEC 1000000000ULL
+#define TEST_UTC_2015_01_01_SEC 1420070400ULL
+#define TEST_UTC_2017_01_01_SEC 1483228800ULL
 #define TEST_RESOLVE_NO_MAGICLINKS 0x02U
 #define TEST_RESOLVE_BENEATH 0x08U
 #define TEST_RENAME_NOREPLACE 0x01U
@@ -2630,6 +2632,149 @@ out:
         user_map_end(&um);
 }
 
+static void test_clock_tai_leap_offset_auto_update(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    void *u_rt = NULL;
+    void *u_tai = NULL;
+    void *u_set = NULL;
+    uint64_t restore_rt_ns = 0;
+    bool restore_needed = false;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "clock_tai leap user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    uint8_t *u_base = (uint8_t *)user_map_ptr(&um, 0);
+    test_check(u_base != NULL, "clock_tai leap user ptr");
+    if (!u_base)
+        goto out;
+
+    u_rt = u_base;
+    u_tai = u_base + sizeof(struct timespec);
+    u_set = u_base + 2 * sizeof(struct timespec);
+
+    int64_t ret64 = sys_clock_gettime(CLOCK_REALTIME, (uint64_t)u_rt, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap get realtime before");
+    if (ret64 < 0)
+        goto out;
+
+    struct timespec ts_restore_rt;
+    rc = copy_from_user(&ts_restore_rt, u_rt, sizeof(ts_restore_rt));
+    test_check(rc == 0, "clock_tai leap copy realtime before");
+    if (rc < 0)
+        goto out;
+
+    restore_rt_ns = (uint64_t)ts_restore_rt.tv_sec * TEST_NS_PER_SEC +
+                    (uint64_t)ts_restore_rt.tv_nsec;
+    restore_needed = true;
+
+    struct timespec ts_2015 = {
+        .tv_sec = (time_t)TEST_UTC_2015_01_01_SEC,
+        .tv_nsec = 0,
+    };
+    rc = copy_to_user(u_set, &ts_2015, sizeof(ts_2015));
+    test_check(rc == 0, "clock_tai leap copy realtime 2015");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_clock_settime(CLOCK_REALTIME, (uint64_t)u_set, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap set realtime 2015");
+    if (ret64 < 0)
+        goto out;
+
+    ret64 = sys_clock_gettime(CLOCK_REALTIME, (uint64_t)u_rt, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap get realtime 2015");
+    if (ret64 < 0)
+        goto out;
+    ret64 = sys_clock_gettime(CLOCK_TAI, (uint64_t)u_tai, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap get tai 2015");
+    if (ret64 < 0)
+        goto out;
+
+    struct timespec ts_rt_2015;
+    struct timespec ts_tai_2015;
+    rc = copy_from_user(&ts_rt_2015, u_rt, sizeof(ts_rt_2015));
+    test_check(rc == 0, "clock_tai leap copy realtime 2015");
+    if (rc < 0)
+        goto out;
+    rc = copy_from_user(&ts_tai_2015, u_tai, sizeof(ts_tai_2015));
+    test_check(rc == 0, "clock_tai leap copy tai 2015");
+    if (rc < 0)
+        goto out;
+
+    uint64_t rt_2015_ns = (uint64_t)ts_rt_2015.tv_sec * TEST_NS_PER_SEC +
+                          (uint64_t)ts_rt_2015.tv_nsec;
+    uint64_t tai_2015_ns = (uint64_t)ts_tai_2015.tv_sec * TEST_NS_PER_SEC +
+                           (uint64_t)ts_tai_2015.tv_nsec;
+    int64_t off_2015_ns = signed_delta_ns(tai_2015_ns, rt_2015_ns);
+
+    struct timespec ts_2017 = {
+        .tv_sec = (time_t)TEST_UTC_2017_01_01_SEC,
+        .tv_nsec = 0,
+    };
+    rc = copy_to_user(u_set, &ts_2017, sizeof(ts_2017));
+    test_check(rc == 0, "clock_tai leap copy realtime 2017");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_clock_settime(CLOCK_REALTIME, (uint64_t)u_set, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap set realtime 2017");
+    if (ret64 < 0)
+        goto out;
+
+    ret64 = sys_clock_gettime(CLOCK_REALTIME, (uint64_t)u_rt, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap get realtime 2017");
+    if (ret64 < 0)
+        goto out;
+    ret64 = sys_clock_gettime(CLOCK_TAI, (uint64_t)u_tai, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai leap get tai 2017");
+    if (ret64 < 0)
+        goto out;
+
+    struct timespec ts_rt_2017;
+    struct timespec ts_tai_2017;
+    rc = copy_from_user(&ts_rt_2017, u_rt, sizeof(ts_rt_2017));
+    test_check(rc == 0, "clock_tai leap copy realtime 2017");
+    if (rc < 0)
+        goto out;
+    rc = copy_from_user(&ts_tai_2017, u_tai, sizeof(ts_tai_2017));
+    test_check(rc == 0, "clock_tai leap copy tai 2017");
+    if (rc < 0)
+        goto out;
+
+    uint64_t rt_2017_ns = (uint64_t)ts_rt_2017.tv_sec * TEST_NS_PER_SEC +
+                          (uint64_t)ts_rt_2017.tv_nsec;
+    uint64_t tai_2017_ns = (uint64_t)ts_tai_2017.tv_sec * TEST_NS_PER_SEC +
+                           (uint64_t)ts_tai_2017.tv_nsec;
+    int64_t off_2017_ns = signed_delta_ns(tai_2017_ns, rt_2017_ns);
+
+    test_check(off_2015_ns >= 0, "clock_tai leap offset 2015 non-negative");
+    test_check(off_2017_ns >= 0, "clock_tai leap offset 2017 non-negative");
+    if (off_2015_ns >= 0 && off_2017_ns >= 0) {
+        uint64_t observed_delta_ns =
+            abs_diff_u64((uint64_t)off_2017_ns, (uint64_t)off_2015_ns);
+        uint64_t expected_delta_ns = 2ULL * TEST_NS_PER_SEC;
+        uint64_t drift = abs_diff_u64(observed_delta_ns, expected_delta_ns);
+        test_check(drift <= 500ULL * 1000ULL * 1000ULL,
+                   "clock_tai leap auto update across 2015/2017");
+    }
+
+out:
+    if (restore_needed && mapped && u_set) {
+        struct timespec ts_restore = {
+            .tv_sec = (time_t)(restore_rt_ns / TEST_NS_PER_SEC),
+            .tv_nsec = (int64_t)(restore_rt_ns % TEST_NS_PER_SEC),
+        };
+        if (copy_to_user(u_set, &ts_restore, sizeof(ts_restore)) == 0)
+            (void)sys_clock_settime(CLOCK_REALTIME, (uint64_t)u_set, 0, 0, 0, 0);
+    }
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_signalfd_syscall_functional(void) {
     int sfd = -1;
     struct user_map_ctx um = {0};
@@ -2986,6 +3131,7 @@ int run_vfs_ipc_tests(void) {
     test_timerfd_syscall_functional();
     test_timerfd_cancel_on_set_functional();
     test_clock_tai_settime_functional();
+    test_clock_tai_leap_offset_auto_update();
     test_signalfd_syscall_semantics();
     test_signalfd_syscall_functional();
     test_signalfd_syscall_rebind();

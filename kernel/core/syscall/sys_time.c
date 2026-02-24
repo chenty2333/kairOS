@@ -16,8 +16,8 @@
 
 #define NS_PER_SEC 1000000000ULL
 #define TIMER_ABSTIME 1U
-#define CLOCK_TAI_DEFAULT_OFFSET_SEC 37ULL
-#define CLOCK_TAI_DEFAULT_OFFSET_NS (CLOCK_TAI_DEFAULT_OFFSET_SEC * NS_PER_SEC)
+#define CLOCK_TAI_UTC_BASE_OFFSET_SEC 10ULL
+#define CLOCK_TAI_UTC_BASE_OFFSET_NS (CLOCK_TAI_UTC_BASE_OFFSET_SEC * NS_PER_SEC)
 #define CLOCK_TAI_OFFSET_MAX_NS (~(1ULL << 63))
 
 struct linux_utsname {
@@ -53,7 +53,67 @@ struct linux_tms {
     long tms_cstime;
 };
 
-static int64_t clock_tai_offset_ns = (int64_t)CLOCK_TAI_DEFAULT_OFFSET_NS;
+struct tai_utc_step {
+    uint64_t realtime_ns;
+    int64_t offset_ns;
+};
+
+static const struct tai_utc_step clock_tai_utc_steps[] = {
+    { 78796800ULL * NS_PER_SEC, 11LL * NS_PER_SEC },   /* 1972-07-01 */
+    { 94694400ULL * NS_PER_SEC, 12LL * NS_PER_SEC },   /* 1973-01-01 */
+    { 126230400ULL * NS_PER_SEC, 13LL * NS_PER_SEC },  /* 1974-01-01 */
+    { 157766400ULL * NS_PER_SEC, 14LL * NS_PER_SEC },  /* 1975-01-01 */
+    { 189302400ULL * NS_PER_SEC, 15LL * NS_PER_SEC },  /* 1976-01-01 */
+    { 220924800ULL * NS_PER_SEC, 16LL * NS_PER_SEC },  /* 1977-01-01 */
+    { 252460800ULL * NS_PER_SEC, 17LL * NS_PER_SEC },  /* 1978-01-01 */
+    { 283996800ULL * NS_PER_SEC, 18LL * NS_PER_SEC },  /* 1979-01-01 */
+    { 315532800ULL * NS_PER_SEC, 19LL * NS_PER_SEC },  /* 1980-01-01 */
+    { 362793600ULL * NS_PER_SEC, 20LL * NS_PER_SEC },  /* 1981-07-01 */
+    { 394329600ULL * NS_PER_SEC, 21LL * NS_PER_SEC },  /* 1982-07-01 */
+    { 425865600ULL * NS_PER_SEC, 22LL * NS_PER_SEC },  /* 1983-07-01 */
+    { 489024000ULL * NS_PER_SEC, 23LL * NS_PER_SEC },  /* 1985-07-01 */
+    { 567993600ULL * NS_PER_SEC, 24LL * NS_PER_SEC },  /* 1988-01-01 */
+    { 631152000ULL * NS_PER_SEC, 25LL * NS_PER_SEC },  /* 1990-01-01 */
+    { 662688000ULL * NS_PER_SEC, 26LL * NS_PER_SEC },  /* 1991-01-01 */
+    { 709948800ULL * NS_PER_SEC, 27LL * NS_PER_SEC },  /* 1992-07-01 */
+    { 741484800ULL * NS_PER_SEC, 28LL * NS_PER_SEC },  /* 1993-07-01 */
+    { 773020800ULL * NS_PER_SEC, 29LL * NS_PER_SEC },  /* 1994-07-01 */
+    { 820454400ULL * NS_PER_SEC, 30LL * NS_PER_SEC },  /* 1996-01-01 */
+    { 867715200ULL * NS_PER_SEC, 31LL * NS_PER_SEC },  /* 1997-07-01 */
+    { 915148800ULL * NS_PER_SEC, 32LL * NS_PER_SEC },  /* 1999-01-01 */
+    { 1136073600ULL * NS_PER_SEC, 33LL * NS_PER_SEC }, /* 2006-01-01 */
+    { 1230768000ULL * NS_PER_SEC, 34LL * NS_PER_SEC }, /* 2009-01-01 */
+    { 1341100800ULL * NS_PER_SEC, 35LL * NS_PER_SEC }, /* 2012-07-01 */
+    { 1435708800ULL * NS_PER_SEC, 36LL * NS_PER_SEC }, /* 2015-07-01 */
+    { 1483228800ULL * NS_PER_SEC, 37LL * NS_PER_SEC }, /* 2017-01-01 */
+};
+
+static int64_t clock_tai_user_offset_ns = 0;
+
+static int64_t saturating_add_i64(int64_t a, int64_t b) {
+    __int128 sum = (__int128)a + (__int128)b;
+    if (sum > INT64_MAX)
+        return INT64_MAX;
+    if (sum < INT64_MIN)
+        return INT64_MIN;
+    return (int64_t)sum;
+}
+
+static int64_t clock_tai_base_offset_ns(uint64_t realtime_ns) {
+    int64_t off = (int64_t)CLOCK_TAI_UTC_BASE_OFFSET_NS;
+    for (size_t i = 0; i < ARRAY_SIZE(clock_tai_utc_steps); i++) {
+        if (realtime_ns < clock_tai_utc_steps[i].realtime_ns)
+            break;
+        off = clock_tai_utc_steps[i].offset_ns;
+    }
+    return off;
+}
+
+static int64_t clock_tai_total_offset_ns(uint64_t realtime_ns) {
+    int64_t base = clock_tai_base_offset_ns(realtime_ns);
+    int64_t user = __atomic_load_n(&clock_tai_user_offset_ns, __ATOMIC_RELAXED);
+    return saturating_add_i64(base, user);
+}
 
 static uint64_t ns_to_sched_ticks(uint64_t ns) {
     if (ns == 0)
@@ -81,34 +141,46 @@ static uint64_t apply_signed_offset_ns(uint64_t base_ns, int64_t off_ns) {
             return UINT64_MAX;
         return base_ns + off;
     }
-    uint64_t neg = (uint64_t)(-off_ns);
+    uint64_t neg = (uint64_t)(-(off_ns + 1)) + 1ULL;
     return (base_ns > neg) ? (base_ns - neg) : 0;
 }
 
 static uint64_t realtime_to_tai_ns(uint64_t realtime_ns) {
-    int64_t off = __atomic_load_n(&clock_tai_offset_ns, __ATOMIC_RELAXED);
+    int64_t off = clock_tai_total_offset_ns(realtime_ns);
     return apply_signed_offset_ns(realtime_ns, off);
 }
 
 static uint64_t tai_to_realtime_ns(uint64_t tai_ns) {
-    int64_t off = __atomic_load_n(&clock_tai_offset_ns, __ATOMIC_RELAXED);
-    return apply_signed_offset_ns(tai_ns, -off);
+    uint64_t guess = apply_signed_offset_ns(
+        tai_ns, -clock_tai_total_offset_ns(time_realtime_ns()));
+    for (int i = 0; i < 4; i++) {
+        int64_t off = clock_tai_total_offset_ns(guess);
+        uint64_t next = apply_signed_offset_ns(tai_ns, -off);
+        if (next == guess)
+            break;
+        guess = next;
+    }
+    return guess;
 }
 
 static int time_set_tai_ns(uint64_t tai_ns, uint64_t realtime_ns) {
-    int64_t off = 0;
+    int64_t desired_off = 0;
     if (tai_ns >= realtime_ns) {
         uint64_t delta = tai_ns - realtime_ns;
         if (delta > CLOCK_TAI_OFFSET_MAX_NS)
             return -ERANGE;
-        off = (int64_t)delta;
+        desired_off = (int64_t)delta;
     } else {
         uint64_t delta = realtime_ns - tai_ns;
         if (delta > CLOCK_TAI_OFFSET_MAX_NS)
             return -ERANGE;
-        off = -(int64_t)delta;
+        desired_off = -(int64_t)delta;
     }
-    __atomic_store_n(&clock_tai_offset_ns, off, __ATOMIC_RELAXED);
+    int64_t base = clock_tai_base_offset_ns(realtime_ns);
+    __int128 user = (__int128)desired_off - (__int128)base;
+    if (user > INT64_MAX || user < INT64_MIN)
+        return -ERANGE;
+    __atomic_store_n(&clock_tai_user_offset_ns, (int64_t)user, __ATOMIC_RELAXED);
     return 0;
 }
 

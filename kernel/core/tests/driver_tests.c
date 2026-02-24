@@ -37,7 +37,7 @@ static int dummy_blk_write(struct blkdev *dev, uint64_t lba, const void *buf, si
 }
 
 struct partition_test_image {
-    uint8_t mbr[512];
+    uint8_t sectors[4][512];
     uint64_t last_lba;
     size_t last_count;
 };
@@ -49,14 +49,24 @@ static void write_le32(uint8_t *dst, uint32_t v) {
     dst[3] = (uint8_t)((v >> 24) & 0xff);
 }
 
+static void write_le64(uint8_t *dst, uint64_t v) {
+    write_le32(dst, (uint32_t)(v & 0xffffffffULL));
+    write_le32(dst + 4, (uint32_t)((v >> 32) & 0xffffffffULL));
+}
+
 static int partition_img_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
     if (!dev || !buf || !count || !dev->private)
         return -EINVAL;
 
     struct partition_test_image *img = dev->private;
     memset(buf, 0, count * dev->sector_size);
-    if (lba == 0 && count >= 1)
-        memcpy(buf, img->mbr, sizeof(img->mbr));
+    for (size_t i = 0; i < count; i++) {
+        uint64_t cur_lba = lba + i;
+        if (cur_lba < ARRAY_SIZE(img->sectors)) {
+            memcpy((uint8_t *)buf + i * dev->sector_size, img->sectors[cur_lba],
+                   dev->sector_size);
+        }
+    }
     img->last_lba = lba;
     img->last_count = count;
     return 0;
@@ -155,10 +165,10 @@ static void test_blkdev_partition_children(void) {
     img.last_lba = UINT64_MAX;
 
     /* MBR signature */
-    img.mbr[510] = 0x55;
-    img.mbr[511] = 0xAA;
+    img.sectors[0][510] = 0x55;
+    img.sectors[0][511] = 0xAA;
     /* First entry: Linux partition, lba=2048, sectors=1024 */
-    uint8_t *entry = &img.mbr[446];
+    uint8_t *entry = &img.sectors[0][446];
     entry[4] = 0x83;
     write_le32(entry + 8, 2048U);
     write_le32(entry + 12, 1024U);
@@ -202,6 +212,82 @@ static void test_blkdev_partition_children(void) {
     test_check(part == NULL, "blkdev partition child removed on parent unregister");
     if (part)
         blkdev_put(part);
+}
+
+static void test_blkdev_gpt_partition_bounds(void) {
+    struct partition_test_image img;
+    memset(&img, 0, sizeof(img));
+    img.last_lba = UINT64_MAX;
+
+    /* Protective MBR */
+    img.sectors[0][510] = 0x55;
+    img.sectors[0][511] = 0xAA;
+    uint8_t *mbr_entry = &img.sectors[0][446];
+    mbr_entry[4] = 0xEE;
+    write_le32(mbr_entry + 8, 1U);
+    write_le32(mbr_entry + 12, 65535U);
+
+    /* GPT header at LBA1 */
+    memcpy(img.sectors[1], "EFI PART", 8);
+    write_le64(&img.sectors[1][72], 2ULL);  /* partition entries start LBA */
+    write_le32(&img.sectors[1][80], 2U);    /* entries count */
+    write_le32(&img.sectors[1][84], 128U);  /* entry size */
+
+    /* GPT entry 1: valid partition [4096,8191] */
+    uint8_t *gpt1 = &img.sectors[2][0];
+    gpt1[0] = 1; /* non-zero type GUID */
+    write_le64(gpt1 + 32, 4096ULL);
+    write_le64(gpt1 + 40, 8191ULL);
+
+    /* GPT entry 2: out-of-bounds partition, should be ignored */
+    uint8_t *gpt2 = &img.sectors[2][128];
+    gpt2[0] = 2; /* non-zero type GUID */
+    write_le64(gpt2 + 32, 70000ULL);
+    write_le64(gpt2 + 40, 70010ULL);
+
+    struct blkdev_ops ops = {
+        .read = partition_img_read,
+        .write = partition_img_write,
+    };
+    struct blkdev dev;
+    memset(&dev, 0, sizeof(dev));
+    strncpy(dev.name, "testgpt0", sizeof(dev.name) - 1);
+    dev.sector_count = 65536;
+    dev.sector_size = 512;
+    dev.ops = &ops;
+    dev.private = &img;
+
+    int ret = blkdev_register(&dev);
+    test_check(ret == 0, "blkdev gpt parent register");
+    if (ret < 0)
+        return;
+
+    struct blkdev *part1 = blkdev_get("testgpt0p1");
+    test_check(part1 != NULL, "blkdev gpt valid child discovered");
+    if (part1) {
+        test_check(part1->parent == &dev, "blkdev gpt child parent link");
+        test_check(part1->start_lba == 4096ULL, "blkdev gpt child start lba");
+        test_check(part1->sector_count == 4096ULL, "blkdev gpt child sectors");
+
+        uint8_t buf[512];
+        memset(buf, 0, sizeof(buf));
+        img.last_lba = UINT64_MAX;
+        ret = blkdev_read(part1, 0, buf, 1);
+        test_check(ret == 0, "blkdev gpt child read");
+        test_check(img.last_lba == 4096ULL, "blkdev gpt child lba translate");
+        blkdev_put(part1);
+    }
+
+    struct blkdev *part2 = blkdev_get("testgpt0p2");
+    test_check(part2 == NULL, "blkdev gpt out-of-bounds child ignored");
+    if (part2)
+        blkdev_put(part2);
+
+    blkdev_unregister(&dev);
+    part1 = blkdev_get("testgpt0p1");
+    test_check(part1 == NULL, "blkdev gpt child removed on parent unregister");
+    if (part1)
+        blkdev_put(part1);
 }
 
 static void test_netdev_registry(void) {
@@ -257,6 +343,7 @@ int run_driver_tests(void) {
     test_virtqueue();
     test_blkdev_registry();
     test_blkdev_partition_children();
+    test_blkdev_gpt_partition_bounds();
     test_netdev_registry();
     test_vfs_umount_busy_with_child_mount();
 

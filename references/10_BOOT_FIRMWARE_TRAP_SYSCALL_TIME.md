@@ -91,8 +91,8 @@ Two-layer structure:
     - `clock_gettime`/`clock_settime`/`clock_getres`/`clock_nanosleep` decode `clockid` using Linux ABI width (`clockid_t`/32-bit int)
     - `getitimer`/`setitimer` decode `which` using Linux ABI width (`int`/32-bit)
     - `clock_nanosleep` accepts `CLOCK_BOOTTIME` and `CLOCK_TAI`; `CLOCK_TAI` absolute deadlines are converted to realtime base using the current in-kernel TAI offset
-    - `CLOCK_REALTIME` is implemented as `CLOCK_MONOTONIC + realtime_offset`; `clock_settime(CLOCK_REALTIME, ...)` updates this offset while `CLOCK_MONOTONIC` remains non-settable; `clock_settime(CLOCK_TAI, ...)` updates the TAI-vs-realtime offset
-    - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) on current realtime/monotonic sources; `CLOCK_TAI` reports `CLOCK_REALTIME + tai_offset` (default +37s, runtime-adjustable), plus CPU clocks (`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`) from scheduler accounting
+    - `CLOCK_REALTIME` is implemented as `CLOCK_MONOTONIC + realtime_offset`; `clock_settime(CLOCK_REALTIME, ...)` updates this offset while `CLOCK_MONOTONIC` remains non-settable; `clock_settime(CLOCK_TAI, ...)` updates user-adjustable TAI delta relative to the in-kernel UTC->TAI leap table baseline
+    - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) on current realtime/monotonic sources; `CLOCK_TAI` reports `CLOCK_REALTIME + (leap-table baseline + user delta)` with current default baseline +37s (post-2017), plus CPU clocks (`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`) from scheduler accounting
     - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
