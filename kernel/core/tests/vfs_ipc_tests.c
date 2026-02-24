@@ -6,12 +6,14 @@
 #include <kairos/epoll_internal.h>
 #include <kairos/inotify.h>
 #include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/pipe.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/select.h>
 #include <kairos/signal.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
@@ -27,6 +29,17 @@
 #define TEST_TFD_TIMER_ABSTIME 0x1U
 #define TEST_TFD_TIMER_CANCEL_ON_SET 0x2U
 #define TEST_NS_PER_SEC 1000000000ULL
+#define TEST_RESOLVE_NO_MAGICLINKS 0x02U
+#define TEST_RESOLVE_BENEATH 0x08U
+#define TEST_RENAME_NOREPLACE 0x01U
+#define TEST_CLOSE_RANGE_CLOEXEC (1U << 2)
+#define TEST_RWF_DSYNC 0x00000002U
+#define TEST_RWF_NOWAIT 0x00000008U
+#define TEST_STATX_MODE 0x00000002U
+#define TEST_STATX_SIZE 0x00000200U
+#define TEST_STATX_BASIC_STATS 0x000007ffU
+#define TEST_STATX__RESERVED 0x80000000U
+#define TEST_AT_STATX_SYNC_AS_STAT 0x0000
 
 static int tests_failed;
 
@@ -94,6 +107,15 @@ static off_t fd_get_offset(int fd) {
     return off;
 }
 
+static off_t fd_set_offset(int fd, off_t off, int whence) {
+    struct file *f = fd_get(proc_current(), fd);
+    if (!f)
+        return (off_t)-1;
+    off_t ret = vfs_seek(f, off, whence);
+    file_put(f);
+    return ret;
+}
+
 static bool fd_has_cloexec(int fd) {
     struct process *p = proc_current();
     if (!p || !p->fdtable || fd < 0 || fd >= CONFIG_MAX_FILES_PER_PROC)
@@ -131,6 +153,52 @@ struct test_linux_inotify_event {
     uint32_t mask;
     uint32_t cookie;
     uint32_t len;
+};
+
+struct test_linux_open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
+
+struct test_iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct test_linux_statx_timestamp {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t __reserved;
+};
+
+struct test_linux_statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __pad0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct test_linux_statx_timestamp stx_atime;
+    struct test_linux_statx_timestamp stx_btime;
+    struct test_linux_statx_timestamp stx_ctime;
+    struct test_linux_statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t __pad1[14];
+};
+
+struct test_pselect_sigset {
+    uint64_t sigmask;
+    uint64_t sigsetsize;
 };
 
 static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
@@ -427,6 +495,968 @@ out:
         user_map_end(&um);
     (void)vfs_umount(VFS_IPC_UMOUNT_ABI_MNT);
     (void)vfs_rmdir(VFS_IPC_UMOUNT_ABI_MNT);
+}
+
+static void test_openat2_faccessat2_fchmodat2_syscall_semantics(void) {
+    const char path[] = VFS_IPC_MNT "/openat2_file.txt";
+    struct user_map_ctx um = {0};
+    struct stat st;
+    bool mounted = false;
+    bool mapped = false;
+    int fd = -1;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "openat2 mount");
+    if (ret < 0)
+        return;
+    mounted = true;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "openat2 user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    struct test_linux_open_how *u_how =
+        (struct test_linux_open_how *)user_map_ptr(&um, 0);
+    char *u_path = (char *)user_map_ptr(&um, 128);
+    char *u_empty = (char *)user_map_ptr(&um, 384);
+    test_check(u_how != NULL, "openat2 u_how");
+    test_check(u_path != NULL, "openat2 u_path");
+    test_check(u_empty != NULL, "openat2 u_empty");
+    if (!u_how || !u_path || !u_empty)
+        goto out;
+
+    rc = copy_to_user(u_path, path, sizeof(path));
+    test_check(rc == 0, "openat2 copy path");
+    rc = copy_to_user(u_empty, "", 1);
+    test_check(rc == 0, "openat2 copy empty");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 =
+        sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path, 0,
+                    sizeof(struct test_linux_open_how), 0, 0);
+    test_check(ret64 == -EFAULT, "openat2 null how efault");
+
+    struct test_linux_open_how how = {
+        .flags = O_CREAT | O_RDWR | O_CLOEXEC,
+        .mode = 0640,
+        .resolve = TEST_RESOLVE_NO_MAGICLINKS,
+    };
+    rc = copy_to_user(u_how, &how, sizeof(how));
+    test_check(rc == 0, "openat2 copy how");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path, (uint64_t)u_how,
+                        sizeof(struct test_linux_open_how) - 1, 0, 0);
+    test_check(ret64 == -EINVAL, "openat2 small size einval");
+
+    how.flags = 1ULL << 33;
+    rc = copy_to_user(u_how, &how, sizeof(how));
+    test_check(rc == 0, "openat2 copy bad flags");
+    if (rc == 0) {
+        ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path,
+                            (uint64_t)u_how, sizeof(how), 0, 0);
+        test_check(ret64 == -EINVAL, "openat2 flags width einval");
+    }
+
+    how.flags = O_RDWR;
+    how.mode = 0600;
+    how.resolve = 0;
+    rc = copy_to_user(u_how, &how, sizeof(how));
+    test_check(rc == 0, "openat2 copy mode without create");
+    if (rc == 0) {
+        ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path,
+                            (uint64_t)u_how, sizeof(how), 0, 0);
+        test_check(ret64 == -EINVAL, "openat2 mode without create einval");
+    }
+
+    how.flags = O_CREAT | O_RDWR;
+    how.mode = 0644;
+    how.resolve = TEST_RESOLVE_BENEATH;
+    rc = copy_to_user(u_how, &how, sizeof(how));
+    test_check(rc == 0, "openat2 copy unsupported resolve");
+    if (rc == 0) {
+        ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path,
+                            (uint64_t)u_how, sizeof(how), 0, 0);
+        test_check(ret64 == -EOPNOTSUPP, "openat2 resolve eopnotsupp");
+    }
+
+    how.flags = O_CREAT | O_RDWR;
+    how.mode = 0644;
+    how.resolve = 1ULL << 31;
+    rc = copy_to_user(u_how, &how, sizeof(how));
+    test_check(rc == 0, "openat2 copy unknown resolve");
+    if (rc == 0) {
+        ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path,
+                            (uint64_t)u_how, sizeof(how), 0, 0);
+        test_check(ret64 == -EINVAL, "openat2 unknown resolve einval");
+    }
+
+    how.flags = O_CREAT | O_RDWR | O_CLOEXEC;
+    how.mode = 0640;
+    how.resolve = 0;
+    rc = copy_to_user(u_how, &how, sizeof(how));
+    test_check(rc == 0, "openat2 copy valid");
+    if (rc < 0)
+        goto out;
+
+    uint8_t one = 1;
+    rc = copy_to_user((uint8_t *)u_how + sizeof(how), &one, 1);
+    test_check(rc == 0, "openat2 copy nonzero tail");
+    if (rc == 0) {
+        ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path,
+                            (uint64_t)u_how, sizeof(how) + 1, 0, 0);
+        test_check(ret64 == -E2BIG, "openat2 nonzero tail e2big");
+    }
+
+    uint8_t zero = 0;
+    rc = copy_to_user((uint8_t *)u_how + sizeof(how), &zero, 1);
+    test_check(rc == 0, "openat2 clear tail");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_openat2((uint64_t)AT_FDCWD, (uint64_t)u_path, (uint64_t)u_how,
+                        sizeof(how) + 1, 0, 0);
+    test_check(ret64 >= 0, "openat2 create ok");
+    if (ret64 >= 0)
+        fd = (int)ret64;
+    if (fd < 0)
+        goto out;
+
+    test_check(fd_has_cloexec(fd), "openat2 cloexec set");
+
+    ret64 = sys_faccessat2((uint64_t)fd, (uint64_t)u_empty, R_OK,
+                           AT_EMPTY_PATH | 0x4U, 0, 0);
+    test_check(ret64 == -EINVAL, "faccessat2 bad flags einval");
+
+    ret64 = sys_faccessat2((uint64_t)fd, (uint64_t)u_empty, 0x80U,
+                           AT_EMPTY_PATH, 0, 0);
+    test_check(ret64 == -EINVAL, "faccessat2 bad mode einval");
+
+    ret64 = sys_faccessat2((uint64_t)fd, (uint64_t)u_empty, R_OK,
+                           AT_EMPTY_PATH, 0, 0);
+    test_check(ret64 == 0, "faccessat2 empty path ok");
+
+    ret64 = sys_faccessat2((uint64_t)fd, (uint64_t)u_empty, R_OK,
+                           (1ULL << 32) | AT_EMPTY_PATH, 0, 0);
+    test_check(ret64 == 0, "faccessat2 flags width");
+
+    ret64 = sys_fchmodat2((uint64_t)fd, 0, 0600, AT_EMPTY_PATH, 0, 0);
+    test_check(ret64 == -EFAULT, "fchmodat2 null path efault");
+
+    ret64 = sys_fchmodat2((uint64_t)fd, (uint64_t)u_empty, 0600, 0x4U, 0, 0);
+    test_check(ret64 == -EINVAL, "fchmodat2 bad flags einval");
+
+    ret64 =
+        sys_fchmodat2((uint64_t)fd, (uint64_t)u_empty, 0600, AT_EMPTY_PATH, 0, 0);
+    test_check(ret64 == 0, "fchmodat2 empty path ok");
+    if (ret64 == 0) {
+        ret = vfs_stat(path, &st);
+        test_check(ret == 0, "fchmodat2 stat after chmod");
+        if (ret == 0)
+            test_check((st.st_mode & 0777) == 0600, "fchmodat2 mode 0600");
+    }
+
+    ret64 = sys_fchmodat2((uint64_t)fd, (uint64_t)u_empty, 0640,
+                          (1ULL << 32) | AT_EMPTY_PATH, 0, 0);
+    test_check(ret64 == 0, "fchmodat2 flags width");
+    if (ret64 == 0) {
+        ret = vfs_stat(path, &st);
+        test_check(ret == 0, "fchmodat2 stat after width");
+        if (ret == 0)
+            test_check((st.st_mode & 0777) == 0640, "fchmodat2 mode 0640");
+    }
+
+out:
+    close_fd_if_open(&fd);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
+static void test_preadv2_pwritev2_syscall_semantics(void) {
+    const char path[] = VFS_IPC_MNT "/rwv2_file.bin";
+    struct user_map_ctx um = {0};
+    bool mounted = false;
+    bool mapped = false;
+    struct file *f = NULL;
+    int fd = -1;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "rwv2 mount");
+    if (ret < 0)
+        return;
+    mounted = true;
+
+    ret = vfs_open(path, O_CREAT | O_RDWR | O_TRUNC, 0644, &f);
+    test_check(ret == 0, "rwv2 open");
+    if (ret < 0)
+        goto out;
+
+    fd = fd_alloc(proc_current(), f);
+    test_check(fd >= 0, "rwv2 alloc fd");
+    if (fd < 0)
+        goto out;
+    f = NULL;
+
+    ssize_t wr = fd_write_once(fd, "0123456789", 10);
+    test_check(wr == 10, "rwv2 seed write");
+    test_check(fd_set_offset(fd, 0, SEEK_SET) == 0, "rwv2 seek zero");
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "rwv2 user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    struct test_iovec *u_iov = (struct test_iovec *)user_map_ptr(&um, 0);
+    char *u_wbuf = (char *)user_map_ptr(&um, 128);
+    char *u_rbuf = (char *)user_map_ptr(&um, 256);
+    test_check(u_iov != NULL, "rwv2 u_iov");
+    test_check(u_wbuf != NULL, "rwv2 u_wbuf");
+    test_check(u_rbuf != NULL, "rwv2 u_rbuf");
+    if (!u_iov || !u_wbuf || !u_rbuf)
+        goto out;
+
+    struct test_iovec iov = {
+        .iov_base = u_wbuf,
+        .iov_len = 2,
+    };
+    rc = copy_to_user(u_iov, &iov, sizeof(iov));
+    test_check(rc == 0, "rwv2 copy iov write");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_wbuf, "AB", 2);
+    test_check(rc == 0, "rwv2 copy write payload");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 =
+        sys_preadv2((uint64_t)fd, (uint64_t)u_iov, 1, 0, 0, TEST_RWF_DSYNC);
+    test_check(ret64 == -EOPNOTSUPP, "rwv2 preadv2 unsupported flags");
+
+    ret64 = sys_pwritev2((uint64_t)fd, (uint64_t)u_iov, 1, 0, 0, 0x10U);
+    test_check(ret64 == -EOPNOTSUPP, "rwv2 pwritev2 unsupported flags");
+
+    test_check(fd_set_offset(fd, 0, SEEK_SET) == 0, "rwv2 reset offset");
+    ret64 = sys_pwritev2((uint64_t)fd, (uint64_t)u_iov, 1, 4, 0,
+                         TEST_RWF_DSYNC);
+    test_check(ret64 == 2, "rwv2 pwritev2 positional write");
+    if (ret64 == 2)
+        test_check(fd_get_offset(fd) == 0, "rwv2 positional keep offset");
+
+    struct test_iovec rd_iov = {
+        .iov_base = u_rbuf,
+        .iov_len = 2,
+    };
+    rc = copy_to_user(u_iov, &rd_iov, sizeof(rd_iov));
+    test_check(rc == 0, "rwv2 copy iov read");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_rbuf, "\0\0", 2);
+    test_check(rc == 0, "rwv2 clear read buf");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_preadv2((uint64_t)fd, (uint64_t)u_iov, 1, 4, 0,
+                        TEST_RWF_NOWAIT);
+    test_check(ret64 == 2, "rwv2 preadv2 positional read");
+    if (ret64 == 2) {
+        char got[2] = {0, 0};
+        rc = copy_from_user(got, u_rbuf, sizeof(got));
+        test_check(rc == 0, "rwv2 copy read payload");
+        if (rc == 0)
+            test_check(memcmp(got, "AB", 2) == 0, "rwv2 read data AB");
+    }
+
+    test_check(fd_set_offset(fd, 0, SEEK_SET) == 0, "rwv2 seek for fallback wr");
+    rc = copy_to_user(u_wbuf, "XY", 2);
+    test_check(rc == 0, "rwv2 copy fallback write payload");
+    if (rc < 0)
+        goto out;
+    iov.iov_base = u_wbuf;
+    iov.iov_len = 2;
+    rc = copy_to_user(u_iov, &iov, sizeof(iov));
+    test_check(rc == 0, "rwv2 copy fallback write iov");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_pwritev2((uint64_t)fd, (uint64_t)u_iov, 1, 0xffffffffULL,
+                         0xffffffffULL, 0);
+    test_check(ret64 == 2, "rwv2 pwritev2 minus1 fallback");
+    if (ret64 == 2)
+        test_check(fd_get_offset(fd) == 2, "rwv2 fallback write advances offset");
+
+    test_check(fd_set_offset(fd, 0, SEEK_SET) == 0, "rwv2 seek for fallback rd");
+    rd_iov.iov_base = u_rbuf;
+    rd_iov.iov_len = 2;
+    rc = copy_to_user(u_iov, &rd_iov, sizeof(rd_iov));
+    test_check(rc == 0, "rwv2 copy fallback read iov");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_rbuf, "\0\0", 2);
+    test_check(rc == 0, "rwv2 clear fallback read buf");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_preadv2((uint64_t)fd, (uint64_t)u_iov, 1, 0xffffffffULL,
+                        0xffffffffULL, 0);
+    test_check(ret64 == 2, "rwv2 preadv2 minus1 fallback");
+    if (ret64 == 2) {
+        test_check(fd_get_offset(fd) == 2, "rwv2 fallback read advances offset");
+        char got[2] = {0, 0};
+        rc = copy_from_user(got, u_rbuf, sizeof(got));
+        test_check(rc == 0, "rwv2 copy fallback read payload");
+        if (rc == 0)
+            test_check(memcmp(got, "XY", 2) == 0, "rwv2 fallback read data");
+    }
+
+out:
+    close_fd_if_open(&fd);
+    close_file_if_open(&f);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
+static void test_close_range_syscall_semantics(void) {
+    struct file *f1 = NULL;
+    struct file *f2 = NULL;
+    struct file *f3 = NULL;
+    int fd1 = -1;
+    int fd2 = -1;
+    int fd3 = -1;
+    bool mounted = false;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "close_range mount");
+    if (ret < 0)
+        return;
+    mounted = true;
+
+    ret = vfs_open(VFS_IPC_MNT "/cr1", O_CREAT | O_RDWR | O_TRUNC, 0644, &f1);
+    test_check(ret == 0, "close_range open1");
+    if (ret < 0)
+        goto out;
+    ret = vfs_open(VFS_IPC_MNT "/cr2", O_CREAT | O_RDWR | O_TRUNC, 0644, &f2);
+    test_check(ret == 0, "close_range open2");
+    if (ret < 0)
+        goto out;
+    ret = vfs_open(VFS_IPC_MNT "/cr3", O_CREAT | O_RDWR | O_TRUNC, 0644, &f3);
+    test_check(ret == 0, "close_range open3");
+    if (ret < 0)
+        goto out;
+
+    fd1 = fd_alloc(proc_current(), f1);
+    fd2 = fd_alloc(proc_current(), f2);
+    fd3 = fd_alloc(proc_current(), f3);
+    test_check(fd1 >= 0, "close_range alloc fd1");
+    test_check(fd2 >= 0, "close_range alloc fd2");
+    test_check(fd3 >= 0, "close_range alloc fd3");
+    if (fd1 < 0 || fd2 < 0 || fd3 < 0)
+        goto out;
+    f1 = NULL;
+    f2 = NULL;
+    f3 = NULL;
+
+    int64_t ret64 = sys_close_range((uint64_t)fd2, (uint64_t)fd1, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "close_range first_gt_last einval");
+
+    ret64 = sys_close_range((uint64_t)fd1, (uint64_t)fd3, 1U, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "close_range invalid flags einval");
+
+    ret64 = sys_close_range((uint64_t)fd1, (uint64_t)fd2,
+                            TEST_CLOSE_RANGE_CLOEXEC, 0, 0, 0);
+    test_check(ret64 == 0, "close_range cloexec set");
+    if (ret64 == 0) {
+        test_check(fd_has_cloexec(fd1), "close_range cloexec fd1");
+        test_check(fd_has_cloexec(fd2), "close_range cloexec fd2");
+        test_check(!fd_has_cloexec(fd3), "close_range cloexec fd3 untouched");
+    }
+
+    ret64 = sys_close_range((1ULL << 32) | (uint64_t)fd3,
+                            (1ULL << 32) | (uint64_t)fd3, 0, 0, 0, 0);
+    test_check(ret64 == 0, "close_range fd width close");
+    if (ret64 == 0) {
+        struct file *chk = fd_get(proc_current(), fd3);
+        test_check(chk == NULL, "close_range fd3 closed");
+        if (chk)
+            file_put(chk);
+    }
+
+    ret64 = sys_close_range((uint64_t)fd1, (uint64_t)fd2, 0, 0, 0, 0);
+    test_check(ret64 == 0, "close_range close range");
+    if (ret64 == 0) {
+        struct file *chk1 = fd_get(proc_current(), fd1);
+        struct file *chk2 = fd_get(proc_current(), fd2);
+        test_check(chk1 == NULL, "close_range fd1 closed");
+        test_check(chk2 == NULL, "close_range fd2 closed");
+        if (chk1)
+            file_put(chk1);
+        if (chk2)
+            file_put(chk2);
+    }
+
+    ret64 =
+        sys_close_range((uint64_t)CONFIG_MAX_FILES_PER_PROC, UINT64_MAX, 0, 0, 0, 0);
+    test_check(ret64 == 0, "close_range first out of range");
+
+out:
+    close_fd_if_open(&fd1);
+    close_fd_if_open(&fd2);
+    close_fd_if_open(&fd3);
+    close_file_if_open(&f1);
+    close_file_if_open(&f2);
+    close_file_if_open(&f3);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
+static void test_statx_syscall_semantics(void) {
+    const char path[] = VFS_IPC_MNT "/statx_file.txt";
+    const char payload[] = "statx-data";
+    struct user_map_ctx um = {0};
+    struct file *f = NULL;
+    bool mounted = false;
+    bool mapped = false;
+    int fd = -1;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "statx mount");
+    if (ret < 0)
+        return;
+    mounted = true;
+
+    ret = vfs_open(path, O_CREAT | O_RDWR | O_TRUNC, 0644, &f);
+    test_check(ret == 0, "statx open");
+    if (ret < 0)
+        goto out;
+
+    ssize_t wr = vfs_write(f, payload, sizeof(payload) - 1);
+    test_check(wr == (ssize_t)(sizeof(payload) - 1), "statx seed write");
+
+    fd = fd_alloc(proc_current(), f);
+    test_check(fd >= 0, "statx alloc fd");
+    if (fd < 0)
+        goto out;
+    f = NULL;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "statx user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    char *u_path = (char *)user_map_ptr(&um, 0);
+    char *u_empty = (char *)user_map_ptr(&um, 256);
+    struct test_linux_statx *u_stx =
+        (struct test_linux_statx *)user_map_ptr(&um, 512);
+    test_check(u_path != NULL, "statx u_path");
+    test_check(u_empty != NULL, "statx u_empty");
+    test_check(u_stx != NULL, "statx u_stx");
+    if (!u_path || !u_empty || !u_stx)
+        goto out;
+
+    rc = copy_to_user(u_path, path, sizeof(path));
+    test_check(rc == 0, "statx copy path");
+    rc = copy_to_user(u_empty, "", 1);
+    test_check(rc == 0, "statx copy empty");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_statx((uint64_t)AT_FDCWD, (uint64_t)u_path, 0,
+                              TEST_STATX_BASIC_STATS, 0, 0);
+    test_check(ret64 == -EFAULT, "statx null out efault");
+
+    ret64 = sys_statx((uint64_t)AT_FDCWD, (uint64_t)u_path, 0x1U,
+                      TEST_STATX_BASIC_STATS, (uint64_t)u_stx, 0);
+    test_check(ret64 == -EINVAL, "statx bad flags einval");
+
+    ret64 = sys_statx((uint64_t)AT_FDCWD, (uint64_t)u_path, 0,
+                      TEST_STATX__RESERVED, (uint64_t)u_stx, 0);
+    test_check(ret64 == -EINVAL, "statx reserved mask einval");
+
+    ret64 = sys_statx((uint64_t)AT_FDCWD, (uint64_t)u_empty, 0,
+                      TEST_STATX_BASIC_STATS, (uint64_t)u_stx, 0);
+    test_check(ret64 == -ENOENT, "statx empty path enoent");
+
+    ret64 = sys_statx((uint64_t)AT_FDCWD, (uint64_t)u_path,
+                      TEST_AT_STATX_SYNC_AS_STAT,
+                      TEST_STATX_SIZE | TEST_STATX_MODE, (uint64_t)u_stx, 0);
+    test_check(ret64 == 0, "statx basic ok");
+    if (ret64 == 0) {
+        struct test_linux_statx stx;
+        rc = copy_from_user(&stx, u_stx, sizeof(stx));
+        test_check(rc == 0, "statx copy out");
+        if (rc == 0) {
+            test_check((stx.stx_mask & TEST_STATX_BASIC_STATS) ==
+                           TEST_STATX_BASIC_STATS,
+                       "statx mask basic");
+            test_check(stx.stx_size == sizeof(payload) - 1, "statx size match");
+        }
+    }
+
+    ret64 = sys_statx((uint64_t)fd, (uint64_t)u_empty,
+                      (1ULL << 32) | AT_EMPTY_PATH, TEST_STATX_SIZE,
+                      (uint64_t)u_stx, 0);
+    test_check(ret64 == 0, "statx empty path fd");
+    if (ret64 == 0) {
+        struct test_linux_statx stx;
+        rc = copy_from_user(&stx, u_stx, sizeof(stx));
+        test_check(rc == 0, "statx copy out fd");
+        if (rc == 0)
+            test_check(stx.stx_size == sizeof(payload) - 1, "statx fd size");
+    }
+
+out:
+    close_fd_if_open(&fd);
+    close_file_if_open(&f);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
+static void test_epoll_pwait2_syscall_semantics(void) {
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    int rfd = -1;
+    int wfd = -1;
+    int epfd = -1;
+    bool mapped = false;
+    struct user_map_ctx um = {0};
+
+    int ret = pipe_create(&rf, &wf);
+    test_check(ret == 0, "epoll_pwait2 create pipe");
+    if (ret < 0)
+        goto out;
+
+    rfd = fd_alloc(proc_current(), rf);
+    wfd = fd_alloc(proc_current(), wf);
+    test_check(rfd >= 0, "epoll_pwait2 alloc rfd");
+    test_check(wfd >= 0, "epoll_pwait2 alloc wfd");
+    if (rfd < 0 || wfd < 0)
+        goto out;
+    rf = NULL;
+    wf = NULL;
+
+    int64_t ret64 = sys_epoll_create1(0, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "epoll_pwait2 create epoll");
+    if (ret64 < 0)
+        goto out;
+    epfd = (int)ret64;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "epoll_pwait2 user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    struct epoll_event *u_add = (struct epoll_event *)user_map_ptr(&um, 0);
+    struct epoll_event *u_out = (struct epoll_event *)user_map_ptr(&um, 128);
+    struct timespec *u_ts = (struct timespec *)user_map_ptr(&um, 320);
+    sigset_t *u_sigmask = (sigset_t *)user_map_ptr(&um, 400);
+    test_check(u_add != NULL, "epoll_pwait2 u_add");
+    test_check(u_out != NULL, "epoll_pwait2 u_out");
+    test_check(u_ts != NULL, "epoll_pwait2 u_ts");
+    test_check(u_sigmask != NULL, "epoll_pwait2 u_sigmask");
+    if (!u_add || !u_out || !u_ts || !u_sigmask)
+        goto out;
+
+    struct epoll_event add = {
+        .events = EPOLLIN,
+        .data = 0x55,
+    };
+    rc = copy_to_user(u_add, &add, sizeof(add));
+    test_check(rc == 0, "epoll_pwait2 copy add");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_epoll_ctl((uint64_t)epfd, EPOLL_CTL_ADD, (uint64_t)rfd,
+                          (uint64_t)u_add, 0, 0);
+    test_check(ret64 == 0, "epoll_pwait2 ctl add");
+    if (ret64 < 0)
+        goto out;
+
+    ret64 = sys_epoll_pwait2((uint64_t)epfd, 0, 1, (uint64_t)u_ts, 0, 0);
+    test_check(ret64 == -EFAULT, "epoll_pwait2 null events efault");
+
+    ret64 = sys_epoll_pwait2((uint64_t)epfd, (uint64_t)u_out, 0, (uint64_t)u_ts,
+                             0, 0);
+    test_check(ret64 == -EINVAL, "epoll_pwait2 maxevents einval");
+
+    struct timespec bad_ts = {
+        .tv_sec = 0,
+        .tv_nsec = TEST_NS_PER_SEC,
+    };
+    rc = copy_to_user(u_ts, &bad_ts, sizeof(bad_ts));
+    test_check(rc == 0, "epoll_pwait2 copy bad ts");
+    if (rc == 0) {
+        ret64 = sys_epoll_pwait2((uint64_t)epfd, (uint64_t)u_out, 1,
+                                 (uint64_t)u_ts, 0, 0);
+        test_check(ret64 == -EINVAL, "epoll_pwait2 bad timeout einval");
+    }
+
+    sigset_t zero_mask = 0;
+    rc = copy_to_user(u_sigmask, &zero_mask, sizeof(zero_mask));
+    test_check(rc == 0, "epoll_pwait2 copy sigmask");
+    if (rc == 0) {
+        ret64 = sys_epoll_pwait2((uint64_t)epfd, (uint64_t)u_out, 1, 0,
+                                 (uint64_t)u_sigmask, sizeof(sigset_t) - 1);
+        test_check(ret64 == -EINVAL, "epoll_pwait2 sigsetsize einval");
+    }
+
+    struct timespec zero_ts = {
+        .tv_sec = 0,
+        .tv_nsec = 0,
+    };
+    rc = copy_to_user(u_ts, &zero_ts, sizeof(zero_ts));
+    test_check(rc == 0, "epoll_pwait2 copy zero ts");
+    if (rc == 0) {
+        ret64 = sys_epoll_pwait2((uint64_t)epfd, (uint64_t)u_out, 1,
+                                 (uint64_t)u_ts, 0, 0);
+        test_check(ret64 == 0, "epoll_pwait2 timeout zero");
+    }
+
+    ssize_t wr = fd_write_once(wfd, "X", 1);
+    test_check(wr == 1, "epoll_pwait2 seed readable");
+    if (wr == 1) {
+        struct timespec one_sec = {
+            .tv_sec = 1,
+            .tv_nsec = 0,
+        };
+        rc = copy_to_user(u_ts, &one_sec, sizeof(one_sec));
+        test_check(rc == 0, "epoll_pwait2 copy one sec");
+        if (rc == 0) {
+            ret64 = sys_epoll_pwait2((uint64_t)epfd, (uint64_t)u_out, 1,
+                                     (uint64_t)u_ts, 0, 0);
+            test_check(ret64 == 1, "epoll_pwait2 ready one");
+            if (ret64 == 1) {
+                struct epoll_event out_ev = {0};
+                rc = copy_from_user(&out_ev, u_out, sizeof(out_ev));
+                test_check(rc == 0, "epoll_pwait2 copy out");
+                if (rc == 0) {
+                    test_check((out_ev.events & EPOLLIN) != 0,
+                               "epoll_pwait2 out mask");
+                    test_check(out_ev.data == 0x55, "epoll_pwait2 out data");
+                }
+            }
+        }
+    }
+
+out:
+    close_fd_if_open(&epfd);
+    close_fd_if_open(&rfd);
+    close_fd_if_open(&wfd);
+    close_file_if_open(&rf);
+    close_file_if_open(&wf);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_ppoll_pselect6_syscall_semantics(void) {
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    int rfd = -1;
+    int wfd = -1;
+    bool mapped = false;
+    struct user_map_ctx um = {0};
+
+    int ret = pipe_create(&rf, &wf);
+    test_check(ret == 0, "pollsel create pipe");
+    if (ret < 0)
+        goto out;
+
+    rfd = fd_alloc(proc_current(), rf);
+    wfd = fd_alloc(proc_current(), wf);
+    test_check(rfd >= 0, "pollsel alloc rfd");
+    test_check(wfd >= 0, "pollsel alloc wfd");
+    if (rfd < 0 || wfd < 0)
+        goto out;
+    rf = NULL;
+    wf = NULL;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "pollsel user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    struct pollfd *u_pfd = (struct pollfd *)user_map_ptr(&um, 0);
+    struct timespec *u_ppoll_ts = (struct timespec *)user_map_ptr(&um, 96);
+    struct timespec *u_pselect_ts = (struct timespec *)user_map_ptr(&um, 160);
+    sigset_t *u_sigmask = (sigset_t *)user_map_ptr(&um, 224);
+    struct test_pselect_sigset *u_pss =
+        (struct test_pselect_sigset *)user_map_ptr(&um, 288);
+    fd_set *u_rfds = (fd_set *)user_map_ptr(&um, 352);
+    test_check(u_pfd != NULL, "pollsel u_pfd");
+    test_check(u_ppoll_ts != NULL, "pollsel u_ppoll_ts");
+    test_check(u_pselect_ts != NULL, "pollsel u_pselect_ts");
+    test_check(u_sigmask != NULL, "pollsel u_sigmask");
+    test_check(u_pss != NULL, "pollsel u_pss");
+    test_check(u_rfds != NULL, "pollsel u_rfds");
+    if (!u_pfd || !u_ppoll_ts || !u_pselect_ts || !u_sigmask || !u_pss ||
+        !u_rfds)
+        goto out;
+
+    struct pollfd pfd = {
+        .fd = rfd,
+        .events = POLLIN,
+        .revents = 0,
+    };
+    rc = copy_to_user(u_pfd, &pfd, sizeof(pfd));
+    test_check(rc == 0, "pollsel copy pfd");
+    if (rc < 0)
+        goto out;
+
+    sigset_t zero_mask = 0;
+    rc = copy_to_user(u_sigmask, &zero_mask, sizeof(zero_mask));
+    test_check(rc == 0, "pollsel copy sigmask");
+    if (rc == 0) {
+        struct timespec ts0 = {
+            .tv_sec = 0,
+            .tv_nsec = 0,
+        };
+        rc = copy_to_user(u_ppoll_ts, &ts0, sizeof(ts0));
+        test_check(rc == 0, "pollsel copy ppoll ts0");
+        if (rc == 0) {
+            int64_t ret64 =
+                sys_ppoll((uint64_t)u_pfd, 1, (uint64_t)u_ppoll_ts,
+                          (uint64_t)u_sigmask, sizeof(sigset_t) - 1, 0);
+            test_check(ret64 == -EINVAL, "pollsel ppoll sigsetsize einval");
+        }
+    }
+
+    struct timespec ts0 = {
+        .tv_sec = 0,
+        .tv_nsec = 0,
+    };
+    rc = copy_to_user(u_ppoll_ts, &ts0, sizeof(ts0));
+    test_check(rc == 0, "pollsel copy ppoll zero timeout");
+    if (rc == 0) {
+        int64_t ret64 =
+            sys_ppoll((uint64_t)u_pfd, 1, (uint64_t)u_ppoll_ts, 0, 0, 0);
+        test_check(ret64 == 0, "pollsel ppoll zero timeout");
+    }
+
+    ssize_t wr = fd_write_once(wfd, "P", 1);
+    test_check(wr == 1, "pollsel ppoll seed data");
+    if (wr == 1) {
+        struct timespec one_sec = {
+            .tv_sec = 1,
+            .tv_nsec = 0,
+        };
+        rc = copy_to_user(u_ppoll_ts, &one_sec, sizeof(one_sec));
+        test_check(rc == 0, "pollsel copy ppoll one sec");
+        if (rc == 0) {
+            int64_t ret64 =
+                sys_ppoll((uint64_t)u_pfd, 1, (uint64_t)u_ppoll_ts, 0, 0, 0);
+            test_check(ret64 == 1, "pollsel ppoll ready");
+            if (ret64 == 1) {
+                struct pollfd out_pfd = {0};
+                rc = copy_from_user(&out_pfd, u_pfd, sizeof(out_pfd));
+                test_check(rc == 0, "pollsel copy ppoll out");
+                if (rc == 0)
+                    test_check((out_pfd.revents & POLLIN) != 0,
+                               "pollsel ppoll revents in");
+            }
+        }
+    }
+
+    char drain = 0;
+    ssize_t rd = fd_read_once(rfd, &drain, 1);
+    test_check(rd == 1, "pollsel drain pipe");
+
+    struct test_pselect_sigset pss = {
+        .sigmask = (uint64_t)u_sigmask,
+        .sigsetsize = sizeof(sigset_t) - 1,
+    };
+    rc = copy_to_user(u_pss, &pss, sizeof(pss));
+    test_check(rc == 0, "pollsel copy pselect bad sigset");
+    if (rc == 0) {
+        fd_set rfds = {
+            .bits = (1ULL << rfd),
+        };
+        rc = copy_to_user(u_rfds, &rfds, sizeof(rfds));
+        test_check(rc == 0, "pollsel copy pselect rfds bad");
+        if (rc == 0) {
+            rc = copy_to_user(u_pselect_ts, &ts0, sizeof(ts0));
+            test_check(rc == 0, "pollsel copy pselect ts0 bad");
+            if (rc == 0) {
+                int64_t ret64 = sys_pselect6((uint64_t)(rfd + 1),
+                                             (uint64_t)u_rfds, 0, 0,
+                                             (uint64_t)u_pselect_ts,
+                                             (uint64_t)u_pss);
+                test_check(ret64 == -EINVAL,
+                           "pollsel pselect sigsetsize einval");
+            }
+        }
+    }
+
+    pss.sigsetsize = sizeof(sigset_t);
+    rc = copy_to_user(u_pss, &pss, sizeof(pss));
+    test_check(rc == 0, "pollsel copy pselect sigset ok");
+
+    fd_set rfds0 = {
+        .bits = (1ULL << rfd),
+    };
+    rc = copy_to_user(u_rfds, &rfds0, sizeof(rfds0));
+    test_check(rc == 0, "pollsel copy pselect rfds zero");
+    rc = copy_to_user(u_pselect_ts, &ts0, sizeof(ts0));
+    test_check(rc == 0, "pollsel copy pselect ts0");
+    if (rc == 0) {
+        int64_t ret64 = sys_pselect6((uint64_t)(rfd + 1), (uint64_t)u_rfds, 0, 0,
+                                     (uint64_t)u_pselect_ts, (uint64_t)u_pss);
+        test_check(ret64 == 0, "pollsel pselect zero timeout");
+    }
+
+    wr = fd_write_once(wfd, "S", 1);
+    test_check(wr == 1, "pollsel pselect seed data");
+    if (wr == 1) {
+        struct timespec one_sec = {
+            .tv_sec = 1,
+            .tv_nsec = 0,
+        };
+        fd_set rfds = {
+            .bits = (1ULL << rfd),
+        };
+        rc = copy_to_user(u_rfds, &rfds, sizeof(rfds));
+        test_check(rc == 0, "pollsel copy pselect rfds");
+        rc = copy_to_user(u_pselect_ts, &one_sec, sizeof(one_sec));
+        test_check(rc == 0, "pollsel copy pselect one sec");
+        if (rc == 0) {
+            int64_t ret64 = sys_pselect6((uint64_t)(rfd + 1),
+                                         (uint64_t)u_rfds, 0, 0,
+                                         (uint64_t)u_pselect_ts,
+                                         (uint64_t)u_pss);
+            test_check(ret64 == 1, "pollsel pselect ready");
+            if (ret64 == 1) {
+                fd_set out = {0};
+                rc = copy_from_user(&out, u_rfds, sizeof(out));
+                test_check(rc == 0, "pollsel copy pselect out");
+                if (rc == 0)
+                    test_check((out.bits & (1ULL << rfd)) != 0,
+                               "pollsel pselect rfds set");
+            }
+        }
+    }
+
+out:
+    close_fd_if_open(&rfd);
+    close_fd_if_open(&wfd);
+    close_file_if_open(&rf);
+    close_file_if_open(&wf);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_renameat2_syscall_semantics(void) {
+    const char src1[] = VFS_IPC_MNT "/ra2_src1";
+    const char dst1[] = VFS_IPC_MNT "/ra2_dst1";
+    const char src2[] = VFS_IPC_MNT "/ra2_src2";
+    const char dst2[] = VFS_IPC_MNT "/ra2_dst2";
+    struct user_map_ctx um = {0};
+    struct file *f = NULL;
+    struct stat st;
+    bool mounted = false;
+    bool mapped = false;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "renameat2 mount");
+    if (ret < 0)
+        return;
+    mounted = true;
+
+    ret = vfs_open(src1, O_CREAT | O_WRONLY | O_TRUNC, 0644, &f);
+    test_check(ret == 0, "renameat2 create src1");
+    close_file_if_open(&f);
+    if (ret < 0)
+        goto out;
+
+    ret = vfs_open(dst1, O_CREAT | O_WRONLY | O_TRUNC, 0644, &f);
+    test_check(ret == 0, "renameat2 create dst1");
+    close_file_if_open(&f);
+    if (ret < 0)
+        goto out;
+
+    ret = vfs_open(src2, O_CREAT | O_WRONLY | O_TRUNC, 0644, &f);
+    test_check(ret == 0, "renameat2 create src2");
+    close_file_if_open(&f);
+    if (ret < 0)
+        goto out;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "renameat2 user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    char *u_src1 = (char *)user_map_ptr(&um, 0);
+    char *u_dst1 = (char *)user_map_ptr(&um, 128);
+    char *u_src2 = (char *)user_map_ptr(&um, 256);
+    char *u_dst2 = (char *)user_map_ptr(&um, 384);
+    test_check(u_src1 != NULL, "renameat2 u_src1");
+    test_check(u_dst1 != NULL, "renameat2 u_dst1");
+    test_check(u_src2 != NULL, "renameat2 u_src2");
+    test_check(u_dst2 != NULL, "renameat2 u_dst2");
+    if (!u_src1 || !u_dst1 || !u_src2 || !u_dst2)
+        goto out;
+
+    rc = copy_to_user(u_src1, src1, sizeof(src1));
+    test_check(rc == 0, "renameat2 copy src1");
+    rc = copy_to_user(u_dst1, dst1, sizeof(dst1));
+    test_check(rc == 0, "renameat2 copy dst1");
+    rc = copy_to_user(u_src2, src2, sizeof(src2));
+    test_check(rc == 0, "renameat2 copy src2");
+    rc = copy_to_user(u_dst2, dst2, sizeof(dst2));
+    test_check(rc == 0, "renameat2 copy dst2");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_renameat2((uint64_t)AT_FDCWD, (uint64_t)u_src1,
+                                  (uint64_t)AT_FDCWD, (uint64_t)u_dst1,
+                                  TEST_RENAME_NOREPLACE, 0);
+    test_check(ret64 == -EEXIST, "renameat2 noreplace eexist");
+
+    ret64 = sys_renameat2((uint64_t)AT_FDCWD, (uint64_t)u_src1,
+                          (uint64_t)AT_FDCWD, (uint64_t)u_dst1, 0x2U, 0);
+    test_check(ret64 == -EINVAL, "renameat2 bad flags einval");
+
+    ret = vfs_unlink(dst1);
+    test_check(ret == 0, "renameat2 unlink dst1");
+    if (ret == 0) {
+        ret64 = sys_renameat2((uint64_t)AT_FDCWD, (uint64_t)u_src1,
+                              (uint64_t)AT_FDCWD, (uint64_t)u_dst1, 0, 0);
+        test_check(ret64 == 0, "renameat2 flags zero");
+        if (ret64 == 0) {
+            ret = vfs_stat(src1, &st);
+            test_check(ret == -ENOENT, "renameat2 src1 gone");
+            ret = vfs_stat(dst1, &st);
+            test_check(ret == 0, "renameat2 dst1 exists");
+        }
+    }
+
+    ret64 = sys_renameat2((uint64_t)AT_FDCWD, (uint64_t)u_src2,
+                          (uint64_t)AT_FDCWD, (uint64_t)u_dst2, 1ULL << 32, 0);
+    test_check(ret64 == 0, "renameat2 flags width");
+    if (ret64 == 0) {
+        ret = vfs_stat(src2, &st);
+        test_check(ret == -ENOENT, "renameat2 src2 gone");
+        ret = vfs_stat(dst2, &st);
+        test_check(ret == 0, "renameat2 dst2 exists");
+    }
+
+out:
+    close_file_if_open(&f);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
 }
 
 struct blocking_read_ctx {
@@ -1732,9 +2762,16 @@ int run_vfs_ipc_tests(void) {
 
     test_tmpfs_vfs_semantics();
     test_umount2_flag_width_semantics();
+    test_openat2_faccessat2_fchmodat2_syscall_semantics();
+    test_preadv2_pwritev2_syscall_semantics();
+    test_close_range_syscall_semantics();
+    test_statx_syscall_semantics();
     test_pipe_semantics();
     test_epoll_pipe_semantics();
     test_epoll_edge_oneshot_semantics();
+    test_epoll_pwait2_syscall_semantics();
+    test_ppoll_pselect6_syscall_semantics();
+    test_renameat2_syscall_semantics();
     test_eventfd_syscall_semantics();
     test_copy_file_range_syscall_semantics();
     test_timerfd_syscall_semantics();
