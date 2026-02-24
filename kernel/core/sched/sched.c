@@ -104,6 +104,15 @@ static inline int sched_online_cpu_count(void) {
     return online;
 }
 
+static inline uint64_t sched_online_cpu_mask_u64(void) {
+    uint64_t mask = 0;
+    int online = sched_online_cpu_count();
+    int bits = online < 64 ? online : 64;
+    for (int cpu = 0; cpu < bits; cpu++)
+        mask |= (1ULL << cpu);
+    return mask;
+}
+
 static int sched_select_target_cpu(const struct process *p, int hint_cpu) {
     int online = sched_online_cpu_count();
     int start = hint_cpu;
@@ -591,6 +600,11 @@ void sched_post_switch_cleanup(void) {
     if (prev) {
         /* State already updated before context switch; nothing to do. */
         __atomic_store_n(&cpu->prev_task, NULL, __ATOMIC_RELEASE);
+        if (prev->state == PROC_RUNNABLE &&
+            se_state_load(&prev->se) == SE_STATE_RUNNABLE &&
+            se_node_is_detached(&prev->se)) {
+            sched_enqueue(prev);
+        }
         /* Zombie finished context switch — notify waiting parent */
         if (prev->state == PROC_ZOMBIE && prev->parent) {
             wait_queue_wakeup_all(&prev->parent->exit_wait);
@@ -711,6 +725,89 @@ void sched_dequeue(struct process *p) {
 
     spin_unlock(&rq->lock);
     arch_irq_restore(state);
+}
+
+int sched_set_affinity(struct process *p, uint64_t mask) {
+    if (!p)
+        return -EINVAL;
+
+    uint64_t online_mask = sched_online_cpu_mask_u64();
+    uint64_t effective_mask = mask & online_mask;
+    if (!effective_mask)
+        return -EINVAL;
+
+    proc_sched_set_affinity_mask(p, effective_mask);
+
+    for (int attempts = 0; attempts < 4; attempts++) {
+        int cpu = p->se.cpu;
+        uint32_t se_state = se_state_load(&p->se);
+
+        if (se_state == SE_STATE_BLOCKED || se_state == SE_STATE_RUNNABLE) {
+            if (cpu < 0 || cpu >= CONFIG_MAX_CPUS || !proc_sched_cpu_allowed(p, cpu))
+                p->se.cpu = sched_select_target_cpu(p, cpu);
+            return 0;
+        }
+
+        if (se_state == SE_STATE_RUNNING) {
+            if (cpu < 0 || cpu >= CONFIG_MAX_CPUS || proc_sched_cpu_allowed(p, cpu))
+                return 0;
+
+            cpu_data[cpu].resched_needed = true;
+            if (cpu != arch_cpu_id())
+                arch_send_ipi(cpu, IPI_RESCHEDULE);
+            return 0;
+        }
+
+        if (se_state != SE_STATE_QUEUED)
+            return 0;
+
+        if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+            return 0;
+        if (proc_sched_cpu_allowed(p, cpu))
+            return 0;
+
+        struct rq *rq = &cpu_data[cpu].runqueue;
+        bool irq_state = arch_irq_save();
+        spin_lock(&rq->lock);
+
+        int locked_cpu = p->se.cpu;
+        uint32_t locked_state = se_state_load(&p->se);
+        if (locked_cpu != cpu || locked_state != SE_STATE_QUEUED) {
+            spin_unlock(&rq->lock);
+            arch_irq_restore(irq_state);
+            continue;
+        }
+        if (proc_sched_cpu_allowed(p, cpu)) {
+            spin_unlock(&rq->lock);
+            arch_irq_restore(irq_state);
+            return 0;
+        }
+
+        int dst_cpu = sched_select_target_cpu(p, cpu);
+        if (dst_cpu < 0 || dst_cpu >= CONFIG_MAX_CPUS) {
+            spin_unlock(&rq->lock);
+            arch_irq_restore(irq_state);
+            return 0;
+        }
+
+        if (p->se.sched_class)
+            p->se.sched_class->dequeue_task(rq, p, DEQUEUE_SLEEP);
+        p->state = PROC_RUNNABLE;
+        se_mark_runnable(&p->se);
+        se_node_mark_detached(&p->se);
+        p->se.cpu = dst_cpu;
+        rq->nr_running--;
+        sched_trace_event(SCHED_TRACE_MIGRATE, p, (uint64_t)cpu,
+                          (uint64_t)dst_cpu);
+
+        spin_unlock(&rq->lock);
+        arch_irq_restore(irq_state);
+
+        sched_enqueue(p);
+        return 0;
+    }
+
+    return -EAGAIN;
 }
 
 /**
@@ -1152,6 +1249,13 @@ static struct process *fair_pick_next_task(struct rq *rq,
 
 static void fair_put_prev_task(struct rq *rq, struct process *prev) {
     struct cfs_rq *cfs = &rq->cfs;
+    int rq_cpu = sched_rq_cpu_id(rq);
+    if (rq_cpu < 0 || rq_cpu >= CONFIG_MAX_CPUS)
+        rq_cpu = prev->se.cpu;
+    if (rq_cpu < 0 || rq_cpu >= CONFIG_MAX_CPUS)
+        rq_cpu = arch_cpu_id();
+    if (rq_cpu < 0 || rq_cpu >= CONFIG_MAX_CPUS)
+        rq_cpu = 0;
     (void)update_curr(cfs);
 
     if (prev->state == PROC_RUNNING || prev->state == PROC_RUNNABLE) {
@@ -1164,6 +1268,19 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
             uint64_t vslice = calc_vslice(&prev->se);
             prev->se.deadline = prev->se.vruntime + vslice;
         }
+        if (rq_cpu >= 0 && rq_cpu < CONFIG_MAX_CPUS &&
+            !proc_sched_cpu_allowed(prev, rq_cpu)) {
+            int dst_cpu = sched_select_target_cpu(prev, rq_cpu);
+            if (dst_cpu >= 0 && dst_cpu < CONFIG_MAX_CPUS &&
+                dst_cpu != rq_cpu) {
+                if (!se_node_is_detached(&prev->se))
+                    se_node_mark_detached(&prev->se);
+                prev->se.cpu = dst_cpu;
+                sched_trace_event(SCHED_TRACE_MIGRATE, prev, (uint64_t)rq_cpu,
+                                  (uint64_t)dst_cpu);
+                return;
+            }
+        }
         bool detached = se_node_is_detached(&prev->se);
         if (!detached && !sched_rb_contains(cfs, &prev->se)) {
             se_node_mark_detached(&prev->se);
@@ -1175,7 +1292,7 @@ static void fair_put_prev_task(struct rq *rq, struct process *prev) {
             rq->nr_running++;
             update_min_vruntime(cfs);
         }
-        se_mark_queued(&prev->se, prev->se.cpu);
+        se_mark_queued(&prev->se, rq_cpu);
         return;
     }
 

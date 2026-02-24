@@ -595,7 +595,16 @@ static void test_sched_affinity_syscalls_regression(void) {
             if (rc == 0) {
                 ret64 = sys_sched_setaffinity(0, sizeof(unsigned long),
                                               (uint64_t)u_mask, 0, 0, 0);
-                test_check(ret64 == -EINVAL, "affinity set running_exclude_einval");
+                test_check(ret64 == 0, "affinity set running_exclude_ok");
+                if (ret64 == 0) {
+                    proc_yield();
+                    struct process *cur = proc_current();
+                    int cur_cpu = cur ? cur->se.cpu : -1;
+                    bool allowed =
+                        cur_cpu >= 0 && cur_cpu < bits &&
+                        ((alt_mask & (1UL << cur_cpu)) != 0);
+                    test_check(allowed, "affinity set migrated_to_allowed_cpu");
+                }
             }
             rc = copy_to_user(u_mask, &saved_mask, sizeof(saved_mask));
             if (rc == 0)

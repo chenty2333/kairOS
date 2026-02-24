@@ -60,6 +60,7 @@ void sched_fork(struct process *child, struct process *parent);
 void sched_post_switch_cleanup(void);
 int sched_setnice(struct process *p, int nice);
 int sched_getnice(struct process *p);
+int sched_set_affinity(struct process *p, uint64_t mask);
 
 struct sched_cpu_stats {
     uint64_t enqueue_count;

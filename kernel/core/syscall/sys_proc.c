@@ -392,36 +392,7 @@ int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
     unsigned long requested = 0;
     if (copy_from_user(&requested, (const void *)mask_ptr, sizeof(requested)) < 0)
         return -EFAULT;
-
-    unsigned long online_mask = 0;
-    int cpus = sched_cpu_count();
-    int max_bits = (int)(sizeof(unsigned long) * 8);
-    for (int i = 0; i < cpus && i < max_bits; i++)
-        online_mask |= (1UL << i);
-
-    unsigned long mask = requested & online_mask;
-    if (!mask)
-        return -EINVAL;
-
-    int cpu = target->se.cpu;
-    uint32_t se_state = __atomic_load_n(&target->se.run_state, __ATOMIC_ACQUIRE);
-    if (cpu >= 0 && cpu < max_bits &&
-        !(mask & (1UL << cpu)) &&
-        (se_state == SE_STATE_RUNNING || se_state == SE_STATE_QUEUED)) {
-        return -EINVAL;
-    }
-
-    proc_sched_set_affinity_mask(target, (uint64_t)mask);
-    if ((cpu < 0 || cpu >= cpus || !(mask & (1UL << cpu))) &&
-        (se_state == SE_STATE_BLOCKED || se_state == SE_STATE_RUNNABLE)) {
-        for (int i = 0; i < cpus && i < max_bits; i++) {
-            if (mask & (1UL << i)) {
-                target->se.cpu = i;
-                break;
-            }
-        }
-    }
-    return 0;
+    return (int64_t)sched_set_affinity(target, (uint64_t)requested);
 }
 
 int64_t sys_getrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
