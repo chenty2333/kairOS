@@ -16,6 +16,8 @@
 
 #define NS_PER_SEC 1000000000ULL
 #define TIMER_ABSTIME 1U
+#define CLOCK_TAI_OFFSET_SEC 37ULL
+#define CLOCK_TAI_OFFSET_NS (CLOCK_TAI_OFFSET_SEC * NS_PER_SEC)
 
 struct linux_utsname {
     char sysname[65];
@@ -65,6 +67,18 @@ static uint64_t sched_ticks_to_ns(uint64_t ticks) {
     return (ticks * NS_PER_SEC) / CONFIG_HZ;
 }
 
+static uint64_t realtime_to_tai_ns(uint64_t realtime_ns) {
+    if (realtime_ns > UINT64_MAX - CLOCK_TAI_OFFSET_NS)
+        return UINT64_MAX;
+    return realtime_ns + CLOCK_TAI_OFFSET_NS;
+}
+
+static uint64_t tai_to_realtime_ns(uint64_t tai_ns) {
+    if (tai_ns <= CLOCK_TAI_OFFSET_NS)
+        return 0;
+    return tai_ns - CLOCK_TAI_OFFSET_NS;
+}
+
 static int clockid_sleep_base(uint64_t clockid, uint64_t *base_clockid) {
     if (!base_clockid)
         return -EINVAL;
@@ -78,7 +92,7 @@ static int clockid_sleep_base(uint64_t clockid, uint64_t *base_clockid) {
         *base_clockid = CLOCK_REALTIME;
         return 0;
     case CLOCK_TAI:
-        // FIXME: CLOCK_TAI currently aliases CLOCK_REALTIME without leap-second offset.
+        /* CLOCK_TAI sleeps use realtime base with explicit deadline conversion. */
         *base_clockid = CLOCK_REALTIME;
         return 0;
     default:
@@ -108,9 +122,14 @@ static int clockid_now_ns(uint64_t clockid, uint64_t *out_ns) {
     case CLOCK_REALTIME:
     case CLOCK_REALTIME_COARSE:
     case CLOCK_REALTIME_ALARM:
-    case CLOCK_TAI:
-        // FIXME: CLOCK_TAI currently aliases CLOCK_REALTIME without leap-second offset.
         *out_ns = time_realtime_ns();
+        return 0;
+    case CLOCK_TAI:
+        /*
+         * Keep a fixed UTC->TAI delta until adjtimex/clock_adjtime style
+         * leap-second management is introduced.
+         */
+        *out_ns = realtime_to_tai_ns(time_realtime_ns());
         return 0;
     default:
         return -EINVAL;
@@ -275,6 +294,8 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
         return rc;
 
     uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
+    if ((uflags & TIMER_ABSTIME) && clockid == CLOCK_TAI)
+        req_ns = tai_to_realtime_ns(req_ns);
     if (uflags & TIMER_ABSTIME)
         return clock_nanosleep_abstime(sleep_clockid, req_ns);
 
