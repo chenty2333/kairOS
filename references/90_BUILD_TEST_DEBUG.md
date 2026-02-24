@@ -104,10 +104,15 @@ QEMU configuration:
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
-- GitHub Actions `ci-quick` runs `riscv64` quick regression (`make test` + `make test-exec-elf-smoke` + `make test-busybox-applets-smoke`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make test-syscall-trap` + `make test-tcc-smoke`)
+- GitHub Actions `ci-quick` runs `riscv64` default regression gate (`make test-ci-default`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make test-syscall-trap` + `make test-tcc-smoke`)
 - GitHub Actions `soak-long` runs `riscv64` long soak-pr profile and `x86_64` bootstrap soak-pr profile (shorter default duration and timeout for CI cost control)
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`, `doomgeneric`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
-- `scripts/impl/fetch-deps.sh` defaults to preserving tracked `kernel/include/boot/limine.h`; refresh only when `FORCE_LIMINE_HEADER_FETCH=1`.
+- `scripts/impl/fetch-deps.sh` validates each cached dependency by sentinel files; when a directory exists but is incomplete/corrupted, it is removed and refetched instead of being blindly skipped.
+- lwIP source for `deps fetch lwip` is configurable: `LWIP_GIT_URL` / `LWIP_GIT_REF` / `LWIP_GIT_COMMIT` (default URL currently `https://github.com/lwip-tcpip/lwip.git`, ref `STABLE-2_2_1_RELEASE`).
+- `scripts/impl/fetch-deps.sh` defaults to preserving tracked `kernel/include/boot/limine.h`; refresh only when `FORCE_LIMINE_HEADER_FETCH=1`. Header source is configurable via `LIMINE_HEADER_REF` or `LIMINE_HEADER_URL` (default currently GitHub raw from `limine-protocol` `trunk`).
+- musl source for `deps fetch musl` is configurable: `MUSL_GIT_URL` / `MUSL_GIT_REF` / `MUSL_GIT_COMMIT` (default still official musl git URL, ref `v1.2.5`).
+- FatFs zip source for `deps fetch fatfs` is configurable: `FATFS_ZIP_URL` / `FATFS_ZIP_SHA256` (default still official FatFs archive URL).
+- BusyBox source for `deps fetch busybox` is configurable: `BUSYBOX_GIT_URL` / `BUSYBOX_GIT_REF` / `BUSYBOX_GIT_COMMIT` (default URL currently `https://github.com/mirror/busybox.git`, ref `1_36_1`).
 - TCC source for `deps fetch tcc` is configurable: `TCC_GIT_URL` / `TCC_GIT_REF` / `TCC_GIT_COMMIT` (default URL currently `https://github.com/chenty2333/tinycc.git`, ref `mob`).
 - Test module selection uses `CONFIG_KERNEL_TEST_MASK` via `TEST_EXTRA_CFLAGS` (default mask `0x7FF`)
 - Kernel test module bits: `0x01 driver`, `0x02 mm`, `0x04 sync`, `0x08 vfork`, `0x10 sched`, `0x20 crash`, `0x40 syscall/trap`, `0x80 vfs/ipc`, `0x100 socket`, `0x200 device/virtio`, `0x400 tty`, `0x800 soak-pr`

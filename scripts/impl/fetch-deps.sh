@@ -17,82 +17,157 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 DEPS_DIR="$ROOT_DIR/third_party"
 mkdir -p "$DEPS_DIR"
 
+dep_ready() {
+    local dep_name="$1"
+    local dep_sentinel="$2"
+    local dep_dir="$DEPS_DIR/$dep_name"
+
+    if [ -e "$dep_dir" ] && [ ! -d "$dep_dir" ]; then
+        echo "$dep_name path exists but is not a directory, removing: $dep_dir"
+        rm -f "$dep_dir"
+    fi
+
+    if [ ! -d "$dep_dir" ]; then
+        return 1
+    fi
+
+    if [ -n "$dep_sentinel" ] && [ ! -e "$dep_dir/$dep_sentinel" ]; then
+        echo "$dep_name exists but is incomplete (missing $dep_sentinel), refetching"
+        rm -rf "$dep_dir"
+        return 1
+    fi
+
+    echo "$dep_name already exists, skipping"
+    return 0
+}
+
+verify_dep_ready() {
+    local dep_name="$1"
+    local dep_sentinel="$2"
+    local dep_dir="$DEPS_DIR/$dep_name"
+    if [ ! -e "$dep_dir/$dep_sentinel" ]; then
+        echo "Failed to verify dependency: $dep_name (missing $dep_sentinel)" >&2
+        exit 1
+    fi
+}
+
 fetch_limine() {
     echo "=== Fetching Limine bootloader ==="
-    if [ -d "$DEPS_DIR/limine" ]; then
-        echo "Limine already exists, skipping"
+    if dep_ready "limine" "Makefile"; then
         return
     fi
     git clone https://github.com/limine-bootloader/limine.git \
         --branch=v10.x-binary --depth=1 "$DEPS_DIR/limine"
+    verify_dep_ready "limine" "Makefile"
     echo "Limine downloaded to $DEPS_DIR/limine"
 }
 
 fetch_lwip() {
+    local lwip_git_url="${LWIP_GIT_URL:-https://github.com/lwip-tcpip/lwip.git}"
+    local lwip_git_ref="${LWIP_GIT_REF:-STABLE-2_2_1_RELEASE}"
+    local lwip_git_commit="${LWIP_GIT_COMMIT:-}"
+
     echo "=== Fetching lwIP network stack ==="
-    if [ -d "$DEPS_DIR/lwip" ]; then
-        echo "lwIP already exists, skipping"
+    if dep_ready "lwip" "src/include/lwip/tcp.h"; then
         return
     fi
-    git clone https://git.savannah.nongnu.org/git/lwip.git \
-        --branch=STABLE-2_2_1_RELEASE --depth=1 "$DEPS_DIR/lwip"
+    git clone "$lwip_git_url" \
+        --branch="$lwip_git_ref" --depth=1 "$DEPS_DIR/lwip"
+    if [[ -n "$lwip_git_commit" ]]; then
+        git -C "$DEPS_DIR/lwip" fetch --depth=1 origin "$lwip_git_commit"
+        git -C "$DEPS_DIR/lwip" checkout --detach "$lwip_git_commit"
+    fi
+    verify_dep_ready "lwip" "src/include/lwip/tcp.h"
     echo "lwIP downloaded to $DEPS_DIR/lwip"
+    echo "Source: $lwip_git_url ($lwip_git_ref${lwip_git_commit:+ @ $lwip_git_commit})"
     echo "License: BSD-3-Clause"
 }
 
 fetch_tinyusb() {
     echo "=== Fetching TinyUSB ==="
-    if [ -d "$DEPS_DIR/tinyusb" ]; then
-        echo "TinyUSB already exists, skipping"
+    if dep_ready "tinyusb" "src/tusb.h"; then
         return
     fi
     git clone https://github.com/hathach/tinyusb.git \
         --branch=0.20.0 --depth=1 "$DEPS_DIR/tinyusb"
+    verify_dep_ready "tinyusb" "src/tusb.h"
     echo "TinyUSB downloaded to $DEPS_DIR/tinyusb"
     echo "License: MIT"
 }
 
 fetch_fatfs() {
+    local fatfs_zip_url="${FATFS_ZIP_URL:-http://elm-chan.org/fsw/ff/arc/ff16.zip}"
+    local fatfs_zip_sha256="${FATFS_ZIP_SHA256:-}"
+    local fatfs_zip_tmp
+
     echo "=== Fetching FatFs ==="
-    if [ -d "$DEPS_DIR/fatfs" ]; then
-        echo "FatFs already exists, skipping"
+    if dep_ready "fatfs" "source/ff.c"; then
         return
     fi
     mkdir -p "$DEPS_DIR/fatfs"
-    # FatFs is distributed as a zip, we'll use curl
-    curl -L "http://elm-chan.org/fsw/ff/arc/ff16.zip" -o "/tmp/fatfs.zip"
-    unzip -q "/tmp/fatfs.zip" -d "$DEPS_DIR/fatfs"
-    rm "/tmp/fatfs.zip"
+    # FatFs is distributed as a zip, so we fetch and unpack the archive.
+    fatfs_zip_tmp="$(mktemp /tmp/fatfs.XXXXXX.zip)"
+    curl -fL "$fatfs_zip_url" -o "$fatfs_zip_tmp"
+    if [[ -n "$fatfs_zip_sha256" ]]; then
+        echo "${fatfs_zip_sha256}  ${fatfs_zip_tmp}" | sha256sum -c -
+    fi
+    unzip -q "$fatfs_zip_tmp" -d "$DEPS_DIR/fatfs"
+    rm -f "$fatfs_zip_tmp"
+    verify_dep_ready "fatfs" "source/ff.c"
     echo "FatFs downloaded to $DEPS_DIR/fatfs"
+    echo "Source: $fatfs_zip_url"
+    if [[ -n "$fatfs_zip_sha256" ]]; then
+        echo "SHA256: verified ($fatfs_zip_sha256)"
+    fi
     echo "License: BSD-1-Clause (FatFs license)"
 }
 
 fetch_busybox() {
+    local busybox_git_url="${BUSYBOX_GIT_URL:-https://github.com/mirror/busybox.git}"
+    local busybox_git_ref="${BUSYBOX_GIT_REF:-1_36_1}"
+    local busybox_git_commit="${BUSYBOX_GIT_COMMIT:-}"
+
     echo "=== Fetching BusyBox ==="
-    if [ -d "$DEPS_DIR/busybox" ]; then
-        echo "BusyBox already exists, skipping"
+    if dep_ready "busybox" "Makefile"; then
         return
     fi
-    git clone https://git.busybox.net/busybox \
-        --branch=1_36_1 --depth=1 "$DEPS_DIR/busybox"
+    git clone "$busybox_git_url" \
+        --branch="$busybox_git_ref" --depth=1 "$DEPS_DIR/busybox"
+    if [[ -n "$busybox_git_commit" ]]; then
+        git -C "$DEPS_DIR/busybox" fetch --depth=1 origin "$busybox_git_commit"
+        git -C "$DEPS_DIR/busybox" checkout --detach "$busybox_git_commit"
+    fi
+    verify_dep_ready "busybox" "Makefile"
     echo "BusyBox downloaded to $DEPS_DIR/busybox"
+    echo "Source: $busybox_git_url ($busybox_git_ref${busybox_git_commit:+ @ $busybox_git_commit})"
     echo "License: GPL-2.0"
 }
 
 fetch_musl() {
+    local musl_git_url="${MUSL_GIT_URL:-https://git.musl-libc.org/git/musl}"
+    local musl_git_ref="${MUSL_GIT_REF:-v1.2.5}"
+    local musl_git_commit="${MUSL_GIT_COMMIT:-}"
+
     echo "=== Fetching musl libc ==="
-    if [ -d "$DEPS_DIR/musl" ]; then
-        echo "musl already exists, skipping"
+    if dep_ready "musl" "include/stdio.h"; then
         return
     fi
-    git clone https://git.musl-libc.org/git/musl \
-        --branch=v1.2.5 --depth=1 "$DEPS_DIR/musl"
+    git clone "$musl_git_url" \
+        --branch="$musl_git_ref" --depth=1 "$DEPS_DIR/musl"
+    if [[ -n "$musl_git_commit" ]]; then
+        git -C "$DEPS_DIR/musl" fetch --depth=1 origin "$musl_git_commit"
+        git -C "$DEPS_DIR/musl" checkout --detach "$musl_git_commit"
+    fi
+    verify_dep_ready "musl" "include/stdio.h"
     echo "musl downloaded to $DEPS_DIR/musl"
+    echo "Source: $musl_git_url ($musl_git_ref${musl_git_commit:+ @ $musl_git_commit})"
     echo "License: MIT"
 }
 
 fetch_limine_header() {
     local dst="$ROOT_DIR/kernel/include/boot/limine.h"
+    local limine_header_ref="${LIMINE_HEADER_REF:-trunk}"
+    local limine_header_url="${LIMINE_HEADER_URL:-https://raw.githubusercontent.com/limine-bootloader/limine-protocol/${limine_header_ref}/include/limine.h}"
     local force_fetch="${FORCE_LIMINE_HEADER_FETCH:-0}"
     echo "=== Fetching Limine protocol header ==="
     mkdir -p "$(dirname "$dst")"
@@ -101,9 +176,9 @@ fetch_limine_header() {
         echo "Set FORCE_LIMINE_HEADER_FETCH=1 to refresh from upstream"
         return
     fi
-    curl -L "https://codeberg.org/Limine/limine-protocol/raw/branch/trunk/include/limine.h" \
-        -o "$dst"
+    curl -fL "$limine_header_url" -o "$dst"
     echo "Limine header downloaded to $dst"
+    echo "Source: $limine_header_url"
 }
 
 fetch_tcc() {
@@ -112,8 +187,7 @@ fetch_tcc() {
     local tcc_git_commit="${TCC_GIT_COMMIT:-}"
 
     echo "=== Fetching TCC (Tiny C Compiler) ==="
-    if [ -d "$DEPS_DIR/tinycc" ]; then
-        echo "TCC already exists, skipping"
+    if dep_ready "tinycc" "tcc.c"; then
         return
     fi
     git clone "$tcc_git_url" \
@@ -122,6 +196,7 @@ fetch_tcc() {
         git -C "$DEPS_DIR/tinycc" fetch --depth=1 origin "$tcc_git_commit"
         git -C "$DEPS_DIR/tinycc" checkout --detach "$tcc_git_commit"
     fi
+    verify_dep_ready "tinycc" "tcc.c"
     echo "TCC downloaded to $DEPS_DIR/tinycc"
     echo "Source: $tcc_git_url ($tcc_git_ref${tcc_git_commit:+ @ $tcc_git_commit})"
     echo "License: LGPL-2.1"
@@ -133,8 +208,7 @@ fetch_doomgeneric() {
     local doom_git_commit="${DOOMGENERIC_GIT_COMMIT:-}"
 
     echo "=== Fetching DoomGeneric source ==="
-    if [ -d "$DEPS_DIR/doomgeneric" ]; then
-        echo "DoomGeneric already exists, skipping"
+    if dep_ready "doomgeneric" "doomgeneric/doomgeneric.h"; then
         return
     fi
     git clone "$doom_git_url" \
@@ -143,6 +217,7 @@ fetch_doomgeneric() {
         git -C "$DEPS_DIR/doomgeneric" fetch --depth=1 origin "$doom_git_commit"
         git -C "$DEPS_DIR/doomgeneric" checkout --detach "$doom_git_commit"
     fi
+    verify_dep_ready "doomgeneric" "doomgeneric/doomgeneric.h"
     echo "DoomGeneric downloaded to $DEPS_DIR/doomgeneric"
     echo "Source: $doom_git_url ($doom_git_ref${doom_git_commit:+ @ $doom_git_commit})"
     echo "License: GPL-2.0"
