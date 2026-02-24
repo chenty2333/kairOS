@@ -85,7 +85,8 @@ int64_t sys_fstatfs(uint64_t fd, uint64_t buf, uint64_t a2, uint64_t a3,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!buf)
         return -EFAULT;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = (int32_t)(uint32_t)fd;
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     struct mount *mnt = NULL;
@@ -300,7 +301,8 @@ int64_t sys_fstat(uint64_t fd, uint64_t st_ptr, uint64_t a2, uint64_t a3,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!st_ptr)
         return -EFAULT;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = (int32_t)(uint32_t)fd;
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
 
@@ -328,6 +330,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
     (void)a4; (void)a5;
     if (!st_ptr)
         return -EFAULT;
+    int64_t kdirfd = (int64_t)(int32_t)(uint32_t)dirfd;
     uint32_t uflags = (uint32_t)flags;
     if (uflags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT))
         return -EINVAL;
@@ -343,7 +346,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
-        if ((int64_t)dirfd == AT_FDCWD) {
+        if (kdirfd == AT_FDCWD) {
             struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
             if (!cwd_vn)
                 return -ENOENT;
@@ -352,7 +355,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
                 return ret;
             return copy_linux_stat_to_user(st_ptr, &st);
         }
-        struct file *f = fd_get(p, (int)dirfd);
+        struct file *f = fd_get(p, (int)kdirfd);
         if (!f)
             return -EBADF;
         if (!f->vnode) {
@@ -372,7 +375,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
 
     struct path resolved;
     path_init(&resolved);
-    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+    int ret = sysfs_resolve_at(kdirfd, kpath, &resolved, nflags);
     if (ret < 0)
         return ret;
     if (!resolved.dentry || !resolved.dentry->vnode) {
@@ -392,6 +395,7 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
     (void)a5;
     if (!stx_ptr)
         return -EFAULT;
+    int64_t kdirfd = (int64_t)(int32_t)(uint32_t)dirfd;
 
     uint32_t uflags = (uint32_t)flags;
     uint32_t allowed_flags = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH |
@@ -422,7 +426,7 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
-        if ((int64_t)dirfd == AT_FDCWD) {
+        if (kdirfd == AT_FDCWD) {
             struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
             if (!cwd_vn)
                 return -ENOENT;
@@ -432,7 +436,7 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
             return copy_linux_statx_to_user(stx_ptr, &st, req_mask);
         }
 
-        struct file *f = fd_get(p, (int)dirfd);
+        struct file *f = fd_get(p, (int)kdirfd);
         if (!f)
             return -EBADF;
         if (!f->vnode) {
@@ -452,7 +456,7 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
 
     struct path resolved;
     path_init(&resolved);
-    int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
+    int ret = sysfs_resolve_at(kdirfd, kpath, &resolved, nflags);
     if (ret < 0)
         return ret;
     if (!resolved.dentry || !resolved.dentry->vnode) {
@@ -480,7 +484,8 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
     if ((size_t)ucount < base + 1)
         return -EINVAL;
 
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = (int32_t)(uint32_t)fd;
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     if (!f->vnode || f->vnode->type != VNODE_DIR) {

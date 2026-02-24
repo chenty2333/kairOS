@@ -126,8 +126,9 @@ static int socket_wait_readable(struct socket *sock, struct file *sock_file,
     }
 }
 
-static struct socket *sock_from_fd(struct process *p, int fd,
+static struct socket *sock_from_fd(struct process *p, uint64_t fd_arg,
                                    struct file **filep) {
+    int fd = (int32_t)(uint32_t)fd_arg;
     struct file *f = fd_get(p, fd);
     if (!f || !f->vnode) {
         if (f) file_put(f);
@@ -272,7 +273,8 @@ static int64_t socket_sendmsg(struct socket *sock,
         total = SOCKET_MSG_MAX_LEN;
     }
     if (!total) {
-        ssize_t ret = sock->ops->sendto(sock, NULL, 0, (int)flags, destp, dlen);
+        ssize_t ret =
+            sock->ops->sendto(sock, NULL, 0, (int32_t)flags, destp, dlen);
         if (ret >= 0 && sent_out) {
             *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
         }
@@ -290,7 +292,8 @@ static int64_t socket_sendmsg(struct socket *sock,
         return rc;
     }
 
-    ssize_t ret = sock->ops->sendto(sock, kbuf, copied, (int)flags, destp, dlen);
+    ssize_t ret =
+        sock->ops->sendto(sock, kbuf, copied, (int32_t)flags, destp, dlen);
     kfree(kbuf);
     if (ret >= 0 && sent_out) {
         *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
@@ -330,7 +333,7 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
 
     struct sockaddr_storage kaddr;
     int alen = (int)sizeof(kaddr);
-    ssize_t ret = sock->ops->recvfrom(sock, kbuf, total, (int)flags,
+    ssize_t ret = sock->ops->recvfrom(sock, kbuf, total, (int32_t)flags,
                                       msg->msg_name ? (struct sockaddr *)&kaddr : NULL,
                                       msg->msg_name ? &alen : NULL);
     if (ret > 0) {
@@ -343,8 +346,9 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
     kfree(kbuf);
 
     if (ret >= 0 && msg->msg_name) {
-        size_t user_len = msg->msg_namelen;
-        size_t copylen = (alen < (int)user_len) ? (size_t)alen : user_len;
+        size_t user_len = (size_t)msg->msg_namelen;
+        size_t klen = (alen < 0) ? 0 : (size_t)alen;
+        size_t copylen = (klen < user_len) ? klen : user_len;
         if (copylen &&
             copy_to_user(msg->msg_name, &kaddr, copylen) < 0) {
             return -EFAULT;
@@ -407,7 +411,7 @@ int64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t addrlen,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -433,7 +437,7 @@ int64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t a2,
     int kbacklog = (int32_t)(uint32_t)backlog;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -455,7 +459,7 @@ static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -552,7 +556,7 @@ int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -577,7 +581,7 @@ int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
     uint32_t uflags = (uint32_t)flags;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -632,7 +636,7 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
     uint32_t uflags = (uint32_t)flags;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -688,7 +692,7 @@ int64_t sys_shutdown(uint64_t fd, uint64_t how, uint64_t a2,
     int khow = (int32_t)(uint32_t)how;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -706,7 +710,7 @@ int64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -727,7 +731,7 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -762,7 +766,7 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -806,7 +810,7 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -873,7 +877,7 @@ int64_t sys_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -920,7 +924,7 @@ int64_t sys_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -970,7 +974,7 @@ int64_t sys_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
     int klen = (int32_t)(uint32_t)optlen;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1004,7 +1008,7 @@ int64_t sys_getsockopt(uint64_t fd, uint64_t level, uint64_t optname,
     int koptname = (int32_t)(uint32_t)optname;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, (int)fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1013,11 +1017,13 @@ int64_t sys_getsockopt(uint64_t fd, uint64_t level, uint64_t optname,
         return -EOPNOTSUPP;
     }
 
-    int klen = 0;
-    if (copy_from_user(&klen, (const void *)optlen_ptr, sizeof(klen)) < 0) {
+    uint32_t klen_raw = 0;
+    if (copy_from_user(&klen_raw, (const void *)optlen_ptr,
+                       sizeof(klen_raw)) < 0) {
         file_put(sock_file);
         return -EFAULT;
     }
+    int klen = (int32_t)klen_raw;
     if (klen < 0 || klen > 256) {
         file_put(sock_file);
         return -EINVAL;

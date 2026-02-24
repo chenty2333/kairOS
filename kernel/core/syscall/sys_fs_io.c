@@ -15,6 +15,10 @@
 #define RWF_SYNC    0x00000004U
 #define RWF_NOWAIT  0x00000008U
 
+static inline int sysfs_abi_int32(uint64_t v) {
+    return (int32_t)(uint32_t)v;
+}
+
 /**
  * sys_read_write_file - perform IO on an already-resolved file pointer.
  * Caller holds a reference on @f; this function does NOT release it.
@@ -65,11 +69,12 @@ static int64_t sys_read_write_file(struct file *f, uint64_t buf, uint64_t count,
 
 static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
                               bool is_write) {
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
 
     if (!f) {
         /* Fallback: early console for stdout/stderr without file */
-        if (is_write && (fd == 1 || fd == 2)) {
+        if (is_write && (kfd == 1 || kfd == 2)) {
             uint8_t kbuf[512];
             size_t done = 0;
             while (done < count) {
@@ -107,20 +112,22 @@ int64_t sys_write(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)fd_close(proc_current(), (int)fd);
+    return (int64_t)fd_close(proc_current(), sysfs_abi_int32(fd));
 }
 
 int64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    int kwhence = sysfs_abi_int32(whence);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     if (f->vnode && f->vnode->type == VNODE_PIPE) {
         file_put(f);
         return -ESPIPE;
     }
-    int64_t ret = (int64_t)vfs_seek(f, (off_t)offset, (int)whence);
+    int64_t ret = (int64_t)vfs_seek(f, (off_t)offset, kwhence);
     file_put(f);
     return ret;
 }
@@ -130,7 +137,8 @@ static int64_t sys_pread_write(uint64_t fd, uint64_t buf, uint64_t count,
     if ((int64_t)offset < 0)
         return -EINVAL;
 
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     if (!f->vnode || f->vnode->type == VNODE_PIPE) {
@@ -240,10 +248,11 @@ int64_t sys_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
     if (iovcnt > 1024)
         return -EINVAL;
 
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f) {
         /* Fallback for stdout/stderr without file — delegate per-iov */
-        if (fd != 1 && fd != 2)
+        if (kfd != 1 && kfd != 2)
             return -EBADF;
         size_t total = 0;
         for (size_t i = 0; i < iovcnt; i++) {
@@ -297,7 +306,8 @@ int64_t sys_readv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
     if (iovcnt > 1024)
         return -EINVAL;
 
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
 
@@ -334,7 +344,8 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
     if (iovcnt > 1024)
         return -EINVAL;
 
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     if (!f->vnode || f->vnode->type == VNODE_PIPE) {
@@ -487,10 +498,12 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
         return 0;
 
     struct process *p = proc_current();
-    struct file *fin = fd_get(p, (int)fd_in);
+    int kfd_in = sysfs_abi_int32(fd_in);
+    int kfd_out = sysfs_abi_int32(fd_out);
+    struct file *fin = fd_get(p, kfd_in);
     if (!fin)
         return -EBADF;
-    struct file *fout = fd_get(p, (int)fd_out);
+    struct file *fout = fd_get(p, kfd_out);
     if (!fout) {
         file_put(fin);
         return -EBADF;
@@ -629,7 +642,8 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
 int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     int64_t ret = vfs_fsync(f, 0);
@@ -640,7 +654,8 @@ int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                       uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = sysfs_abi_int32(fd);
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
     int64_t ret = vfs_fsync(f, 1);

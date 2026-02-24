@@ -66,6 +66,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `preadv`/`pwritev` and `preadv2`/`pwritev2` follow Linux split-offset ABI (`pos_l`/`pos_h`)
   - `preadv2` supports `RWF_HIPRI|RWF_NOWAIT`; `pwritev2` supports `RWF_HIPRI|RWF_DSYNC|RWF_SYNC|RWF_NOWAIT`
   - `preadv2`/`pwritev2` decode `flags` using Linux ABI width (`int`/32-bit)
+  - `read`/`write`/`close`/`lseek`/`pread64`/`pwrite64`/`readv`/`writev`/`preadv`/`pwritev`/`copy_file_range`/`fsync`/`fdatasync` decode `fd` via Linux ABI `int` width (32-bit); `lseek` decodes `whence` as 32-bit `int`
   - `preadv2`/`pwritev2` with offset `-1` follow non-positional `readv`/`writev` fallback
   - `copy_file_range` is wired through vnode read/write paths; `flags` (32-bit ABI width) must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
 
@@ -111,10 +112,11 @@ Special:
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
 - `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
 - `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
+- `recvmsg` bounds source-address copy length by `min(user_msg_namelen, kernel_sockaddr_len)` using width-safe arithmetic (no signed wrap on large `msg_namelen`)
 - AF_UNIX stream send paths honor `MSG_NOSIGNAL` (suppress `SIGPIPE`, return `EPIPE` only)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
 - socket message/accept syscall `flags` are decoded using Linux ABI width (`int`/32-bit) for `accept4`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`
-- socket control/int arguments are decoded with Linux ABI `int` width (`socket`/`socketpair` domain/type/protocol, `listen` backlog, `shutdown` how, `setsockopt`/`getsockopt` level/optname/optlen, `sendto`/`recvfrom` flags, sockaddr lengths)
+- socket control/int arguments are decoded with Linux ABI `int` width (`socket`/`socketpair` domain/type/protocol, socket syscalls `fd`, `listen` backlog, `shutdown` how, `setsockopt`/`getsockopt` level/optname/optlen, `getsockopt` user `optlen_ptr` value, `sendto`/`recvfrom` flags, sockaddr lengths)
 - `sendmmsg`/`recvmmsg` decode `vlen` using Linux ABI width (`unsigned int`/32-bit), ignoring upper 32 syscall argument bits
 - socket address-length values read from userspace (`accept*`, `recvfrom`, `getsockname`, `getpeername`) are decoded as 32-bit ABI values before range checks
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
@@ -127,6 +129,7 @@ Special:
 - `getdents64` follows Linux ABI argument width for `count` (`unsigned int`): upper 32 bits are ignored
 - `newfstatat` accepts `AT_NO_AUTOMOUNT` as a compatibility no-op
 - `statx` and `newfstatat` both decode `flags` using Linux ABI width (`int`/32-bit)
+- `fstatfs`/`fstat`/`getdents64` decode `fd` as Linux ABI `int` (32-bit), and `newfstatat`/`statx` decode `dirfd` as 32-bit `int` before `AT_FDCWD` checks and path resolution
 - path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `linkat`) decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit
 - `dup3` and `pipe2` decode `flags` via Linux ABI width (`int`/32-bit)
 - `fcntl` decodes `cmd`/`arg` via Linux ABI `int` width (32-bit)
