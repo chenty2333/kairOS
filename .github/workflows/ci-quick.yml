@@ -402,18 +402,41 @@ jobs:
       - name: Run aarch64 syscall/trap gate
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=aarch64 TEST_TIMEOUT=240 test-syscall-trap
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=240 test-syscall-trap
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
             echo "No isolated run found after aarch64 syscall/trap gate" >&2
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          log_candidates=(
+            "${latest}/aarch64/test.log"
+            "${latest}/aarch64/run.log"
+            "build/aarch64/test.log"
+            "build/aarch64/run.log"
+          )
+          smp_marker=0
+          for path in "${log_candidates[@]}"; do
+            if [[ -f "${path}" ]] && grep -Eq "SMP: 2/2 CPUs active" "${path}"; then
+              smp_marker=1
+              break
+            fi
+          done
+          if [[ "${smp_marker}" -ne 1 ]]; then
+            echo "aarch64 SMP gate missing marker: SMP: 2/2 CPUs active" >&2
+            for path in "${log_candidates[@]}"; do
+              if [[ -f "${path}" ]]; then
+                echo "--- tail ${path} ---" >&2
+                tail -n 120 "${path}" >&2
+              fi
+            done
+            exit 2
+          fi
 
       - name: Run aarch64 tcc smoke gate
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=aarch64 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
             echo "No isolated run found after aarch64 tcc smoke gate" >&2

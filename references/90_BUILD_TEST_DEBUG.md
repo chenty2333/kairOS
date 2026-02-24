@@ -105,7 +105,7 @@ QEMU configuration:
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
-- GitHub Actions `ci-quick` runs `riscv64` default regression gate (`make test-ci-default`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make test-syscall-trap` + `make test-tcc-smoke`)
+- GitHub Actions `ci-quick` runs `riscv64` default regression gate (`make test-ci-default`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make QEMU_SMP=2 test-syscall-trap` + `make QEMU_SMP=2 test-tcc-smoke`); aarch64 syscall gate additionally asserts SMP online marker `SMP: 2/2 CPUs active`
 - GitHub Actions `soak-long` runs `riscv64` long soak-pr profile and `x86_64` bootstrap soak-pr profile (shorter default duration and timeout for CI cost control)
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`, `doomgeneric`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
 - `scripts/impl/fetch-deps.sh` validates each cached dependency by sentinel files; when a directory exists but is incomplete/corrupted, it is removed and refetched instead of being blindly skipped.
