@@ -39,7 +39,7 @@ static inline int sysproc_copy_path_from_user(char *kpath, size_t kpath_len,
         return -EFAULT;
     long len = strncpy_from_user(kpath, (const char *)upath, kpath_len);
     if (len < 0)
-        return -EFAULT;
+        return (int)len;
     if ((size_t)len >= kpath_len)
         return -ENAMETOOLONG;
     kpath[kpath_len - 1] = '\0';

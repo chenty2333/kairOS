@@ -53,8 +53,11 @@ int64_t sys_statfs(uint64_t path, uint64_t buf, uint64_t a2, uint64_t a3,
     if (!buf)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path resolved;
     path_init(&resolved);
@@ -283,8 +286,11 @@ int64_t sys_stat(uint64_t path, uint64_t st_ptr, uint64_t a2, uint64_t a3,
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
     struct stat st;
-    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     int ret = vfs_stat(kpath, &st);
     if (ret < 0)
@@ -336,8 +342,11 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
@@ -416,8 +425,11 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
