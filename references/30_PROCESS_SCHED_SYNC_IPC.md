@@ -26,6 +26,7 @@ Lifecycle (core/proc/):
 - proc_exec(): ELF loading (core/proc/elf.c), replaces address space and context
 - proc_exec() failure path preserves underlying `-errno` (instead of collapsing to `-ENOEXEC`) across main ELF load, interpreter resolve/load, and user stack setup
 - proc_exec() failure diagnostics emit structured kernel log with `reason + stage + errno(number/name)` to classify missing interp, invalid ELF, permission, and resource faults
+- exec path copy now reports `ENAMETOOLONG` on userspace path truncation (instead of `EFAULT`), and `execveat` relative-path join rejects truncated composed paths with `ENAMETOOLONG`
 - proc_exit(): sets ZOMBIE, wakes parent, notifies reaper
 - proc_wait(): reaps child processes
 
@@ -68,7 +69,7 @@ SMP support:
 - Default policy: user processes are stealable with full affinity; kernel threads (`kthread_create*`, idle) are marked `PROC_SCHEDF_KTHREAD`, non-stealable, and affinity-pinned to creator CPU
 - Failed steal attempts use per-CPU cooldown to reduce hot-loop lock pressure on empty/imbalanced systems
 - Enqueue placement respects per-process affinity and falls back to the first online allowed CPU if the hinted CPU is not allowed
-- Linux ABI exposes `sched_getaffinity` and `sched_setaffinity` with single-word (`unsigned long`) masks; `sched_setaffinity` currently does not force migrate RUNNING/QUEUED tasks across CPUs (such masks are rejected)
+- Linux ABI exposes `sched_getaffinity` and `sched_setaffinity` with single-word (`unsigned long`) masks; `sched_setaffinity` now accepts masks excluding the current CPU and migrates QUEUED tasks immediately, while RUNNING tasks are rescheduled then migrated via the scheduler handoff path
 - sched_trace ring buffer for debugging (per-CPU, records enqueue/dequeue/pick/switch/steal/migrate events)
 
 Core functions:

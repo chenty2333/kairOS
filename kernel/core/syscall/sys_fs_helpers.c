@@ -41,8 +41,8 @@ int sysfs_copy_path(uint64_t uptr, char *kbuf, size_t klen) {
     long len = strncpy_from_user(kbuf, (const char *)uptr, klen);
     if (len < 0)
         return -EFAULT;
-    if ((size_t)len >= klen - 1)
-        return -EFAULT;
+    if ((size_t)len >= klen)
+        return -ENAMETOOLONG;
     kbuf[klen - 1] = '\0';
     return 0;
 }

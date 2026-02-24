@@ -33,6 +33,19 @@ static inline pid_t sysproc_abi_pid(uint64_t v) {
     return (pid_t)sysproc_abi_i32(v);
 }
 
+static inline int sysproc_copy_path_from_user(char *kpath, size_t kpath_len,
+                                              uint64_t upath) {
+    if (!upath || !kpath || kpath_len == 0)
+        return -EFAULT;
+    long len = strncpy_from_user(kpath, (const char *)upath, kpath_len);
+    if (len < 0)
+        return -EFAULT;
+    if ((size_t)len >= kpath_len)
+        return -ENAMETOOLONG;
+    kpath[kpath_len - 1] = '\0';
+    return 0;
+}
+
 int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
                       uint64_t old_ptr, uint64_t a4, uint64_t a5);
 
@@ -53,9 +66,9 @@ int64_t sys_exec(uint64_t path, uint64_t argv, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) {
-        return -EFAULT;
-    }
+    int ret = sysproc_copy_path_from_user(kpath, sizeof(kpath), path);
+    if (ret < 0)
+        return ret;
     return (int64_t)proc_exec(kpath, (char *const *)argv, NULL);
 }
 
@@ -63,9 +76,9 @@ int64_t sys_execve(uint64_t path, uint64_t argv, uint64_t envp, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0) {
-        return -EFAULT;
-    }
+    int ret = sysproc_copy_path_from_user(kpath, sizeof(kpath), path);
+    if (ret < 0)
+        return ret;
     return (int64_t)proc_exec(kpath, (char *const *)argv, (char *const *)envp);
 }
 
@@ -627,8 +640,9 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
         kpath[sizeof(kpath) - 1] = '\0';
         file_put(f);
     } else {
-        if (strncpy_from_user(kpath, (const char *)path, sizeof(kpath)) < 0)
-            return -EFAULT;
+        int ret = sysproc_copy_path_from_user(kpath, sizeof(kpath), path);
+        if (ret < 0)
+            return ret;
 
         /* Resolve relative to dirfd if not absolute and not AT_FDCWD */
         if (kpath[0] != '/' && kdirfd != AT_FDCWD) {
@@ -638,12 +652,17 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
             /* Build full path from dirfd path + relative path */
             char full[CONFIG_PATH_MAX];
             int dlen = (int)strlen(df->path);
+            int written;
             if (dlen > 0 && df->path[dlen - 1] == '/') {
-                snprintf(full, sizeof(full), "%s%s", df->path, kpath);
+                written = snprintf(full, sizeof(full), "%s%s", df->path, kpath);
             } else {
-                snprintf(full, sizeof(full), "%s/%s", df->path, kpath);
+                written = snprintf(full, sizeof(full), "%s/%s", df->path, kpath);
             }
             file_put(df);
+            if (written < 0)
+                return -EINVAL;
+            if ((size_t)written >= sizeof(full))
+                return -ENAMETOOLONG;
             strncpy(kpath, full, sizeof(kpath) - 1);
             kpath[sizeof(kpath) - 1] = '\0';
         }

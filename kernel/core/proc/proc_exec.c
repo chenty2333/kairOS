@@ -211,7 +211,7 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
                 ret = (int)len;
                 goto out;
             }
-            if (len >= CONFIG_PATH_MAX - 1) {
+            if (len >= CONFIG_PATH_MAX) {
                 ret = -E2BIG;
                 goto out;
             }
@@ -249,7 +249,7 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
                 ret = (int)len;
                 goto out;
             }
-            if (len >= CONFIG_PATH_MAX - 1) {
+            if (len >= CONFIG_PATH_MAX) {
                 ret = -E2BIG;
                 goto out;
             }
