@@ -14,6 +14,10 @@
 #define SIG_UNBLOCKABLE_MASK \
     ((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)))
 
+static inline int epoll_abi_int32(uint64_t v) {
+    return (int32_t)(uint32_t)v;
+}
+
 struct epoll_sigmask_ctx {
     struct process *proc;
     sigset_t old_mask;
@@ -99,6 +103,8 @@ int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
 int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
                       uint64_t event_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
+    int kepfd = epoll_abi_int32(epfd);
+    int kfd = epoll_abi_int32(fd);
     uint32_t uop = (uint32_t)op;
     struct epoll_event ev = {0};
 
@@ -109,12 +115,13 @@ int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
             return -EFAULT;
     }
 
-    return epoll_ctl_fd((int)epfd, (int)(int32_t)uop, (int)fd,
+    return epoll_ctl_fd(kepfd, (int)(int32_t)uop, kfd,
                         ((int32_t)uop == EPOLL_CTL_DEL) ? NULL : &ev);
 }
 
 int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
                        uint64_t timeout_ms, uint64_t a4, uint64_t a5) {
+    int kepfd = epoll_abi_int32(epfd);
     bool have_sigmask = false;
     sigset_t mask = 0;
     if (a4) {
@@ -150,7 +157,7 @@ int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
             return apply_rc;
         }
     }
-    int ready = epoll_wait_events((int)epfd, out, maxevents_n,
+    int ready = epoll_wait_events(kepfd, out, maxevents_n,
                                   (int)tmo);
     epoll_sigmask_restore(&sigctx);
     int64_t ret = ready;

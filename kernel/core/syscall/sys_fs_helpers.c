@@ -59,7 +59,9 @@ int sysfs_get_base_path(int64_t dirfd, const char *path, struct path *base,
     if (!p)
         return -EINVAL;
 
-    if (dirfd == AT_FDCWD) {
+    int64_t kdirfd = (int64_t)(int32_t)(uint32_t)dirfd;
+
+    if (kdirfd == AT_FDCWD) {
         struct dentry *cwd_d = sysfs_proc_cwd_dentry(p);
         if (!cwd_d)
             return -ENOENT;
@@ -69,7 +71,7 @@ int sysfs_get_base_path(int64_t dirfd, const char *path, struct path *base,
         return 0;
     }
 
-    struct file *f = fd_get(p, (int)dirfd);
+    struct file *f = fd_get(p, (int)kdirfd);
     if (!f)
         return -EBADF;
     if (!f->vnode || f->vnode->type != VNODE_DIR) {

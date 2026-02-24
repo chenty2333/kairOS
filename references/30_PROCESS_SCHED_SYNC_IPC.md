@@ -34,7 +34,7 @@ Other:
 - proc_idle_init(): create idle process
 - userspace `/init` supervises the login shell in a restart loop, logs exit cause (exit code / signal), and uses bounded exponential backoff on repeated failures
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
-- Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` as 32-bit `int`
+- Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` and `dirfd` as 32-bit `int`; `setuid`/`setgid` and `setre*id`/`setres*id` decode uid/gid arguments as 32-bit values (`-1` sentinel is `0xffffffff`)
 
 ## Scheduler (core/sched/sched.c)
 

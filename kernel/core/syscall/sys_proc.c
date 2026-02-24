@@ -17,6 +17,14 @@
 
 #include "sys_fs_helpers.h"
 
+static inline int64_t sysproc_abi_fd(uint64_t v) {
+    return (int64_t)(int32_t)(uint32_t)v;
+}
+
+static inline uint32_t sysproc_abi_u32(uint64_t v) {
+    return (uint32_t)v;
+}
+
 int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
                       uint64_t old_ptr, uint64_t a4, uint64_t a5);
 
@@ -145,7 +153,7 @@ int64_t sys_setuid(uint64_t uid, uint64_t a1, uint64_t a2, uint64_t a3,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    p->uid = (uid_t)uid;
+    p->uid = (uid_t)sysproc_abi_u32(uid);
     return 0;
 }
 
@@ -155,63 +163,73 @@ int64_t sys_setgid(uint64_t gid, uint64_t a1, uint64_t a2, uint64_t a3,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    p->gid = (gid_t)gid;
+    p->gid = (gid_t)sysproc_abi_u32(gid);
     return 0;
 }
 
 int64_t sys_setreuid(uint64_t ruid, uint64_t euid, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    uint32_t kruid = sysproc_abi_u32(ruid);
+    uint32_t keuid = sysproc_abi_u32(euid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (ruid != (uint64_t)-1)
-        p->uid = (uid_t)ruid;
-    if (euid != (uint64_t)-1)
-        p->uid = (uid_t)euid;
+    if (kruid != UINT32_MAX)
+        p->uid = (uid_t)kruid;
+    if (keuid != UINT32_MAX)
+        p->uid = (uid_t)keuid;
     return 0;
 }
 
 int64_t sys_setregid(uint64_t rgid, uint64_t egid, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    uint32_t krgid = sysproc_abi_u32(rgid);
+    uint32_t kegid = sysproc_abi_u32(egid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (rgid != (uint64_t)-1)
-        p->gid = (gid_t)rgid;
-    if (egid != (uint64_t)-1)
-        p->gid = (gid_t)egid;
+    if (krgid != UINT32_MAX)
+        p->gid = (gid_t)krgid;
+    if (kegid != UINT32_MAX)
+        p->gid = (gid_t)kegid;
     return 0;
 }
 
 int64_t sys_setresuid(uint64_t ruid, uint64_t euid, uint64_t suid, uint64_t a3,
                       uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    uint32_t kruid = sysproc_abi_u32(ruid);
+    uint32_t keuid = sysproc_abi_u32(euid);
+    uint32_t ksuid = sysproc_abi_u32(suid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (ruid != (uint64_t)-1)
-        p->uid = (uid_t)ruid;
-    if (euid != (uint64_t)-1)
-        p->uid = (uid_t)euid;
-    if (suid != (uint64_t)-1)
-        p->uid = (uid_t)suid;
+    if (kruid != UINT32_MAX)
+        p->uid = (uid_t)kruid;
+    if (keuid != UINT32_MAX)
+        p->uid = (uid_t)keuid;
+    if (ksuid != UINT32_MAX)
+        p->uid = (uid_t)ksuid;
     return 0;
 }
 
 int64_t sys_setresgid(uint64_t rgid, uint64_t egid, uint64_t sgid, uint64_t a3,
                       uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    uint32_t krgid = sysproc_abi_u32(rgid);
+    uint32_t kegid = sysproc_abi_u32(egid);
+    uint32_t ksgid = sysproc_abi_u32(sgid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (rgid != (uint64_t)-1)
-        p->gid = (gid_t)rgid;
-    if (egid != (uint64_t)-1)
-        p->gid = (gid_t)egid;
-    if (sgid != (uint64_t)-1)
-        p->gid = (gid_t)sgid;
+    if (krgid != UINT32_MAX)
+        p->gid = (gid_t)krgid;
+    if (kegid != UINT32_MAX)
+        p->gid = (gid_t)kegid;
+    if (ksgid != UINT32_MAX)
+        p->gid = (gid_t)ksgid;
     return 0;
 }
 
@@ -565,6 +583,7 @@ int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
 int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
                      uint64_t envp, uint64_t flags, uint64_t a5) {
     (void)a5;
+    int64_t kdirfd = sysproc_abi_fd(dirfd);
     uint32_t uflags = (uint32_t)flags;
     uint32_t supported_flags = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
     int exec_namei_flags = NAMEI_FOLLOW;
@@ -577,7 +596,7 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
 
     if (uflags & AT_EMPTY_PATH) {
         /* Execute the file referred to by dirfd directly */
-        struct file *f = fd_get(proc_current(), (int)dirfd);
+        struct file *f = fd_get(proc_current(), (int)kdirfd);
         if (!f)
             return -EBADF;
         strncpy(kpath, f->path, sizeof(kpath) - 1);
@@ -588,8 +607,8 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
             return -EFAULT;
 
         /* Resolve relative to dirfd if not absolute and not AT_FDCWD */
-        if (kpath[0] != '/' && (int64_t)dirfd != AT_FDCWD) {
-            struct file *df = fd_get(proc_current(), (int)dirfd);
+        if (kpath[0] != '/' && kdirfd != AT_FDCWD) {
+            struct file *df = fd_get(proc_current(), (int)kdirfd);
             if (!df)
                 return -EBADF;
             /* Build full path from dirfd path + relative path */

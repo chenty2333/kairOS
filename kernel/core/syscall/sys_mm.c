@@ -27,6 +27,10 @@
 #define MREMAP_MAYMOVE 1
 #define MREMAP_FIXED 2
 
+static inline int sysmm_abi_int32(uint64_t v) {
+    return (int32_t)(uint32_t)v;
+}
+
 static uint64_t sysmm_normalize_prot(uint64_t prot) {
 #if defined(ARCH_aarch64)
     /* Linux AArch64 extensions not modeled in current VM permissions. */
@@ -86,7 +90,7 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (!anon) {
         if ((offset & (CONFIG_PAGE_SIZE - 1)) != 0)
             return -EINVAL;
-        struct file *f = fd_get(p, (int)fd);
+        struct file *f = fd_get(p, sysmm_abi_int32(fd));
         if (!f)
             return -EBADF;
         if (!f->vnode || f->vnode->type != VNODE_FILE) {

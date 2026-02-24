@@ -107,6 +107,8 @@ Special:
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + strict `sigsetsize == sizeof(sigset_t)` checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
 - Linux ABI compatibility also includes `eventfd2`, `timerfd_create/settime/gettime`, and `signalfd4` via anon-vnode pollable file descriptors
 - `epoll_create1`, `eventfd2`, `timerfd_create`, `timerfd_settime`, `signalfd4`, and `inotify_init1` decode `flags` using Linux ABI width (`int`/32-bit)
+- `epoll_ctl`/`epoll_wait` decode `epfd` (and target `fd` in `epoll_ctl`) as Linux ABI `int` (32-bit)
+- `timerfd_settime`/`timerfd_gettime`, `signalfd4`, and `inotify_add_watch`/`inotify_rm_watch` decode `fd` (and `wd` for `inotify_rm_watch`) as Linux ABI `int` (32-bit)
 - `epoll_ctl` decodes `op` as Linux ABI `int` (32-bit), and `epoll_wait` decodes `maxevents`/`timeout` as Linux ABI `int` (32-bit)
 - `timerfd_create` accepts `CLOCK_REALTIME`/`CLOCK_MONOTONIC` plus `CLOCK_BOOTTIME`/`*_ALARM` aliases (mapped to realtime/monotonic base clocks)
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
@@ -130,7 +132,8 @@ Special:
 - `newfstatat` accepts `AT_NO_AUTOMOUNT` as a compatibility no-op
 - `statx` and `newfstatat` both decode `flags` using Linux ABI width (`int`/32-bit)
 - `fstatfs`/`fstat`/`getdents64` decode `fd` as Linux ABI `int` (32-bit), and `newfstatat`/`statx` decode `dirfd` as 32-bit `int` before `AT_FDCWD` checks and path resolution
-- path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `linkat`) decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit
+- path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `mkdirat`, `mknodat`, `renameat*`, `readlinkat`, `symlinkat`, `linkat`) decode `dirfd`/`olddirfd`/`newdirfd` as Linux ABI `int` (32-bit) before `AT_FDCWD` checks and path resolution
+- path-based `*at` syscalls decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit, and `fchownat` uses Linux 32-bit sentinel semantics (`owner/group == 0xffffffff` means no change)
 - `dup3` and `pipe2` decode `flags` via Linux ABI width (`int`/32-bit)
 - `fcntl` decodes `cmd`/`arg` via Linux ABI `int` width (32-bit)
 - fd-based metadata/control syscalls (`dup`/`dup2`/`dup3`/`fcntl`/`ftruncate`/`fchmod`/`fchown`) decode `fd` as Linux ABI `int` (32-bit); `fchown` also uses Linux 32-bit sentinel semantics (`uid/gid == 0xffffffff` means no change)

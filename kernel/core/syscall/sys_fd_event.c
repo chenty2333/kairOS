@@ -37,6 +37,10 @@
 
 #define INOTIFY_Q_MAX_BYTES (64U * 1024U)
 
+static inline int sysfd_abi_int32(uint64_t v) {
+    return (int32_t)(uint32_t)v;
+}
+
 struct linux_itimerspec {
     struct timespec it_interval;
     struct timespec it_value;
@@ -1180,13 +1184,14 @@ int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a2,
 int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
                             uint64_t old_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
+    int kfd = sysfd_abi_int32(fd);
     uint32_t uflags = (uint32_t)flags;
     if (uflags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))
         return -EINVAL;
     if (!new_ptr)
         return -EFAULT;
 
-    struct file *file = fd_get(proc_current(), (int)fd);
+    struct file *file = fd_get(proc_current(), kfd);
     if (!file)
         return -EBADF;
     if (!file->vnode) {
@@ -1276,10 +1281,11 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
 int64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_ptr, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    int kfd = sysfd_abi_int32(fd);
     if (!curr_ptr)
         return -EFAULT;
 
-    struct file *file = fd_get(proc_current(), (int)fd);
+    struct file *file = fd_get(proc_current(), kfd);
     if (!file)
         return -EBADF;
     if (!file->vnode) {
@@ -1313,6 +1319,7 @@ int64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_ptr, uint64_t a2,
 int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
                       uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
+    int kfd = sysfd_abi_int32(fd);
     if (!mask_ptr)
         return -EFAULT;
     if (sigsetsize != sizeof(sigset_t))
@@ -1326,7 +1333,7 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
         return -EFAULT;
     mask = signalfd_sanitize_mask(mask);
 
-    if ((int64_t)fd == -1) {
+    if (kfd == -1) {
         struct file *file = NULL;
         int rc = signalfd_create_file(mask, uflags, &file);
         if (rc < 0)
@@ -1341,9 +1348,7 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
         return newfd;
     }
 
-    if (fd > (uint64_t)INT32_MAX)
-        return -EBADF;
-    struct file *file = fd_get(proc_current(), (int)fd);
+    struct file *file = fd_get(proc_current(), kfd);
     if (!file)
         return -EBADF;
     if (!file->vnode) {
@@ -1361,7 +1366,7 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
     ctx->mask = mask;
     spin_unlock_irqrestore(&ctx->lock, irq);
     file_put(file);
-    return (int64_t)(int)fd;
+    return (int64_t)kfd;
 }
 
 static struct inotify_ctx *inotify_ctx_from_fd(struct file *file) {
@@ -1397,6 +1402,7 @@ int64_t sys_inotify_init1(uint64_t flags, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_inotify_add_watch(uint64_t fd, uint64_t path_ptr, uint64_t mask,
                               uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    int kfd = sysfd_abi_int32(fd);
     if (!path_ptr)
         return -EFAULT;
     if ((mask & IN_MASK_ADD) && (mask & IN_MASK_CREATE))
@@ -1425,7 +1431,7 @@ int64_t sys_inotify_add_watch(uint64_t fd, uint64_t path_ptr, uint64_t mask,
         return -ENOTDIR;
     }
 
-    struct file *file = fd_get(proc_current(), (int)fd);
+    struct file *file = fd_get(proc_current(), kfd);
     if (!file) {
         dentry_put(resolved.dentry);
         return -EBADF;
@@ -1483,7 +1489,9 @@ int64_t sys_inotify_add_watch(uint64_t fd, uint64_t path_ptr, uint64_t mask,
 int64_t sys_inotify_rm_watch(uint64_t fd, uint64_t wd, uint64_t a2, uint64_t a3,
                              uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    struct file *file = fd_get(proc_current(), (int)fd);
+    int kfd = sysfd_abi_int32(fd);
+    int kwd = sysfd_abi_int32(wd);
+    struct file *file = fd_get(proc_current(), kfd);
     if (!file)
         return -EBADF;
     struct inotify_ctx *ctx = inotify_ctx_from_fd(file);
@@ -1494,7 +1502,7 @@ int64_t sys_inotify_rm_watch(uint64_t fd, uint64_t wd, uint64_t a2, uint64_t a3,
 
     int rc = -EINVAL;
     mutex_lock(&ctx->lock);
-    struct inotify_watch *watch = inotify_find_watch_by_wd(ctx, (int)wd);
+    struct inotify_watch *watch = inotify_find_watch_by_wd(ctx, kwd);
     if (watch) {
         inotify_remove_watch_locked(ctx, watch, true);
         rc = 0;
