@@ -154,9 +154,29 @@ extract_first_smoke_fail_reason() {
         return 0
     fi
 
-    line="$(grep -Eo 'SMOKE_FAIL_FIRST:[A-Za-z0-9_.-]+' "${log_path}" | head -n 1 || true)"
+    line="$(
+        awk '
+            match($0, /^[[:space:]]*SMOKE_FAIL_FIRST:[A-Za-z0-9_.-]+[[:space:]]*$/) {
+                m = $0
+                sub(/^[[:space:]]*/, "", m)
+                sub(/[[:space:]]*$/, "", m)
+                print m
+                exit 0
+            }
+        ' "${log_path}" || true
+    )"
     if [[ -z "${line}" ]]; then
-        line="$(grep -Eo 'SMOKE_FAIL:[A-Za-z0-9_.-]+' "${log_path}" | head -n 1 || true)"
+        line="$(
+            awk '
+                match($0, /^[[:space:]]*SMOKE_FAIL:[A-Za-z0-9_.-]+[[:space:]]*$/) {
+                    m = $0
+                    sub(/^[[:space:]]*/, "", m)
+                    sub(/[[:space:]]*$/, "", m)
+                    print m
+                    exit 0
+                }
+            ' "${log_path}" || true
+        )"
     fi
 
     if [[ -n "${line}" ]]; then
@@ -312,6 +332,11 @@ run_test_main() {
     local status reason exit_code verdict_source
     local allow_signal_override
 
+    mkdir -p "${TEST_BUILD_ROOT}" \
+        "$(dirname "${TEST_LOG}")" \
+        "$(dirname "${TEST_MANIFEST}")" \
+        "$(dirname "${TEST_RESULT}")" \
+        "$(dirname "${TEST_QEMU_PID_FILE}")"
     rm -f "${TEST_LOG}"
 
     start_ms="$(date +%s%3N)"
