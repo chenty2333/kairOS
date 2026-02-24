@@ -199,6 +199,27 @@ static struct timeval timeout_ns_to_timeval(uint64_t ns) {
     return tv;
 }
 
+static int timespec_to_timeout_ns(const struct timespec *ts, uint64_t *out_ns) {
+    if (!ts || !out_ns)
+        return -EINVAL;
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= (int64_t)NS_PER_SEC)
+        return -EINVAL;
+    uint64_t sec = (uint64_t)ts->tv_sec;
+    if (sec > UINT64_MAX / NS_PER_SEC)
+        return -ERANGE;
+    uint64_t ns = sec * NS_PER_SEC + (uint64_t)ts->tv_nsec;
+    *out_ns = ns;
+    return 0;
+}
+
+static struct timespec timeout_ns_to_timespec(uint64_t ns) {
+    struct timespec ts = {
+        .tv_sec = (time_t)(ns / NS_PER_SEC),
+        .tv_nsec = (int64_t)(ns % NS_PER_SEC),
+    };
+    return ts;
+}
+
 static int poll_copy_sigmask_from_user(sigset_t *out, uint64_t mask_ptr,
                                        uint64_t sigsetsize) {
     if (!out)
@@ -369,15 +390,15 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
         struct timeval tv;
         if (copy_from_user(&tv, (void *)timeout_ptr, sizeof(tv)) < 0)
             return -EFAULT;
-        int rc = timeval_to_timeout_ms(&tv);
-        if (rc < 0)
-            return rc;
-        rc = timeval_to_timeout_ns(&tv, &timeout_ns);
-        if (rc < 0 && rc != -ERANGE)
-            return rc;
-        if (rc == -ERANGE)
+        int timeout_ms_rc = timeval_to_timeout_ms(&tv);
+        if (timeout_ms_rc < 0)
+            return timeout_ms_rc;
+        timeout_ms = timeout_ms_rc;
+        int timeout_ns_rc = timeval_to_timeout_ns(&tv, &timeout_ns);
+        if (timeout_ns_rc < 0 && timeout_ns_rc != -ERANGE)
+            return timeout_ns_rc;
+        if (timeout_ns_rc == -ERANGE)
             timeout_ns = UINT64_MAX;
-        timeout_ms = rc;
         have_timeout = true;
         start_ticks = arch_timer_get_ticks();
     }
@@ -409,14 +430,24 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
         have_sigmask = rc > 0;
     }
     int timeout_ms = -1;
+    bool have_timeout = false;
+    uint64_t timeout_ns = 0;
+    uint64_t start_ticks = 0;
     if (tsp_ptr) {
         struct timespec ts;
         if (copy_from_user(&ts, (void *)tsp_ptr, sizeof(ts)) < 0)
             return -EFAULT;
-        int rc = timespec_to_timeout_ms(&ts);
-        if (rc < 0)
-            return rc;
-        timeout_ms = rc;
+        int timeout_ms_rc = timespec_to_timeout_ms(&ts);
+        if (timeout_ms_rc < 0)
+            return timeout_ms_rc;
+        timeout_ms = timeout_ms_rc;
+        int timeout_ns_rc = timespec_to_timeout_ns(&ts, &timeout_ns);
+        if (timeout_ns_rc < 0 && timeout_ns_rc != -ERANGE)
+            return timeout_ns_rc;
+        if (timeout_ns_rc == -ERANGE)
+            timeout_ns = UINT64_MAX;
+        have_timeout = true;
+        start_ticks = arch_timer_get_ticks();
     }
 
     struct poll_sigmask_ctx ctx = {0};
@@ -427,6 +458,14 @@ int64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t tsp_ptr,
     }
     int64_t ret = sys_poll(fds_ptr, nfds, (uint64_t)timeout_ms, 0, 0, 0);
     poll_sigmask_restore(&ctx);
+    if (have_timeout && (ret >= 0 || ret == -EINTR)) {
+        uint64_t elapsed_ns =
+            arch_timer_ticks_to_ns(arch_timer_get_ticks() - start_ticks);
+        uint64_t rem_ns = (elapsed_ns >= timeout_ns) ? 0 : (timeout_ns - elapsed_ns);
+        struct timespec rem_ts = timeout_ns_to_timespec(rem_ns);
+        if (copy_to_user((void *)tsp_ptr, &rem_ts, sizeof(rem_ts)) < 0)
+            return -EFAULT;
+    }
     return ret;
 }
 
@@ -451,14 +490,24 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
         }
     }
     int timeout_ms = -1;
+    bool have_timeout = false;
+    uint64_t timeout_ns = 0;
+    uint64_t start_ticks = 0;
     if (timeout_ptr) {
         struct timespec ts;
         if (copy_from_user(&ts, (void *)timeout_ptr, sizeof(ts)) < 0)
             return -EFAULT;
-        int rc = timespec_to_timeout_ms(&ts);
-        if (rc < 0)
-            return rc;
-        timeout_ms = rc;
+        int timeout_ms_rc = timespec_to_timeout_ms(&ts);
+        if (timeout_ms_rc < 0)
+            return timeout_ms_rc;
+        timeout_ms = timeout_ms_rc;
+        int timeout_ns_rc = timespec_to_timeout_ns(&ts, &timeout_ns);
+        if (timeout_ns_rc < 0 && timeout_ns_rc != -ERANGE)
+            return timeout_ns_rc;
+        if (timeout_ns_rc == -ERANGE)
+            timeout_ns = UINT64_MAX;
+        have_timeout = true;
+        start_ticks = arch_timer_get_ticks();
     }
 
     struct poll_sigmask_ctx ctx = {0};
@@ -471,5 +520,13 @@ int64_t sys_pselect6(uint64_t nfds, uint64_t readfds_ptr,
         do_select_common(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr,
                          timeout_ms);
     poll_sigmask_restore(&ctx);
+    if (have_timeout && (ret >= 0 || ret == -EINTR)) {
+        uint64_t elapsed_ns =
+            arch_timer_ticks_to_ns(arch_timer_get_ticks() - start_ticks);
+        uint64_t rem_ns = (elapsed_ns >= timeout_ns) ? 0 : (timeout_ns - elapsed_ns);
+        struct timespec rem_ts = timeout_ns_to_timespec(rem_ns);
+        if (copy_to_user((void *)timeout_ptr, &rem_ts, sizeof(rem_ts)) < 0)
+            return -EFAULT;
+    }
     return ret;
 }

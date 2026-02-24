@@ -111,6 +111,7 @@ Special:
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
 - `select` updates user `timeval` with remaining time on return (`success`/`EINTR`)
 - `ppoll`/`pselect6` now temporarily install the provided signal mask during wait and restore the original mask on return
+- raw `ppoll`/`pselect6` also update user `timespec` with remaining timeout on return (`success`/`EINTR`), matching Linux syscall-level ABI
 - `renameat2` supports `flags=0` and `RENAME_NOREPLACE` (`EEXIST` when destination already exists)
 
 Related references:
