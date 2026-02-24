@@ -38,6 +38,8 @@ struct vnode;
 /* Message flags */
 #define MSG_DONTWAIT 0x40
 #define MSG_NOSIGNAL 0x4000
+#define MSG_CTRUNC   0x8
+#define MSG_CMSG_CLOEXEC 0x40000000
 
 /* Socket options levels */
 #define SOL_SOCKET 1
@@ -79,6 +81,22 @@ struct sockaddr_storage {
     char __ss_padding[126];
 };
 
+#define SOCKET_MAX_RIGHTS 16
+
+struct socket_ucred {
+    int32_t pid;
+    uint32_t uid;
+    uint32_t gid;
+};
+
+struct file;
+struct socket_control {
+    bool has_creds;
+    struct socket_ucred creds;
+    size_t rights_count;
+    struct file *rights[SOCKET_MAX_RIGHTS];
+};
+
 struct socket;
 
 /* Protocol operations - each address family implements these */
@@ -92,6 +110,12 @@ struct proto_ops {
                       int flags, const struct sockaddr *dest, int addrlen);
     ssize_t (*recvfrom)(struct socket *sock, void *buf, size_t len, int flags,
                         struct sockaddr *src, int *addrlen);
+    ssize_t (*sendmsg)(struct socket *sock, const void *buf, size_t len,
+                       int flags, const struct sockaddr *dest, int addrlen,
+                       const struct socket_control *control);
+    ssize_t (*recvmsg)(struct socket *sock, void *buf, size_t len, int flags,
+                       struct sockaddr *src, int *addrlen,
+                       struct socket_control *control);
     int (*shutdown)(struct socket *sock, int how);
     int (*close)(struct socket *sock);
     int (*poll)(struct socket *sock, uint32_t events);

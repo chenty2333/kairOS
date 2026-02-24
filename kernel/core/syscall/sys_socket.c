@@ -57,12 +57,6 @@ struct socket_cmsghdr {
     int32_t cmsg_type;
 };
 
-struct socket_ucred {
-    int32_t pid;
-    uint32_t uid;
-    uint32_t gid;
-};
-
 static size_t socket_cmsg_align(size_t len) {
     const size_t align = sizeof(size_t) - 1;
     return (len + align) & ~align;
@@ -113,6 +107,203 @@ static int socket_validate_send_control(uint64_t control_ptr, size_t controllen)
         }
         off += adv;
     }
+    return 0;
+}
+
+static void socket_control_release(struct socket_control *control) {
+    if (!control)
+        return;
+    for (size_t i = 0; i < control->rights_count && i < SOCKET_MAX_RIGHTS; i++) {
+        if (control->rights[i]) {
+            file_put(control->rights[i]);
+            control->rights[i] = NULL;
+        }
+    }
+    control->rights_count = 0;
+    control->has_creds = false;
+}
+
+static int socket_parse_send_control(const struct socket_msghdr *msg,
+                                     struct socket_control *control) {
+    if (!control)
+        return -EINVAL;
+    memset(control, 0, sizeof(*control));
+
+    if (!msg->msg_controllen)
+        return 0;
+
+    uint64_t control_ptr = (uint64_t)(uintptr_t)msg->msg_control;
+    int rc = socket_validate_send_control(control_ptr, msg->msg_controllen);
+    if (rc < 0)
+        return rc;
+
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+
+    size_t off = 0;
+    while (off < msg->msg_controllen) {
+        struct socket_cmsghdr hdr;
+        if (copy_from_user(&hdr, (const void *)(control_ptr + off),
+                           sizeof(hdr)) < 0) {
+            rc = -EFAULT;
+            goto fail;
+        }
+
+        size_t payload_len = hdr.cmsg_len - sizeof(struct socket_cmsghdr);
+        uint64_t payload_ptr = control_ptr + off + sizeof(struct socket_cmsghdr);
+
+        if (hdr.cmsg_type == SCM_RIGHTS) {
+            size_t rights_nr = payload_len / sizeof(int32_t);
+            if (rights_nr > SOCKET_MAX_RIGHTS ||
+                control->rights_count > SOCKET_MAX_RIGHTS - rights_nr) {
+                rc = -EINVAL;
+                goto fail;
+            }
+            for (size_t i = 0; i < rights_nr; i++) {
+                int32_t ufd = -1;
+                if (copy_from_user(&ufd,
+                                   (const void *)(payload_ptr +
+                                                  i * sizeof(int32_t)),
+                                   sizeof(ufd)) < 0) {
+                    rc = -EFAULT;
+                    goto fail;
+                }
+                struct file *f = fd_get(curr, ufd);
+                if (!f) {
+                    rc = -EBADF;
+                    goto fail;
+                }
+                control->rights[control->rights_count++] = f;
+            }
+        } else if (hdr.cmsg_type == SCM_CREDENTIALS) {
+            struct socket_ucred ucred;
+            if (copy_from_user(&ucred, (const void *)payload_ptr,
+                               sizeof(ucred)) < 0) {
+                rc = -EFAULT;
+                goto fail;
+            }
+            control->has_creds = true;
+            control->creds.pid = curr->pid;
+            control->creds.uid = curr->uid;
+            control->creds.gid = curr->gid;
+        }
+
+        size_t adv = socket_cmsg_align(hdr.cmsg_len);
+        if (adv > msg->msg_controllen - off)
+            off = msg->msg_controllen;
+        else
+            off += adv;
+    }
+    return 0;
+
+fail:
+    socket_control_release(control);
+    return rc;
+}
+
+static void socket_close_installed_fds(struct process *p, const int *fds,
+                                       size_t nr) {
+    if (!p || !fds)
+        return;
+    for (size_t i = 0; i < nr; i++) {
+        if (fds[i] >= 0)
+            (void)fd_close(p, fds[i]);
+    }
+}
+
+static int socket_copyout_recv_control(struct socket_msghdr *msg,
+                                       struct socket_control *control,
+                                       uint32_t recv_flags) {
+    if (!msg || !control)
+        return -EINVAL;
+
+    size_t user_cap = msg->msg_controllen;
+    uint64_t user_ptr = (uint64_t)(uintptr_t)msg->msg_control;
+    size_t off = 0;
+    uint32_t out_flags = msg->msg_flags;
+    bool cloexec = (recv_flags & MSG_CMSG_CLOEXEC) != 0;
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+
+    if (control->has_creds) {
+        size_t cmsg_len = sizeof(struct socket_cmsghdr) +
+                          sizeof(struct socket_ucred);
+        if (user_ptr && user_cap - off >= cmsg_len) {
+            struct socket_cmsghdr hdr = {
+                .cmsg_len = cmsg_len,
+                .cmsg_level = SOL_SOCKET,
+                .cmsg_type = SCM_CREDENTIALS,
+            };
+            if (copy_to_user((void *)(user_ptr + off), &hdr, sizeof(hdr)) < 0)
+                return -EFAULT;
+            if (copy_to_user((void *)(user_ptr + off + sizeof(hdr)),
+                             &control->creds, sizeof(control->creds)) < 0)
+                return -EFAULT;
+            size_t adv = socket_cmsg_align(cmsg_len);
+            if (adv > user_cap - off)
+                off += cmsg_len;
+            else
+                off += adv;
+        } else {
+            out_flags |= MSG_CTRUNC;
+        }
+    }
+
+    size_t rights_nr = control->rights_count;
+    if (rights_nr > SOCKET_MAX_RIGHTS)
+        rights_nr = SOCKET_MAX_RIGHTS;
+    if (rights_nr > 0) {
+        size_t payload_len = rights_nr * sizeof(int32_t);
+        size_t cmsg_len = sizeof(struct socket_cmsghdr) + payload_len;
+        if (user_ptr && user_cap - off >= cmsg_len) {
+            int installed[SOCKET_MAX_RIGHTS];
+            int32_t rights_payload[SOCKET_MAX_RIGHTS];
+            for (size_t i = 0; i < rights_nr; i++) {
+                installed[i] = -1;
+                rights_payload[i] = -1;
+            }
+
+            for (size_t i = 0; i < rights_nr; i++) {
+                if (!control->rights[i]) {
+                    socket_close_installed_fds(curr, installed, i);
+                    return -EINVAL;
+                }
+                int fd = fd_alloc_flags(curr, control->rights[i],
+                                        cloexec ? FD_CLOEXEC : 0);
+                if (fd < 0) {
+                    socket_close_installed_fds(curr, installed, i);
+                    return fd;
+                }
+                installed[i] = fd;
+                rights_payload[i] = fd;
+                control->rights[i] = NULL;
+            }
+
+            struct socket_cmsghdr hdr = {
+                .cmsg_len = cmsg_len,
+                .cmsg_level = SOL_SOCKET,
+                .cmsg_type = SCM_RIGHTS,
+            };
+            if (copy_to_user((void *)(user_ptr + off), &hdr, sizeof(hdr)) < 0 ||
+                copy_to_user((void *)(user_ptr + off + sizeof(hdr)),
+                             rights_payload, payload_len) < 0) {
+                socket_close_installed_fds(curr, installed, rights_nr);
+                return -EFAULT;
+            }
+            size_t adv = socket_cmsg_align(cmsg_len);
+            if (adv > user_cap - off)
+                off += cmsg_len;
+            else
+                off += adv;
+        } else {
+            out_flags |= MSG_CTRUNC;
+        }
+    }
+
+    msg->msg_controllen = off;
+    msg->msg_flags = out_flags;
     return 0;
 }
 
@@ -322,10 +513,15 @@ static int64_t socket_sendmsg(struct socket *sock,
     if (msg->msg_iovlen > SOCKET_MSG_IOV_MAX) {
         return -EINVAL;
     }
-    int rc = socket_validate_send_control((uint64_t)(uintptr_t)msg->msg_control,
-                                          msg->msg_controllen);
+    struct socket_control control;
+    int rc = socket_parse_send_control(msg, &control);
     if (rc < 0)
         return rc;
+    bool has_control_payload = control.has_creds || control.rights_count > 0;
+    if (has_control_payload && !sock->ops->sendmsg) {
+        socket_control_release(&control);
+        return -EOPNOTSUPP;
+    }
 
     struct sockaddr_storage kaddr;
     struct sockaddr *destp = NULL;
@@ -334,6 +530,7 @@ static int64_t socket_sendmsg(struct socket *sock,
         dlen = copy_sockaddr_from_user(&kaddr, (uint64_t)(uintptr_t)msg->msg_name,
                                        msg->msg_namelen);
         if (dlen < 0) {
+            socket_control_release(&control);
             return (int64_t)dlen;
         }
         destp = (struct sockaddr *)&kaddr;
@@ -343,14 +540,19 @@ static int64_t socket_sendmsg(struct socket *sock,
     size_t total = 0;
     rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
     if (rc < 0) {
+        socket_control_release(&control);
         return rc;
     }
     if (total > SOCKET_MSG_MAX_LEN) {
         total = SOCKET_MSG_MAX_LEN;
     }
     if (!total) {
-        ssize_t ret =
-            sock->ops->sendto(sock, NULL, 0, (int32_t)flags, destp, dlen);
+        ssize_t ret = has_control_payload
+                          ? sock->ops->sendmsg(sock, NULL, 0, (int32_t)flags,
+                                               destp, dlen, &control)
+                          : sock->ops->sendto(sock, NULL, 0, (int32_t)flags,
+                                              destp, dlen);
+        socket_control_release(&control);
         if (ret >= 0 && sent_out) {
             *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
         }
@@ -359,18 +561,24 @@ static int64_t socket_sendmsg(struct socket *sock,
 
     void *kbuf = kmalloc(total);
     if (!kbuf) {
+        socket_control_release(&control);
         return -ENOMEM;
     }
     size_t copied = 0;
     rc = socket_msg_copyin_iov(iov_ptr, msg->msg_iovlen, kbuf, total, &copied);
     if (rc < 0) {
         kfree(kbuf);
+        socket_control_release(&control);
         return rc;
     }
 
-    ssize_t ret =
-        sock->ops->sendto(sock, kbuf, copied, (int32_t)flags, destp, dlen);
+    ssize_t ret = has_control_payload
+                      ? sock->ops->sendmsg(sock, kbuf, copied, (int32_t)flags,
+                                           destp, dlen, &control)
+                      : sock->ops->sendto(sock, kbuf, copied, (int32_t)flags,
+                                          destp, dlen);
     kfree(kbuf);
+    socket_control_release(&control);
     if (ret >= 0 && sent_out) {
         *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
     }
@@ -406,15 +614,28 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
         }
     }
 
+    uint32_t proto_flags = flags & ~MSG_CMSG_CLOEXEC;
+    struct socket_control control = {0};
     struct sockaddr_storage kaddr;
     int alen = (int)sizeof(kaddr);
-    ssize_t ret = sock->ops->recvfrom(sock, kbuf, total, (int32_t)flags,
-                                      msg->msg_name ? (struct sockaddr *)&kaddr : NULL,
-                                      msg->msg_name ? &alen : NULL);
+    ssize_t ret = sock->ops->recvmsg
+                      ? sock->ops->recvmsg(sock, kbuf, total, (int32_t)proto_flags,
+                                           msg->msg_name
+                                               ? (struct sockaddr *)&kaddr
+                                               : NULL,
+                                           msg->msg_name ? &alen : NULL,
+                                           &control)
+                      : sock->ops->recvfrom(sock, kbuf, total,
+                                            (int32_t)proto_flags,
+                                            msg->msg_name
+                                                ? (struct sockaddr *)&kaddr
+                                                : NULL,
+                                            msg->msg_name ? &alen : NULL);
     if (ret > 0) {
         rc = socket_msg_copyout_iov(iov_ptr, msg->msg_iovlen, kbuf, (size_t)ret);
         if (rc < 0) {
             kfree(kbuf);
+            socket_control_release(&control);
             return rc;
         }
     }
@@ -426,17 +647,23 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
         size_t copylen = (klen < user_len) ? klen : user_len;
         if (copylen &&
             copy_to_user(msg->msg_name, &kaddr, copylen) < 0) {
+            socket_control_release(&control);
             return -EFAULT;
         }
         msg->msg_namelen = (alen < 0) ? 0 : (uint32_t)alen;
     }
     if (ret >= 0) {
-        msg->msg_controllen = 0;
         msg->msg_flags = 0;
+        rc = socket_copyout_recv_control(msg, &control, flags);
+        if (rc < 0) {
+            socket_control_release(&control);
+            return rc;
+        }
         if (recv_out) {
             *recv_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
         }
     }
+    socket_control_release(&control);
     return ret;
 }
 

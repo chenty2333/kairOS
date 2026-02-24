@@ -43,6 +43,10 @@ struct unix_dgram_msg {
     struct list_head node;
     size_t len;
     struct sockaddr_un sender;
+    bool has_creds;
+    struct socket_ucred creds;
+    size_t rights_count;
+    struct file *rights[SOCKET_MAX_RIGHTS];
     uint8_t data[];
 };
 
@@ -685,9 +689,28 @@ static int unix_stream_poll(struct socket *sock, uint32_t events) {
 
 /* --- Proto ops (DGRAM) --- */
 
-static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
+static ssize_t unix_dgram_recvmsg(struct socket *sock, void *buf,
                                   size_t len, int flags,
-                                  const struct sockaddr *dest, int addrlen) {
+                                  struct sockaddr *src, int *addrlen,
+                                  struct socket_control *control);
+
+static void unix_dgram_msg_release_control(struct unix_dgram_msg *msg) {
+    if (!msg)
+        return;
+    for (size_t i = 0; i < msg->rights_count && i < SOCKET_MAX_RIGHTS; i++) {
+        if (msg->rights[i]) {
+            file_put(msg->rights[i]);
+            msg->rights[i] = NULL;
+        }
+    }
+    msg->rights_count = 0;
+    msg->has_creds = false;
+}
+
+static ssize_t unix_dgram_sendmsg(struct socket *sock, const void *buf,
+                                  size_t len, int flags,
+                                  const struct sockaddr *dest, int addrlen,
+                                  const struct socket_control *control) {
     (void)flags;
     struct unix_sock *us = sock->proto_data;
     const struct sockaddr_un *sun = (const struct sockaddr_un *)dest;
@@ -724,9 +747,24 @@ static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
         unix_sock_put(target);
         return -ENOMEM;
     }
+    memset(msg, 0, sizeof(*msg));
     msg->len = len;
     memset(&msg->sender, 0, sizeof(msg->sender));
     msg->sender.sun_family = AF_UNIX;
+    if (control) {
+        msg->has_creds = control->has_creds;
+        msg->creds = control->creds;
+        msg->rights_count =
+            (control->rights_count > SOCKET_MAX_RIGHTS)
+                ? SOCKET_MAX_RIGHTS
+                : control->rights_count;
+        for (size_t i = 0; i < msg->rights_count; i++) {
+            if (control->rights[i]) {
+                file_get(control->rights[i]);
+                msg->rights[i] = control->rights[i];
+            }
+        }
+    }
 
     mutex_lock(&us->lock);
     sender_bound = us->bound;
@@ -748,6 +786,7 @@ static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
     mutex_lock(&target->lock);
     if (target->closing) {
         mutex_unlock(&target->lock);
+        unix_dgram_msg_release_control(msg);
         kfree(msg);
         unix_sock_put(target);
         return -ECONNREFUSED;
@@ -763,11 +802,22 @@ static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
     return (ssize_t)len;
 }
 
-static ssize_t unix_dgram_recvfrom(struct socket *sock, void *buf,
-                                    size_t len, int flags,
-                                    struct sockaddr *src, int *addrlen) {
+static ssize_t unix_dgram_sendto(struct socket *sock, const void *buf,
+                                 size_t len, int flags,
+                                 const struct sockaddr *dest, int addrlen) {
+    return unix_dgram_sendmsg(sock, buf, len, flags, dest, addrlen, NULL);
+}
+
+static ssize_t unix_dgram_recvmsg(struct socket *sock, void *buf,
+                                  size_t len, int flags,
+                                  struct sockaddr *src, int *addrlen,
+                                  struct socket_control *control) {
     bool nonblock = (flags & MSG_DONTWAIT) != 0;
     struct unix_sock *us = sock->proto_data;
+
+    if (control) {
+        memset(control, 0, sizeof(*control));
+    }
 
     mutex_lock(&us->lock);
     while (list_empty(&us->dgram_queue)) {
@@ -805,9 +855,30 @@ static ssize_t unix_dgram_recvfrom(struct socket *sock, void *buf,
         *addrlen = (int)sizeof(struct sockaddr_un);
     }
 
+    if (control) {
+        control->has_creds = msg->has_creds;
+        control->creds = msg->creds;
+        control->rights_count = msg->rights_count;
+        if (control->rights_count > SOCKET_MAX_RIGHTS)
+            control->rights_count = SOCKET_MAX_RIGHTS;
+        for (size_t i = 0; i < control->rights_count; i++) {
+            control->rights[i] = msg->rights[i];
+            msg->rights[i] = NULL;
+        }
+        msg->rights_count = 0;
+        msg->has_creds = false;
+    }
+
     ssize_t ret = (ssize_t)msg->len;
+    unix_dgram_msg_release_control(msg);
     kfree(msg);
     return ret;
+}
+
+static ssize_t unix_dgram_recvfrom(struct socket *sock, void *buf,
+                                   size_t len, int flags,
+                                   struct sockaddr *src, int *addrlen) {
+    return unix_dgram_recvmsg(sock, buf, len, flags, src, addrlen, NULL);
 }
 
 static int unix_dgram_connect(struct socket *sock, const struct sockaddr *addr,
@@ -976,6 +1047,7 @@ static int unix_close(struct socket *sock) {
         struct unix_dgram_msg *msg = list_entry(pos, struct unix_dgram_msg,
                                                  node);
         list_del(&msg->node);
+        unix_dgram_msg_release_control(msg);
         kfree(msg);
     }
     unix_buf_destroy(&us->buf);
@@ -1137,6 +1209,31 @@ static ssize_t unix_stream_recvfrom_wrap(struct socket *sock, void *buf,
     return unix_stream_recvfrom(sock, buf, len, flags, src, addrlen);
 }
 
+static ssize_t unix_stream_sendmsg_wrap(struct socket *sock, const void *buf,
+                                        size_t len, int flags,
+                                        const struct sockaddr *dest,
+                                        int addrlen,
+                                        const struct socket_control *control) {
+    if (control && (control->has_creds || control->rights_count))
+        return -EOPNOTSUPP;
+    if (!unix_ensure_proto_data(sock)) {
+        return -ENOMEM;
+    }
+    return unix_stream_sendto(sock, buf, len, flags, dest, addrlen);
+}
+
+static ssize_t unix_stream_recvmsg_wrap(struct socket *sock, void *buf,
+                                        size_t len, int flags,
+                                        struct sockaddr *src, int *addrlen,
+                                        struct socket_control *control) {
+    if (control)
+        memset(control, 0, sizeof(*control));
+    if (!unix_ensure_proto_data(sock)) {
+        return -ENOMEM;
+    }
+    return unix_stream_recvfrom(sock, buf, len, flags, src, addrlen);
+}
+
 static int unix_stream_poll_wrap(struct socket *sock, uint32_t events) {
     if (!unix_ensure_proto_data(sock)) {
         return 0;
@@ -1224,6 +1321,26 @@ static ssize_t unix_dgram_recvfrom_wrap(struct socket *sock, void *buf,
     return unix_dgram_recvfrom(sock, buf, len, flags, src, addrlen);
 }
 
+static ssize_t unix_dgram_sendmsg_wrap(struct socket *sock, const void *buf,
+                                       size_t len, int flags,
+                                       const struct sockaddr *dest, int addrlen,
+                                       const struct socket_control *control) {
+    if (!unix_ensure_proto_data(sock)) {
+        return -ENOMEM;
+    }
+    return unix_dgram_sendmsg(sock, buf, len, flags, dest, addrlen, control);
+}
+
+static ssize_t unix_dgram_recvmsg_wrap(struct socket *sock, void *buf,
+                                       size_t len, int flags,
+                                       struct sockaddr *src, int *addrlen,
+                                       struct socket_control *control) {
+    if (!unix_ensure_proto_data(sock)) {
+        return -ENOMEM;
+    }
+    return unix_dgram_recvmsg(sock, buf, len, flags, src, addrlen, control);
+}
+
 static int unix_dgram_poll_wrap(struct socket *sock, uint32_t events) {
     if (!unix_ensure_proto_data(sock)) {
         return 0;
@@ -1238,6 +1355,8 @@ static const struct proto_ops unix_stream_wrap_ops = {
     .accept     = unix_stream_accept_wrap,
     .sendto     = unix_stream_sendto_wrap,
     .recvfrom   = unix_stream_recvfrom_wrap,
+    .sendmsg    = unix_stream_sendmsg_wrap,
+    .recvmsg    = unix_stream_recvmsg_wrap,
     .shutdown   = unix_shutdown_wrap,
     .close      = unix_close_wrap,
     .poll       = unix_stream_poll_wrap,
@@ -1254,6 +1373,8 @@ static const struct proto_ops unix_dgram_wrap_ops = {
     .accept     = NULL,
     .sendto     = unix_dgram_sendto_wrap,
     .recvfrom   = unix_dgram_recvfrom_wrap,
+    .sendmsg    = unix_dgram_sendmsg_wrap,
+    .recvmsg    = unix_dgram_recvmsg_wrap,
     .shutdown   = unix_shutdown_wrap,
     .close      = unix_close_wrap,
     .poll       = unix_dgram_poll_wrap,
