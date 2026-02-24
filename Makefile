@@ -258,7 +258,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -774,6 +774,22 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 				$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
 		fi
 
+test-ci-default:
+		$(Q)set -eu; \
+		run_and_assert() { \
+			label="$$1"; \
+			target="$$2"; \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" "$$target"; \
+			latest="$$(ls -1dt "$(TEST_RUNS_ROOT)"/* 2>/dev/null | head -n 1 || true)"; \
+			if [ -z "$$latest" ]; then \
+				echo "No isolated run found after $$label" >&2; \
+				exit 2; \
+			fi; \
+			python3 scripts/impl/assert-result-pass.py "$$latest/result.json" --require-structured; \
+		}; \
+		run_and_assert "quick regression" test; \
+		run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke
+
 test-exec-elf-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 		$(Q)if [ "$(EXEC_ELF_SMOKE_ISOLATED)" = "1" ]; then \
 			if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
@@ -1025,6 +1041,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests (isolated by default)"
+	@echo "  test-ci-default - Run default CI gates (test + exec/ELF smoke)"
 	@echo "  test-exec-elf-smoke - Run exec/ELF interactive smoke regression"
 	@echo "  test-busybox-applets-smoke - Run busybox applet interactive smoke regression"
 	@echo "  test-tcc-smoke - Run tcc interactive smoke regression"

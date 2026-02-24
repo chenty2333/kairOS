@@ -117,27 +117,10 @@ jobs:
           echo "Using UEFI_CODE_SRC=${code_src}"
           echo "Using UEFI_VARS_SRC=${vars_src}"
 
-      - name: Run quick regression
+      - name: Run default regression gates
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=riscv64 test
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after quick regression" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run exec/ELF smoke regression
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=riscv64 test-exec-elf-smoke
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after exec/ELF smoke regression" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          make --no-print-directory ARCH=riscv64 test-ci-default
 
       - name: Run BusyBox applet smoke regression
         run: |
