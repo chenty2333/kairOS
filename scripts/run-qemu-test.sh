@@ -610,10 +610,32 @@ if kairos_lock_is_busy_rc "${rc}"; then
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     write_manifest "${start_time_utc}"
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    write_result "${end_time_utc}" 0 "error" "lock_busy" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 "missing" -1 1 0 -1 -1 -1
+    write_result \
+        "${end_time_utc}" \
+        0 \
+        "error" \
+        "lock_busy" \
+        2 \
+        2 \
+        "infra" \
+        0 \
+        0 \
+        0 \
+        "missing" \
+        -1 \
+        -1 \
+        0 \
+        -1 \
+        "missing" \
+        -1 \
+        1 \
+        0 \
+        -1 \
+        -1 \
+        -1
     echo "test: manifest -> ${TEST_MANIFEST}"
     echo "test: result -> ${TEST_RESULT}"
-    echo "test: lock_busy (lock: ${TEST_LOCK_FILE})" >&2
+    echo "test: lock_busy lock=${TEST_LOCK_FILE}" >&2
     exit 2
 fi
 
