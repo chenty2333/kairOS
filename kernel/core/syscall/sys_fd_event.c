@@ -1133,15 +1133,16 @@ void timerfd_tick(uint64_t now_ticks) {
 int64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (flags & ~(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK))
         return -EINVAL;
 
     struct file *file = NULL;
-    int rc = eventfd_create_file((uint32_t)initval, flags, &file);
+    int rc = eventfd_create_file((uint32_t)initval, uflags, &file);
     if (rc < 0)
         return rc;
 
-    uint32_t fd_flags = (flags & EFD_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (uflags & EFD_CLOEXEC) ? FD_CLOEXEC : 0;
     int fd = fd_alloc_flags(proc_current(), file, fd_flags);
     if (fd < 0) {
         vfs_close(file);
@@ -1153,7 +1154,8 @@ int64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2, uint64_t a3,
 int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (flags & ~(TFD_CLOEXEC | TFD_NONBLOCK))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(TFD_CLOEXEC | TFD_NONBLOCK))
         return -EINVAL;
 
     int norm_clockid = 0;
@@ -1162,11 +1164,11 @@ int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a2,
         return clock_rc;
 
     struct file *file = NULL;
-    int rc = timerfd_create_file(norm_clockid, flags, &file);
+    int rc = timerfd_create_file(norm_clockid, uflags, &file);
     if (rc < 0)
         return rc;
 
-    uint32_t fd_flags = (flags & TFD_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (uflags & TFD_CLOEXEC) ? FD_CLOEXEC : 0;
     int fd = fd_alloc_flags(proc_current(), file, fd_flags);
     if (fd < 0) {
         vfs_close(file);
@@ -1178,7 +1180,8 @@ int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a2,
 int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
                             uint64_t old_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))
         return -EINVAL;
     if (!new_ptr)
         return -EFAULT;
@@ -1215,8 +1218,8 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
         return rc;
     }
 
-    bool cancel_on_set = (flags & TFD_TIMER_CANCEL_ON_SET) != 0;
-    if (cancel_on_set && !(flags & TFD_TIMER_ABSTIME)) {
+    bool cancel_on_set = (uflags & TFD_TIMER_CANCEL_ON_SET) != 0;
+    if (cancel_on_set && !(uflags & TFD_TIMER_ABSTIME)) {
         file_put(file);
         return -EINVAL;
     }
@@ -1246,7 +1249,7 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
         ctx->cancel_on_set = false;
     } else {
         uint64_t first_ns = value_ns;
-        if (!(flags & TFD_TIMER_ABSTIME)) {
+        if (!(uflags & TFD_TIMER_ABSTIME)) {
             first_ns = u64_add_sat(timerfd_now_ns(ctx->clockid, mono_ns, realtime_ns),
                                    value_ns);
         }
@@ -1314,7 +1317,8 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
         return -EFAULT;
     if (sigsetsize != sizeof(sigset_t))
         return -EINVAL;
-    if (flags & ~(SFD_CLOEXEC | SFD_NONBLOCK))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(SFD_CLOEXEC | SFD_NONBLOCK))
         return -EINVAL;
 
     sigset_t mask = 0;
@@ -1324,11 +1328,11 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
 
     if ((int64_t)fd == -1) {
         struct file *file = NULL;
-        int rc = signalfd_create_file(mask, flags, &file);
+        int rc = signalfd_create_file(mask, uflags, &file);
         if (rc < 0)
             return rc;
 
-        uint32_t fd_flags = (flags & SFD_CLOEXEC) ? FD_CLOEXEC : 0;
+        uint32_t fd_flags = (uflags & SFD_CLOEXEC) ? FD_CLOEXEC : 0;
         int newfd = fd_alloc_flags(proc_current(), file, fd_flags);
         if (newfd < 0) {
             vfs_close(file);
@@ -1372,15 +1376,16 @@ static struct inotify_ctx *inotify_ctx_from_fd(struct file *file) {
 int64_t sys_inotify_init1(uint64_t flags, uint64_t a1, uint64_t a2, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    if (flags & ~(IN_CLOEXEC | IN_NONBLOCK))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(IN_CLOEXEC | IN_NONBLOCK))
         return -EINVAL;
 
     struct file *file = NULL;
-    int rc = inotify_create_file(flags, &file);
+    int rc = inotify_create_file(uflags, &file);
     if (rc < 0)
         return rc;
 
-    uint32_t fd_flags = (flags & IN_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (uflags & IN_CLOEXEC) ? FD_CLOEXEC : 0;
     int fd = fd_alloc_flags(proc_current(), file, fd_flags);
     if (fd < 0) {
         vfs_close(file);

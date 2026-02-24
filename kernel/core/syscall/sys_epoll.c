@@ -78,7 +78,8 @@ static int epoll_timespec_to_timeout_ms(const struct timespec *ts) {
 int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    if (flags & ~EPOLL_CLOEXEC)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~EPOLL_CLOEXEC)
         return -EINVAL;
 
     struct file *file = NULL;
@@ -86,7 +87,7 @@ int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
     if (ret < 0)
         return ret;
 
-    uint32_t fd_flags = (flags & EPOLL_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (uflags & EPOLL_CLOEXEC) ? FD_CLOEXEC : 0;
     int fd = fd_alloc_flags(proc_current(), file, fd_flags);
     if (fd < 0) {
         vfs_close(file);
