@@ -77,6 +77,18 @@ static void fd_set_nonblock(int fd, bool enabled) {
     file_put(f);
 }
 
+static off_t fd_get_offset(int fd) {
+    struct file *f = fd_get(proc_current(), fd);
+    if (!f)
+        return (off_t)-1;
+    off_t off = 0;
+    mutex_lock(&f->lock);
+    off = f->offset;
+    mutex_unlock(&f->lock);
+    file_put(f);
+    return off;
+}
+
 struct user_map_ctx {
     struct process *proc;
     struct mm_struct *saved_mm;
@@ -816,6 +828,211 @@ static void test_eventfd_syscall_semantics(void) {
     close_fd_if_open(&efd);
 }
 
+static void test_copy_file_range_syscall_semantics(void) {
+    static const char src_payload[] = "abcdefghij";
+    int srcfd = -1;
+    int dstfd = -1;
+    int dst2fd = -1;
+    int dirfd = -1;
+    int prfd = -1;
+    int pwfd = -1;
+    struct file *srcf = NULL;
+    struct file *dstf = NULL;
+    struct file *dst2f = NULL;
+    struct file *dirf = NULL;
+    struct file *pr = NULL;
+    struct file *pw = NULL;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    bool mounted = false;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "copy_file_range mount");
+    if (ret < 0)
+        goto out;
+    mounted = true;
+
+    ret = vfs_open(VFS_IPC_MNT "/cfr_src.bin", O_CREAT | O_RDWR | O_TRUNC, 0644,
+                   &srcf);
+    test_check(ret == 0, "copy_file_range open src");
+    if (ret < 0)
+        goto out;
+
+    ret = vfs_open(VFS_IPC_MNT "/cfr_dst.bin", O_CREAT | O_RDWR | O_TRUNC, 0644,
+                   &dstf);
+    test_check(ret == 0, "copy_file_range open dst");
+    if (ret < 0)
+        goto out;
+
+    ret = vfs_open(VFS_IPC_MNT "/cfr_dst2.bin", O_CREAT | O_RDWR | O_TRUNC, 0644,
+                   &dst2f);
+    test_check(ret == 0, "copy_file_range open dst2");
+    if (ret < 0)
+        goto out;
+
+    srcfd = fd_alloc(proc_current(), srcf);
+    dstfd = fd_alloc(proc_current(), dstf);
+    dst2fd = fd_alloc(proc_current(), dst2f);
+    test_check(srcfd >= 0, "copy_file_range alloc srcfd");
+    test_check(dstfd >= 0, "copy_file_range alloc dstfd");
+    test_check(dst2fd >= 0, "copy_file_range alloc dst2fd");
+    if (srcfd < 0 || dstfd < 0 || dst2fd < 0)
+        goto out;
+
+    srcf = NULL;
+    dstf = NULL;
+    dst2f = NULL;
+
+    ssize_t wr = fd_write_once(srcfd, src_payload, sizeof(src_payload) - 1);
+    test_check(wr == (ssize_t)(sizeof(src_payload) - 1), "copy_file_range write src");
+    if (wr < 0)
+        goto out;
+
+    struct file *sf = fd_get(proc_current(), srcfd);
+    if (sf) {
+        (void)vfs_seek(sf, 0, SEEK_SET);
+        file_put(sf);
+    }
+
+    int64_t ret64 = sys_copy_file_range((uint64_t)srcfd, 0, (uint64_t)dstfd, 0, 0,
+                                        0);
+    test_check(ret64 == 0, "copy_file_range len0");
+
+    ret64 = sys_copy_file_range((uint64_t)srcfd, 0, (uint64_t)dstfd, 0, 1, 1);
+    test_check(ret64 == -EINVAL, "copy_file_range flags_einval");
+
+    ret64 = sys_copy_file_range((uint64_t)(srcfd + 4096), 0, (uint64_t)dstfd, 0,
+                                1, 0);
+    test_check(ret64 == -EBADF, "copy_file_range badfd_ebadf");
+
+    ret64 = sys_copy_file_range((uint64_t)srcfd, 0, (uint64_t)dstfd, 0, 4, 0);
+    test_check(ret64 == 4, "copy_file_range implicit_copy4");
+    if (ret64 == 4) {
+        off_t src_off = fd_get_offset(srcfd);
+        off_t dst_off = fd_get_offset(dstfd);
+        test_check(src_off == 4, "copy_file_range implicit_src_off");
+        test_check(dst_off == 4, "copy_file_range implicit_dst_off");
+    }
+
+    struct file *verify = NULL;
+    ret = vfs_open(VFS_IPC_MNT "/cfr_dst.bin", O_RDONLY, 0, &verify);
+    test_check(ret == 0, "copy_file_range verify open dst");
+    if (ret == 0 && verify) {
+        char buf[8] = {0};
+        ssize_t rd = vfs_read(verify, buf, 4);
+        test_check(rd == 4, "copy_file_range verify dst rd");
+        if (rd == 4)
+            test_check(memcmp(buf, "abcd", 4) == 0, "copy_file_range verify dst data");
+        vfs_close(verify);
+    }
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "copy_file_range user_map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    off_t *u_in_off = (off_t *)user_map_ptr(&um, 0);
+    off_t *u_out_off = (off_t *)user_map_ptr(&um, sizeof(off_t));
+    test_check(u_in_off != NULL, "copy_file_range u_in_off");
+    test_check(u_out_off != NULL, "copy_file_range u_out_off");
+    if (!u_in_off || !u_out_off)
+        goto out;
+
+    off_t in_off = 2;
+    off_t out_off = 0;
+    rc = copy_to_user(u_in_off, &in_off, sizeof(in_off));
+    test_check(rc == 0, "copy_file_range copy in_off");
+    rc = copy_to_user(u_out_off, &out_off, sizeof(out_off));
+    test_check(rc == 0, "copy_file_range copy out_off");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_copy_file_range((uint64_t)srcfd, (uint64_t)u_in_off,
+                                (uint64_t)dst2fd, (uint64_t)u_out_off, 3, 0);
+    test_check(ret64 == 3, "copy_file_range explicit_copy3");
+    if (ret64 == 3) {
+        rc = copy_from_user(&in_off, u_in_off, sizeof(in_off));
+        test_check(rc == 0, "copy_file_range read in_off");
+        rc = copy_from_user(&out_off, u_out_off, sizeof(out_off));
+        test_check(rc == 0, "copy_file_range read out_off");
+        if (rc == 0) {
+            test_check(in_off == 5, "copy_file_range explicit_in_off_advance");
+            test_check(out_off == 3, "copy_file_range explicit_out_off_advance");
+        }
+        test_check(fd_get_offset(srcfd) == 4, "copy_file_range explicit_src_off_keep");
+        test_check(fd_get_offset(dst2fd) == 0, "copy_file_range explicit_dst_off_keep");
+    }
+
+    verify = NULL;
+    ret = vfs_open(VFS_IPC_MNT "/cfr_dst2.bin", O_RDONLY, 0, &verify);
+    test_check(ret == 0, "copy_file_range verify open dst2");
+    if (ret == 0 && verify) {
+        char buf[8] = {0};
+        ssize_t rd = vfs_read(verify, buf, 3);
+        test_check(rd == 3, "copy_file_range verify dst2 rd");
+        if (rd == 3)
+            test_check(memcmp(buf, "cde", 3) == 0, "copy_file_range verify dst2 data");
+        vfs_close(verify);
+    }
+
+    ret64 = sys_copy_file_range((uint64_t)srcfd, 0x1000U, (uint64_t)dstfd, 0, 1,
+                                0);
+    test_check(ret64 == -EFAULT, "copy_file_range bad_off_ptr_efault");
+
+    ret = vfs_open(VFS_IPC_MNT, O_RDONLY, 0, &dirf);
+    test_check(ret == 0, "copy_file_range open dir");
+    if (ret == 0 && dirf) {
+        dirfd = fd_alloc(proc_current(), dirf);
+        test_check(dirfd >= 0, "copy_file_range alloc dirfd");
+        if (dirfd >= 0) {
+            dirf = NULL;
+            ret64 = sys_copy_file_range((uint64_t)dirfd, 0, (uint64_t)dstfd, 0, 1,
+                                        0);
+            test_check(ret64 == -EISDIR, "copy_file_range dir_eisdir");
+        }
+    }
+
+    ret = pipe_create(&pr, &pw);
+    test_check(ret == 0, "copy_file_range create pipe");
+    if (ret == 0) {
+        prfd = fd_alloc(proc_current(), pr);
+        pwfd = fd_alloc(proc_current(), pw);
+        test_check(prfd >= 0, "copy_file_range alloc prfd");
+        test_check(pwfd >= 0, "copy_file_range alloc pwfd");
+        if (prfd >= 0)
+            pr = NULL;
+        if (pwfd >= 0)
+            pw = NULL;
+        if (prfd >= 0 && pwfd >= 0) {
+            ret64 = sys_copy_file_range((uint64_t)prfd, 0, (uint64_t)dstfd, 0, 1,
+                                        0);
+            test_check(ret64 == -EINVAL, "copy_file_range src_pipe_einval");
+            ret64 = sys_copy_file_range((uint64_t)srcfd, 0, (uint64_t)pwfd, 0, 1,
+                                        0);
+            test_check(ret64 == -EINVAL, "copy_file_range dst_pipe_einval");
+        }
+    }
+
+out:
+    close_fd_if_open(&pwfd);
+    close_fd_if_open(&prfd);
+    close_fd_if_open(&dirfd);
+    close_fd_if_open(&dst2fd);
+    close_fd_if_open(&dstfd);
+    close_fd_if_open(&srcfd);
+    close_file_if_open(&pw);
+    close_file_if_open(&pr);
+    close_file_if_open(&dirf);
+    close_file_if_open(&dst2f);
+    close_file_if_open(&dstf);
+    close_file_if_open(&srcf);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
 static void test_timerfd_syscall_semantics(void) {
     int tfd = -1;
 
@@ -1120,6 +1337,7 @@ int run_vfs_ipc_tests(void) {
     test_epoll_pipe_semantics();
     test_epoll_edge_oneshot_semantics();
     test_eventfd_syscall_semantics();
+    test_copy_file_range_syscall_semantics();
     test_timerfd_syscall_semantics();
     test_timerfd_syscall_functional();
     test_signalfd_syscall_semantics();

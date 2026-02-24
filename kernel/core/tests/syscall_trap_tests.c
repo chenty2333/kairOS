@@ -3,12 +3,14 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/futex.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
+#include <kairos/time.h>
 #include <kairos/trap_core.h>
 #include <kairos/uaccess.h>
 
@@ -28,7 +30,114 @@ static int trap_should_deliver_calls;
 static bool trap_handler_saw_current_tf;
 static struct trap_frame *trap_handler_tf;
 
+#define TEST_NS_PER_SEC 1000000000ULL
 #define SYSCALL_USER_TEST_CODE_ADDR 0x12000
+
+struct user_map_ctx {
+    struct process *proc;
+    struct mm_struct *saved_mm;
+    struct mm_struct *active_mm;
+    struct mm_struct *temp_mm;
+    paddr_t saved_pgdir;
+    vaddr_t base;
+    size_t len;
+    bool switched_pgdir;
+};
+
+struct futex_waker_ctx {
+    vaddr_t uaddr;
+    volatile int started;
+    int wake_ret;
+};
+
+static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
+    if (!ctx || len == 0)
+        return -EINVAL;
+
+    memset(ctx, 0, sizeof(*ctx));
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+
+    ctx->proc = p;
+    ctx->saved_mm = p->mm;
+    ctx->active_mm = p->mm;
+    ctx->saved_pgdir = arch_mmu_current();
+
+    if (!ctx->active_mm) {
+        ctx->temp_mm = mm_create();
+        if (!ctx->temp_mm)
+            return -ENOMEM;
+        p->mm = ctx->temp_mm;
+        ctx->active_mm = ctx->temp_mm;
+    }
+
+    if (ctx->saved_pgdir != ctx->active_mm->pgdir) {
+        arch_mmu_switch(ctx->active_mm->pgdir);
+        ctx->switched_pgdir = true;
+    }
+
+    int rc = mm_mmap(ctx->active_mm, 0, len, VM_READ | VM_WRITE, 0, NULL, 0,
+                     false, &ctx->base);
+    if (rc < 0) {
+        if (ctx->switched_pgdir)
+            arch_mmu_switch(ctx->saved_pgdir);
+        if (ctx->temp_mm) {
+            p->mm = ctx->saved_mm;
+            mm_destroy(ctx->temp_mm);
+        }
+        memset(ctx, 0, sizeof(*ctx));
+        return rc;
+    }
+    ctx->len = len;
+    return 0;
+}
+
+static void user_map_end(struct user_map_ctx *ctx) {
+    if (!ctx || !ctx->proc)
+        return;
+    if (ctx->active_mm && ctx->base && ctx->len)
+        (void)mm_munmap(ctx->active_mm, ctx->base, ctx->len);
+    if (ctx->switched_pgdir)
+        arch_mmu_switch(ctx->saved_pgdir);
+    if (ctx->temp_mm) {
+        ctx->proc->mm = ctx->saved_mm;
+        mm_destroy(ctx->temp_mm);
+    }
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static void *user_map_ptr(const struct user_map_ctx *ctx, size_t off) {
+    if (!ctx || off >= ctx->len)
+        return NULL;
+    return (void *)(ctx->base + off);
+}
+
+static struct timespec ns_to_timespec(uint64_t ns) {
+    struct timespec ts = {
+        .tv_sec = (time_t)(ns / TEST_NS_PER_SEC),
+        .tv_nsec = (int64_t)(ns % TEST_NS_PER_SEC),
+    };
+    return ts;
+}
+
+static int futex_waitv_waker_worker(void *arg) {
+    struct futex_waker_ctx *ctx = (struct futex_waker_ctx *)arg;
+    if (!ctx)
+        proc_exit(0);
+
+    ctx->started = 1;
+    ctx->wake_ret = 0;
+    for (int i = 0; i < 4096; i++) {
+        int64_t ret = sys_futex((uint64_t)ctx->uaddr, FUTEX_WAKE, 1, 0, 0, 0);
+        if (ret > 0) {
+            ctx->wake_ret = (int)ret;
+            proc_exit(0);
+        }
+        proc_yield();
+    }
+    proc_exit(0);
+}
 
 static struct process *create_legacy_user_process(const char *name,
                                                   const uint8_t *code,
@@ -407,6 +516,227 @@ out_restore_mm:
     }
 }
 
+static void test_sched_affinity_syscalls_regression(void) {
+    struct process *p = proc_current();
+    test_check(p != NULL, "affinity proc_current");
+    if (!p)
+        return;
+
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    unsigned long saved_mask = 0;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "affinity user_map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    unsigned long *u_mask = (unsigned long *)user_map_ptr(&um, 0);
+    test_check(u_mask != NULL, "affinity user_ptr");
+    if (!u_mask)
+        goto out;
+
+    int64_t ret64 = sys_sched_getaffinity(0, sizeof(unsigned long) - 1,
+                                          (uint64_t)u_mask, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "affinity get len_einval");
+
+    ret64 = sys_sched_getaffinity(0, sizeof(unsigned long), 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "affinity get null_efault");
+
+    ret64 = sys_sched_getaffinity(0, sizeof(unsigned long), (uint64_t)u_mask, 0,
+                                  0, 0);
+    test_check(ret64 == (int64_t)sizeof(unsigned long), "affinity get ok");
+    if (ret64 == (int64_t)sizeof(unsigned long)) {
+        rc = copy_from_user(&saved_mask, u_mask, sizeof(saved_mask));
+        test_check(rc == 0, "affinity get copy_mask");
+        if (rc == 0)
+            test_check(saved_mask != 0, "affinity get nonzero_mask");
+    }
+
+    ret64 = sys_sched_getaffinity(0x7fffffffU, sizeof(unsigned long),
+                                  (uint64_t)u_mask, 0, 0, 0);
+    test_check(ret64 == -ESRCH, "affinity get bad_pid_esrch");
+
+    ret64 = sys_sched_setaffinity(0, sizeof(unsigned long) - 1, (uint64_t)u_mask,
+                                  0, 0, 0);
+    test_check(ret64 == -EINVAL, "affinity set len_einval");
+
+    ret64 = sys_sched_setaffinity(0, sizeof(unsigned long), 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "affinity set null_efault");
+
+    unsigned long req_mask = 0;
+    rc = copy_to_user(u_mask, &req_mask, sizeof(req_mask));
+    test_check(rc == 0, "affinity set copy_zero");
+    if (rc == 0) {
+        ret64 = sys_sched_setaffinity(0, sizeof(unsigned long), (uint64_t)u_mask,
+                                      0, 0, 0);
+        test_check(ret64 == -EINVAL, "affinity set zero_einval");
+    }
+
+    if (saved_mask) {
+        rc = copy_to_user(u_mask, &saved_mask, sizeof(saved_mask));
+        test_check(rc == 0, "affinity set copy_saved");
+        if (rc == 0) {
+            ret64 = sys_sched_setaffinity(0, sizeof(unsigned long),
+                                          (uint64_t)u_mask, 0, 0, 0);
+            test_check(ret64 == 0, "affinity set restore_ok");
+        }
+    }
+
+    int cpus = sched_cpu_count();
+    int bits = (int)(sizeof(unsigned long) * 8);
+    int current_cpu = p->se.cpu;
+    if (saved_mask && cpus > 1 && current_cpu >= 0 && current_cpu < bits) {
+        unsigned long alt_mask = saved_mask & ~(1UL << current_cpu);
+        if (alt_mask != 0) {
+            rc = copy_to_user(u_mask, &alt_mask, sizeof(alt_mask));
+            test_check(rc == 0, "affinity set copy_alt");
+            if (rc == 0) {
+                ret64 = sys_sched_setaffinity(0, sizeof(unsigned long),
+                                              (uint64_t)u_mask, 0, 0, 0);
+                test_check(ret64 == -EINVAL, "affinity set running_exclude_einval");
+            }
+            rc = copy_to_user(u_mask, &saved_mask, sizeof(saved_mask));
+            if (rc == 0)
+                (void)sys_sched_setaffinity(0, sizeof(unsigned long),
+                                            (uint64_t)u_mask, 0, 0, 0);
+        }
+    }
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_futex_waitv_syscalls_regression(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "futex_waitv user_map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    uint32_t *u_word = (uint32_t *)user_map_ptr(&um, 0);
+    struct futex_waitv *u_waiter =
+        (struct futex_waitv *)user_map_ptr(&um, 64);
+    struct timespec *u_timeout =
+        (struct timespec *)user_map_ptr(&um, 128);
+    test_check(u_word != NULL, "futex_waitv u_word");
+    test_check(u_waiter != NULL, "futex_waitv u_waiter");
+    test_check(u_timeout != NULL, "futex_waitv u_timeout");
+    if (!u_word || !u_waiter || !u_timeout)
+        goto out;
+
+    uint32_t word = 0;
+    rc = copy_to_user(u_word, &word, sizeof(word));
+    test_check(rc == 0, "futex_waitv init_word");
+    if (rc < 0)
+        goto out;
+
+    struct futex_waitv waiter = {
+        .val = 0,
+        .uaddr = (uint64_t)(uintptr_t)u_word,
+        .flags = FUTEX_32,
+        .__reserved = 0,
+    };
+    rc = copy_to_user(u_waiter, &waiter, sizeof(waiter));
+    test_check(rc == 0, "futex_waitv init_waiter");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_futex_waitv(0, 1, 0, 0, CLOCK_MONOTONIC, 0);
+    test_check(ret64 == -EFAULT, "futex_waitv null_waiters_efault");
+
+    ret64 = sys_futex_waitv((uint64_t)u_waiter, 0, 0, 0, CLOCK_MONOTONIC, 0);
+    test_check(ret64 == -EINVAL, "futex_waitv nr_zero_einval");
+
+    ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 1, 0, CLOCK_MONOTONIC, 0);
+    test_check(ret64 == -EINVAL, "futex_waitv flags_einval");
+
+    waiter.flags = 0;
+    rc = copy_to_user(u_waiter, &waiter, sizeof(waiter));
+    test_check(rc == 0, "futex_waitv copy_bad_flags");
+    if (rc == 0) {
+        ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 0, 0, CLOCK_MONOTONIC, 0);
+        test_check(ret64 == -EINVAL, "futex_waitv waiter_flags_einval");
+    }
+
+    waiter.flags = FUTEX_32;
+    waiter.__reserved = 1;
+    rc = copy_to_user(u_waiter, &waiter, sizeof(waiter));
+    test_check(rc == 0, "futex_waitv copy_reserved");
+    if (rc == 0) {
+        ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 0, 0, CLOCK_MONOTONIC, 0);
+        test_check(ret64 == -EINVAL, "futex_waitv reserved_einval");
+    }
+
+    waiter.__reserved = 0;
+    waiter.val = 1;
+    rc = copy_to_user(u_waiter, &waiter, sizeof(waiter));
+    test_check(rc == 0, "futex_waitv copy_eagain_waiter");
+    if (rc == 0) {
+        ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 0, 0, CLOCK_MONOTONIC, 0);
+        test_check(ret64 == -EAGAIN, "futex_waitv value_mismatch_eagain");
+    }
+
+    waiter.val = 0;
+    rc = copy_to_user(u_waiter, &waiter, sizeof(waiter));
+    test_check(rc == 0, "futex_waitv copy_timeout_waiter");
+    if (rc == 0) {
+        uint64_t now_ns = time_now_ns();
+        struct timespec abs = ns_to_timespec(now_ns);
+        rc = copy_to_user(u_timeout, &abs, sizeof(abs));
+        test_check(rc == 0, "futex_waitv copy_timeout_now");
+        if (rc == 0) {
+            ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 0, (uint64_t)u_timeout,
+                                    CLOCK_MONOTONIC, 0);
+            test_check(ret64 == -ETIMEDOUT, "futex_waitv timeout_etimedout");
+        }
+
+        ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 0, (uint64_t)u_timeout,
+                                12345, 0);
+        test_check(ret64 == -EINVAL, "futex_waitv bad_clock_einval");
+    }
+
+    struct futex_waker_ctx wctx = {
+        .uaddr = (vaddr_t)u_word,
+        .started = 0,
+        .wake_ret = 0,
+    };
+    struct process *waker =
+        kthread_create_joinable(futex_waitv_waker_worker, &wctx, "fwaitv");
+    test_check(waker != NULL, "futex_waitv create_waker");
+    if (!waker)
+        goto out;
+    pid_t wpid = waker->pid;
+    sched_enqueue(waker);
+    for (int i = 0; i < 2000 && !wctx.started; i++)
+        proc_yield();
+    test_check(wctx.started != 0, "futex_waitv waker_started");
+
+    uint64_t wake_deadline_ns = time_now_ns() + 1000ULL * 1000ULL * 1000ULL;
+    struct timespec wake_abs = ns_to_timespec(wake_deadline_ns);
+    rc = copy_to_user(u_timeout, &wake_abs, sizeof(wake_abs));
+    test_check(rc == 0, "futex_waitv copy_wake_timeout");
+    if (rc == 0) {
+        ret64 = sys_futex_waitv((uint64_t)u_waiter, 1, 0, (uint64_t)u_timeout,
+                                CLOCK_MONOTONIC, 0);
+        test_check(ret64 == 0, "futex_waitv wake_index_zero");
+    }
+
+    int status = 0;
+    pid_t wp = proc_wait(wpid, &status, 0);
+    test_check(wp == wpid, "futex_waitv waker_reaped");
+    test_check(wctx.wake_ret > 0, "futex_waitv wake_positive");
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_trap_dispatch_guard_clauses(void) {
     struct trap_frame tf;
     memset(&tf, 0, sizeof(tf));
@@ -523,6 +853,8 @@ int run_syscall_trap_tests(void) {
     test_syscall_identity_legacy();
     test_syscall_error_paths_legacy();
     test_uaccess_cross_page_regression();
+    test_sched_affinity_syscalls_regression();
+    test_futex_waitv_syscalls_regression();
     test_trap_dispatch_guard_clauses();
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();

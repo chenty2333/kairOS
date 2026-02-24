@@ -516,9 +516,7 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
         file_put(fin);
         return -EBADF;
     }
-    if (!fin->vnode || !fout->vnode ||
-        !fin->vnode->ops || !fout->vnode->ops ||
-        !fin->vnode->ops->read || !fout->vnode->ops->write) {
+    if (!fin->vnode || !fout->vnode) {
         file_put(fout);
         file_put(fin);
         return -EINVAL;
@@ -530,6 +528,12 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
     }
     if (fin->vnode->type == VNODE_PIPE || fin->vnode->type == VNODE_SOCKET ||
         fout->vnode->type == VNODE_PIPE || fout->vnode->type == VNODE_SOCKET) {
+        file_put(fout);
+        file_put(fin);
+        return -EINVAL;
+    }
+    if (!fin->vnode->ops || !fout->vnode->ops ||
+        !fin->vnode->ops->read || !fout->vnode->ops->write) {
         file_put(fout);
         file_put(fin);
         return -EINVAL;
