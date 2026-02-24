@@ -178,6 +178,9 @@ fi
 # resulting in empty libtcc object lists and link failures.
 run_cmd_with_quiet_log env -u MAKEFLAGS -u MAKEOVERRIDES -u MFLAGS \
   make -C "$BUILD_DIR" "${make_jobs[@]}" \
+  ONE_SOURCE=yes \
+  CONFIG_backtrace=no \
+  CPPFLAGS="-include ${BUILD_DIR}/config.h" \
   "${TCC_LIBTCC1_TARGET}-libtcc1-usegcc=yes" \
   tcc libtcc1.a
 
