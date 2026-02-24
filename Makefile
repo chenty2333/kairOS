@@ -258,7 +258,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-tcc-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -294,7 +294,7 @@ initramfs: $(INITRAMFS_STAMP)
 $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
 	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
-$(INITRAMFS_STAMP): $(USER_INITRAMFS) $(KAIROS_DEPS)
+$(INITRAMFS_STAMP): $(USER_INITRAMFS) $(BUSYBOX_STAMP) $(KAIROS_DEPS) scripts/busybox-applets.txt
 	@mkdir -p $(STAMP_DIR)
 	$(Q)INITRAMFS_BUSYBOX=$(INITRAMFS_BUSYBOX) $(KAIROS_CMD) image initramfs
 	@touch $@
@@ -322,7 +322,7 @@ $(ROOTFS_BASE_STAMP): $(KAIROS_DEPS)
 
 rootfs-busybox: $(ROOTFS_BUSYBOX_STAMP)
 
-$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) $(KAIROS_DEPS)
+$(ROOTFS_BUSYBOX_STAMP): $(BUSYBOX_STAMP) $(KAIROS_DEPS) scripts/busybox-applets.txt
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image rootfs-busybox
 	@touch $@
@@ -700,6 +700,9 @@ TEST_LOG ?= $(BUILD_DIR)/test.log
 TCC_SMOKE_TIMEOUT ?= 240
 TCC_SMOKE_LOG ?= $(BUILD_DIR)/tcc-smoke.log
 TCC_SMOKE_EXTRA_CFLAGS ?=
+BUSYBOX_APPLET_SMOKE_TIMEOUT ?= 240
+BUSYBOX_APPLET_SMOKE_LOG ?= $(BUILD_DIR)/busybox-applets-smoke.log
+BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS ?=
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
@@ -711,6 +714,7 @@ RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
 TEST_ISOLATED ?= 1
 TCC_SMOKE_ISOLATED ?= 0
+BUSYBOX_APPLET_SMOKE_ISOLATED ?= 0
 TEST_CONCURRENCY ?= 3
 TEST_ROUNDS ?= 3
 TEST_CONCURRENT_TARGET ?= test-vfs-ipc
@@ -727,11 +731,15 @@ TEST_LOCK_WAIT ?= $(LOCK_WAIT)
 TOOLCHAIN_LOCK_WAIT ?= 900
 TEST_LOG_FWD :=
 TCC_SMOKE_LOG_FWD :=
+BUSYBOX_APPLET_SMOKE_LOG_FWD :=
 ifneq ($(origin TEST_LOG),file)
 TEST_LOG_FWD := TEST_LOG="$(TEST_LOG)"
 endif
 ifneq ($(origin TCC_SMOKE_LOG),file)
 TCC_SMOKE_LOG_FWD := TCC_SMOKE_LOG="$(TCC_SMOKE_LOG)"
+endif
+ifneq ($(origin BUSYBOX_APPLET_SMOKE_LOG),file)
+BUSYBOX_APPLET_SMOKE_LOG_FWD := BUSYBOX_APPLET_SMOKE_LOG="$(BUSYBOX_APPLET_SMOKE_LOG)"
 endif
 ifndef RUN_ID
 RUN_ID := $(shell sh -c 'ts="$$(date +%y%m%d-%H%M)"; rnd="$$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d "[[:space:]]")"; if [ -z "$$rnd" ]; then rnd="$$(printf "%04x" "$$$$")"; fi; printf "%s-%s" "$$ts" "$$rnd"')
@@ -770,6 +778,24 @@ test-tcc-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 				TCC_SMOKE_STEP_DELAY_SEC="$(TCC_SMOKE_STEP_DELAY_SEC)" \
 				$(KAIROS_CMD) run test-tcc-smoke --extra-cflags "$(TCC_SMOKE_EXTRA_CFLAGS)" \
 				--timeout "$(TCC_SMOKE_TIMEOUT)" --log "$(TCC_SMOKE_LOG)"; \
+		fi
+
+test-busybox-applets-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+		$(Q)if [ "$(BUSYBOX_APPLET_SMOKE_ISOLATED)" = "1" ]; then \
+			if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+				$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+			fi; \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+				BUSYBOX_APPLET_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" \
+				BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS="$(BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS)" \
+				BUSYBOX_APPLET_SMOKE_TIMEOUT="$(BUSYBOX_APPLET_SMOKE_TIMEOUT)" \
+				$(BUSYBOX_APPLET_SMOKE_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-busybox-applets-smoke; \
+		else \
+			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+				BUSYBOX_APPLET_SMOKE_BOOT_DELAY_SEC="$(BUSYBOX_APPLET_SMOKE_BOOT_DELAY_SEC)" \
+				BUSYBOX_APPLET_SMOKE_STEP_DELAY_SEC="$(BUSYBOX_APPLET_SMOKE_STEP_DELAY_SEC)" \
+				$(KAIROS_CMD) run test-busybox-applets-smoke --extra-cflags "$(BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS)" \
+				--timeout "$(BUSYBOX_APPLET_SMOKE_TIMEOUT)" --log "$(BUSYBOX_APPLET_SMOKE_LOG)"; \
 		fi
 
 test-isolated:
@@ -970,6 +996,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests (isolated by default)"
+	@echo "  test-busybox-applets-smoke - Run busybox applet interactive smoke regression"
 	@echo "  test-tcc-smoke - Run tcc interactive smoke regression"
 	@echo "  test-isolated - Alias of isolated test mode"
 	@echo "  test-driver - Run driver test module only"

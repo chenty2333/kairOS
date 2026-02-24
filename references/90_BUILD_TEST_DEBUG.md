@@ -45,6 +45,7 @@ Userspace and rootfs:
 - `make rootfs` — full rootfs (base + busybox + init; includes tcc when WITH_TCC=1, which is the default)
 - `make disk` — create ext2 disk image
 - Image allocation prefers `truncate` and falls back to `dd if=/dev/zero`, improving compatibility in restricted containers
+- BusyBox applet link staging is driven by `scripts/busybox-applets.txt`; both `rootfs-busybox` and `initramfs` now depend on this file to avoid stale applet-link images
 
 Boot image:
 - `make uefi` — prepare UEFI firmware + Limine boot image
@@ -83,6 +84,7 @@ QEMU configuration:
 
 - `make test` — run kernel tests (default isolated mode, one run directory per invocation)
 - `make test-tcc-smoke` — run interactive `tcc` smoke regression (send `tcc` command in guest shell, assert usage + prompt round-trip, and fail on SIGSEGV/`no vma` markers)
+- `make test-busybox-applets-smoke` — run interactive BusyBox applet smoke regression (assert applet symlink/execution path for the enabled A-set and require `APPLET_SMOKE_OK:40`, `APPLET_BAD_COUNT:0`, `__BB_APPLET_SMOKE_DONE__`)
 - `make test-isolated` — isolated test alias
 - `make test-driver` — driver module only
 - `make test-mm` — memory module only

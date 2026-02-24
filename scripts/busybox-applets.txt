@@ -8,3 +8,7 @@ xargs find expr test seq
 dd hexdump od strings
 comm cmp diff paste fold nl
 vi
+ar cpio gunzip gzip tar unzip zcat
+base32 base64 cksum crc32 md5sum sha1sum sha256sum sha3sum sha512sum sum
+dos2unix expand fsync hostid install less link logname more nohup nproc printenv
+shuf split tac timeout truncate tsort unexpand unix2dos unlink watch xxd
