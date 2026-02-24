@@ -22,6 +22,7 @@
 #if CONFIG_KERNEL_TESTS
 
 #define VFS_IPC_MNT "/tmp/.kairos_vfs_ipc"
+#define VFS_IPC_UMOUNT_ABI_MNT "/tmp/.kairos_umount_abi"
 #define TEST_EFD_SEMAPHORE 0x1U
 #define TEST_TFD_TIMER_ABSTIME 0x1U
 #define TEST_TFD_TIMER_CANCEL_ON_SET 0x2U
@@ -377,6 +378,55 @@ static void test_tmpfs_vfs_semantics(void) {
 
     close_file_if_open(&f);
     cleanup_tmpfs_mount();
+}
+
+static void test_umount2_flag_width_semantics(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int ret = 0;
+
+    (void)vfs_umount(VFS_IPC_UMOUNT_ABI_MNT);
+    (void)vfs_rmdir(VFS_IPC_UMOUNT_ABI_MNT);
+
+    ret = vfs_mkdir(VFS_IPC_UMOUNT_ABI_MNT, 0755);
+    test_check(ret == 0 || ret == -EEXIST, "umount2 width mkdir");
+    if (ret < 0 && ret != -EEXIST)
+        return;
+
+    ret = vfs_mount(NULL, VFS_IPC_UMOUNT_ABI_MNT, "tmpfs", 0);
+    test_check(ret == 0, "umount2 width mount");
+    if (ret < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "umount2 width user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    char *u_path = (char *)user_map_ptr(&um, 0x0);
+    test_check(u_path != NULL, "umount2 width user path ptr");
+    if (!u_path)
+        goto out;
+
+    ret = copy_to_user(u_path, VFS_IPC_UMOUNT_ABI_MNT,
+                       strlen(VFS_IPC_UMOUNT_ABI_MNT) + 1);
+    test_check(ret == 0, "umount2 width copy path");
+    if (ret < 0)
+        goto out;
+
+    int64_t ret64 = sys_umount2((uint64_t)u_path, (1ULL << 32) | 1ULL, 0, 0, 0,
+                                0);
+    test_check(ret64 == -EINVAL, "umount2 width low32 invalid");
+
+    ret64 = sys_umount2((uint64_t)u_path, 1ULL << 32, 0, 0, 0, 0);
+    test_check(ret64 == 0, "umount2 width high32 ignored");
+
+out:
+    if (mapped)
+        user_map_end(&um);
+    (void)vfs_umount(VFS_IPC_UMOUNT_ABI_MNT);
+    (void)vfs_rmdir(VFS_IPC_UMOUNT_ABI_MNT);
 }
 
 struct blocking_read_ctx {
@@ -1681,6 +1731,7 @@ int run_vfs_ipc_tests(void) {
     pr_info("\n=== VFS/IPC Tests ===\n");
 
     test_tmpfs_vfs_semantics();
+    test_umount2_flag_width_semantics();
     test_pipe_semantics();
     test_epoll_pipe_semantics();
     test_epoll_edge_oneshot_semantics();
