@@ -59,6 +59,22 @@ static int epoll_copy_sigmask_from_user(sigset_t *out, uint64_t mask_ptr,
     return 1;
 }
 
+static int epoll_timespec_to_timeout_ms(const struct timespec *ts) {
+    if (!ts)
+        return -1;
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 ||
+        ts->tv_nsec >= (int64_t)NS_PER_SEC)
+        return -EINVAL;
+    uint64_t sec = (uint64_t)ts->tv_sec;
+    if (sec > UINT64_MAX / 1000ULL)
+        return 0x7fffffff;
+    uint64_t ms = sec * 1000ULL +
+                  ((uint64_t)ts->tv_nsec + 999999ULL) / 1000000ULL;
+    if (ms > 0x7fffffffULL)
+        return 0x7fffffff;
+    return (int)ms;
+}
+
 int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -152,12 +168,10 @@ int64_t sys_epoll_pwait2(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
         struct timespec ts;
         if (copy_from_user(&ts, (void *)timeout_ptr, sizeof(ts)) < 0)
             return -EFAULT;
-        if (ts.tv_sec < 0 || ts.tv_nsec < 0 ||
-            ts.tv_nsec >= (int64_t)NS_PER_SEC)
-            return -EINVAL;
-        uint64_t ms = (uint64_t)ts.tv_sec * 1000ULL +
-                      ((uint64_t)ts.tv_nsec + 999999ULL) / 1000000ULL;
-        timeout_ms = (ms > 0x7fffffffULL) ? 0x7fffffffLL : (int64_t)ms;
+        int rc = epoll_timespec_to_timeout_ms(&ts);
+        if (rc < 0)
+            return rc;
+        timeout_ms = (int64_t)rc;
     }
     return sys_epoll_wait(epfd, events_ptr, maxevents, (uint64_t)timeout_ms,
                           sigmask_ptr, sigsetsize);

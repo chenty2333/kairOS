@@ -153,8 +153,27 @@ static int timespec_to_timeout_ms(const struct timespec *ts) {
         return -1;
     if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= (int64_t)NS_PER_SEC)
         return -EINVAL;
-    uint64_t ms = (uint64_t)ts->tv_sec * 1000 + (uint64_t)ts->tv_nsec / 1000000ULL;
+    uint64_t sec = (uint64_t)ts->tv_sec;
+    if (sec > UINT64_MAX / 1000ULL)
+        return 0x7fffffff;
+    uint64_t ms = sec * 1000ULL +
+                  ((uint64_t)ts->tv_nsec + 999999ULL) / 1000000ULL;
     if (ms > 0x7fffffff)
+        return 0x7fffffff;
+    return (int)ms;
+}
+
+static int timeval_to_timeout_ms(const struct timeval *tv) {
+    if (!tv)
+        return -1;
+    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000)
+        return -EINVAL;
+    uint64_t sec = (uint64_t)tv->tv_sec;
+    if (sec > UINT64_MAX / 1000ULL)
+        return 0x7fffffff;
+    uint64_t ms = sec * 1000ULL +
+                  ((uint64_t)tv->tv_usec + 999ULL) / 1000ULL;
+    if (ms > 0x7fffffffULL)
         return 0x7fffffff;
     return (int)ms;
 }
@@ -326,9 +345,10 @@ int64_t sys_select(uint64_t nfds, uint64_t readfds_ptr, uint64_t writefds_ptr,
         struct timeval tv;
         if (copy_from_user(&tv, (void *)timeout_ptr, sizeof(tv)) < 0)
             return -EFAULT;
-        if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1000000)
-            return -EINVAL;
-        timeout_ms = (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+        int rc = timeval_to_timeout_ms(&tv);
+        if (rc < 0)
+            return rc;
+        timeout_ms = rc;
     }
 
     return do_select_common(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr,

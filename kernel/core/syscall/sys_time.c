@@ -57,14 +57,43 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
     return ticks ? ticks : 1;
 }
 
+static int clockid_sleep_base(uint64_t clockid, uint64_t *base_clockid) {
+    if (!base_clockid)
+        return -EINVAL;
+
+    switch (clockid) {
+    case CLOCK_MONOTONIC:
+    case CLOCK_BOOTTIME:
+        *base_clockid = CLOCK_MONOTONIC;
+        return 0;
+    case CLOCK_REALTIME:
+        *base_clockid = CLOCK_REALTIME;
+        return 0;
+    case CLOCK_TAI:
+        // FIXME: CLOCK_TAI currently aliases CLOCK_REALTIME without leap-second offset.
+        *base_clockid = CLOCK_REALTIME;
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
 static int clockid_now_ns(uint64_t clockid, uint64_t *out_ns) {
     if (!out_ns)
         return -EINVAL;
     switch (clockid) {
     case CLOCK_MONOTONIC:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_BOOTTIME:
+    case CLOCK_BOOTTIME_ALARM:
         *out_ns = time_now_ns();
         return 0;
     case CLOCK_REALTIME:
+    case CLOCK_REALTIME_COARSE:
+    case CLOCK_REALTIME_ALARM:
+    case CLOCK_TAI:
+        // FIXME: CLOCK_TAI currently aliases CLOCK_REALTIME without leap-second offset.
         *out_ns = time_realtime_ns();
         return 0;
     default:
@@ -165,9 +194,7 @@ int64_t sys_clock_gettime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
 int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
-        return -EINVAL;
-    if (clockid == CLOCK_MONOTONIC)
+    if (clockid != CLOCK_REALTIME)
         return -EINVAL;
     struct timespec ts;
     int rc = sys_copy_timespec(tp_ptr, &ts, false);
@@ -184,7 +211,8 @@ int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if (!tp_ptr)
         return -EFAULT;
-    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
+    uint64_t probe_ns = 0;
+    if (clockid_now_ns(clockid, &probe_ns) < 0)
         return -EINVAL;
 
     uint64_t res_ns = (NS_PER_SEC + CONFIG_HZ - 1) / CONFIG_HZ;
@@ -220,8 +248,8 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
     (void)a4; (void)a5;
     if (flags & ~TIMER_ABSTIME)
         return -EINVAL;
-    uint64_t now_ns = 0;
-    int rc = clockid_now_ns(clockid, &now_ns);
+    uint64_t sleep_clockid = 0;
+    int rc = clockid_sleep_base(clockid, &sleep_clockid);
     if (rc < 0)
         return rc;
     struct timespec req;
@@ -231,7 +259,7 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
 
     uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
     if (flags & TIMER_ABSTIME)
-        return clock_nanosleep_abstime(clockid, req_ns);
+        return clock_nanosleep_abstime(sleep_clockid, req_ns);
 
     uint64_t delta = ns_to_sched_ticks(req_ns);
     if (delta == 0)
