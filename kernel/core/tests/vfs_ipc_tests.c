@@ -1574,6 +1574,108 @@ out:
         cleanup_tmpfs_mount();
 }
 
+static void test_inotify_mask_update_functional(void) {
+    int ifd = -1;
+    int wd = -1;
+    struct file *f = NULL;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    bool mounted = false;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "inotify mask mount");
+    if (ret < 0)
+        goto out;
+    mounted = true;
+
+    ret = vfs_mkdir(VFS_IPC_MNT "/watch2", 0755);
+    test_check(ret == 0, "inotify mask mkdir watch2");
+    if (ret < 0)
+        goto out;
+
+    ret = vfs_open(VFS_IPC_MNT "/regular.txt", O_CREAT | O_WRONLY | O_TRUNC, 0644,
+                   &f);
+    test_check(ret == 0, "inotify mask create regular");
+    close_file_if_open(&f);
+    if (ret < 0)
+        goto out;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "inotify mask user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    char *u_dir_path = (char *)user_map_ptr(&um, 0);
+    char *u_file_path = (char *)user_map_ptr(&um, 256);
+    test_check(u_dir_path != NULL, "inotify mask u dir path");
+    test_check(u_file_path != NULL, "inotify mask u file path");
+    if (!u_dir_path || !u_file_path)
+        goto out;
+
+    const char *dir_path = VFS_IPC_MNT "/watch2";
+    const char *file_path = VFS_IPC_MNT "/regular.txt";
+    rc = copy_to_user(u_dir_path, dir_path, strlen(dir_path) + 1);
+    test_check(rc == 0, "inotify mask copy dir path");
+    rc = copy_to_user(u_file_path, file_path, strlen(file_path) + 1);
+    test_check(rc == 0, "inotify mask copy file path");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_inotify_init1(IN_NONBLOCK | IN_CLOEXEC, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "inotify mask init");
+    if (ret64 < 0)
+        goto out;
+    ifd = (int)ret64;
+    test_check(fd_has_cloexec(ifd), "inotify mask cloexec");
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, (uint64_t)u_dir_path, IN_CREATE,
+                                  0, 0, 0);
+    test_check(ret64 > 0, "inotify mask add create");
+    if (ret64 <= 0)
+        goto out;
+    wd = (int)ret64;
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, (uint64_t)u_dir_path,
+                                  IN_MASK_ADD | IN_DELETE, 0, 0, 0);
+    test_check(ret64 == wd, "inotify mask add merge");
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, (uint64_t)u_dir_path,
+                                  IN_MASK_CREATE | IN_CREATE, 0, 0, 0);
+    test_check(ret64 == -EEXIST, "inotify mask create eexist");
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, (uint64_t)u_file_path,
+                                  IN_ONLYDIR | IN_MODIFY, 0, 0, 0);
+    test_check(ret64 == -ENOTDIR, "inotify onlydir enotdir");
+
+    ret = vfs_open(VFS_IPC_MNT "/watch2/new2.txt", O_CREAT | O_WRONLY | O_TRUNC,
+                   0644, &f);
+    test_check(ret == 0, "inotify mask create file");
+    close_file_if_open(&f);
+    if (ret < 0)
+        goto out;
+
+    bool seen = inotify_wait_event(ifd, wd, IN_CREATE, "new2.txt",
+                                   500ULL * 1000ULL * 1000ULL);
+    test_check(seen, "inotify mask saw create");
+
+    ret = vfs_unlink(VFS_IPC_MNT "/watch2/new2.txt");
+    test_check(ret == 0, "inotify mask unlink file");
+    if (ret == 0) {
+        seen = inotify_wait_event(ifd, wd, IN_DELETE, "new2.txt",
+                                  500ULL * 1000ULL * 1000ULL);
+        test_check(seen, "inotify mask saw delete");
+    }
+
+out:
+    close_file_if_open(&f);
+    close_fd_if_open(&ifd);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
 int run_vfs_ipc_tests(void) {
     tests_failed = 0;
     pr_info("\n=== VFS/IPC Tests ===\n");
@@ -1592,6 +1694,7 @@ int run_vfs_ipc_tests(void) {
     test_signalfd_syscall_rebind();
     test_inotify_syscall_semantics();
     test_inotify_syscall_functional();
+    test_inotify_mask_update_functional();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");
