@@ -80,7 +80,7 @@ Two-layer structure:
     - `clock_nanosleep` supports both relative sleep and `TIMER_ABSTIME` absolute deadlines
     - `clock_nanosleep` accepts `CLOCK_BOOTTIME` and `CLOCK_TAI` (currently mapped to monotonic/realtime base clocks)
     - `CLOCK_REALTIME` is implemented as `CLOCK_MONOTONIC + realtime_offset`; `clock_settime(CLOCK_REALTIME, ...)` updates this offset while `CLOCK_MONOTONIC` remains non-settable
-    - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) on current realtime/monotonic sources
+    - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) on current realtime/monotonic sources, plus CPU clocks (`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`) from scheduler accounting
     - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 

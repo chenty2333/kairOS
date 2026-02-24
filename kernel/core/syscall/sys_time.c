@@ -57,6 +57,14 @@ static uint64_t ns_to_sched_ticks(uint64_t ns) {
     return ticks ? ticks : 1;
 }
 
+static uint64_t sched_ticks_to_ns(uint64_t ticks) {
+    if (ticks == 0)
+        return 0;
+    if (ticks > UINT64_MAX / NS_PER_SEC)
+        return UINT64_MAX;
+    return (ticks * NS_PER_SEC) / CONFIG_HZ;
+}
+
 static int clockid_sleep_base(uint64_t clockid, uint64_t *base_clockid) {
     if (!base_clockid)
         return -EINVAL;
@@ -82,6 +90,14 @@ static int clockid_now_ns(uint64_t clockid, uint64_t *out_ns) {
     if (!out_ns)
         return -EINVAL;
     switch (clockid) {
+    case CLOCK_PROCESS_CPUTIME_ID:
+    case CLOCK_THREAD_CPUTIME_ID: {
+        struct process *p = proc_current();
+        if (!p)
+            return -EINVAL;
+        *out_ns = sched_ticks_to_ns(p->utime + p->stime);
+        return 0;
+    }
     case CLOCK_MONOTONIC:
     case CLOCK_MONOTONIC_RAW:
     case CLOCK_MONOTONIC_COARSE:
