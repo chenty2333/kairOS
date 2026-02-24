@@ -18,6 +18,7 @@ All three architectures share the same path:
    - aarch64 treats PSCI `ALREADY_ON` / `ON_PENDING` as accepted start request (normalized to success for SMP bring-up flow)
    - aarch64 keeps a low-VA identity alias for kernel image so PSCI-started AP can safely enable MMU while executing from PA
    - failed AP bring-up is logged explicitly as `SMP: cpuX start failed rc=<errno>`
+   - when an AP start request succeeds but CPU never reaches `secondary_cpu_main()`, kernel logs `SMP: cpuX did not reach online state` plus arch debug marker
    - SMP summary now reports discovered topology total (`SMP: online/total CPUs active`) and emits `online shortfall` when APs fail to come online
 
 boot_info struct is defined in include/kairos/boot.h, accessed globally through boot/boot.c getters.

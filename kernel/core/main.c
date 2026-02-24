@@ -10,6 +10,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/tick.h>
 
@@ -21,6 +22,7 @@ extern char _bss_end[];
 
 /* Secondary CPU handling */
 static volatile int secondary_cpus_online = 0;
+static volatile uint8_t secondary_cpu_online_map[CONFIG_MAX_CPUS];
 int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque);
 uint64_t arch_cpu_start_debug(int cpu);
 extern void _secondary_start(void);
@@ -32,6 +34,8 @@ void secondary_cpu_main(unsigned long cpu_id) {
     arch_trap_init();
     arch_timer_init(CONFIG_HZ);
     proc_idle_init();
+    if ((int)cpu_id >= 0 && (int)cpu_id < CONFIG_MAX_CPUS)
+        secondary_cpu_online_map[cpu_id] = 1;
     __sync_fetch_and_add(&secondary_cpus_online, 1);
     pr_info("CPU %lu: online and ready\n", cpu_id);
     arch_irq_enable();
@@ -46,6 +50,7 @@ static void smp_init(void) {
     int bsp_cpu = bi ? (int)bi->bsp_cpu_id : (int)arch_cpu_id();
     int started = 0;
     int start_fail = 0;
+    bool requested[CONFIG_MAX_CPUS];
 
     if (cpu_count < 1)
         cpu_count = 1;
@@ -53,6 +58,8 @@ static void smp_init(void) {
         cpu_count = CONFIG_MAX_CPUS;
 
     secondary_cpus_online = 0;
+    memset((void *)secondary_cpu_online_map, 0, sizeof(secondary_cpu_online_map));
+    memset(requested, 0, sizeof(requested));
 
     pr_info("SMP: Booting secondary CPUs (bsp=%d total=%d)...\n",
             bsp_cpu, cpu_count);
@@ -65,6 +72,7 @@ static void smp_init(void) {
                                 (unsigned long)cpu);
         if (rc == 0) {
             started++;
+            requested[cpu] = true;
             pr_info("SMP: cpu%d start requested\n", cpu);
         } else {
             start_fail++;
@@ -107,6 +115,8 @@ static void smp_init(void) {
         for (int cpu = 0; cpu < cpu_count; cpu++) {
             if (cpu == bsp_cpu)
                 continue;
+            if (requested[cpu] && !secondary_cpu_online_map[cpu])
+                pr_warn("SMP: cpu%d did not reach online state\n", cpu);
             uint64_t dbg = arch_cpu_start_debug(cpu);
             if (dbg)
                 pr_warn("SMP: cpu%d start debug=0x%lx\n",
