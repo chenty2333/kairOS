@@ -65,6 +65,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - drivers/net/: virtio_net
 - drivers/tty/: terminal subsystem (tty_core, console_tty, n_tty line discipline, pty)
   - PTY slave->master output path now uses bounded buffering with backpressure (no overwrite-on-full); nonblocking writes return `EAGAIN`, and writable readiness is reflected by `POLLOUT`
+  - n_tty/pty blocking read-write waits now use wait-queue sleep/wakeup paths (no poll-wait + yield spin loops)
 - drivers/char/: character devices (console)
 - drivers/gpu/: drm_lite (optional, CONFIG_DRM_LITE)
 - drivers/fb/: framebuffer (directory exists, currently empty)
@@ -83,12 +84,14 @@ AF_UNIX (net/af_unix.c):
 - Stream/Dgram peer and bind-table object lifetime is refcounted internally to avoid close/connect/send race UAFs
 - Listener close now propagates connect errors to pending clients instead of leaving blocked connectors indefinitely
 - Stream connect/accept support non-blocking mode (`MSG_DONTWAIT`), including connect-in-progress state and `SO_ERROR` readout
+  - Nonblocking connect failure keeps `poll(POLLOUT|POLLERR)` visible until userspace consumes/clears it via `getsockopt(SO_ERROR)`
 
 AF_INET (net/af_inet.c):
 - Based on lwIP raw/callback API
 - Each socket maps to a tcp_pcb or udp_pcb
 - Receive buffer 64KB; INET_ACCEPT_BACKLOG=16 defines accept queue size, but listen() backlog parameter is currently ignored
 - Stream connect/accept/recv and UDP recv honor non-blocking behavior (`EINPROGRESS`/`EALREADY`/`EAGAIN`), with connect readiness surfaced via poll + `SO_ERROR`
+  - TCP connect completion races are stabilized: repeated connect returns `EALREADY` while in progress and `EISCONN` after completion
 
 lwIP integration:
 - net/lwip_netif.c: network interface adapter; lwip_netif_input() is implemented but not yet called from virtio_net RX interrupt

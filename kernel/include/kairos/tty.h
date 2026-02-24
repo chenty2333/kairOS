@@ -9,6 +9,7 @@
 #include <kairos/ringbuf.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
+#include <kairos/wait.h>
 
 #define TTY_INPUT_BUF_SIZE  1024
 #define TTY_CANON_BUF_SIZE  256
@@ -94,6 +95,8 @@ struct tty_struct {
     struct vnode        *vnode;
     int                 count;
     void                *driver_data;
+    struct wait_queue   read_wait;
+    struct wait_queue   write_wait;
 };
 
 struct tty_struct *tty_alloc(struct tty_driver *driver, int index);

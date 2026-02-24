@@ -6,7 +6,6 @@
 #include <kairos/devfs.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
-#include <kairos/pollwait.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/ringbuf.h>
@@ -248,11 +247,6 @@ static int pty_wait_master_input_space(struct tty_struct *master) {
     if (!master)
         return -EIO;
 
-    struct vnode *vn = master->vnode;
-    struct process *p = proc_current();
-    if (!vn || !p)
-        return -EAGAIN;
-
     for (;;) {
         bool irq_state = arch_irq_save();
         spin_lock(&master->lock);
@@ -266,42 +260,8 @@ static int pty_wait_master_input_space(struct tty_struct *master) {
         if (hungup)
             return 0;
 
-        struct poll_waiter waiter = {0};
-        INIT_LIST_HEAD(&waiter.entry.node);
-        waiter.entry.proc = p;
-        poll_wait_add(&vn->pollers, &waiter);
-
-        irq_state = arch_irq_save();
-        spin_lock(&master->lock);
-        has_space = ringbuf_avail(&master->input_rb) > 0;
-        hungup = (master->flags & TTY_HUPPED) != 0;
-        spin_unlock(&master->lock);
-        arch_irq_restore(irq_state);
-        if (has_space || hungup) {
-            poll_wait_remove(&waiter);
-            return has_space ? 1 : 0;
-        }
-
-        proc_lock(p);
-        if (p->sig_pending) {
-            proc_unlock(p);
-            poll_wait_remove(&waiter);
-            return -EINTR;
-        }
-        p->wait_channel = &waiter;
-        p->sleep_deadline = 0;
-        p->state = PROC_SLEEPING;
-        proc_unlock(p);
-        proc_yield();
-
-        proc_lock(p);
-        p->wait_channel = NULL;
-        p->sleep_deadline = 0;
-        p->state = PROC_RUNNING;
-        bool interrupted = p->sig_pending;
-        proc_unlock(p);
-        poll_wait_remove(&waiter);
-        if (interrupted)
+        int rc = proc_sleep_on(&master->write_wait, &master->write_wait, true);
+        if (rc == -EINTR)
             return -EINTR;
     }
 }
@@ -332,6 +292,8 @@ static ssize_t pty_slave_write(struct tty_struct *tty, const uint8_t *buf,
         spin_unlock(&master->lock);
         arch_irq_restore(irq_state);
 
+        if (pushed)
+            wait_queue_wakeup_all(&master->read_wait);
         if (pushed && master->vnode)
             vfs_poll_wake(master->vnode, POLLIN);
         if (written == count)
@@ -420,6 +382,7 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
         arch_irq_restore(irq_state);
 
         if (got > 0) {
+            wait_queue_wakeup_all(&tty->write_wait);
             if (vn)
                 vfs_poll_wake(vn, POLLOUT);
             return (ssize_t)got;
@@ -429,66 +392,8 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
         if (flags & O_NONBLOCK)
             return -EAGAIN;
 
-        struct process *p = proc_current();
-        if (!p)
-            return -EAGAIN;
-        if (!vn)
-            return -EIO;
-
-        /* Poll-wait based blocking */
-        struct poll_waiter waiter = {0};
-        INIT_LIST_HEAD(&waiter.entry.node);
-        waiter.entry.proc = p;
-
-        irq_state = arch_irq_save();
-        spin_lock(&tty->lock);
-        bool has_data = !ringbuf_empty(&tty->input_rb);
-        spin_unlock(&tty->lock);
-        arch_irq_restore(irq_state);
-        if (has_data)
-            continue;
-
-        poll_wait_add(&vn->pollers, &waiter);
-
-        irq_state = arch_irq_save();
-        spin_lock(&tty->lock);
-        has_data = !ringbuf_empty(&tty->input_rb);
-        spin_unlock(&tty->lock);
-        arch_irq_restore(irq_state);
-        if (has_data) {
-            poll_wait_remove(&waiter);
-            continue;
-        }
-
-        proc_lock(p);
-        if (p->sig_pending) {
-            proc_unlock(p);
-            poll_wait_remove(&waiter);
-            return -EINTR;
-        }
-        p->wait_channel = &waiter;
-        p->sleep_deadline = 0;
-        p->state = PROC_SLEEPING;
-        proc_unlock(p);
-
-        /* Final re-check before yield */
-        irq_state = arch_irq_save();
-        spin_lock(&tty->lock);
-        has_data = !ringbuf_empty(&tty->input_rb);
-        spin_unlock(&tty->lock);
-        arch_irq_restore(irq_state);
-        if (!has_data)
-            proc_yield();
-
-        proc_lock(p);
-        p->wait_channel = NULL;
-        p->sleep_deadline = 0;
-        p->state = PROC_RUNNING;
-        bool interrupted = p->sig_pending;
-        proc_unlock(p);
-
-        poll_wait_remove(&waiter);
-        if (interrupted)
+        int rc = proc_sleep_on(&tty->read_wait, &tty->read_wait, true);
+        if (rc == -EINTR)
             return -EINTR;
     }
 }

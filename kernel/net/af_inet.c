@@ -401,9 +401,22 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
         return -EISCONN;
     }
     if (sock->state == SS_CONNECTING) {
-        if (nonblock)
-            return -EALREADY;
         mutex_lock(&is->lock);
+        if (is->connect_done) {
+            int done_ret = is->connect_err;
+            if (done_ret == 0)
+                sock->state = SS_CONNECTED;
+            else
+                sock->state = SS_UNCONNECTED;
+            mutex_unlock(&is->lock);
+            if (done_ret == 0)
+                return -EISCONN;
+            return done_ret;
+        }
+        if (nonblock) {
+            mutex_unlock(&is->lock);
+            return -EALREADY;
+        }
         while (!is->connect_done) {
             int rc = proc_sleep_on_mutex(&is->connect_wait, &is->connect_wait,
                                          &is->lock, true);
@@ -687,8 +700,13 @@ static int inet_tcp_poll(struct socket *sock, uint32_t events) {
             if (is->connect_err == 0)
                 revents |= POLLOUT;
             else
-                revents |= POLLERR;
+                revents |= POLLOUT | POLLERR;
         }
+        mutex_unlock(&is->lock);
+    } else if (sock->state == SS_UNCONNECTED) {
+        mutex_lock(&is->lock);
+        if (is->connect_err != 0)
+            revents |= POLLOUT | POLLERR;
         mutex_unlock(&is->lock);
     } else if (sock->state == SS_CONNECTED) {
         inet_lwip_lock();

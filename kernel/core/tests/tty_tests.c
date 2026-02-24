@@ -10,6 +10,7 @@
 #include <kairos/sched.h>
 #include <kairos/signal.h>
 #include <kairos/string.h>
+#include <kairos/syscall.h>
 #include <kairos/vfs.h>
 
 #if CONFIG_KERNEL_TESTS
@@ -28,6 +29,13 @@ static void close_file_if_open(struct file **f) {
         vfs_close(*f);
         *f = NULL;
     }
+}
+
+static void close_fd_if_open(int *fd) {
+    if (!fd || *fd < 0)
+        return;
+    (void)fd_close(proc_current(), *fd);
+    *fd = -1;
 }
 
 static void set_nonblock(struct file *f, bool enabled) {
@@ -292,6 +300,58 @@ static void test_pty_nonblock_write_backpressure(void) {
     wr = vfs_write(slave, "z", 1);
     test_check(wr == 1, "pty nonblock write resumes after drain");
 
+    close_file_if_open(&slave);
+    close_file_if_open(&master);
+}
+
+static void test_tty_fcntl_nonblock_semantics(void) {
+    struct file *master = NULL;
+    struct file *slave = NULL;
+    int slave_fd = -1;
+    int ret = open_pty_pair(&master, &slave);
+    test_check(ret == 0, "tty fcntl open pair");
+    if (ret < 0)
+        return;
+
+    slave_fd = fd_alloc(proc_current(), slave);
+    test_check(slave_fd >= 0, "tty fcntl alloc slave fd");
+    if (slave_fd >= 0)
+        slave = NULL;
+
+    if (slave_fd >= 0) {
+        int64_t fl = sys_fcntl((uint64_t)slave_fd, F_GETFL, 0, 0, 0, 0);
+        test_check(fl >= 0, "tty fcntl getfl initial");
+        if (fl >= 0) {
+            int64_t ret64 =
+                sys_fcntl((uint64_t)slave_fd, F_SETFL,
+                          (uint64_t)(((uint32_t)fl) | O_NONBLOCK), 0, 0, 0);
+            test_check(ret64 == 0, "tty fcntl setfl nonblock");
+
+            fl = sys_fcntl((uint64_t)slave_fd, F_GETFL, 0, 0, 0, 0);
+            test_check(fl >= 0, "tty fcntl getfl nonblock");
+            if (fl >= 0)
+                test_check((((uint32_t)fl) & O_NONBLOCK) != 0,
+                           "tty fcntl getfl has nonblock");
+
+            struct file *sf = fd_get(proc_current(), slave_fd);
+            test_check(sf != NULL, "tty fcntl fd_get");
+            if (sf) {
+                uint8_t buf[8];
+                ssize_t rd = vfs_read(sf, buf, sizeof(buf));
+                test_check(rd == -EWOULDBLOCK,
+                           "tty fcntl read empty ewouldblock");
+                file_put(sf);
+            }
+
+            ret64 = sys_fcntl((uint64_t)slave_fd, F_SETFL,
+                              (uint64_t)(((uint32_t)fl) & ~O_NONBLOCK), 0, 0,
+                              0);
+            test_check(ret64 == 0, "tty fcntl clear nonblock");
+        }
+    }
+
+    if (slave_fd >= 0)
+        close_fd_if_open(&slave_fd);
     close_file_if_open(&slave);
     close_file_if_open(&master);
 }
@@ -600,6 +660,7 @@ int run_tty_tests(void) {
 
     test_pty_open_read_write_ioctl();
     test_pty_nonblock_write_backpressure();
+    test_tty_fcntl_nonblock_semantics();
     test_n_tty_canonical_echo();
     test_n_tty_isig_behavior();
     test_n_tty_blocking_read_paths();

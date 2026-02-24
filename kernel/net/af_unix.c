@@ -409,14 +409,29 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
         return -EISCONN;
     }
     if (sock->state == SS_CONNECTING) {
-        if (nonblock)
-            return -EALREADY;
         mutex_lock(&us->lock);
+        if (us->peer) {
+            sock->state = SS_CONNECTED;
+            mutex_unlock(&us->lock);
+            return -EISCONN;
+        }
+        if (us->connect_err != 0 || us->closing) {
+            ret = us->connect_err ? us->connect_err : -ECONNABORTED;
+            sock->state = SS_UNCONNECTED;
+            mutex_unlock(&us->lock);
+            return ret;
+        }
+        if (nonblock) {
+            mutex_unlock(&us->lock);
+            return -EALREADY;
+        }
         while (!us->peer && us->connect_err == 0 && !us->closing) {
             int rc = proc_sleep_on_mutex(&us->buf.rwait, &us->buf.rwait,
                                          &us->lock, true);
-            if (rc == -EINTR)
-                continue;
+            if (rc == -EINTR) {
+                mutex_unlock(&us->lock);
+                return -EINTR;
+            }
         }
         if (!us->peer && us->connect_err == 0 && us->closing)
             ret = -ECONNABORTED;
@@ -502,7 +517,9 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
         int rc = proc_sleep_on_mutex(&us->buf.rwait, &us->buf.rwait,
                                      &us->lock, true);
         if (rc == -EINTR) {
-            continue;
+            mutex_unlock(&us->lock);
+            unix_sock_put(listener);
+            return -EINTR;
         }
     }
     if (!ret && us->peer)
@@ -568,6 +585,8 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                     client->sock->state = SS_UNCONNECTED;
             }
             wait_queue_wakeup_all(&client->buf.rwait);
+            if (client->sock)
+                poll_wait_wake(&client->sock->pollers, POLLOUT | POLLERR);
             mutex_unlock(&client->lock);
             unix_sock_put(client);
             return ret;
@@ -585,6 +604,8 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                         client->sock->state = SS_UNCONNECTED;
                 }
                 wait_queue_wakeup_all(&client->buf.rwait);
+                if (client->sock)
+                    poll_wait_wake(&client->sock->pollers, POLLOUT | POLLERR);
                 mutex_unlock(&client->lock);
                 unix_sock_put(client);
                 return -ENOMEM;
@@ -601,6 +622,8 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                     client->sock->state = SS_UNCONNECTED;
             }
             wait_queue_wakeup_all(&client->buf.rwait);
+            if (client->sock)
+                poll_wait_wake(&client->sock->pollers, POLLOUT | POLLERR);
             mutex_unlock(&client->lock);
             unix_sock_put(client);
             return ret;
@@ -712,8 +735,11 @@ static int unix_stream_poll(struct socket *sock, uint32_t events) {
         if (us->peer) {
             revents |= POLLOUT;
         } else if (us->connect_err != 0 || us->closing) {
-            revents |= POLLERR;
+            revents |= POLLOUT | POLLERR;
         }
+    } else if (sock->state == SS_UNCONNECTED) {
+        if (us->connect_err != 0)
+            revents |= POLLOUT | POLLERR;
     } else if (sock->state == SS_CONNECTED) {
         if (us->buf.count > 0 || !us->peer || us->closing)
             revents |= POLLIN;
@@ -1093,6 +1119,9 @@ static int unix_close(struct socket *sock) {
                     pend->client->sock->state = SS_UNCONNECTED;
             }
             wait_queue_wakeup_all(&pend->client->buf.rwait);
+            if (pend->client->sock)
+                poll_wait_wake(&pend->client->sock->pollers,
+                               POLLOUT | POLLERR);
             mutex_unlock(&pend->client->lock);
             unix_sock_put(pend->client);
             pend->client = NULL;

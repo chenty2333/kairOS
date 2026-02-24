@@ -1431,6 +1431,10 @@ static void test_socket_nonblock_syscall_semantics(void) {
                "socknb connect nonblock inprogress");
 
     if (ret64 == -EINPROGRESS) {
+        int64_t retry = sys_connect((uint64_t)client_fd, (uint64_t)u_srv_addr,
+                                    sizeof(srv_addr), 0, 0, 0);
+        test_check(retry == -EALREADY, "socknb connect retry ealready");
+
         int64_t acc = -EAGAIN;
         for (int i = 0; i < 4000 && acc == -EAGAIN; i++) {
             acc = sys_accept((uint64_t)listener_fd, 0, 0, 0, 0, 0);
@@ -1441,6 +1445,10 @@ static void test_socket_nonblock_syscall_semantics(void) {
         if (acc >= 0)
             accepted_fd = (int)acc;
     }
+
+    ret64 = sys_connect((uint64_t)client_fd, (uint64_t)u_srv_addr,
+                        sizeof(srv_addr), 0, 0, 0);
+    test_check(ret64 == -EISCONN, "socknb connect after complete eisconn");
 
     int optlen = sizeof(int);
     rc = copy_to_user(u_optlen, &optlen, sizeof(optlen));
@@ -1474,6 +1482,109 @@ out:
     close_socket_if_open(&listener);
     if (mapped)
         user_map_end(&um);
+}
+
+static void test_unix_stream_connect_error_transitions(void) {
+    struct socket *listener = NULL;
+    struct socket *client = NULL;
+    struct sockaddr_un srv_addr;
+    make_unix_addr(&srv_addr, SOCKET_TEST_UNIX_NB_SRV_PATH);
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &listener);
+    test_check(ret == 0, "sockconnerr create listener");
+    ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &client);
+    test_check(ret == 0, "sockconnerr create client");
+    if (!listener || !client)
+        goto out;
+
+    ret = listener->ops->bind(listener, (const struct sockaddr *)&srv_addr,
+                              sizeof(srv_addr));
+    test_check(ret == 0, "sockconnerr bind listener");
+    if (ret < 0)
+        goto out;
+
+    ret = listener->ops->listen(listener, 8);
+    test_check(ret == 0, "sockconnerr listen listener");
+    if (ret < 0)
+        goto out;
+
+    ret = client->ops->connect(client, (const struct sockaddr *)&srv_addr,
+                               sizeof(srv_addr), MSG_DONTWAIT);
+    test_check(ret == -EINPROGRESS, "sockconnerr connect inprogress");
+    if (ret != -EINPROGRESS)
+        goto out;
+
+    close_socket_if_open(&listener);
+
+    bool ready = wait_socket_event(client, POLLOUT | POLLERR, POLLERR, 4000);
+    test_check(ready, "sockconnerr poll error ready");
+    if (ready) {
+        int re = client->ops->poll(client, POLLOUT | POLLERR);
+        test_check((re & POLLOUT) != 0, "sockconnerr poll writable on error");
+        test_check((re & POLLERR) != 0, "sockconnerr poll err set");
+    }
+
+    int so_error = -1;
+    int so_error_len = sizeof(so_error);
+    ret = client->ops->getsockopt(client, SOL_SOCKET, SO_ERROR, &so_error,
+                                  &so_error_len);
+    test_check(ret == 0, "sockconnerr getsockopt so_error");
+    test_check(so_error_len == (int)sizeof(so_error),
+               "sockconnerr getsockopt so_error len");
+    test_check(so_error == ECONNREFUSED, "sockconnerr so_error econnrefused");
+
+    int re = client->ops->poll(client, POLLOUT | POLLERR);
+    test_check((re & POLLERR) == 0, "sockconnerr poll err cleared");
+out:
+    close_socket_if_open(&client);
+    close_socket_if_open(&listener);
+}
+
+static void test_socket_fcntl_nonblock_semantics(void) {
+    struct socket *sock = NULL;
+    int fd = -1;
+
+    int ret = sock_create(AF_UNIX, SOCK_DGRAM, 0, &sock);
+    test_check(ret == 0, "sockfcntl create dgram");
+    if (ret < 0 || !sock)
+        goto out;
+
+    fd = socket_install_fd(&sock);
+    test_check(fd >= 0, "sockfcntl install fd");
+    if (fd < 0)
+        goto out;
+
+    int64_t fl = sys_fcntl((uint64_t)fd, F_GETFL, 0, 0, 0, 0);
+    test_check(fl >= 0, "sockfcntl getfl initial");
+    if (fl < 0)
+        goto out;
+
+    int64_t ret64 = sys_fcntl((uint64_t)fd, F_SETFL,
+                              (uint64_t)((uint32_t)fl | O_NONBLOCK), 0, 0, 0);
+    test_check(ret64 == 0, "sockfcntl setfl nonblock");
+
+    fl = sys_fcntl((uint64_t)fd, F_GETFL, 0, 0, 0, 0);
+    test_check(fl >= 0, "sockfcntl getfl nonblock");
+    if (fl >= 0)
+        test_check((((uint32_t)fl) & O_NONBLOCK) != 0,
+                   "sockfcntl getfl has nonblock");
+
+    ret64 = sys_recvfrom((uint64_t)fd, 0, 8, 0, 0, 0);
+    test_check(ret64 == -EWOULDBLOCK, "sockfcntl recv empty ewouldblock");
+
+    ret64 = sys_fcntl((uint64_t)fd, F_SETFL,
+                      (uint64_t)((uint32_t)fl & ~O_NONBLOCK), 0, 0, 0);
+    test_check(ret64 == 0, "sockfcntl clear nonblock");
+
+    fl = sys_fcntl((uint64_t)fd, F_GETFL, 0, 0, 0, 0);
+    test_check(fl >= 0, "sockfcntl getfl cleared");
+    if (fl >= 0)
+        test_check((((uint32_t)fl) & O_NONBLOCK) == 0,
+                   "sockfcntl nonblock cleared");
+
+out:
+    close_fd_if_open(&fd);
+    close_socket_if_open(&sock);
 }
 
 static void test_unix_dgram_semantics(void) {
@@ -1686,6 +1797,11 @@ static bool run_inet_tcp_attempt(uint32_t loopback_ip, uint16_t server_port,
         goto out;
 
     if (ret == -EINPROGRESS) {
+        int r2 = client->ops->connect(client,
+                                      (const struct sockaddr *)&listener_addr,
+                                      sizeof(listener_addr), MSG_DONTWAIT);
+        if (r2 != -EALREADY && r2 != -EISCONN)
+            goto out;
         int cre = 0;
         for (int i = 0; i < 4000; i++) {
             cre = client->ops->poll(client, POLLOUT | POLLERR);
@@ -1702,6 +1818,11 @@ static bool run_inet_tcp_attempt(uint32_t loopback_ip, uint16_t server_port,
         if (ret < 0 || so_error_len != (int)sizeof(so_error) || so_error != 0)
             goto out;
     }
+
+    ret = client->ops->connect(client, (const struct sockaddr *)&listener_addr,
+                               sizeof(listener_addr), MSG_DONTWAIT);
+    if (ret != -EISCONN)
+        goto out;
 
     int lre = listener->ops->poll(listener, POLLIN);
     if ((lre & POLLIN) == 0)
@@ -1897,6 +2018,8 @@ int run_socket_tests(void) {
     test_socket_msg_syscall_semantics();
     test_socket_syscall_abi_width_edges();
     test_socket_nonblock_syscall_semantics();
+    test_unix_stream_connect_error_transitions();
+    test_socket_fcntl_nonblock_semantics();
     test_unix_dgram_semantics();
     test_inet_tcp_primary();
     test_inet_udp_secondary();

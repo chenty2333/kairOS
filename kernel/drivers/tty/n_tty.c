@@ -4,7 +4,6 @@
 
 #include <kairos/arch.h>
 #include <kairos/poll.h>
-#include <kairos/pollwait.h>
 #include <kairos/process.h>
 #include <kairos/ringbuf.h>
 #include <kairos/signal.h>
@@ -234,15 +233,8 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
             return -EAGAIN;
 
         /* Block waiting for input */
-        struct process *p = proc_current();
-        if (!p)
-            return -EAGAIN;
         if (!vn)
             return -EIO;
-
-        struct poll_waiter waiter = {0};
-        INIT_LIST_HEAD(&waiter.entry.node);
-        waiter.entry.proc = p;
 
         /* Check once more under lock before sleeping */
         irq_state = arch_irq_save();
@@ -253,48 +245,8 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
         if (has_data)
             continue;
 
-        poll_wait_add(&vn->pollers, &waiter);
-
-        /* Re-check after adding waiter */
-        irq_state = arch_irq_save();
-        spin_lock(&tty->lock);
-        has_data = !ringbuf_empty(&tty->input_rb) || tty->eof_pending;
-        spin_unlock(&tty->lock);
-        arch_irq_restore(irq_state);
-        if (has_data) {
-            poll_wait_remove(&waiter);
-            continue;
-        }
-
-        proc_lock(p);
-        if (p->sig_pending) {
-            proc_unlock(p);
-            poll_wait_remove(&waiter);
-            return -EINTR;
-        }
-        p->wait_channel = &waiter;
-        p->sleep_deadline = 0;
-        p->state = PROC_SLEEPING;
-        proc_unlock(p);
-
-        /* Final re-check before yield */
-        irq_state = arch_irq_save();
-        spin_lock(&tty->lock);
-        has_data = !ringbuf_empty(&tty->input_rb) || tty->eof_pending;
-        spin_unlock(&tty->lock);
-        arch_irq_restore(irq_state);
-        if (!has_data)
-            proc_yield();
-
-        proc_lock(p);
-        p->wait_channel = NULL;
-        p->sleep_deadline = 0;
-        p->state = PROC_RUNNING;
-        bool interrupted = p->sig_pending;
-        proc_unlock(p);
-
-        poll_wait_remove(&waiter);
-        if (interrupted)
+        int rc = proc_sleep_on(&tty->read_wait, &tty->read_wait, true);
+        if (rc == -EINTR)
             return -EINTR;
     }
 }

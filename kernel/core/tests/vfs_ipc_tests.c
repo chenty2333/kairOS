@@ -1607,6 +1607,70 @@ static void test_pipe_semantics(void) {
     close_file_if_open(&r);
 }
 
+static void test_pipe_fcntl_nonblock_semantics(void) {
+    struct file *r = NULL;
+    struct file *w = NULL;
+    int rfd = -1;
+    int wfd = -1;
+
+    int ret = pipe_create(&r, &w);
+    test_check(ret == 0, "pipe fcntl create");
+    if (ret < 0)
+        return;
+
+    rfd = fd_alloc(proc_current(), r);
+    test_check(rfd >= 0, "pipe fcntl alloc read fd");
+    if (rfd >= 0)
+        r = NULL;
+
+    wfd = fd_alloc(proc_current(), w);
+    test_check(wfd >= 0, "pipe fcntl alloc write fd");
+    if (wfd >= 0)
+        w = NULL;
+
+    if (rfd >= 0 && wfd >= 0) {
+        int64_t rfl = sys_fcntl((uint64_t)rfd, F_GETFL, 0, 0, 0, 0);
+        int64_t wfl = sys_fcntl((uint64_t)wfd, F_GETFL, 0, 0, 0, 0);
+        test_check(rfl >= 0, "pipe fcntl getfl read");
+        test_check(wfl >= 0, "pipe fcntl getfl write");
+
+        if (rfl >= 0 && wfl >= 0) {
+            int64_t ret64 = sys_fcntl((uint64_t)rfd, F_SETFL,
+                                      (uint64_t)(((uint32_t)rfl) | O_NONBLOCK),
+                                      0, 0, 0);
+            test_check(ret64 == 0, "pipe fcntl setfl read nonblock");
+            ret64 = sys_fcntl((uint64_t)wfd, F_SETFL,
+                              (uint64_t)(((uint32_t)wfl) | O_NONBLOCK), 0, 0,
+                              0);
+            test_check(ret64 == 0, "pipe fcntl setfl write nonblock");
+
+            char c = 0;
+            ssize_t rd = fd_read_once(rfd, &c, 1);
+            test_check(rd == -EWOULDBLOCK, "pipe fcntl read ewouldblock");
+
+            char wbuf[256];
+            memset(wbuf, 'f', sizeof(wbuf));
+            size_t total = 0;
+            while (1) {
+                ssize_t wr = fd_write_once(wfd, wbuf, sizeof(wbuf));
+                if (wr > 0) {
+                    total += (size_t)wr;
+                    continue;
+                }
+                test_check(wr == -EWOULDBLOCK,
+                           "pipe fcntl write full ewouldblock");
+                break;
+            }
+            test_check(total == 4096, "pipe fcntl fill exact");
+        }
+    }
+
+    close_fd_if_open(&wfd);
+    close_fd_if_open(&rfd);
+    close_file_if_open(&w);
+    close_file_if_open(&r);
+}
+
 static void test_epoll_pipe_semantics(void) {
     struct file *rf = NULL;
     struct file *wf = NULL;
@@ -2910,6 +2974,7 @@ int run_vfs_ipc_tests(void) {
     test_close_range_syscall_semantics();
     test_statx_syscall_semantics();
     test_pipe_semantics();
+    test_pipe_fcntl_nonblock_semantics();
     test_epoll_pipe_semantics();
     test_epoll_edge_oneshot_semantics();
     test_epoll_pwait2_syscall_semantics();

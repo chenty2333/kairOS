@@ -46,6 +46,8 @@ struct tty_struct *tty_alloc(struct tty_driver *driver, int index) {
 
     spin_init(&tty->lock);
     ringbuf_init(&tty->input_rb, tty->input_buf, TTY_INPUT_BUF_SIZE);
+    wait_queue_init(&tty->read_wait);
+    wait_queue_init(&tty->write_wait);
 
     /* termios needs explicit non-zero defaults */
     memset(&tty->termios, 0, sizeof(tty->termios));
@@ -163,6 +165,8 @@ void tty_hangup(struct tty_struct *tty) {
     if (tty->driver && tty->driver->ops && tty->driver->ops->hangup)
         tty->driver->ops->hangup(tty);
 
+    wait_queue_wakeup_all(&tty->read_wait);
+    wait_queue_wakeup_all(&tty->write_wait);
     if (tty->vnode)
         vfs_poll_wake(tty->vnode, POLLIN | POLLERR | POLLHUP);
 }
@@ -217,6 +221,8 @@ void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count) {
             }
         }
     }
+    if (pushed)
+        wait_queue_wakeup_all(&tty->read_wait);
     if (pushed && vn)
         vfs_poll_wake(vn, POLLIN);
 }
@@ -285,6 +291,8 @@ int tty_ioctl(struct tty_struct *tty, uint64_t cmd, uint64_t arg) {
         arch_irq_restore(irq_state);
         if (tty->driver && tty->driver->ops && tty->driver->ops->set_termios)
             tty->driver->ops->set_termios(tty, &old);
+        if (wake)
+            wait_queue_wakeup_all(&tty->read_wait);
         if (wake && wake_vn)
             vfs_poll_wake(wake_vn, POLLIN);
         return 0;
