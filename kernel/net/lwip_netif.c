@@ -3,6 +3,7 @@
  */
 
 #include <kairos/mm.h>
+#include <kairos/config.h>
 #include <kairos/net.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
@@ -17,6 +18,24 @@
 
 static struct netif lwip_netif;
 static struct netdev *lwip_netdev;
+
+#if CONFIG_KERNEL_TESTS
+static uint64_t lwip_netif_test_rx_input_count;
+static uint64_t lwip_netif_test_rx_input_last_len;
+
+void lwip_netif_test_reset_rx_stats(void) {
+    __atomic_store_n(&lwip_netif_test_rx_input_count, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&lwip_netif_test_rx_input_last_len, 0, __ATOMIC_RELAXED);
+}
+
+uint64_t lwip_netif_test_rx_input_count_get(void) {
+    return __atomic_load_n(&lwip_netif_test_rx_input_count, __ATOMIC_RELAXED);
+}
+
+uint64_t lwip_netif_test_rx_input_last_len_get(void) {
+    return __atomic_load_n(&lwip_netif_test_rx_input_last_len, __ATOMIC_RELAXED);
+}
+#endif
 
 /* Called by lwIP to transmit a packet */
 static err_t kairos_netif_output(struct netif *netif, struct pbuf *p) {
@@ -67,6 +86,11 @@ void lwip_netif_input(const void *data, size_t len) {
     if (!data || len == 0) {
         return;
     }
+
+#if CONFIG_KERNEL_TESTS
+    __atomic_add_fetch(&lwip_netif_test_rx_input_count, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&lwip_netif_test_rx_input_last_len, len, __ATOMIC_RELAXED);
+#endif
 
     struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
     if (!p) {

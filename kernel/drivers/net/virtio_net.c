@@ -18,6 +18,8 @@
 #define VIRTQ_SIZE 16
 #define NET_BUF_SIZE 2048
 
+void lwip_netif_input(const void *data, size_t len);
+
 /* VirtIO net header (legacy 10-byte layout). */
 struct virtio_net_hdr {
     uint8_t flags;
@@ -61,6 +63,34 @@ struct virtio_net_dev {
     struct virtio_net_cookie rx_cookie[VIRTQ_SIZE];
     struct netdev netdev;
 };
+
+static void virtio_net_rx_deliver(struct virtio_net_rx_slot *slot, uint32_t len) {
+    if (!slot || len <= sizeof(struct virtio_net_hdr))
+        return;
+
+    uint32_t payload_len = len - (uint32_t)sizeof(struct virtio_net_hdr);
+    if (payload_len > NET_BUF_SIZE) {
+        pr_warn("virtio-net: rx payload too large (%u), truncating\n",
+                payload_len);
+        payload_len = NET_BUF_SIZE;
+    }
+
+    lwip_netif_input(slot->data, payload_len);
+    pr_debug("virtio-net: rx packet len=%u\n", payload_len);
+}
+
+#if CONFIG_KERNEL_TESTS
+int virtio_net_test_rx_deliver_len(uint32_t len) {
+    struct virtio_net_rx_slot slot;
+    memset(&slot, 0, sizeof(slot));
+    if (len > sizeof(slot))
+        len = sizeof(slot);
+    if (len > sizeof(struct virtio_net_hdr))
+        memset(slot.data, 0x5a, len - sizeof(struct virtio_net_hdr));
+    virtio_net_rx_deliver(&slot, len);
+    return 0;
+}
+#endif
 
 static int virtio_net_post_rx(struct virtio_net_dev *vn, uint16_t idx) {
     struct virtq_desc desc;
@@ -110,10 +140,7 @@ static void virtio_net_intr(struct virtio_device *vdev) {
         if (cookie && cookie->type == 1 && cookie->idx < VIRTQ_SIZE) {
             struct virtio_net_rx_slot *slot = &vn->rx_slots[cookie->idx];
             dma_unmap_single(slot->dma_buf, sizeof(*slot), DMA_FROM_DEVICE);
-            if (len > sizeof(struct virtio_net_hdr)) {
-                pr_debug("virtio-net: rx packet len=%u\n",
-                         len - (uint32_t)sizeof(struct virtio_net_hdr));
-            }
+            virtio_net_rx_deliver(slot, len);
             virtio_net_post_rx(vn, cookie->idx);
         }
     }

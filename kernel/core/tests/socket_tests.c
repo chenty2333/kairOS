@@ -237,6 +237,17 @@ static bool wait_socket_event(struct socket *sock, uint32_t events,
     return (sock->ops->poll(sock, events) & (int)mask) == (int)mask;
 }
 
+static bool wait_inet_connect_so_error(struct socket *sock, int *so_error,
+                                       int spins) {
+    if (!sock || !sock->ops || !sock->ops->getsockopt || !so_error)
+        return false;
+    if (!wait_socket_event(sock, POLLOUT | POLLERR, POLLOUT | POLLERR, spins))
+        return false;
+    int len = sizeof(*so_error);
+    int rc = sock->ops->getsockopt(sock, SOL_SOCKET, SO_ERROR, so_error, &len);
+    return rc == 0 && len == (int)sizeof(*so_error);
+}
+
 struct unix_stream_client_ctx {
     struct sockaddr_un srv_addr;
     uint32_t token;
@@ -2104,10 +2115,102 @@ out:
     return ok;
 }
 
+static bool run_inet_tcp_backlog_attempt(uint32_t loopback_ip,
+                                         uint16_t server_port,
+                                         uint16_t client1_port,
+                                         uint16_t client2_port) {
+    struct socket *listener = NULL;
+    struct socket *client1 = NULL;
+    struct socket *client2 = NULL;
+    struct socket *server = NULL;
+    struct socket *server2 = NULL;
+    struct sockaddr_in listener_addr;
+    struct sockaddr_in client1_addr;
+    struct sockaddr_in client2_addr;
+    bool ok = false;
+
+    int ret = sock_create(AF_INET, SOCK_STREAM, 0, &listener);
+    if (ret < 0 || !listener)
+        goto out;
+    ret = sock_create(AF_INET, SOCK_STREAM, 0, &client1);
+    if (ret < 0 || !client1)
+        goto out;
+    ret = sock_create(AF_INET, SOCK_STREAM, 0, &client2);
+    if (ret < 0 || !client2)
+        goto out;
+
+    make_inet_addr(&listener_addr, loopback_ip, server_port);
+    make_inet_addr(&client1_addr, loopback_ip, client1_port);
+    make_inet_addr(&client2_addr, loopback_ip, client2_port);
+
+    ret = listener->ops->bind(listener, (const struct sockaddr *)&listener_addr,
+                              sizeof(listener_addr));
+    if (ret < 0)
+        goto out;
+    ret = listener->ops->listen(listener, 1);
+    if (ret < 0)
+        goto out;
+
+    ret = client1->ops->bind(client1, (const struct sockaddr *)&client1_addr,
+                             sizeof(client1_addr));
+    if (ret < 0)
+        goto out;
+    ret = client2->ops->bind(client2, (const struct sockaddr *)&client2_addr,
+                             sizeof(client2_addr));
+    if (ret < 0)
+        goto out;
+
+    ret = client1->ops->connect(client1, (const struct sockaddr *)&listener_addr,
+                                sizeof(listener_addr), MSG_DONTWAIT);
+    if (ret != 0 && ret != -EINPROGRESS)
+        goto out;
+    if (ret == -EINPROGRESS) {
+        int so_error = 0;
+        if (!wait_inet_connect_so_error(client1, &so_error, 4000) ||
+            so_error != 0) {
+            goto out;
+        }
+    }
+
+    if (!wait_socket_event(listener, POLLIN, POLLIN, 4000))
+        goto out;
+
+    ret = client2->ops->connect(client2, (const struct sockaddr *)&listener_addr,
+                                sizeof(listener_addr), MSG_DONTWAIT);
+    if (ret == 0 || ret == -EINPROGRESS) {
+        int so_error = 0;
+        if (!wait_inet_connect_so_error(client2, &so_error, 4000))
+            goto out;
+        if (so_error != ECONNREFUSED)
+            goto out;
+    } else if (ret != -ECONNREFUSED) {
+        goto out;
+    }
+
+    ret = listener->ops->accept(listener, &server, 0);
+    if (ret < 0 || !server)
+        goto out;
+
+    ret = listener->ops->accept(listener, &server2, MSG_DONTWAIT);
+    if (ret != -EAGAIN)
+        goto out;
+
+    ok = true;
+
+out:
+    close_socket_if_open(&server2);
+    close_socket_if_open(&server);
+    close_socket_if_open(&client2);
+    close_socket_if_open(&client1);
+    close_socket_if_open(&listener);
+    return ok;
+}
+
 struct inet_attempt_ctx {
     uint32_t loopback_ip;
     uint16_t server_port;
     uint16_t client_port;
+    uint16_t client2_port;
     bool ok;
 };
 
@@ -2122,6 +2225,14 @@ static int inet_tcp_attempt_worker(void *arg) {
     struct inet_attempt_ctx *ctx = (struct inet_attempt_ctx *)arg;
     ctx->ok = run_inet_tcp_attempt(ctx->loopback_ip, ctx->server_port,
                                    ctx->client_port);
+    proc_exit(0);
+}
+
+static int inet_tcp_backlog_attempt_worker(void *arg) {
+    struct inet_attempt_ctx *ctx = (struct inet_attempt_ctx *)arg;
+    ctx->ok = run_inet_tcp_backlog_attempt(ctx->loopback_ip, ctx->server_port,
+                                           ctx->client_port,
+                                           ctx->client2_port);
     proc_exit(0);
 }
 
@@ -2180,6 +2291,7 @@ static void test_inet_udp_secondary(void) {
             .loopback_ip = loopback_ips[i],
             .server_port = (uint16_t)(42000 + i),
             .client_port = (uint16_t)(43000 + i),
+            .client2_port = 0,
             .ok = false,
         };
         if (run_inet_attempt_with_timeout(inet_udp_attempt_worker, &ctx, "inudp",
@@ -2212,6 +2324,7 @@ static void test_inet_tcp_primary(void) {
             .loopback_ip = loopback_ips[i],
             .server_port = (uint16_t)(44000 + i),
             .client_port = (uint16_t)(45000 + i),
+            .client2_port = 0,
             .ok = false,
         };
         if (run_inet_attempt_with_timeout(inet_tcp_attempt_worker, &ctx, "intcp",
@@ -2221,10 +2334,27 @@ static void test_inet_tcp_primary(void) {
         }
     }
 
-    if (ok)
+    if (ok) {
         test_check(true, "inet_tcp loopback");
-    else
+        bool backlog_ok = false;
+        for (size_t i = 0; i < sizeof(loopback_ips) / sizeof(loopback_ips[0]); i++) {
+            struct inet_attempt_ctx ctx = {
+                .loopback_ip = loopback_ips[i],
+                .server_port = (uint16_t)(46000 + i),
+                .client_port = (uint16_t)(47000 + i),
+                .client2_port = (uint16_t)(48000 + i),
+                .ok = false,
+            };
+            if (run_inet_attempt_with_timeout(inet_tcp_backlog_attempt_worker, &ctx,
+                                              "intcpb", 8000)) {
+                backlog_ok = true;
+                break;
+            }
+        }
+        test_check(backlog_ok, "inet_tcp backlog limit");
+    } else {
         test_skip("inet_tcp (loopback tcp unavailable)");
+    }
 }
 
 int run_socket_tests(void) {

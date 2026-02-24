@@ -51,6 +51,7 @@ struct inet_sock {
     /* TCP accept queue */
     struct list_head accept_queue;
     int accept_count;
+    int accept_backlog;
     struct wait_queue accept_wait;
 
     /* Send wait (TCP flow control) */
@@ -81,6 +82,14 @@ static inline void inet_lwip_unlock(void) {
     UNLOCK_TCPIP_CORE();
 }
 
+static int inet_listen_backlog_clamp(int backlog) {
+    if (backlog < 1)
+        return 1;
+    if (backlog > INET_ACCEPT_BACKLOG)
+        return INET_ACCEPT_BACKLOG;
+    return backlog;
+}
+
 static struct inet_sock *inet_sock_alloc(struct socket *sock, int proto) {
     struct inet_sock *is = kzalloc(sizeof(*is));
     if (!is) {
@@ -98,6 +107,7 @@ static struct inet_sock *inet_sock_alloc(struct socket *sock, int proto) {
     wait_queue_init(&is->connect_wait);
     INIT_LIST_HEAD(&is->accept_queue);
     is->accept_count = 0;
+    is->accept_backlog = INET_ACCEPT_BACKLOG;
     wait_queue_init(&is->accept_wait);
     wait_queue_init(&is->send_wait);
     is->send_ready = true;
@@ -265,6 +275,11 @@ static err_t inet_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     pend->addr.sin_addr = newpcb->remote_ip.addr;
 
     mutex_lock(&is->lock);
+    if (is->accept_count >= is->accept_backlog) {
+        mutex_unlock(&is->lock);
+        tcp_abort(newpcb);
+        return ERR_ABRT;
+    }
     list_add_tail(&pend->node, &is->accept_queue);
     is->accept_count++;
     mutex_unlock(&is->lock);
@@ -366,17 +381,21 @@ static int inet_tcp_listen(struct socket *sock, int backlog) {
         return -EINVAL;
     }
 
-    (void)backlog;
+    int clamped_backlog = inet_listen_backlog_clamp(backlog);
     inet_lwip_lock();
-    struct tcp_pcb *lpcb = tcp_listen(is->pcb.tcp);
+    err_t lwerr = ERR_OK;
+    struct tcp_pcb *lpcb =
+        tcp_listen_with_backlog_and_err(is->pcb.tcp, (u8_t)clamped_backlog,
+                                        &lwerr);
     if (!lpcb) {
         inet_lwip_unlock();
-        return -ENOMEM;
+        return (lwerr == ERR_MEM) ? -ENOMEM : -EINVAL;
     }
     is->pcb.tcp = lpcb;
     tcp_arg(lpcb, is);
     tcp_accept(lpcb, inet_tcp_accept_cb);
     inet_lwip_unlock();
+    is->accept_backlog = clamped_backlog;
     sock->state = SS_LISTENING;
 
     int ret = inet_recv_buf_init(is);

@@ -3,6 +3,7 @@
  */
 
 #include <kairos/blkdev.h>
+#include <kairos/config.h>
 #include <kairos/net.h>
 #include <kairos/printk.h>
 #include <kairos/ringbuf.h>
@@ -12,6 +13,13 @@
 #include <kairos/virtio.h>
 
 static int tests_failed;
+
+#if CONFIG_KERNEL_TESTS
+extern int virtio_net_test_rx_deliver_len(uint32_t len);
+extern void lwip_netif_test_reset_rx_stats(void);
+extern uint64_t lwip_netif_test_rx_input_count_get(void);
+extern uint64_t lwip_netif_test_rx_input_last_len_get(void);
+#endif
 
 static void test_check(bool cond, const char *name) {
     if (!cond) {
@@ -307,6 +315,25 @@ static void test_netdev_registry(void) {
     netdev_unregister(&dev);
 }
 
+#if CONFIG_KERNEL_TESTS
+static void test_virtio_net_rx_to_lwip_bridge(void) {
+    lwip_netif_test_reset_rx_stats();
+    uint64_t before = lwip_netif_test_rx_input_count_get();
+
+    int ret = virtio_net_test_rx_deliver_len(10U + 64U);
+    test_check(ret == 0, "virtio_net rx bridge deliver");
+    uint64_t after = lwip_netif_test_rx_input_count_get();
+    test_check(after == before + 1, "virtio_net rx bridge count inc");
+    test_check(lwip_netif_test_rx_input_last_len_get() == 64U,
+               "virtio_net rx bridge payload len");
+
+    ret = virtio_net_test_rx_deliver_len(10U);
+    test_check(ret == 0, "virtio_net rx bridge header only");
+    test_check(lwip_netif_test_rx_input_count_get() == after,
+               "virtio_net rx bridge header skipped");
+}
+#endif
+
 static void test_vfs_umount_busy_with_child_mount(void) {
     struct stat st;
     int ret = vfs_stat("/tmp", &st);
@@ -345,6 +372,9 @@ int run_driver_tests(void) {
     test_blkdev_partition_children();
     test_blkdev_gpt_partition_bounds();
     test_netdev_registry();
+#if CONFIG_KERNEL_TESTS
+    test_virtio_net_rx_to_lwip_bridge();
+#endif
     test_vfs_umount_busy_with_child_mount();
 
     if (tests_failed == 0)

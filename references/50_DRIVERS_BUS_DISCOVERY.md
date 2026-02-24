@@ -89,20 +89,18 @@ AF_UNIX (net/af_unix.c):
 AF_INET (net/af_inet.c):
 - Based on lwIP raw/callback API
 - Each socket maps to a tcp_pcb or udp_pcb
-- Receive buffer 64KB; INET_ACCEPT_BACKLOG=16 defines accept queue size, but listen() backlog parameter is currently ignored
+- Receive buffer 64KB; listen() backlog is clamped to `[1, INET_ACCEPT_BACKLOG]` and enforced as accept queue upper bound
 - Stream connect/accept/recv and UDP recv honor non-blocking behavior (`EINPROGRESS`/`EALREADY`/`EAGAIN`), with connect readiness surfaced via poll + `SO_ERROR`
   - TCP connect completion races are stabilized: repeated connect returns `EALREADY` while in progress and `EISCONN` after completion
 
 lwIP integration:
-- net/lwip_netif.c: network interface adapter; lwip_netif_input() is implemented but not yet called from virtio_net RX interrupt
+- net/lwip_netif.c: network interface adapter; virtio-net RX completion forwards ethernet payloads into `lwip_netif_input()`
 - net/lwip_port/: lwIP system adaptation layer (threads, semaphores, timers)
 - net/net_ioctl.c: network ioctl
 - LWIP_TCPIP_CORE_LOCKING is enabled; AF_INET raw API paths and net_ioctl netif mutations are serialized with LWIP core lock
 
 ## Current Limitations
 
-- AF_INET listen() backlog parameter is ignored
-- virtio_net RX → lwIP input path is not yet wired up
 - ACPI platform-device discovery is still scaffolding (does not register fw descriptors); currently only PCI ECAM discovery via MCFG is wired for aarch64
 - virtio-pci currently uses common INTx path; MSI-X and advanced PCI features are not wired yet
 
