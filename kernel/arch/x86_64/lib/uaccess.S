@@ -28,8 +28,9 @@ __arch_strncpy_from_user:
     inc %rsi
     inc %rdi
     dec %rdx
-    inc %rax
     test %cl, %cl
-    jnz 1b
+    jz 2f
+    inc %rax
+    jmp 1b
 2:
     ret

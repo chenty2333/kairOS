@@ -63,9 +63,9 @@ __arch_strncpy_from_user:
 .L_sfu_ld:
     ldrb w5, [x1], #1
     strb w5, [x0], #1
-    add x4, x4, #1
     subs x3, x3, #1
     cbz w5, 2f
+    add x4, x4, #1
     b 1b
 2:
     mov x0, x4

@@ -617,6 +617,62 @@ out_restore_mm:
     }
 }
 
+static void test_strncpy_from_user_len_regression(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc = user_map_begin(&um, 2 * CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "uaccess_strncpy user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    char *u_cross = (char *)user_map_ptr(&um, CONFIG_PAGE_SIZE - 2);
+    char *u_plain = (char *)user_map_ptr(&um, 128);
+    test_check(u_cross != NULL, "uaccess_strncpy u_cross");
+    test_check(u_plain != NULL, "uaccess_strncpy u_plain");
+    if (!u_cross || !u_plain)
+        goto out;
+
+    static const char cross_src[] = {'A', 'B', '\0', 'X'};
+    rc = copy_to_user(u_cross, cross_src, sizeof(cross_src));
+    test_check(rc == 0, "uaccess_strncpy copy_cross");
+    if (rc == 0) {
+        char out[16];
+        memset(out, 0xcc, sizeof(out));
+        long len = strncpy_from_user(out, u_cross, sizeof(out));
+        test_check(len == 2, "uaccess_strncpy cross_len_excludes_nul");
+        test_check(out[0] == 'A' && out[1] == 'B' && out[2] == '\0',
+                   "uaccess_strncpy cross_content");
+    }
+
+    static const char plain_src[] = {'1', '2', '3', '4', '\0'};
+    rc = copy_to_user(u_plain, plain_src, sizeof(plain_src));
+    test_check(rc == 0, "uaccess_strncpy copy_plain");
+    if (rc == 0) {
+        char out[8];
+        memset(out, 0xcc, sizeof(out));
+        long len = strncpy_from_user(out, u_plain, sizeof(plain_src));
+        test_check(len == 4, "uaccess_strncpy exact_len_excludes_nul");
+        test_check(out[4] == '\0', "uaccess_strncpy exact_nul_copied");
+    }
+
+    static const char nonul_src[] = {'x', 'y', 'z'};
+    rc = copy_to_user(u_plain, nonul_src, sizeof(nonul_src));
+    test_check(rc == 0, "uaccess_strncpy copy_nonul");
+    if (rc == 0) {
+        char out[8];
+        memset(out, 0, sizeof(out));
+        long len = strncpy_from_user(out, u_plain, sizeof(nonul_src));
+        test_check(len == 3, "uaccess_strncpy nonul_len_matches_count");
+        test_check(out[0] == 'x' && out[1] == 'y' && out[2] == 'z',
+                   "uaccess_strncpy nonul_content");
+    }
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_sched_affinity_syscalls_regression(void) {
     struct process *p = proc_current();
     test_check(p != NULL, "affinity proc_current");
@@ -1083,6 +1139,7 @@ int run_syscall_trap_tests(void) {
     test_syscall_error_paths_legacy();
     test_uaccess_cross_page_regression();
     test_uaccess_large_range_regression();
+    test_strncpy_from_user_len_regression();
     test_sched_affinity_syscalls_regression();
     test_mount_umount_flag_semantics();
     test_acct_syscall_semantics();
