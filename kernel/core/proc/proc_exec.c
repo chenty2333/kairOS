@@ -17,8 +17,6 @@
 
 #include "proc_internal.h"
 
-#define ELF_INTERP_LOAD_BIAS 0x0000002000000000ULL
-
 static void proc_free_strv(char **vec, int count) {
     if (!vec) {
         return;
@@ -31,7 +29,65 @@ static void proc_free_strv(char **vec, int count) {
     kfree(vec);
 }
 
-int proc_exec(const char *path, char *const argv[], char *const envp[]) {
+static uint64_t proc_interp_bias_seed(const char *path) {
+    uint64_t seed = arch_timer_get_ticks();
+    struct process *curr = proc_current();
+    if (curr) {
+        seed ^= ((uint64_t)(uint32_t)curr->pid << 32);
+        seed ^= (uint64_t)(uint32_t)curr->tgid;
+    }
+    if (path) {
+        const unsigned char *p = (const unsigned char *)path;
+        while (*p) {
+            seed = (seed * 11400714819323198485ULL) ^ (uint64_t)(*p++);
+        }
+    }
+    return seed;
+}
+
+static int proc_load_interp_bias(struct mm_struct *mm, struct vnode *vn,
+                                 size_t size, const char *exec_path,
+                                 vaddr_t *entry_out,
+                                 struct elf_auxv_info *aux_out) {
+    vaddr_t base = ALIGN_DOWN((vaddr_t)CONFIG_ELF_INTERP_LOAD_BIAS_BASE,
+                              CONFIG_PAGE_SIZE);
+    uint64_t stride = CONFIG_ELF_INTERP_LOAD_BIAS_STRIDE;
+    uint64_t slots = CONFIG_ELF_INTERP_LOAD_BIAS_SLOTS;
+
+    if (stride < CONFIG_PAGE_SIZE)
+        stride = CONFIG_PAGE_SIZE;
+    stride = ALIGN_UP(stride, CONFIG_PAGE_SIZE);
+    if (slots == 0)
+        slots = 1;
+
+    uint64_t seed = proc_interp_bias_seed(exec_path);
+    int last_err = -ENOEXEC;
+
+    for (uint64_t i = 0; i < slots; i++) {
+        uint64_t slot = (seed + i) % slots;
+        if (slot > ((~(uint64_t)0) - (uint64_t)base) / stride)
+            continue;
+        vaddr_t bias = base + (vaddr_t)(slot * stride);
+        int ret = elf_load_vnode_bias(mm, vn, size, bias, entry_out, aux_out);
+        if (ret == 0)
+            return 0;
+        last_err = ret;
+        if (ret != -EEXIST)
+            break;
+    }
+
+    if (slots > 1) {
+        int ret = elf_load_vnode_bias(mm, vn, size, base, entry_out, aux_out);
+        if (ret == 0)
+            return 0;
+        last_err = ret;
+    }
+
+    return last_err;
+}
+
+int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
+                      int namei_flags) {
     enum { EXEC_ARG_MAX = 64, EXEC_ENV_MAX = 64 };
     char **kargv = NULL;
     char **kenvp = NULL;
@@ -122,8 +178,12 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         kenvp[envc] = NULL;
     }
 
+    int resolve_flags = namei_flags;
+    if ((resolve_flags & NAMEI_NOFOLLOW) == 0)
+        resolve_flags |= NAMEI_FOLLOW;
+
     path_init(&resolved);
-    ret = vfs_namei(path, &resolved, NAMEI_FOLLOW);
+    ret = vfs_namei(path, &resolved, resolve_flags);
     if (ret < 0)
         goto out;
     if (!resolved.dentry || !resolved.dentry->vnode) {
@@ -182,8 +242,8 @@ int proc_exec(const char *path, char *const argv[], char *const envp[]) {
         }
         struct vnode *ivn = interp_resolved.dentry->vnode;
         size_t interp_size = ivn->size;
-        ret = elf_load_vnode_bias(new_mm, ivn, interp_size, ELF_INTERP_LOAD_BIAS,
-                                  &interp_entry, &interp_aux);
+        ret = proc_load_interp_bias(new_mm, ivn, interp_size, path,
+                                    &interp_entry, &interp_aux);
         dentry_put(interp_resolved.dentry);
         if (ret < 0) {
             mm_destroy(new_mm);
@@ -228,6 +288,10 @@ out:
     proc_free_strv(kargv, argc);
     proc_free_strv(kenvp, envc);
     return ret;
+}
+
+int proc_exec(const char *path, char *const argv[], char *const envp[]) {
+    return proc_exec_resolve(path, argv, envp, NAMEI_FOLLOW);
 }
 
 struct process *proc_spawn_from_vfs(const char *path,

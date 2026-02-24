@@ -255,6 +255,8 @@ struct process *proc_idle_init(void);
 struct process *proc_start_init(void);
 void proc_yield(void);
 int proc_exec(const char *path, char *const argv[], char *const envp[]);
+int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
+                      int namei_flags);
 void proc_wakeup(struct process *p);
 void proc_wake_expired_sleepers(uint64_t now_ticks);
 void signal_init_process(struct process *p);
