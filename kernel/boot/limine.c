@@ -78,7 +78,7 @@ static void *efi_find_dtb(void *system_table) {
 
 /* Limine base revision */
 __attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(0);
+static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(5);
 
 /* Request markers */
 __attribute__((used, section(".limine_requests_start_marker")))
@@ -244,6 +244,10 @@ static uint32_t limine_memmap_type_to_boot(uint32_t type) {
         return BOOT_MEM_FRAMEBUFFER;
     case LIMINE_MEMMAP_BAD_MEMORY:
         return BOOT_MEM_BAD;
+#ifdef LIMINE_MEMMAP_RESERVED_MAPPED
+    case LIMINE_MEMMAP_RESERVED_MAPPED:
+        return BOOT_MEM_RESERVED;
+#endif
 #ifdef LIMINE_MEMMAP_ACPI_TABLES
     case LIMINE_MEMMAP_ACPI_TABLES:
         return BOOT_MEM_ACPI_RECLAIM;

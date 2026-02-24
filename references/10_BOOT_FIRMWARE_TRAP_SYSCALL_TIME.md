@@ -8,6 +8,8 @@ All three architectures share the same path:
    - riscv64 explicitly disables interrupts (csrw sie, zero); x86_64 has no explicit cli
    - aarch64 additionally handles EL2→EL1 drop and system register initialization
 2. `boot/limine.c:limine_bootstrap()` — parse Limine protocol responses, populate boot_info (memory map, DTB, RSDP, framebuffer, CPU list, etc.)
+   - kernel requests Limine protocol base revision `5` (`LIMINE_BASE_REVISION(5)`)
+   - Limine memmap type `LIMINE_MEMMAP_RESERVED_MAPPED` is treated as `BOOT_MEM_RESERVED` (legacy `LIMINE_MEMMAP_ACPI_TABLES` remains compatibility-mapped to `BOOT_MEM_ACPI_RECLAIM` when present)
    - aarch64 fallback: when Limine MP reports only BSP, `boot_init_limine()` reads DTB `/cpus` to populate CPU topology metadata (`boot_info.cpu_count` / `cpus[].hw_id`)
 3. `arch_cpu_init()` — BSP CPU initialization
 4. `core/main.c:kernel_main()` — main initialization sequence:

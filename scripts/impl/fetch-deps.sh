@@ -52,14 +52,36 @@ verify_dep_ready() {
 }
 
 fetch_limine() {
+    local limine_git_url="${LIMINE_GIT_URL:-https://github.com/limine-bootloader/limine.git}"
+    local limine_git_ref="${LIMINE_GIT_REF:-v10.8.0-binary}"
+    local limine_git_commit="${LIMINE_GIT_COMMIT:-1e99a4a6d593507719a8fbb567a8c34b58a8299b}"
+
     echo "=== Fetching Limine bootloader ==="
     if dep_ready "limine" "Makefile"; then
-        return
+        if [[ -n "$limine_git_commit" ]]; then
+            local limine_head
+            limine_head="$(git -C "$DEPS_DIR/limine" rev-parse HEAD 2>/dev/null || true)"
+            if [[ -n "$limine_head" && "$limine_head" != "$limine_git_commit" ]]; then
+                echo "limine exists but at $limine_head (expected $limine_git_commit), refetching"
+                rm -rf "$DEPS_DIR/limine"
+            else
+                echo "Source: $limine_git_url ($limine_git_ref${limine_git_commit:+ @ $limine_git_commit})"
+                return
+            fi
+        else
+            echo "Source: $limine_git_url ($limine_git_ref)"
+            return
+        fi
     fi
-    git clone https://github.com/limine-bootloader/limine.git \
-        --branch=v10.x-binary --depth=1 "$DEPS_DIR/limine"
+    git clone "$limine_git_url" \
+        --branch="$limine_git_ref" --depth=1 "$DEPS_DIR/limine"
+    if [[ -n "$limine_git_commit" ]]; then
+        git -C "$DEPS_DIR/limine" fetch --depth=1 origin "$limine_git_commit"
+        git -C "$DEPS_DIR/limine" checkout --detach "$limine_git_commit"
+    fi
     verify_dep_ready "limine" "Makefile"
     echo "Limine downloaded to $DEPS_DIR/limine"
+    echo "Source: $limine_git_url ($limine_git_ref${limine_git_commit:+ @ $limine_git_commit})"
 }
 
 fetch_lwip() {
@@ -166,7 +188,7 @@ fetch_musl() {
 
 fetch_limine_header() {
     local dst="$ROOT_DIR/kernel/include/boot/limine.h"
-    local limine_header_ref="${LIMINE_HEADER_REF:-trunk}"
+    local limine_header_ref="${LIMINE_HEADER_REF:-aa0fe82730f9a6ea09794503cdf6361be15d66a6}"
     local limine_header_url="${LIMINE_HEADER_URL:-https://raw.githubusercontent.com/limine-bootloader/limine-protocol/${limine_header_ref}/include/limine.h}"
     local force_fetch="${FORCE_LIMINE_HEADER_FETCH:-0}"
     echo "=== Fetching Limine protocol header ==="
