@@ -45,11 +45,14 @@ static void smp_init(void) {
     int cpu_count = bi ? (int)bi->cpu_count : 1;
     int bsp_cpu = bi ? (int)bi->bsp_cpu_id : (int)arch_cpu_id();
     int started = 0;
+    int start_fail = 0;
 
     if (cpu_count < 1)
         cpu_count = 1;
     if (cpu_count > CONFIG_MAX_CPUS)
         cpu_count = CONFIG_MAX_CPUS;
+
+    secondary_cpus_online = 0;
 
     pr_info("SMP: Booting secondary CPUs (bsp=%d total=%d)...\n",
             bsp_cpu, cpu_count);
@@ -64,6 +67,7 @@ static void smp_init(void) {
             started++;
             pr_info("SMP: cpu%d start requested\n", cpu);
         } else {
+            start_fail++;
             pr_warn("SMP: cpu%d start failed rc=%d\n", cpu, rc);
         }
     }
@@ -87,6 +91,9 @@ static void smp_init(void) {
     int online = secondary_cpus_online + 1;
     if (online < 1)
         online = 1;
+    int expected = cpu_count;
+    if (expected < 1)
+        expected = 1;
     if (secondary_cpus_online < started) {
         for (int cpu = 0; cpu < cpu_count; cpu++) {
             if (cpu == bsp_cpu)
@@ -97,7 +104,14 @@ static void smp_init(void) {
                         cpu, (unsigned long)dbg);
         }
     }
-    pr_info("SMP: %d/%d CPUs active\n", online, started + 1);
+    if (start_fail > 0) {
+        pr_warn("SMP: %d CPU start requests failed\n", start_fail);
+    }
+    if (online < expected) {
+        pr_warn("SMP: online shortfall expected=%d online=%d\n",
+                expected, online);
+    }
+    pr_info("SMP: %d/%d CPUs active\n", online, expected);
     sched_set_steal_enabled(online > 1);
 }
 

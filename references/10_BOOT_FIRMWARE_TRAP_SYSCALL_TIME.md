@@ -16,6 +16,7 @@ All three architectures share the same path:
    - aarch64 fallback start path: if `mp_info` is missing, `arch_start_cpu()` falls back to PSCI `CPU_ON` using DTB MPIDR (`cpus[].hw_id`)
    - aarch64 keeps a low-VA identity alias for kernel image so PSCI-started AP can safely enable MMU while executing from PA
    - failed AP bring-up is logged explicitly as `SMP: cpuX start failed rc=<errno>`
+   - SMP summary now reports discovered topology total (`SMP: online/total CPUs active`) and emits `online shortfall` when APs fail to come online
 
 boot_info struct is defined in include/kairos/boot.h, accessed globally through boot/boot.c getters.
 
