@@ -24,6 +24,8 @@ Lifecycle (core/proc/):
 - proc_alloc(): allocate free slot from proc_table, initialize fdtable, cwd, signals, context
 - proc_fork() / proc_fork_ex(): fork/clone, supports CLONE_VM/CLONE_FILES/CLONE_SIGHAND/CLONE_THREAD/CLONE_SETTLS, COW address space copy
 - proc_exec(): ELF loading (core/proc/elf.c), replaces address space and context
+- proc_exec() failure path preserves underlying `-errno` (instead of collapsing to `-ENOEXEC`) across main ELF load, interpreter resolve/load, and user stack setup
+- proc_exec() failure diagnostics emit structured kernel log with `reason + stage + errno(number/name)` to classify missing interp, invalid ELF, permission, and resource faults
 - proc_exit(): sets ZOMBIE, wakes parent, notifies reaper
 - proc_wait(): reaps child processes
 

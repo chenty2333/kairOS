@@ -45,6 +45,86 @@ static uint64_t proc_interp_bias_seed(const char *path) {
     return seed;
 }
 
+static const char *proc_exec_errno_name(int err) {
+    int e = (err < 0) ? -err : err;
+    switch (e) {
+    case EPERM: return "EPERM";
+    case ENOENT: return "ENOENT";
+    case EIO: return "EIO";
+    case E2BIG: return "E2BIG";
+    case ENOEXEC: return "ENOEXEC";
+    case ENOMEM: return "ENOMEM";
+    case EACCES: return "EACCES";
+    case EFAULT: return "EFAULT";
+    case EBUSY: return "EBUSY";
+    case EEXIST: return "EEXIST";
+    case ENODEV: return "ENODEV";
+    case ENOTDIR: return "ENOTDIR";
+    case EISDIR: return "EISDIR";
+    case EINVAL: return "EINVAL";
+    case ENFILE: return "ENFILE";
+    case EMFILE: return "EMFILE";
+    case EFBIG: return "EFBIG";
+    case ENOSPC: return "ENOSPC";
+    case ESPIPE: return "ESPIPE";
+    case EROFS: return "EROFS";
+    case ENOSYS: return "ENOSYS";
+    case ELOOP: return "ELOOP";
+    case ENAMETOOLONG: return "ENAMETOOLONG";
+    default: return "EUNKNOWN";
+    }
+}
+
+static const char *proc_exec_fail_reason(const char *stage, int err) {
+    int e = (err < 0) ? -err : err;
+
+    if (stage && strcmp(stage, "resolve_interp") == 0 && e == ENOENT)
+        return "missing_interp";
+    if (stage && strcmp(stage, "resolve_interp_type") == 0)
+        return "invalid_interp_path";
+    if (stage && strcmp(stage, "load_main_elf") == 0 && e == ENOEXEC)
+        return "invalid_elf";
+    if (stage && strcmp(stage, "load_interp_elf") == 0 && e == ENOEXEC)
+        return "invalid_interp_elf";
+    if (stage && strcmp(stage, "setup_stack") == 0 && e == E2BIG)
+        return "argv_env_too_large";
+
+    switch (e) {
+    case EACCES: return "permission_denied";
+    case ENOENT: return "path_not_found";
+    case ENOEXEC: return "invalid_executable";
+    case ENOMEM: return "out_of_memory";
+    case EIO: return "io_error";
+    case EFAULT: return "bad_user_pointer";
+    case ENAMETOOLONG: return "path_too_long";
+    default: return "exec_failed";
+    }
+}
+
+static bool proc_exec_should_log_failure(const char *stage, int err) {
+    if (err >= 0)
+        return false;
+    if (stage && strcmp(stage, "resolve_exec") == 0 && err == -ENOENT)
+        return false;
+    if (stage && strcmp(stage, "resolve_exec_dentry") == 0 && err == -ENOENT)
+        return false;
+    return true;
+}
+
+static void proc_exec_log_failure(const char *stage, const char *path,
+                                  const char *interp_path, int err) {
+    if (!proc_exec_should_log_failure(stage, err))
+        return;
+    struct process *curr = proc_current();
+    pr_warn("exec: fail reason=%s stage=%s pid=%d comm=%s path=%s interp=%s errno=%d(%s)\n",
+            proc_exec_fail_reason(stage, err), stage ? stage : "unknown",
+            curr ? curr->pid : -1,
+            (curr && curr->name[0]) ? curr->name : "?",
+            path ? path : "?",
+            interp_path ? interp_path : "-",
+            -err, proc_exec_errno_name(err));
+}
+
 static int proc_load_interp_bias(struct mm_struct *mm, struct vnode *vn,
                                  size_t size, const char *exec_path,
                                  vaddr_t *entry_out,
@@ -103,10 +183,12 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
     int ret = 0;
     struct elf_auxv_info aux = {0};
     struct elf_auxv_info interp_aux = {0};
-    char interp_path[CONFIG_PATH_MAX];
+    char interp_path[CONFIG_PATH_MAX] = {0};
     bool has_interp = false;
+    const char *fail_stage = "init";
 
     if (argv) {
+        fail_stage = "copy_argv";
         kargv = kmalloc((EXEC_ARG_MAX + 1) * sizeof(char *));
         if (!kargv)
             return -ENOMEM;
@@ -142,6 +224,7 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
     }
 
     if (envp) {
+        fail_stage = "copy_envp";
         kenvp = kmalloc((EXEC_ENV_MAX + 1) * sizeof(char *));
         if (!kenvp) {
             ret = -ENOMEM;
@@ -183,10 +266,12 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
         resolve_flags |= NAMEI_FOLLOW;
 
     path_init(&resolved);
+    fail_stage = "resolve_exec";
     ret = vfs_namei(path, &resolved, resolve_flags);
     if (ret < 0)
         goto out;
     if (!resolved.dentry || !resolved.dentry->vnode) {
+        fail_stage = "resolve_exec_dentry";
         if (resolved.dentry)
             dentry_put(resolved.dentry);
         ret = -ENOENT;
@@ -194,6 +279,7 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
     }
     vn = resolved.dentry->vnode;
     if (vn->type != VNODE_FILE) {
+        fail_stage = "resolve_exec_type";
         dentry_put(resolved.dentry);
         ret = -EACCES;
         goto out;
@@ -201,11 +287,13 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
 
     size = vn->size;
     if (size < sizeof(Elf64_Ehdr)) {
+        fail_stage = "check_exec_size";
         dentry_put(resolved.dentry);
         ret = -ENOEXEC;
         goto out;
     }
 
+    fail_stage = "read_interp";
     ret = elf_read_interp_vnode(vn, size, interp_path, sizeof(interp_path));
     if (ret == 0) {
         has_interp = true;
@@ -214,49 +302,61 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
         goto out;
     }
 
+    fail_stage = "create_mm";
     if (!(new_mm = mm_create())) {
         dentry_put(resolved.dentry);
         ret = -ENOMEM;
         goto out;
     }
+    fail_stage = "load_main_elf";
     ret = elf_load_vnode(new_mm, vn, size, &entry, &aux);
     dentry_put(resolved.dentry);
     if (ret < 0) {
         mm_destroy(new_mm);
-        ret = -ENOEXEC;
         goto out;
     }
     aux.base = 0;
 
     if (has_interp) {
         path_init(&interp_resolved);
+        fail_stage = "resolve_interp";
         ret = vfs_namei(interp_path, &interp_resolved, NAMEI_FOLLOW);
-        if (ret < 0 || !interp_resolved.dentry ||
-            !interp_resolved.dentry->vnode ||
-            interp_resolved.dentry->vnode->type != VNODE_FILE) {
-            if (ret >= 0 && interp_resolved.dentry)
+        if (ret < 0) {
+            mm_destroy(new_mm);
+            goto out;
+        }
+        if (!interp_resolved.dentry || !interp_resolved.dentry->vnode) {
+            if (interp_resolved.dentry)
                 dentry_put(interp_resolved.dentry);
             mm_destroy(new_mm);
-            ret = -ENOEXEC;
+            ret = -ENOENT;
+            goto out;
+        }
+        if (interp_resolved.dentry->vnode->type != VNODE_FILE) {
+            fail_stage = "resolve_interp_type";
+            dentry_put(interp_resolved.dentry);
+            mm_destroy(new_mm);
+            ret = -EACCES;
             goto out;
         }
         struct vnode *ivn = interp_resolved.dentry->vnode;
         size_t interp_size = ivn->size;
+        fail_stage = "load_interp_elf";
         ret = proc_load_interp_bias(new_mm, ivn, interp_size, path,
                                     &interp_entry, &interp_aux);
         dentry_put(interp_resolved.dentry);
         if (ret < 0) {
             mm_destroy(new_mm);
-            ret = -ENOEXEC;
             goto out;
         }
         aux.base = interp_aux.base;
         entry = interp_entry;
     }
 
-    if (elf_setup_stack(new_mm, kargv, kenvp, &sp, &aux) < 0) {
+    fail_stage = "setup_stack";
+    ret = elf_setup_stack(new_mm, kargv, kenvp, &sp, &aux);
+    if (ret < 0) {
         mm_destroy(new_mm);
-        ret = -ENOEXEC;
         goto out;
     }
 
@@ -285,6 +385,8 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
     goto out;
 
 out:
+    if (ret < 0)
+        proc_exec_log_failure(fail_stage, path, has_interp ? interp_path : NULL, ret);
     proc_free_strv(kargv, argc);
     proc_free_strv(kenvp, envc);
     return ret;
