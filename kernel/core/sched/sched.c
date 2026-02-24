@@ -755,7 +755,22 @@ int sched_set_affinity(struct process *p, uint64_t mask) {
             cpu_data[cpu].resched_needed = true;
             if (cpu != arch_cpu_id())
                 arch_send_ipi(cpu, IPI_RESCHEDULE);
-            return 0;
+
+            if (p == proc_current())
+                proc_yield();
+            else {
+                for (int spins = 0; spins < 1024; spins++) {
+                    arch_cpu_relax();
+                    uint32_t now_state = se_state_load(&p->se);
+                    int now_cpu = p->se.cpu;
+                    if (now_state != SE_STATE_RUNNING)
+                        break;
+                    if (now_cpu >= 0 && now_cpu < CONFIG_MAX_CPUS &&
+                        proc_sched_cpu_allowed(p, now_cpu))
+                        return 0;
+                }
+            }
+            continue;
         }
 
         if (se_state != SE_STATE_QUEUED)

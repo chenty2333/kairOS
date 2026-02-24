@@ -174,6 +174,134 @@ static int vfs_propagate_bind(struct dentry *source, struct dentry *target,
     return 0;
 }
 
+static bool mount_is_descendant_of(const struct mount *child,
+                                   const struct mount *ancestor) {
+    if (!child || !ancestor || child == ancestor)
+        return false;
+    const struct mount *cur = child->parent;
+    while (cur) {
+        if (cur == ancestor)
+            return true;
+        cur = cur->parent;
+    }
+    return false;
+}
+
+static bool mount_has_child_locked(const struct mount *mnt,
+                                   bool attached_only) {
+    struct mount *child;
+    list_for_each_entry(child, &mount_list, list) {
+        if (child->parent != mnt)
+            continue;
+        if (attached_only && (child->mflags & MOUNT_F_DETACHED))
+            continue;
+        return true;
+    }
+    return false;
+}
+
+static bool mount_can_reap_detached_locked(struct mount *mnt) {
+    if (!mnt || !(mnt->mflags & MOUNT_F_DETACHED))
+        return false;
+    if (mnt->mflags & MOUNT_F_REAP_FAILED)
+        return false;
+    if (mnt == init_mnt_ns.root || mnt == root_mount)
+        return false;
+    if (mount_has_child_locked(mnt, false))
+        return false;
+    uint32_t refs = atomic_read(&mnt->refcount);
+    return refs <= 1;
+}
+
+static void mount_finalize_free(struct mount *mnt) {
+    if (!mnt)
+        return;
+
+    if (mnt == init_mnt_ns.root) {
+        vfs_mount_put(init_mnt_ns.root);
+        init_mnt_ns.root = NULL;
+        init_mnt_ns.root_dentry = NULL;
+    }
+    if (mnt->root_dentry) {
+        dentry_drop(mnt->root_dentry);
+        mnt->root_dentry = NULL;
+    }
+    if (mnt->mountpoint_dentry) {
+        mnt->mountpoint_dentry->mounted = NULL;
+        mnt->mountpoint_dentry->flags &= ~DENTRY_MOUNTPOINT;
+        dentry_put(mnt->mountpoint_dentry);
+        mnt->mountpoint_dentry = NULL;
+    }
+    if (mnt->root) {
+        vnode_put(mnt->root);
+        mnt->root = NULL;
+    }
+    if (mnt->group)
+        mount_group_remove(mnt);
+    if (mnt->master) {
+        list_del(&mnt->slave_node);
+        mnt->master = NULL;
+    }
+    if (mnt->dev && !(mnt->mflags & MOUNT_F_BIND))
+        blkdev_put(mnt->dev);
+    kfree(mnt->mountpoint);
+    kfree(mnt);
+}
+
+static void mount_mark_detached_subtree_locked(struct mount *root) {
+    if (!root)
+        return;
+    struct mount *mnt;
+    list_for_each_entry(mnt, &mount_list, list) {
+        if (mnt != root && !mount_is_descendant_of(mnt, root))
+            continue;
+        mnt->mflags |= MOUNT_F_DETACHED;
+        mnt->mflags &= ~MOUNT_F_REAP_FAILED;
+        if (mnt->mountpoint_dentry) {
+            mnt->mountpoint_dentry->mounted = NULL;
+            mnt->mountpoint_dentry->flags &= ~DENTRY_MOUNTPOINT;
+            dentry_put(mnt->mountpoint_dentry);
+            mnt->mountpoint_dentry = NULL;
+        }
+    }
+}
+
+static void mount_reap_detached_locked(void) {
+    while (1) {
+        struct mount *victim = NULL;
+        struct mount *mnt;
+        list_for_each_entry(mnt, &mount_list, list) {
+            if (mount_can_reap_detached_locked(mnt)) {
+                victim = mnt;
+                break;
+            }
+        }
+        if (!victim)
+            return;
+
+        spin_unlock(&vfs_lock);
+        int unmount_ret = 0;
+        if (victim->ops && victim->ops->unmount &&
+            !(victim->mflags & MOUNT_F_BIND)) {
+            unmount_ret = victim->ops->unmount(victim);
+        }
+        spin_lock(&vfs_lock);
+        if (unmount_ret < 0) {
+            victim->mflags |= MOUNT_F_REAP_FAILED;
+            continue;
+        }
+        if (!mount_can_reap_detached_locked(victim))
+            continue;
+
+        list_del(&victim->list);
+        if (victim == root_mount)
+            root_mount = NULL;
+        spin_unlock(&vfs_lock);
+        mount_finalize_free(victim);
+        spin_lock(&vfs_lock);
+    }
+}
+
 struct mount *vfs_root_mount(void) {
     struct process *p = proc_current();
     if (p && p->mnt_ns && p->mnt_ns->root)
@@ -203,6 +331,13 @@ void vfs_mount_put(struct mount *mnt) {
     uint32_t old = atomic_fetch_sub(&mnt->refcount, 1);
     if (old == 0)
         panic("vfs_mount_put: refcount already zero");
+    if (old == 1 && (mnt->mflags & MOUNT_F_DETACHED)) {
+        vfs_mount_global_lock();
+        spin_lock(&vfs_lock);
+        mount_reap_detached_locked();
+        spin_unlock(&vfs_lock);
+        vfs_mount_global_unlock();
+    }
 }
 
 void vfs_mount_global_lock(void) {
@@ -300,6 +435,8 @@ static struct mount *find_mount(const char *path) {
     vfs_mount_global_lock();
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
+        if (mnt->mflags & MOUNT_F_DETACHED)
+            continue;
         size_t len = strlen(mnt->mountpoint);
         if (strncmp(path, mnt->mountpoint, len) == 0 &&
             (path[len] == '\0' || path[len] == '/' || len == 1)) {
@@ -518,78 +655,80 @@ int vfs_bind_mount(struct dentry *source, struct dentry *target,
     return vfs_mount_bind_at(source, target, flags, propagate);
 }
 
-int vfs_umount(const char *tgt) {
-    struct mount *mnt;
+int vfs_umount2(const char *tgt, uint32_t flags) {
+    if (!tgt)
+        return -EINVAL;
+    if (flags & ~VFS_UMOUNT_DETACH)
+        return -EINVAL;
+
+    struct mount *mnt = NULL;
+    bool found = false;
     vfs_mount_global_lock();
     spin_lock(&vfs_lock);
     list_for_each_entry(mnt, &mount_list, list) {
+        if (mnt->mflags & MOUNT_F_DETACHED)
+            continue;
         if (strcmp(mnt->mountpoint, tgt) == 0) {
-            struct mount *child;
-            list_for_each_entry(child, &mount_list, list) {
-                if (child != mnt && child->parent == mnt) {
-                    spin_unlock(&vfs_lock);
-                    vfs_mount_global_unlock();
-                    return -EBUSY;
-                }
-            }
-            uint32_t mount_refs = atomic_read(&mnt->refcount);
-            uint32_t baseline_refs = 1;
-            if (mnt == init_mnt_ns.root)
-                baseline_refs++;
-            if (mount_refs > baseline_refs) {
-                spin_unlock(&vfs_lock);
-                vfs_mount_global_unlock();
-                return -EBUSY;
-            }
-            spin_unlock(&vfs_lock);
-            if (mnt->ops->unmount && !(mnt->mflags & MOUNT_F_BIND)) {
-                int ret = mnt->ops->unmount(mnt);
-                if (ret < 0) {
-                    vfs_mount_global_unlock();
-                    return ret;
-                }
-            }
-
-            spin_lock(&vfs_lock);
-            list_del(&mnt->list);
-            if (mnt == root_mount)
-                root_mount = NULL;
-            spin_unlock(&vfs_lock);
-
-            if (mnt == init_mnt_ns.root) {
-                vfs_mount_put(init_mnt_ns.root);
-                init_mnt_ns.root = NULL;
-                init_mnt_ns.root_dentry = NULL;
-            }
-            if (mnt->root_dentry) {
-                dentry_drop(mnt->root_dentry);
-                mnt->root_dentry = NULL;
-            }
-            if (mnt->mountpoint_dentry) {
-                mnt->mountpoint_dentry->mounted = NULL;
-                mnt->mountpoint_dentry->flags &= ~DENTRY_MOUNTPOINT;
-                dentry_put(mnt->mountpoint_dentry);
-                mnt->mountpoint_dentry = NULL;
-            }
-            if (mnt->root) {
-                vnode_put(mnt->root);
-                mnt->root = NULL;
-            }
-            if (mnt->group)
-                mount_group_remove(mnt);
-            if (mnt->master) {
-                list_del(&mnt->slave_node);
-                mnt->master = NULL;
-            }
-            if (mnt->dev && !(mnt->mflags & MOUNT_F_BIND))
-                blkdev_put(mnt->dev);
-            kfree(mnt->mountpoint);
-            kfree(mnt);
-            vfs_mount_global_unlock();
-            return 0;
+            found = true;
+            break;
         }
     }
+    if (!found) {
+        spin_unlock(&vfs_lock);
+        vfs_mount_global_unlock();
+        return -ENOENT;
+    }
+
+    if (flags & VFS_UMOUNT_DETACH) {
+        if (mnt == init_mnt_ns.root || mnt == root_mount) {
+            spin_unlock(&vfs_lock);
+            vfs_mount_global_unlock();
+            return -EBUSY;
+        }
+        mount_mark_detached_subtree_locked(mnt);
+        mount_reap_detached_locked();
+        spin_unlock(&vfs_lock);
+        vfs_mount_global_unlock();
+        return 0;
+    }
+
+    if (mount_has_child_locked(mnt, true)) {
+        spin_unlock(&vfs_lock);
+        vfs_mount_global_unlock();
+        return -EBUSY;
+    }
+    uint32_t mount_refs = atomic_read(&mnt->refcount);
+    uint32_t baseline_refs = 1;
+    if (mnt == init_mnt_ns.root)
+        baseline_refs++;
+    if (mount_refs > baseline_refs) {
+        spin_unlock(&vfs_lock);
+        vfs_mount_global_unlock();
+        return -EBUSY;
+    }
     spin_unlock(&vfs_lock);
+
+    if (mnt->ops->unmount && !(mnt->mflags & MOUNT_F_BIND)) {
+        int ret = mnt->ops->unmount(mnt);
+        if (ret < 0) {
+            vfs_mount_global_unlock();
+            return ret;
+        }
+    }
+
+    spin_lock(&vfs_lock);
+    if (!list_empty(&mnt->list))
+        list_del(&mnt->list);
+    if (mnt == root_mount)
+        root_mount = NULL;
+    mount_reap_detached_locked();
+    spin_unlock(&vfs_lock);
+
+    mount_finalize_free(mnt);
     vfs_mount_global_unlock();
-    return -ENOENT;
+    return 0;
+}
+
+int vfs_umount(const char *tgt) {
+    return vfs_umount2(tgt, 0);
 }

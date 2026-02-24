@@ -174,7 +174,11 @@ struct mount_group {
     uint32_t id;
 };
 
-#define MOUNT_F_BIND 0x1
+#define MOUNT_F_BIND        0x1
+#define MOUNT_F_DETACHED    0x2
+#define MOUNT_F_REAP_FAILED 0x4
+
+#define VFS_UMOUNT_DETACH 0x1
 
 struct vfs_ops {
     const char *name;
@@ -223,6 +227,7 @@ void vfs_init(void);
 int vfs_mount(const char *src, const char *tgt, const char *type,
               uint32_t flags);
 int vfs_umount(const char *tgt);
+int vfs_umount2(const char *tgt, uint32_t flags);
 struct mount *vfs_mount_for_path(const char *path);
 int vfs_build_path_dentry(struct dentry *d, char *out, size_t len);
 int vfs_build_relpath(struct dentry *root, struct dentry *target,
