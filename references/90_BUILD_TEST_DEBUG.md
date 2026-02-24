@@ -106,7 +106,7 @@ QEMU configuration:
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
 - GitHub Actions `ci-quick` runs `riscv64` default regression gate (`make test-ci-default`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make QEMU_SMP=2 test-syscall-trap` + `make QEMU_SMP=2 test-tcc-smoke`); aarch64 syscall gate additionally asserts SMP online marker `SMP: 2/2 CPUs active`
-- GitHub Actions `soak-long` runs `riscv64` long soak-pr profile and `x86_64` bootstrap soak-pr profile (shorter default duration and timeout for CI cost control)
+- GitHub Actions `soak-long` runs `riscv64` long soak-pr profile plus `x86_64` and `aarch64` bootstrap soak-pr profiles (shorter default duration and timeout for CI cost control); `aarch64` bootstrap soak runs with `QEMU_SMP=2`
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`, `doomgeneric`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
 - `scripts/impl/fetch-deps.sh` validates each cached dependency by sentinel files; when a directory exists but is incomplete/corrupted, it is removed and refetched instead of being blindly skipped.
 - lwIP source for `deps fetch lwip` is configurable: `LWIP_GIT_URL` / `LWIP_GIT_REF` / `LWIP_GIT_COMMIT` (default URL currently `https://github.com/lwip-tcpip/lwip.git`, ref `STABLE-2_2_1_RELEASE`).
