@@ -79,6 +79,7 @@ ifeq ($(ARCH),riscv64)
   CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
+  QEMU_CPU ?= max
   # Keep boot hart deterministic for Limine on older OpenSBI firmware.
   QEMU_ACCEL ?= tcg,thread=single
   QEMU_VIRTIO_BLK_DEV := virtio-blk-device

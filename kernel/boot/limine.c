@@ -78,7 +78,7 @@ static void *efi_find_dtb(void *system_table) {
 
 /* Limine base revision */
 __attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(0);
+static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(5);
 
 /* Request markers */
 __attribute__((used, section(".limine_requests_start_marker")))
@@ -298,11 +298,11 @@ static void boot_init_limine(void) {
         boot_info.kernel_virt_base = limine_exec_addr.response->virtual_base;
     }
 
-    if (!boot_info.dtb && boot_info.efi_system_table) {
-        boot_info.dtb = efi_find_dtb(boot_info.efi_system_table);
-    }
     if (!boot_info.dtb) {
         boot_info.dtb = limine_find_dtb_module();
+    }
+    if (!boot_info.dtb && boot_info.efi_system_table) {
+        boot_info.dtb = efi_find_dtb(boot_info.efi_system_table);
     }
 
     if (limine_modules.response && limine_modules.response->module_count) {
@@ -384,13 +384,17 @@ static void boot_init_limine(void) {
         }
     }
 
+#if defined(ARCH_aarch64)
     uint32_t limine_cpu_count = 0;
+#endif
     if (limine_mp.response && limine_mp.response->cpu_count) {
         uint64_t count = limine_mp.response->cpu_count;
         if (count > CONFIG_MAX_CPUS)
             count = CONFIG_MAX_CPUS;
         boot_info.cpu_count = (uint32_t)count;
+#if defined(ARCH_aarch64)
         limine_cpu_count = (uint32_t)count;
+#endif
         boot_info.bsp_cpu_id = 0;
         for (uint64_t i = 0; i < count; i++) {
             struct limine_mp_info *info =

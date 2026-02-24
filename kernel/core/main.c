@@ -29,6 +29,12 @@ extern void _secondary_start(void);
 
 void secondary_cpu_main(unsigned long cpu_id) {
     arch_cpu_init((int)cpu_id);
+#if defined(ARCH_riscv64)
+    /* APs may still enter with Limine's temporary page tables. */
+    paddr_t kernel_pgdir = arch_mmu_get_kernel_pgdir();
+    if (kernel_pgdir && arch_mmu_current() != kernel_pgdir)
+        arch_mmu_switch(kernel_pgdir);
+#endif
     sched_init_cpu((int)cpu_id);
     sched_cpu_online((int)cpu_id);
     arch_trap_init();
