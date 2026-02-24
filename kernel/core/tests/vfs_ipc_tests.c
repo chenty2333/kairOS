@@ -4,13 +4,16 @@
 
 #include <kairos/epoll.h>
 #include <kairos/epoll_internal.h>
+#include <kairos/inotify.h>
 #include <kairos/mm.h>
 #include <kairos/pipe.h>
 #include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/signal.h>
 #include <kairos/string.h>
+#include <kairos/syscall.h>
 #include <kairos/vfs.h>
 
 #if CONFIG_KERNEL_TESTS
@@ -627,6 +630,103 @@ static void test_epoll_edge_oneshot_semantics(void) {
     close_file_if_open(&rf);
 }
 
+static void test_eventfd_syscall_semantics(void) {
+    int efd = -1;
+
+    int64_t ret64 = sys_eventfd2(0, 0x4U, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "eventfd2 invalid flags einval");
+
+    ret64 = sys_eventfd2(0, O_NONBLOCK, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "eventfd2 create nonblock");
+    if (ret64 < 0)
+        return;
+    efd = (int)ret64;
+
+    uint64_t counter = 0;
+    ssize_t rd = fd_read_once(efd, &counter, sizeof(counter));
+    test_check(rd == -EAGAIN, "eventfd2 empty read eagain");
+
+    counter = 2;
+    ssize_t wr = fd_write_once(efd, &counter, sizeof(counter));
+    test_check(wr == (ssize_t)sizeof(counter), "eventfd2 write");
+
+    counter = 0;
+    rd = fd_read_once(efd, &counter, sizeof(counter));
+    test_check(rd == (ssize_t)sizeof(counter), "eventfd2 read");
+    if (rd == (ssize_t)sizeof(counter))
+        test_check(counter == 2, "eventfd2 read value");
+
+    close_fd_if_open(&efd);
+}
+
+static void test_timerfd_syscall_semantics(void) {
+    int tfd = -1;
+
+    int64_t ret64 = sys_timerfd_create(CLOCK_MONOTONIC, 0x4U, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "timerfd_create invalid flags einval");
+
+    ret64 = sys_timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "timerfd_create nonblock");
+    if (ret64 < 0)
+        goto out;
+    tfd = (int)ret64;
+
+    ret64 = sys_timerfd_gettime((uint64_t)tfd, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "timerfd_gettime null ptr efault");
+
+    ret64 = sys_timerfd_settime((uint64_t)tfd, 0x4U, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "timerfd_settime invalid flags einval");
+
+    ret64 = sys_timerfd_settime((uint64_t)tfd, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "timerfd_settime null ptr efault");
+
+out:
+    close_fd_if_open(&tfd);
+}
+
+static void test_signalfd_syscall_semantics(void) {
+    int64_t ret64 = sys_signalfd4((uint64_t)-1, 0, sizeof(sigset_t), 0, 0, 0);
+    test_check(ret64 == -EFAULT, "signalfd4 null mask efault");
+
+    ret64 = sys_signalfd4((uint64_t)-1, 0x1000U, sizeof(sigset_t) - 1, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "signalfd4 bad sigsetsize einval");
+
+    ret64 = sys_signalfd4((uint64_t)-1, 0x1000U, sizeof(sigset_t), 0x4U, 0, 0);
+    test_check(ret64 == -EINVAL, "signalfd4 invalid flags einval");
+}
+
+static void test_inotify_syscall_semantics(void) {
+    int ifd = -1;
+
+    int64_t ret64 = sys_inotify_init1(0x4U, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "inotify_init1 invalid flags einval");
+
+    ret64 = sys_inotify_init1(IN_NONBLOCK, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "inotify_init1 nonblock");
+    if (ret64 < 0)
+        goto out;
+    ifd = (int)ret64;
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, 0, IN_CREATE, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "inotify_add_watch null path efault");
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, 0x1000U,
+                                  IN_MASK_ADD | IN_MASK_CREATE, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "inotify_add_watch mask_add_mask_create");
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, 0x1000U, IN_ONLYDIR, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "inotify_add_watch missing events");
+
+    ret64 = sys_inotify_rm_watch((uint64_t)ifd, 123456U, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "inotify_rm_watch invalid wd");
+
+    ret64 = sys_inotify_rm_watch((uint64_t)(ifd + 1024), 1, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "inotify_rm_watch badfd");
+
+out:
+    close_fd_if_open(&ifd);
+}
+
 int run_vfs_ipc_tests(void) {
     tests_failed = 0;
     pr_info("\n=== VFS/IPC Tests ===\n");
@@ -635,6 +735,10 @@ int run_vfs_ipc_tests(void) {
     test_pipe_semantics();
     test_epoll_pipe_semantics();
     test_epoll_edge_oneshot_semantics();
+    test_eventfd_syscall_semantics();
+    test_timerfd_syscall_semantics();
+    test_signalfd_syscall_semantics();
+    test_inotify_syscall_semantics();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");
