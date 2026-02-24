@@ -521,6 +521,102 @@ out_restore_mm:
     }
 }
 
+static void test_uaccess_large_range_regression(void) {
+    struct process *p = proc_current();
+    test_check(p != NULL, "uaccess_large_range proc_current");
+    if (!p)
+        return;
+
+    struct mm_struct *saved_mm = p->mm;
+    struct mm_struct *active_mm = saved_mm;
+    struct mm_struct *temp_mm = NULL;
+    paddr_t saved_pgdir = arch_mmu_current();
+    bool switched_pgdir = false;
+
+    if (!active_mm) {
+        temp_mm = mm_create();
+        test_check(temp_mm != NULL, "uaccess_large_range mm_create");
+        if (!temp_mm)
+            return;
+        p->mm = temp_mm;
+        active_mm = temp_mm;
+    }
+
+    if (saved_pgdir != active_mm->pgdir) {
+        arch_mmu_switch(active_mm->pgdir);
+        switched_pgdir = true;
+    }
+
+    const size_t map_len = 12 * CONFIG_PAGE_SIZE;
+    const size_t span = 7 * CONFIG_PAGE_SIZE + 257;
+    vaddr_t map_start = 0;
+    vaddr_t user_ptr = 0;
+
+    int ret = mm_mmap(active_mm, 0, map_len, VM_READ | VM_WRITE, 0, NULL, 0,
+                      false, &map_start);
+    test_check(ret == 0, "uaccess_large_range mmap");
+    if (ret < 0)
+        goto out_restore_mm;
+
+    uint8_t *src = kmalloc(span);
+    uint8_t *dst = kmalloc(span);
+    test_check(src != NULL, "uaccess_large_range kmalloc_src");
+    test_check(dst != NULL, "uaccess_large_range kmalloc_dst");
+    if (!src || !dst)
+        goto out_unmap;
+
+    for (size_t i = 0; i < span; i++)
+        src[i] = (uint8_t)((i * 97U + 23U) & 0xffU);
+
+    user_ptr = map_start + CONFIG_PAGE_SIZE / 2;
+    ret = copy_to_user((void *)user_ptr, src, span);
+    test_check(ret == 0, "uaccess_large_range copy_to_user");
+    if (ret == 0) {
+        vaddr_t first = ALIGN_DOWN(user_ptr, CONFIG_PAGE_SIZE);
+        vaddr_t mid = first + 4 * CONFIG_PAGE_SIZE;
+        vaddr_t last = ALIGN_DOWN(user_ptr + span - 1, CONFIG_PAGE_SIZE);
+        test_check(arch_mmu_translate(active_mm->pgdir, first) != 0,
+                   "uaccess_large_range first_faulted");
+        test_check(arch_mmu_translate(active_mm->pgdir, mid) != 0,
+                   "uaccess_large_range mid_faulted");
+        test_check(arch_mmu_translate(active_mm->pgdir, last) != 0,
+                   "uaccess_large_range last_faulted");
+    }
+
+    memset(dst, 0, span);
+    ret = copy_from_user(dst, (const void *)user_ptr, span);
+    test_check(ret == 0, "uaccess_large_range copy_from_user");
+    if (ret == 0)
+        test_check(memcmp(src, dst, span) == 0, "uaccess_large_range data_match");
+
+    ret = mm_munmap(active_mm, map_start + 4 * CONFIG_PAGE_SIZE, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "uaccess_large_range munmap_hole");
+    if (ret == 0) {
+        ret = copy_from_user(dst, (const void *)user_ptr, span);
+        test_check(ret == -EFAULT, "uaccess_large_range hole_copy_from_efault");
+
+        ret = copy_to_user((void *)user_ptr, src, span);
+        test_check(ret == -EFAULT, "uaccess_large_range hole_copy_to_efault");
+    }
+
+out_unmap:
+    ret = mm_munmap(active_mm, map_start, map_len);
+    test_check(ret == 0, "uaccess_large_range munmap_all");
+
+    if (src)
+        kfree(src);
+    if (dst)
+        kfree(dst);
+
+out_restore_mm:
+    if (switched_pgdir)
+        arch_mmu_switch(saved_pgdir);
+    if (temp_mm) {
+        p->mm = saved_mm;
+        mm_destroy(temp_mm);
+    }
+}
+
 static void test_sched_affinity_syscalls_regression(void) {
     struct process *p = proc_current();
     test_check(p != NULL, "affinity proc_current");
@@ -986,6 +1082,7 @@ int run_syscall_trap_tests(void) {
     test_syscall_identity_legacy();
     test_syscall_error_paths_legacy();
     test_uaccess_cross_page_regression();
+    test_uaccess_large_range_regression();
     test_sched_affinity_syscalls_regression();
     test_mount_umount_flag_semantics();
     test_acct_syscall_semantics();
