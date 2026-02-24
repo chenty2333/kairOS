@@ -64,7 +64,7 @@ jobs:
       - name: Fetch required third-party sources
         run: |
           set -euo pipefail
-          deps=(lwip limine musl busybox tcc)
+          deps=(lwip limine musl busybox tcc doomgeneric)
           for dep in "${deps[@]}"; do
             ok=0
             for attempt in 1 2 3; do
@@ -208,7 +208,7 @@ jobs:
       - name: Fetch required third-party sources
         run: |
           set -euo pipefail
-          deps=(lwip limine musl busybox tcc)
+          deps=(lwip limine musl busybox tcc doomgeneric)
           for dep in "${deps[@]}"; do
             ok=0
             for attempt in 1 2 3; do
@@ -347,7 +347,7 @@ jobs:
       - name: Fetch required third-party sources
         run: |
           set -euo pipefail
-          deps=(lwip limine musl busybox tcc)
+          deps=(lwip limine musl busybox tcc doomgeneric)
           for dep in "${deps[@]}"; do
             ok=0
             for attempt in 1 2 3; do

@@ -9,6 +9,7 @@
 #   scripts/kairos.sh deps fetch tinyusb  - Fetch TinyUSB
 #   scripts/kairos.sh deps fetch fatfs    - Fetch FatFs
 #   scripts/kairos.sh deps fetch tcc      - Fetch TCC (Tiny C Compiler)
+#   scripts/kairos.sh deps fetch doomgeneric - Fetch DoomGeneric source
 
 set -euo pipefail
 
@@ -126,6 +127,27 @@ fetch_tcc() {
     echo "License: LGPL-2.1"
 }
 
+fetch_doomgeneric() {
+    local doom_git_url="${DOOMGENERIC_GIT_URL:-https://github.com/ozkl/doomgeneric.git}"
+    local doom_git_ref="${DOOMGENERIC_GIT_REF:-master}"
+    local doom_git_commit="${DOOMGENERIC_GIT_COMMIT:-}"
+
+    echo "=== Fetching DoomGeneric source ==="
+    if [ -d "$DEPS_DIR/doomgeneric" ]; then
+        echo "DoomGeneric already exists, skipping"
+        return
+    fi
+    git clone "$doom_git_url" \
+        --branch="$doom_git_ref" --depth=1 "$DEPS_DIR/doomgeneric"
+    if [[ -n "$doom_git_commit" ]]; then
+        git -C "$DEPS_DIR/doomgeneric" fetch --depth=1 origin "$doom_git_commit"
+        git -C "$DEPS_DIR/doomgeneric" checkout --detach "$doom_git_commit"
+    fi
+    echo "DoomGeneric downloaded to $DEPS_DIR/doomgeneric"
+    echo "Source: $doom_git_url ($doom_git_ref${doom_git_commit:+ @ $doom_git_commit})"
+    echo "License: GPL-2.0"
+}
+
 show_help() {
     echo "Usage: $0 [component]"
     echo ""
@@ -138,6 +160,7 @@ show_help() {
     echo "  musl     - musl C library (MIT license)"
     echo "  busybox  - BusyBox userland (GPL-2.0)"
     echo "  tcc      - TCC Tiny C Compiler (LGPL-2.1)"
+    echo "  doomgeneric - DoomGeneric source (GPL-2.0)"
     echo "  header   - Just the Limine protocol header"
     echo ""
     echo "All dependencies will be placed in ./third_party/"
@@ -153,6 +176,7 @@ case "${1:-help}" in
         fetch_musl
         fetch_busybox
         fetch_tcc
+        fetch_doomgeneric
         echo ""
         echo "=== All dependencies fetched ==="
         ;;
@@ -177,6 +201,9 @@ case "${1:-help}" in
         ;;
     tcc)
         fetch_tcc
+        ;;
+    doomgeneric)
+        fetch_doomgeneric
         ;;
     header)
         fetch_limine_header
