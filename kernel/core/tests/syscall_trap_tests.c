@@ -13,6 +13,7 @@
 #include <kairos/time.h>
 #include <kairos/trap_core.h>
 #include <kairos/uaccess.h>
+#include <kairos/vfs.h>
 
 #if CONFIG_KERNEL_TESTS
 
@@ -128,7 +129,11 @@ static int futex_waitv_waker_worker(void *arg) {
 
     ctx->started = 1;
     ctx->wake_ret = 0;
-    for (int i = 0; i < 4096; i++) {
+    uint64_t wake_deadline = arch_timer_get_ticks() +
+                             arch_timer_ns_to_ticks(2ULL * TEST_NS_PER_SEC);
+    if (wake_deadline == 0)
+        wake_deadline = 1;
+    while (arch_timer_get_ticks() < wake_deadline) {
         int64_t ret = sys_futex((uint64_t)ctx->uaddr, FUTEX_WAKE, 1, 0, 0, 0);
         if (ret > 0) {
             ctx->wake_ret = (int)ret;
@@ -618,6 +623,125 @@ out:
         user_map_end(&um);
 }
 
+#define SYSCALL_MOUNT_FLAG_TEST_PATH "/tmp/.kairos_syscall_mount_flags"
+#define SYSCALL_ACCT_TEST_FILE "/tmp/.kairos_syscall_acct"
+
+static void test_mount_umount_flag_semantics(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc;
+
+    (void)vfs_umount(SYSCALL_MOUNT_FLAG_TEST_PATH);
+    (void)vfs_rmdir(SYSCALL_MOUNT_FLAG_TEST_PATH);
+
+    rc = vfs_mkdir(SYSCALL_MOUNT_FLAG_TEST_PATH, 0755);
+    test_check(rc == 0 || rc == -EEXIST, "mountflags mkdir");
+    if (rc < 0 && rc != -EEXIST)
+        goto out;
+
+    rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "mountflags user_map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    char *u_tgt = (char *)user_map_ptr(&um, 0x000);
+    char *u_fstype = (char *)user_map_ptr(&um, 0x100);
+    test_check(u_tgt != NULL, "mountflags u_tgt");
+    test_check(u_fstype != NULL, "mountflags u_fstype");
+    if (!u_tgt || !u_fstype)
+        goto out;
+
+    rc = copy_to_user(u_tgt, SYSCALL_MOUNT_FLAG_TEST_PATH,
+                      strlen(SYSCALL_MOUNT_FLAG_TEST_PATH) + 1);
+    test_check(rc == 0, "mountflags copy tgt");
+    rc = copy_to_user(u_fstype, "tmpfs", 6);
+    test_check(rc == 0, "mountflags copy fstype");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_mount(0, (uint64_t)u_tgt, (uint64_t)u_fstype,
+                              MS_RDONLY | MS_NODEV | MS_NOEXEC, 0, 0);
+    test_check(ret64 == 0, "mountflags mount semantic");
+
+    ret64 = sys_mount(0, (uint64_t)u_tgt, 0,
+                      MS_REMOUNT | MS_RDONLY | MS_NOEXEC, 0, 0);
+    test_check(ret64 == 0, "mountflags remount semantic");
+
+    ret64 = sys_umount2((uint64_t)u_tgt, MNT_DETACH | UMOUNT_NOFOLLOW, 0, 0, 0, 0);
+    test_check(ret64 == 0, "mountflags umount2 detach_nofollow");
+
+    ret64 = sys_umount2((uint64_t)u_tgt, MNT_EXPIRE, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "mountflags umount2 unsupported");
+
+out:
+    if (mapped)
+        user_map_end(&um);
+    (void)vfs_umount(SYSCALL_MOUNT_FLAG_TEST_PATH);
+    (void)vfs_rmdir(SYSCALL_MOUNT_FLAG_TEST_PATH);
+}
+
+static void test_acct_syscall_semantics(void) {
+    struct process *p = proc_current();
+    test_check(p != NULL, "acct proc_current");
+    if (!p)
+        return;
+
+    uid_t saved_uid = p->uid;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    struct file *f = NULL;
+
+    int rc = vfs_open(SYSCALL_ACCT_TEST_FILE, O_CREAT | O_TRUNC | O_RDWR, 0644, &f);
+    test_check(rc == 0, "acct create file");
+    if (rc == 0 && f)
+        vfs_close(f);
+
+    rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "acct user_map");
+    if (rc < 0)
+        goto out_restore_uid;
+    mapped = true;
+
+    char *u_path = (char *)user_map_ptr(&um, 0x000);
+    char *u_dir = (char *)user_map_ptr(&um, 0x100);
+    test_check(u_path != NULL, "acct u_path");
+    test_check(u_dir != NULL, "acct u_dir");
+    if (!u_path || !u_dir)
+        goto out;
+
+    rc = copy_to_user(u_path, SYSCALL_ACCT_TEST_FILE, strlen(SYSCALL_ACCT_TEST_FILE) + 1);
+    test_check(rc == 0, "acct copy file");
+    rc = copy_to_user(u_dir, "/tmp", 5);
+    test_check(rc == 0, "acct copy dir");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_acct((uint64_t)u_path, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "acct enable root");
+
+    ret64 = sys_acct(0, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "acct disable root");
+
+    ret64 = sys_acct((uint64_t)u_dir, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EISDIR, "acct dir eisdir");
+
+    ret64 = sys_acct(0x1000, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "acct badptr efault");
+
+    p->uid = 1000;
+    ret64 = sys_acct((uint64_t)u_path, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EPERM, "acct nonroot eperm");
+    p->uid = saved_uid;
+
+out:
+    if (mapped)
+        user_map_end(&um);
+out_restore_uid:
+    p->uid = saved_uid;
+    (void)vfs_unlink(SYSCALL_ACCT_TEST_FILE);
+}
+
 static void test_futex_waitv_syscalls_regression(void) {
     struct user_map_ctx um = {0};
     bool mapped = false;
@@ -863,6 +987,8 @@ int run_syscall_trap_tests(void) {
     test_syscall_error_paths_legacy();
     test_uaccess_cross_page_regression();
     test_sched_affinity_syscalls_regression();
+    test_mount_umount_flag_semantics();
+    test_acct_syscall_semantics();
     test_futex_waitv_syscalls_regression();
     test_trap_dispatch_guard_clauses();
     test_trap_dispatch_sets_and_restores_tf();
