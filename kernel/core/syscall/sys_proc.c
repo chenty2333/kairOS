@@ -808,8 +808,11 @@ int64_t sys_acct(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
     }
 
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(a0, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(a0, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path resolved;
     path_init(&resolved);

@@ -40,8 +40,11 @@ int64_t sys_chroot(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
         return -EFAULT;
 
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path resolved;
     path_init(&resolved);
@@ -103,10 +106,16 @@ int64_t sys_pivot_root(uint64_t new_root_ptr, uint64_t put_old_ptr,
 
     char new_root[CONFIG_PATH_MAX];
     char put_old[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(new_root_ptr, new_root, sizeof(new_root)) < 0)
-        return -EFAULT;
-    if (sysfs_copy_path(put_old_ptr, put_old, sizeof(put_old)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(new_root_ptr, new_root, sizeof(new_root));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
+    {
+        int copy_ret = sysfs_copy_path(put_old_ptr, put_old, sizeof(put_old));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path newp, oldp;
     path_init(&newp);
@@ -266,8 +275,11 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
         resolve_flags |= NAMEI_NOFOLLOW;
     else
         resolve_flags |= NAMEI_FOLLOW;
-    if (sysfs_copy_path(target_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(target_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     struct path tpath;
     path_init(&tpath);
     int ret = sysfs_resolve_at(AT_FDCWD, kpath, &tpath, resolve_flags);
@@ -279,8 +291,10 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
         return -ENAMETOOLONG;
     }
     dentry_put(tpath.dentry);
-    // FIXME: MNT_DETACH currently aliases immediate unmount semantics.
-    return vfs_umount(full);
+    uint32_t vfs_flags = 0;
+    if (uflags & MNT_DETACH)
+        vfs_flags |= VFS_UMOUNT_DETACH;
+    return vfs_umount2(full, vfs_flags);
 }
 
 static int set_mount_propagation(struct mount *mnt, uint32_t flags) {
@@ -315,14 +329,21 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
 
     if (!target_ptr)
         return -EFAULT;
-    if (sysfs_copy_path(target_ptr, target, sizeof(target)) < 0)
-        return -EFAULT;
-    if (source_ptr &&
-        sysfs_copy_path(source_ptr, source, sizeof(source)) < 0)
-        return -EFAULT;
-    if (fstype_ptr &&
-        sysfs_copy_path(fstype_ptr, fstype, sizeof(fstype)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(target_ptr, target, sizeof(target));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
+    if (source_ptr) {
+        int copy_ret = sysfs_copy_path(source_ptr, source, sizeof(source));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
+    if (fstype_ptr) {
+        int copy_ret = sysfs_copy_path(fstype_ptr, fstype, sizeof(fstype));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path tpath;
     path_init(&tpath);

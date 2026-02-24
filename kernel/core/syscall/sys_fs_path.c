@@ -138,8 +138,11 @@ int64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     struct path resolved;
     path_init(&resolved);
     int ret = vfs_namei(kpath, &resolved,
@@ -211,8 +214,11 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
@@ -288,8 +294,11 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
@@ -368,8 +377,10 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
         return -EFAULT;
     }
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0) {
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
     }
     if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
@@ -463,8 +474,11 @@ int64_t sys_openat(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mode,
     int64_t kdirfd = sysfs_abi_fd(dirfd);
     char kpath[CONFIG_PATH_MAX];
     struct file *f;
-    if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     struct path base;
     path_init(&base);
     struct path *basep = NULL;
@@ -594,8 +608,11 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     bool use_effective_ids = (uflags & AT_EACCESS) != 0;
 
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
@@ -654,8 +671,11 @@ int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     int nflags = (uflags & AT_REMOVEDIR) ? NAMEI_DIRECTORY : 0;
     struct path resolved;
@@ -700,8 +720,11 @@ int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     (void)a3; (void)a4; (void)a5;
     int64_t kdirfd = sysfs_abi_fd(dirfd);
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     mode_t umode = sysfs_apply_umask((mode_t)mode);
     struct path resolved;
@@ -744,8 +767,10 @@ int64_t sys_mknodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return -EFAULT;
     }
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0) {
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
     }
 
     mode_t type = (mode_t)mode & S_IFMT;
@@ -826,10 +851,16 @@ int64_t sys_renameat(uint64_t olddirfd, uint64_t oldpath_ptr,
     int64_t knewfd = sysfs_abi_fd(newdirfd);
     char oldpath[CONFIG_PATH_MAX];
     char newpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(oldpath_ptr, oldpath, sizeof(oldpath)) < 0)
-        return -EFAULT;
-    if (sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(oldpath_ptr, oldpath, sizeof(oldpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
+    {
+        int copy_ret = sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path oldp, newp;
     path_init(&oldp);
@@ -891,8 +922,11 @@ int64_t sys_renameat2(uint64_t olddirfd, uint64_t oldpath_ptr,
         return -EINVAL;
 
     char newpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path newp;
     path_init(&newp);
@@ -920,8 +954,11 @@ int64_t sys_readlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t buf_ptr,
     if (bufsz == 0)
         return -EINVAL;
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     char kbuf[CONFIG_PATH_MAX];
     size_t klen = (bufsz < sizeof(kbuf)) ? (size_t)bufsz : sizeof(kbuf);
@@ -950,10 +987,16 @@ int64_t sys_symlinkat(uint64_t target_ptr, uint64_t dirfd, uint64_t linkpath_ptr
     int64_t kdirfd = sysfs_abi_fd(dirfd);
     char target[CONFIG_PATH_MAX];
     char linkpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(target_ptr, target, sizeof(target)) < 0)
-        return -EFAULT;
-    if (sysfs_copy_path(linkpath_ptr, linkpath, sizeof(linkpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(target_ptr, target, sizeof(target));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
+    {
+        int copy_ret = sysfs_copy_path(linkpath_ptr, linkpath, sizeof(linkpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
     struct path resolved;
     path_init(&resolved);
     int ret = sysfs_resolve_at(kdirfd, linkpath, &resolved, NAMEI_CREATE);
@@ -993,8 +1036,11 @@ int64_t sys_truncate(uint64_t path_ptr, uint64_t length, uint64_t a2,
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(path_ptr, kpath, sizeof(kpath));
+        if (copy_ret < 0)
+            return copy_ret;
+    }
 
     struct path resolved;
     path_init(&resolved);
@@ -1063,11 +1109,15 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
 
     char oldpath[CONFIG_PATH_MAX];
     char newpath[CONFIG_PATH_MAX];
-    if (sysfs_copy_path(oldpath_ptr, oldpath, sizeof(oldpath)) < 0) {
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(oldpath_ptr, oldpath, sizeof(oldpath));
+        if (copy_ret < 0)
+            return copy_ret;
     }
-    if (sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath)) < 0) {
-        return -EFAULT;
+    {
+        int copy_ret = sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath));
+        if (copy_ret < 0)
+            return copy_ret;
     }
 
     /* Resolve old path (target of the link) */
