@@ -56,12 +56,20 @@ int64_t sys_statfs(uint64_t path, uint64_t buf, uint64_t a2, uint64_t a3,
     if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
-    struct mount *mnt = vfs_mount_for_path(kpath);
-    if (!mnt)
+    struct path resolved;
+    path_init(&resolved);
+    int namei_ret = sysfs_resolve_at(AT_FDCWD, kpath, &resolved, NAMEI_FOLLOW);
+    if (namei_ret < 0)
+        return namei_ret;
+    if (!resolved.dentry || !resolved.dentry->mnt) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
         return -ENOENT;
+    }
 
     struct kstatfs kst;
-    int ret = vfs_statfs(mnt, &kst);
+    int ret = vfs_statfs(resolved.dentry->mnt, &kst);
+    dentry_put(resolved.dentry);
     if (ret < 0)
         return ret;
 
@@ -80,13 +88,18 @@ int64_t sys_fstatfs(uint64_t fd, uint64_t buf, uint64_t a2, uint64_t a3,
     struct file *f = fd_get(proc_current(), (int)fd);
     if (!f)
         return -EBADF;
-    if (!f->vnode || !f->vnode->mount) {
+    struct mount *mnt = NULL;
+    if (f->vnode && f->vnode->mount)
+        mnt = f->vnode->mount;
+    else if (f->dentry && f->dentry->mnt)
+        mnt = f->dentry->mnt;
+    if (!mnt) {
         file_put(f);
-        return -ENOSYS;
+        return -EINVAL;
     }
 
     struct kstatfs kst;
-    int ret = vfs_statfs(f->vnode->mount, &kst);
+    int ret = vfs_statfs(mnt, &kst);
     if (ret < 0) {
         file_put(f);
         return ret;
