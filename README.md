@@ -1,125 +1,122 @@
 # Kairos Kernel
 
-Kairos is a multi-architecture hobby kernel focused on practical build/run/test workflows and subsystem iteration.
-
-## Current Status
+Kairos is a multi-architecture hobby kernel with a build/run/test flow optimized for iteration.
 
 - Primary verification architecture: `riscv64`
 - Supported build targets: `riscv64`, `x86_64`, `aarch64`
 - Boot flow: UEFI + Limine
 
-## Quick Start
+## 5-Minute Start
 
 ```bash
-# 1) Check host dependencies
+# 1) Verify host tools
 make check-tools
 
-# 2) Build kernel (default ARCH=riscv64)
+# 2) Boot once (default ARCH=riscv64)
+make run
+
+# 3) Run core tests
+make test
+```
+
+If you only run one module test first, use:
+
+```bash
+make test-vfs-ipc
+```
+
+## Daily Commands
+
+```bash
+# build only
 make
 
-# 3) Run in QEMU (isolated run directory by default)
+# run kernel
 make run
 
-# 4) Run kernel tests (isolated test directory by default)
-make test
-```
-
-## Common Build/Run Targets
-
-```bash
-make ARCH=riscv64
-make ARCH=x86_64
-make ARCH=aarch64
-
-make run
-make run-e1000
-make debug
-
-make uefi
-make disk
-make rootfs
-```
-
-## Test Targets
-
-```bash
-make test
+# module tests
 make test-mm
 make test-sched
 make test-vfs-ipc
 make test-device-virtio
-make test-tty
-make test-soak
-make test-matrix
 ```
 
-## Isolated Runs and Structured Results
+## The 4 Knobs You Usually Need
 
-`make run` / `make test` use isolated run directories by default.
+- `ARCH` - `riscv64|x86_64|aarch64`
+- `TEST_TIMEOUT` - test timeout seconds (default `180`)
+- `LOCK_WAIT` - wait seconds for run/test lock acquisition (default `0`)
+- `V=1` - verbose output
 
-- Test runs root: `build/runs/<run_id>/...`
-- Run runs root: `build/runs/run/<run_id>/...`
+Examples:
+
+```bash
+make ARCH=x86_64
+make TEST_TIMEOUT=300 test-sched
+make LOCK_WAIT=5 test-mm
+make V=1 run
+```
+
+## Where Results Go
+
+Run/test are isolated by default.
+
+- Test runs: `build/runs/<run_id>/...`
+- Run sessions: `build/runs/run/<run_id>/...`
 - Each run writes:
   - `manifest.json`
   - `result.json`
 
-`result.json` is the machine-readable outcome for automation.
+Automation should consume `result.json`.
 
-## Locking, Concurrency, and Cleanup
-
-- Local lock scope: `<BUILD_ROOT>/<arch>/.locks/`
-- Shared lock scope: `build/.locks/`
-- Useful commands:
+## If You Hit Concurrency Issues
 
 ```bash
 make lock-status
 make lock-clean-stale
 ```
 
-Lock wait controls:
+If you see `lock_busy`, either wait for active runs to finish or retry with a small wait window:
 
 ```bash
-make LOCK_WAIT=5 test-mm
-make RUN_LOCK_WAIT=10 run
-make TEST_LOCK_WAIT=10 test-vfs-ipc
+make LOCK_WAIT=5 test-vfs-ipc
 ```
 
-## Retention and GC
+## Retention
 
-By default, old isolated runs are auto-pruned before new runs/tests.
+Old isolated runs are auto-pruned before `run`/`test`.
 
 - Test runs kept: `RUNS_KEEP` (default `20`)
 - Run sessions kept: `RUNS_KEEP_RUN` (default `5`)
 
-Manual GC:
+Manual cleanup:
 
 ```bash
 make gc-runs
 ```
 
-## Useful Variables
+## Advanced Usage
 
-- `ARCH`: `riscv64|x86_64|aarch64`
-- `BUILD_ROOT`: build root (default `build`)
-- `RUN_ID`: explicit isolated run ID
-- `LOCK_WAIT`: shared lock wait default
-- `RUN_LOCK_WAIT`: run lock wait override
-- `TEST_LOCK_WAIT`: test lock wait override
-- `TEST_TIMEOUT`: test timeout seconds
-- `V=1`: verbose build output
-
-See full target/variable list:
+Default help is intentionally minimal:
 
 ```bash
 make help
 ```
+
+Full target/parameter surface:
+
+```bash
+make HELP_ADVANCED=1 help
+```
+
+For detailed build/test/debug behavior, see `references/90_BUILD_TEST_DEBUG.md`.
 
 ## Repository Layout
 
 ```text
 kernel/       # kernel sources (arch/core/drivers/fs/net/...)
 user/         # userland init + libc/shell
-scripts/      # orchestration scripts (build/run/test/deps/image)
+scripts/      # build/run/test orchestration
 third_party/  # external dependencies
 tools/        # helper tools
 build/        # generated artifacts

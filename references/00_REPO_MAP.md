@@ -7,7 +7,6 @@
 - `third_party/` — third-party sources (busybox, musl, lwip, fatfs, limine, etc.)
 - `tools/` — build utilities
 - `scripts/` — build/test/QEMU scripts
-- `docs/` — project documentation
 - `build/` — build artifacts, split by architecture subdirectory
 
 ## kernel/ Subdirectories
