@@ -673,6 +673,40 @@ out:
         user_map_end(&um);
 }
 
+static void test_strncpy_from_user_unmapped_tail_regression(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc = user_map_begin(&um, 2 * CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "uaccess_strncpy_tail user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    char *u_tail = (char *)user_map_ptr(&um, CONFIG_PAGE_SIZE - 1);
+    test_check(u_tail != NULL, "uaccess_strncpy_tail u_tail");
+    if (!u_tail)
+        goto out;
+
+    static const char c = 'Q';
+    rc = copy_to_user(u_tail, &c, 1);
+    test_check(rc == 0, "uaccess_strncpy_tail copy_char");
+    if (rc == 0) {
+        rc = mm_munmap(um.active_mm, um.base + CONFIG_PAGE_SIZE, CONFIG_PAGE_SIZE);
+        test_check(rc == 0, "uaccess_strncpy_tail munmap_next_page");
+        if (rc == 0) {
+            char out[8];
+            memset(out, 0, sizeof(out));
+            long len = strncpy_from_user(out, u_tail, 4);
+            test_check(len == -EFAULT,
+                       "uaccess_strncpy_tail unmapped_tail_efault");
+        }
+    }
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_uaccess_arg_validation_regression(void) {
     uint8_t src = 0x5a;
     uint8_t dst = 0;
@@ -1158,6 +1192,7 @@ int run_syscall_trap_tests(void) {
     test_uaccess_cross_page_regression();
     test_uaccess_large_range_regression();
     test_strncpy_from_user_len_regression();
+    test_strncpy_from_user_unmapped_tail_regression();
     test_uaccess_arg_validation_regression();
     test_sched_affinity_syscalls_regression();
     test_mount_umount_flag_semantics();
