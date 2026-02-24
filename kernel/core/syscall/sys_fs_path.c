@@ -884,9 +884,10 @@ int64_t sys_renameat2(uint64_t olddirfd, uint64_t oldpath_ptr,
                       uint64_t newdirfd, uint64_t newpath_ptr, uint64_t flags,
                       uint64_t a5) {
     (void)a5;
-    if (flags == 0)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags == 0)
         return sys_renameat(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, 0, 0);
-    if (flags != RENAME_NOREPLACE)
+    if (uflags != RENAME_NOREPLACE)
         return -EINVAL;
 
     char newpath[CONFIG_PATH_MAX];
