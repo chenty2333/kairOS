@@ -32,6 +32,7 @@ INIT := $(OUT_DIR)/init
 INITRAMFS := $(OUT_DIR)/initramfs/init
 DOOM := $(OUT_DIR)/doom
 DOOM_DIR := $(ROOT_DIR)/third_party/doomgeneric/doomgeneric
+DOOM_PORT_SRC := $(ROOT_DIR)/user/doomgeneric_kairos.c
 
 CFLAGS := -Os -static -fno-stack-protector -fno-pie --sysroot=$(SYSROOT)
 CFLAGS += -isystem $(SYSROOT)/include
@@ -165,7 +166,7 @@ DOOM_SRCS := \
 	$(DOOM_DIR)/i_input.c \
 	$(DOOM_DIR)/i_video.c \
 	$(DOOM_DIR)/doomgeneric.c \
-	$(DOOM_DIR)/doomgeneric_kairos.c
+	$(DOOM_PORT_SRC)
 
 $(DOOM): $(DOOM_SRCS)
 	@mkdir -p $(OUT_DIR)
