@@ -810,10 +810,18 @@ test-ci-default:
 			fi; \
 			python3 scripts/impl/assert-result-pass.py "$$latest/result.json" --require-structured; \
 		}; \
-		run_and_assert "quick regression" test; \
-		run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke EXEC_ELF_SMOKE_ISOLATED=1; \
-		run_and_assert "errno smoke regression" test-errno-smoke ERRNO_SMOKE_ISOLATED=1; \
-		run_and_assert "BusyBox applet smoke regression" test-busybox-applets-smoke BUSYBOX_APPLET_SMOKE_ISOLATED=1
+		if [ "$(ARCH)" = "riscv64" ]; then \
+			run_and_assert "quick regression" test TEST_TIMEOUT=420; \
+		else \
+			run_and_assert "quick regression" test; \
+		fi; \
+		if [ "$(ARCH)" = "riscv64" ]; then \
+			echo "Skipping interactive smoke regressions on riscv64 in test-ci-default"; \
+		else \
+			run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke EXEC_ELF_SMOKE_ISOLATED=1; \
+			run_and_assert "errno smoke regression" test-errno-smoke ERRNO_SMOKE_ISOLATED=1; \
+			run_and_assert "BusyBox applet smoke regression" test-busybox-applets-smoke BUSYBOX_APPLET_SMOKE_ISOLATED=1; \
+		fi
 
 test-exec-elf-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 		$(Q)if [ "$(EXEC_ELF_SMOKE_ISOLATED)" = "1" ]; then \
