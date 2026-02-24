@@ -673,6 +673,24 @@ out:
         user_map_end(&um);
 }
 
+static void test_uaccess_arg_validation_regression(void) {
+    uint8_t src = 0x5a;
+    uint8_t dst = 0;
+    void *bad = (void *)(~(uintptr_t)0);
+
+    int ret = copy_from_user(&dst, bad, 1);
+    test_check(ret == -EFAULT, "uaccess_arg bad_from_efault");
+
+    ret = copy_to_user(bad, &src, 1);
+    test_check(ret == -EFAULT, "uaccess_arg bad_to_efault");
+
+    ret = copy_from_user(&dst, NULL, 0);
+    test_check(ret == 0, "uaccess_arg zero_from_ok");
+
+    ret = copy_to_user(NULL, &src, 0);
+    test_check(ret == 0, "uaccess_arg zero_to_ok");
+}
+
 static void test_sched_affinity_syscalls_regression(void) {
     struct process *p = proc_current();
     test_check(p != NULL, "affinity proc_current");
@@ -1140,6 +1158,7 @@ int run_syscall_trap_tests(void) {
     test_uaccess_cross_page_regression();
     test_uaccess_large_range_regression();
     test_strncpy_from_user_len_regression();
+    test_uaccess_arg_validation_regression();
     test_sched_affinity_syscalls_regression();
     test_mount_umount_flag_semantics();
     test_acct_syscall_semantics();
