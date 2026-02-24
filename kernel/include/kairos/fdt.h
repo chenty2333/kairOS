@@ -16,5 +16,7 @@ int fdt_get_memory(int index, paddr_t *base, size_t *size);
 int fdt_memory_count(void);
 int fdt_get_reserved(int index, paddr_t *base, size_t *size);
 int fdt_reserved_count(void);
+int fdt_get_cpus(const void *fdt, uint64_t *cpu_ids, uint32_t max_ids,
+                 uint32_t *out_count);
 
 #endif

@@ -99,6 +99,21 @@ if [ "$ARCH" = "riscv64" ] && [ -f "qemu-virt.dtb" ]; then
     cp qemu-virt.dtb "$BOOT_FS/qemu-virt.dtb"
     cp qemu-virt.dtb "$BOOT_FS/boot/qemu-virt.dtb"
 fi
+if [ "$ARCH" = "aarch64" ]; then
+    AARCH64_DTB="$BUILD_DIR/qemu-virt-aarch64.dtb"
+    if [ ! -f "$AARCH64_DTB" ] && command -v qemu-system-aarch64 >/dev/null 2>&1; then
+        qemu-system-aarch64 \
+            -machine virt,gic-version=3,dumpdtb="$AARCH64_DTB" \
+            -cpu cortex-a72 -m 256M -smp "${QEMU_SMP:-2}" \
+            -display none -serial none -nodefaults >/dev/null 2>&1 || true
+    fi
+    if [ -f "$AARCH64_DTB" ]; then
+        cp "$AARCH64_DTB" "$BOOT_FS/qemu-virt-aarch64.dtb"
+        cp "$AARCH64_DTB" "$BOOT_FS/boot/qemu-virt-aarch64.dtb"
+    else
+        echo "WARN: aarch64 DTB not found; Limine MP may stay single-core" >&2
+    fi
+fi
 if [ -f "$INITRAMFS" ]; then
     cp "$INITRAMFS" "$BOOT_FS/initramfs.cpio"
     cp "$INITRAMFS" "$BOOT_FS/boot/initramfs.cpio"

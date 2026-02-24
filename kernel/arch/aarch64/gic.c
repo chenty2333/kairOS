@@ -6,6 +6,8 @@
  */
 
 #include <kairos/mm.h>
+#include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/types.h>
@@ -27,12 +29,14 @@
 #define GICR_ISENABLER0 (GICR_SGI_BASE + 0x100)
 #define GICR_ICENABLER0 (GICR_SGI_BASE + 0x180)
 #define GICR_IPRIORITYR (GICR_SGI_BASE + 0x400)
+#define GICR_STRIDE     0x20000
 
 /* WARN: GICR offset 0xA0000 from GICD is QEMU virt specific */
 #define GICR_OFFSET     0xA0000
 
 static volatile uint32_t *gicd;
-static volatile uint8_t  *gicr;
+static volatile uint8_t  *gicr_base;
+static volatile int gicd_ready;
 
 /* --- System register accessors (GICv3 CPU interface) --- */
 
@@ -62,7 +66,14 @@ static inline void gic_write_icc_sgi1r(uint64_t val) {
     __asm__ __volatile__("msr S3_0_C12_C11_5, %0" :: "r"(val));
 }
 
-static void gicr_wake(void)
+static inline volatile uint8_t *gicr_local(void) {
+    int cpu = arch_cpu_id();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    return gicr_base + ((size_t)cpu * GICR_STRIDE);
+}
+
+static void gicr_wake(volatile uint8_t *gicr)
 {
     volatile uint32_t *waker = (volatile uint32_t *)(gicr + GICR_WAKER);
     uint32_t val = *waker;
@@ -74,12 +85,20 @@ static void gicr_wake(void)
 
 static void gicv3_init(const struct platform_desc *plat)
 {
-    paddr_t gic_base = plat->early_mmio[0].base;
-    gicd = (volatile uint32_t *)ioremap(gic_base, 0x10000);
-    gicr = (volatile uint8_t *)ioremap(gic_base + GICR_OFFSET, 0x20000);
+    if (!gicd || !gicr_base) {
+        paddr_t gic_base = plat->early_mmio[0].base;
+        gicd = (volatile uint32_t *)ioremap(gic_base, 0x10000);
+        gicr_base = (volatile uint8_t *)ioremap(
+            gic_base + GICR_OFFSET, GICR_STRIDE * CONFIG_MAX_CPUS);
+    }
+    if (!gicd || !gicr_base)
+        return;
 
-    gicd[GICD_CTLR / 4] = GICD_CTLR_ARE_S | GICD_CTLR_ENABLE_G1;
-    gicr_wake();
+    if (__sync_bool_compare_and_swap(&gicd_ready, 0, 1))
+        gicd[GICD_CTLR / 4] = GICD_CTLR_ARE_S | GICD_CTLR_ENABLE_G1;
+
+    volatile uint8_t *gicr = gicr_local();
+    gicr_wake(gicr);
 
     for (int i = 0; i < 32; i++)
         gicr[GICR_IPRIORITYR + i] = 0xA0;
@@ -90,13 +109,15 @@ static void gicv3_init(const struct platform_desc *plat)
     gic_write_icc_igrpen1(1);
     __asm__ __volatile__("isb");
 
-    pr_info("GIC: GICv3 initialized\n");
+    if (arch_cpu_id() == 0)
+        pr_info("GIC: GICv3 initialized\n");
 }
 
 static void gicv3_enable(int irq)
 {
     uint32_t uirq = (uint32_t)irq;
     if (uirq < 32) {
+        volatile uint8_t *gicr = gicr_local();
         volatile uint32_t *reg =
             (volatile uint32_t *)(gicr + GICR_ISENABLER0);
         *reg = (1U << uirq);
@@ -109,6 +130,7 @@ static void gicv3_disable(int irq)
 {
     uint32_t uirq = (uint32_t)irq;
     if (uirq < 32) {
+        volatile uint8_t *gicr = gicr_local();
         volatile uint32_t *reg =
             (volatile uint32_t *)(gicr + GICR_ICENABLER0);
         *reg = (1U << uirq);

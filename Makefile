@@ -677,7 +677,7 @@ distclean: clean-all
 
 # Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) \
+	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) QEMU_SMP=$(QEMU_SMP) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) \
 		QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) $(KAIROS_CMD) image uefi
 
 # Create a disk image with ext2 filesystem

@@ -6,6 +6,7 @@
 #include <kairos/arch.h>
 #include <kairos/boot.h>
 #include <kairos/config.h>
+#include <kairos/fdt.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
@@ -379,11 +380,13 @@ static void boot_init_limine(void) {
         }
     }
 
+    uint32_t limine_cpu_count = 0;
     if (limine_mp.response && limine_mp.response->cpu_count) {
         uint64_t count = limine_mp.response->cpu_count;
         if (count > CONFIG_MAX_CPUS)
             count = CONFIG_MAX_CPUS;
         boot_info.cpu_count = (uint32_t)count;
+        limine_cpu_count = (uint32_t)count;
         boot_info.bsp_cpu_id = 0;
         for (uint64_t i = 0; i < count; i++) {
             struct limine_mp_info *info =
@@ -410,6 +413,29 @@ static void boot_init_limine(void) {
         boot_info.cpu_count = 1;
         boot_info.bsp_cpu_id = 0;
     }
+
+#if defined(ARCH_aarch64)
+    if (boot_info.cpu_count <= 1 && boot_info.dtb) {
+        uint64_t cpu_ids[CONFIG_MAX_CPUS] = {0};
+        uint32_t dtb_cpu_count = 0;
+        if (fdt_get_cpus(boot_info.dtb, cpu_ids, CONFIG_MAX_CPUS,
+                         &dtb_cpu_count) == 0 &&
+            dtb_cpu_count > 1) {
+            boot_info.cpu_count = dtb_cpu_count;
+            boot_info.bsp_cpu_id = 0;
+            for (uint32_t i = 0; i < dtb_cpu_count; i++) {
+                void *mp_info = (i < limine_cpu_count) ? boot_info.cpus[i].mp_info : NULL;
+                boot_info.cpus[i].cpu_id = i;
+                boot_info.cpus[i].hw_id = cpu_ids[i];
+                boot_info.cpus[i].mp_info = mp_info;
+                if (limine_mp.response &&
+                    cpu_ids[i] == limine_mp.response->bsp_mpidr)
+                    boot_info.bsp_cpu_id = i;
+            }
+            pr_info("boot: DTB CPU topology %u CPUs\n", dtb_cpu_count);
+        }
+    }
+#endif
 
     boot_info_set(&boot_info);
 }

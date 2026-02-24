@@ -8,10 +8,12 @@ All three architectures share the same path:
    - riscv64 explicitly disables interrupts (csrw sie, zero); x86_64 has no explicit cli
    - aarch64 additionally handles EL2→EL1 drop and system register initialization
 2. `boot/limine.c:limine_bootstrap()` — parse Limine protocol responses, populate boot_info (memory map, DTB, RSDP, framebuffer, CPU list, etc.)
+   - aarch64 fallback: when Limine MP reports only BSP, `boot_init_limine()` now reads DTB `/cpus` to populate CPU topology metadata (`boot_info.cpu_count` / `cpus[].hw_id`), while AP bring-up still depends on Limine `mp_info` availability
 3. `arch_cpu_init()` — BSP CPU initialization
 4. `core/main.c:kernel_main()` — main initialization sequence:
    - init_boot → init_mm → syscall_init → arch_trap_init → tick_policy_init → arch_timer_init(100) → sched_init → proc_init → futex_init → proc_idle_init → init_devices → init_net → init_fs → smp_init → init_user
 5. SMP: smp_init() starts secondary CPUs one by one, each goes through `_secondary_start` → `secondary_cpu_main()` (arch_cpu_init → sched_init_cpu → sched_cpu_online → arch_trap_init → arch_timer_init(CONFIG_HZ) → proc_idle_init → enable interrupts → scheduling loop)
+   - failed AP bring-up is logged explicitly as `SMP: cpuX start failed rc=<errno>`
 
 boot_info struct is defined in include/kairos/boot.h, accessed globally through boot/boot.c getters.
 
@@ -42,6 +44,7 @@ trap_core.c:trap_core_dispatch() is the architecture-independent dispatch bounda
 - RISC-V page-fault diagnostics now log unresolved fault context with `pid/comm/sepc/fault-addr/access-type` before signal/panic path, and MM fault logs include the same context.
 
 Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses GIC.
+- aarch64 GICv3 now selects Redistributor frame per CPU (`arch_cpu_id`) for local SGI/PPI enable/disable paths.
 
 ## Syscall
 

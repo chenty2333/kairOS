@@ -80,6 +80,7 @@ QEMU configuration:
 - `scripts/run-qemu-session.sh` preflights boot media strictly and fails fast on missing expected artifact (no automatic `boot.img`/`bootfs` fallback)
 - Under `UEFI_BOOT_MODE=both`, selecting `QEMU_UEFI_BOOT_MODE=img` requires `mkfs.fat + mtools`; missing host tools now fail image preparation early
 - `make uefi` now propagates image-preparation failure to caller (no silent success on missing boot image prerequisites)
+- aarch64 UEFI image prep now auto-generates `qemu-virt-aarch64.dtb` (via QEMU `dumpdtb`) and embeds it as a Limine module; `make uefi` passes current `QEMU_SMP` into image prep so generated DTB CPU topology matches the requested SMP count
 
 ## Testing
 

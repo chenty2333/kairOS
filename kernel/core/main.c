@@ -57,9 +57,13 @@ static void smp_init(void) {
         if (cpu == bsp_cpu) {
             continue;
         }
-        if (arch_start_cpu(cpu, (unsigned long)_secondary_start,
-                           (unsigned long)cpu) == 0)
+        int rc = arch_start_cpu(cpu, (unsigned long)_secondary_start,
+                                (unsigned long)cpu);
+        if (rc == 0) {
             started++;
+        } else {
+            pr_warn("SMP: cpu%d start failed rc=%d\n", cpu, rc);
+        }
     }
 
     if (started == 0) {

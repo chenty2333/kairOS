@@ -214,6 +214,22 @@ static int fdt_read_reg(const uint32_t *reg, uint32_t reg_len,
     return 0;
 }
 
+static int fdt_read_addr(const uint32_t *reg, uint32_t reg_len,
+                         uint32_t address_cells, uint64_t *addr) {
+    if (!reg || !addr)
+        return -EINVAL;
+    if (address_cells == 0)
+        return -EINVAL;
+    if (reg_len < address_cells * 4)
+        return -EINVAL;
+
+    uint64_t out = 0;
+    for (uint32_t i = 0; i < address_cells; i++)
+        out = (out << 32) | fdt_be32(reg[i]);
+    *addr = out;
+    return 0;
+}
+
 static bool fdt_is_memory_node(const char *name) {
     if (!name)
         return false;
@@ -369,6 +385,104 @@ int fdt_get_reserved(int index, paddr_t *base, size_t *size) {
 
 int fdt_reserved_count(void) {
     return num_reserved_regions;
+}
+
+int fdt_get_cpus(const void *fdt, uint64_t *cpu_ids, uint32_t max_ids,
+                 uint32_t *out_count) {
+    if (!fdt || !cpu_ids || !out_count || max_ids == 0)
+        return -EINVAL;
+
+    struct fdt_view view;
+    if (fdt_init_view(fdt, &view))
+        return -EINVAL;
+
+    uint32_t addr_cells_stack[MAX_FDT_DEPTH] = { 0 };
+    uint32_t size_cells_stack[MAX_FDT_DEPTH] = { 0 };
+    addr_cells_stack[0] = 2;
+    size_cells_stack[0] = 1;
+
+    struct fdt_iter it = { .p = view.struct_blk, .depth = 0 };
+    bool in_cpus = false;
+    int cpus_depth = -1;
+    bool in_cpu_node = false;
+    int cpu_depth = -1;
+    bool cpu_is_cpu = false;
+    bool cpu_has_reg = false;
+    uint64_t cpu_reg = 0;
+    uint32_t cpu_addr_cells = 1;
+
+    *out_count = 0;
+
+    while (1) {
+        uint32_t token = 0;
+        const char *node_name = NULL;
+        const char *prop_name = NULL;
+        const void *prop_data = NULL;
+        uint32_t prop_len = 0;
+
+        int ret = fdt_next_token(&view, &it, &token, &node_name,
+                                 &prop_name, &prop_data, &prop_len);
+        if (ret)
+            return ret;
+
+        switch (token) {
+        case FDT_BEGIN_NODE: {
+            uint32_t parent = (it.depth > 0) ? (uint32_t)(it.depth - 1) : 0;
+            addr_cells_stack[it.depth] = addr_cells_stack[parent];
+            size_cells_stack[it.depth] = size_cells_stack[parent];
+
+            if (it.depth == 2 && strcmp(node_name, "cpus") == 0) {
+                in_cpus = true;
+                cpus_depth = it.depth;
+            }
+
+            if (in_cpus && it.depth == cpus_depth + 1) {
+                in_cpu_node = true;
+                cpu_depth = it.depth;
+                cpu_is_cpu = strncmp(node_name, "cpu@", 4) == 0;
+                cpu_has_reg = false;
+                cpu_reg = 0;
+                cpu_addr_cells = addr_cells_stack[parent];
+            }
+            break;
+        }
+        case FDT_END_NODE:
+            if (in_cpu_node && it.depth < cpu_depth) {
+                if (cpu_is_cpu && cpu_has_reg && *out_count < max_ids) {
+                    cpu_ids[*out_count] = cpu_reg;
+                    (*out_count)++;
+                }
+                in_cpu_node = false;
+            }
+            if (in_cpus && it.depth < cpus_depth) {
+                in_cpus = false;
+                cpus_depth = -1;
+            }
+            break;
+        case FDT_PROP:
+            if (strcmp(prop_name, "#address-cells") == 0 && prop_len >= 4) {
+                addr_cells_stack[it.depth] =
+                    fdt_be32(*(const uint32_t *)prop_data);
+            } else if (strcmp(prop_name, "#size-cells") == 0 && prop_len >= 4) {
+                size_cells_stack[it.depth] =
+                    fdt_be32(*(const uint32_t *)prop_data);
+            } else if (in_cpu_node && strcmp(prop_name, "device_type") == 0 &&
+                       prop_len >= 3 && strncmp(prop_data, "cpu", 3) == 0) {
+                cpu_is_cpu = true;
+            } else if (in_cpu_node && strcmp(prop_name, "reg") == 0) {
+                if (fdt_read_addr((const uint32_t *)prop_data, prop_len,
+                                  cpu_addr_cells, &cpu_reg) == 0)
+                    cpu_has_reg = true;
+            }
+            break;
+        case FDT_END:
+            return (*out_count > 0) ? 0 : -ENODEV;
+        case FDT_NOP:
+            break;
+        default:
+            return -EINVAL;
+        }
+    }
 }
 
 struct fdt_node_ctx {

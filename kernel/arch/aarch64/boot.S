@@ -86,13 +86,17 @@ _start:
 
 /* Secondary CPU entry (Limine MP) */
 _secondary_start:
-    /* x0 = struct limine_mp_info * */
+    /* x0 = struct limine_mp_info * (Limine) or cpu_id (PSCI context) */
     mov x19, x0
     DROP_TO_EL1
     INIT_SYSREGS
 
-    mov x0, x19
-    ldr x1, [x0, #40] /* extra_argument (aarch64 limine_mp_info) */
+    /* Small x0 values are treated as direct cpu_id context. */
+    mov x1, x19
+    cmp x19, #CONFIG_MAX_CPUS
+    b.lo 1f
+    ldr x1, [x19, #40] /* extra_argument in aarch64 limine_mp_info */
+1:
     mov x18, x1
 
     ldr x2, =_percpu_stacks
