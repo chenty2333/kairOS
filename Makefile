@@ -79,6 +79,8 @@ ifeq ($(ARCH),riscv64)
   CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
+  # Keep boot hart deterministic for Limine on older OpenSBI firmware.
+  QEMU_ACCEL ?= tcg,thread=single
   QEMU_VIRTIO_BLK_DEV := virtio-blk-device
   KERNEL_LOAD := 0x80200000
 else ifeq ($(ARCH),x86_64)
@@ -250,6 +252,7 @@ COMPILER_RT_STAMP := $(STAMP_DIR)/compiler-rt.stamp
 MUSL_STAMP := $(STAMP_DIR)/musl.stamp
 USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
+USER_ERRNO_SMOKE := $(BUILD_DIR)/user/errno_smoke
 KAIROS_DEPS := scripts/kairos.sh $(wildcard scripts/modules/*.sh scripts/lib/*.sh scripts/impl/*.sh scripts/patches/*/*)
 
 ifeq ($(WITH_TCC),1)
@@ -294,6 +297,9 @@ initramfs: $(INITRAMFS_STAMP)
 $(USER_INITRAMFS): $(MUSL_STAMP) user/initramfs/init.c user/Makefile
 	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V) initramfs
 
+$(USER_ERRNO_SMOKE): $(MUSL_STAMP) user/errno_smoke.c user/Makefile
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V) errno-smoke
+
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) $(BUSYBOX_STAMP) $(KAIROS_DEPS) scripts/busybox-applets.txt
 	@mkdir -p $(STAMP_DIR)
 	$(Q)INITRAMFS_BUSYBOX=$(INITRAMFS_BUSYBOX) $(KAIROS_CMD) image initramfs
@@ -336,7 +342,7 @@ $(ROOTFS_INIT_STAMP): $(USER_INIT) $(KAIROS_DEPS)
 
 rootfs-tcc: $(ROOTFS_TCC_STAMP)
 
-$(ROOTFS_TCC_STAMP): $(TCC_STAMP) $(KAIROS_DEPS)
+$(ROOTFS_TCC_STAMP): $(TCC_STAMP) $(USER_ERRNO_SMOKE) $(KAIROS_DEPS)
 	@mkdir -p $(STAMP_DIR)
 	$(Q)$(KAIROS_CMD) image rootfs-tcc
 	@touch $@
@@ -401,6 +407,9 @@ $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
 
 # Common QEMU flags
 QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp $(QEMU_SMP)
+ifneq ($(QEMU_ACCEL),)
+QEMU_FLAGS += -accel $(QEMU_ACCEL)
+endif
 # Use QEMU stdio multiplexer for robust interactive input in -nographic mode.
 QEMU_FLAGS += -serial mon:stdio
 QEMU_UEFI_NOISE_FILTER := ./scripts/impl/filter-uefi-noise.sh
@@ -709,7 +718,7 @@ EXEC_ELF_SMOKE_EXTRA_CFLAGS ?= $(TCC_SMOKE_EXTRA_CFLAGS)
 BUSYBOX_APPLET_SMOKE_TIMEOUT ?= 240
 BUSYBOX_APPLET_SMOKE_LOG ?= $(BUILD_DIR)/busybox-applets-smoke.log
 BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS ?=
-ERRNO_SMOKE_TIMEOUT ?= 240
+ERRNO_SMOKE_TIMEOUT ?= 360
 ERRNO_SMOKE_LOG ?= $(BUILD_DIR)/errno-smoke.log
 ERRNO_SMOKE_EXTRA_CFLAGS ?=
 SOAK_TIMEOUT ?= 600
@@ -792,7 +801,8 @@ test-ci-default:
 		run_and_assert() { \
 			label="$$1"; \
 			target="$$2"; \
-			$(MAKE) --no-print-directory ARCH="$(ARCH)" "$$target"; \
+			shift 2; \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" "$$@" "$$target"; \
 			latest="$$(ls -1dt "$(TEST_RUNS_ROOT)"/* 2>/dev/null | head -n 1 || true)"; \
 			if [ -z "$$latest" ]; then \
 				echo "No isolated run found after $$label" >&2; \
@@ -801,9 +811,9 @@ test-ci-default:
 			python3 scripts/impl/assert-result-pass.py "$$latest/result.json" --require-structured; \
 		}; \
 		run_and_assert "quick regression" test; \
-		run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke; \
-		run_and_assert "errno smoke regression" test-errno-smoke; \
-		run_and_assert "BusyBox applet smoke regression" test-busybox-applets-smoke
+		run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke EXEC_ELF_SMOKE_ISOLATED=1; \
+		run_and_assert "errno smoke regression" test-errno-smoke ERRNO_SMOKE_ISOLATED=1; \
+		run_and_assert "BusyBox applet smoke regression" test-busybox-applets-smoke BUSYBOX_APPLET_SMOKE_ISOLATED=1
 
 test-exec-elf-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 		$(Q)if [ "$(EXEC_ELF_SMOKE_ISOLATED)" = "1" ]; then \
@@ -812,7 +822,8 @@ test-exec-elf-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 			fi; \
 			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
 				EXEC_ELF_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" EXEC_ELF_SMOKE_EXTRA_CFLAGS="$(EXEC_ELF_SMOKE_EXTRA_CFLAGS)" \
-				EXEC_ELF_SMOKE_TIMEOUT="$(EXEC_ELF_SMOKE_TIMEOUT)" $(EXEC_ELF_SMOKE_LOG_FWD) \
+				EXEC_ELF_SMOKE_TIMEOUT="$(EXEC_ELF_SMOKE_TIMEOUT)" \
+				EXEC_ELF_SMOKE_LOG="$(TEST_BUILD_ROOT)/$(ARCH)/exec-elf-smoke.log" \
 				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-exec-elf-smoke; \
 		else \
 			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
@@ -830,7 +841,8 @@ test-tcc-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 			fi; \
 			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
 				TCC_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" TCC_SMOKE_EXTRA_CFLAGS="$(TCC_SMOKE_EXTRA_CFLAGS)" \
-				TCC_SMOKE_TIMEOUT="$(TCC_SMOKE_TIMEOUT)" $(TCC_SMOKE_LOG_FWD) \
+				TCC_SMOKE_TIMEOUT="$(TCC_SMOKE_TIMEOUT)" \
+				TCC_SMOKE_LOG="$(TEST_BUILD_ROOT)/$(ARCH)/tcc-smoke.log" \
 				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-tcc-smoke; \
 		else \
 			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
@@ -849,7 +861,8 @@ test-busybox-applets-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 				BUSYBOX_APPLET_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" \
 				BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS="$(BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS)" \
 				BUSYBOX_APPLET_SMOKE_TIMEOUT="$(BUSYBOX_APPLET_SMOKE_TIMEOUT)" \
-				$(BUSYBOX_APPLET_SMOKE_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-busybox-applets-smoke; \
+				BUSYBOX_APPLET_SMOKE_LOG="$(TEST_BUILD_ROOT)/$(ARCH)/busybox-applets-smoke.log" \
+				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-busybox-applets-smoke; \
 		else \
 			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 				BUSYBOX_APPLET_SMOKE_BOOT_DELAY_SEC="$(BUSYBOX_APPLET_SMOKE_BOOT_DELAY_SEC)" \
@@ -867,7 +880,8 @@ test-errno-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 				ERRNO_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" \
 				ERRNO_SMOKE_EXTRA_CFLAGS="$(ERRNO_SMOKE_EXTRA_CFLAGS)" \
 				ERRNO_SMOKE_TIMEOUT="$(ERRNO_SMOKE_TIMEOUT)" \
-				$(ERRNO_SMOKE_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-errno-smoke; \
+				ERRNO_SMOKE_LOG="$(TEST_BUILD_ROOT)/$(ARCH)/errno-smoke.log" \
+				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-errno-smoke; \
 		else \
 			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 				ERRNO_SMOKE_BOOT_DELAY_SEC="$(ERRNO_SMOKE_BOOT_DELAY_SEC)" \

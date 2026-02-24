@@ -31,6 +31,7 @@ OUT_DIR := $(BUILD_ROOT)/$(ARCH)/user
 INIT := $(OUT_DIR)/init
 INITRAMFS := $(OUT_DIR)/initramfs/init
 DOOM := $(OUT_DIR)/doom
+ERRNO_SMOKE := $(OUT_DIR)/errno_smoke
 DOOM_DIR := $(ROOT_DIR)/third_party/doomgeneric/doomgeneric
 DOOM_PORT_SRC := $(ROOT_DIR)/user/doomgeneric_kairos.c
 
@@ -66,7 +67,7 @@ else
   Q :=
 endif
 
-.PHONY: all clean initramfs
+.PHONY: all clean initramfs errno-smoke
 
 all: $(INIT) $(DOOM)
 
@@ -80,6 +81,13 @@ initramfs: $(INITRAMFS)
 $(INITRAMFS): initramfs/init.c
 	@mkdir -p $(dir $@)
 	@echo "  CC      user/initramfs/init"
+	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+errno-smoke: $(ERRNO_SMOKE)
+
+$(ERRNO_SMOKE): errno_smoke.c
+	@mkdir -p $(OUT_DIR)
+	@echo "  CC      user/errno_smoke"
 	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 DOOM_CFLAGS := $(CFLAGS) -I$(DOOM_DIR) -DDOOMGENERIC_RESX=320 \

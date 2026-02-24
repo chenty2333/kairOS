@@ -22,6 +22,7 @@ DOOM_WAD="${DOOM_WAD:-}"
 TCC_BIN="${TCC_BIN:-${BUILD_DIR}/tcc/bin/tcc}"
 TCC_LIB="${TCC_LIB:-${BUILD_DIR}/tcc/lib/tcc}"
 SYSROOT_DIR="${SYSROOT_DIR:-${BUILD_DIR}/sysroot}"
+ERRNO_SMOKE_BIN="${ERRNO_SMOKE_BIN:-${BUILD_DIR}/user/errno_smoke}"
 ROOTFS_ONLY="${ROOTFS_ONLY:-0}"
 ROOTFS_STAGE="${ROOTFS_STAGE:-all}"
 
@@ -125,6 +126,13 @@ stage_tcc() {
     chmod 0755 "$ROOTFS_DIR/usr/bin/tcc"
   else
     echo "WARN: tcc not found ($TCC_BIN)"
+  fi
+
+  if [[ -x "$ERRNO_SMOKE_BIN" ]]; then
+    cp -f "$ERRNO_SMOKE_BIN" "$ROOTFS_DIR/usr/bin/errno_smoke"
+    chmod 0755 "$ROOTFS_DIR/usr/bin/errno_smoke"
+  else
+    echo "WARN: errno smoke binary not found ($ERRNO_SMOKE_BIN)"
   fi
 
   # libtcc1.a + tcc built-in headers (stdarg.h, stddef.h, etc.)
