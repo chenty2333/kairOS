@@ -3,7 +3,9 @@
  */
 
 #include <kairos/config.h>
+#include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/socket.h>
 #include <kairos/string.h>
@@ -14,6 +16,7 @@
 #define SOCKET_MSG_IOV_MAX 1024
 #define SOCKET_MSG_MAX_LEN 65536
 #define MSG_WAITFORONE 0x10000
+#define NS_PER_SEC 1000000000ULL
 
 struct socket_iovec {
     void *iov_base;
@@ -37,6 +40,91 @@ struct socket_mmsghdr {
     uint32_t msg_len;
     uint32_t __pad;
 };
+
+static uint64_t socket_ns_to_sched_ticks(uint64_t ns) {
+    if (ns == 0)
+        return 0;
+    uint64_t ticks = (ns * CONFIG_HZ + NS_PER_SEC - 1) / NS_PER_SEC;
+    return ticks ? ticks : 1;
+}
+
+static int socket_copy_timeout_deadline(uint64_t timeout_ptr, bool *has_timeout,
+                                        uint64_t *deadline_out) {
+    if (!has_timeout || !deadline_out)
+        return -EINVAL;
+
+    *has_timeout = false;
+    *deadline_out = 0;
+    if (!timeout_ptr)
+        return 0;
+
+    struct timespec ts;
+    if (copy_from_user(&ts, (const void *)timeout_ptr, sizeof(ts)) < 0)
+        return -EFAULT;
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= (int64_t)NS_PER_SEC)
+        return -EINVAL;
+
+    uint64_t now = arch_timer_get_ticks();
+    if (ts.tv_sec == 0 && ts.tv_nsec == 0) {
+        *has_timeout = true;
+        *deadline_out = now;
+        return 0;
+    }
+
+    uint64_t sec = (uint64_t)ts.tv_sec;
+    if (sec > UINT64_MAX / NS_PER_SEC)
+        return -EINVAL;
+    uint64_t ns = sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
+    *has_timeout = true;
+    *deadline_out = now + socket_ns_to_sched_ticks(ns);
+    return 0;
+}
+
+static int socket_wait_readable(struct socket *sock, struct file *sock_file,
+                                bool has_timeout, uint64_t deadline) {
+    if (!sock || !sock_file)
+        return -EINVAL;
+
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+
+    while (1) {
+        uint32_t revents = (uint32_t)vfs_poll(sock_file, POLLIN | POLLERR | POLLHUP);
+        if (revents & (POLLIN | POLLERR | POLLHUP))
+            return 1;
+        if (has_timeout && arch_timer_get_ticks() >= deadline)
+            return 0;
+
+        struct poll_waiter waiter = {0};
+        INIT_LIST_HEAD(&waiter.entry.node);
+        waiter.entry.proc = curr;
+        poll_wait_add(&sock->pollers, &waiter);
+
+        revents = (uint32_t)vfs_poll(sock_file, POLLIN | POLLERR | POLLHUP);
+        if (revents & (POLLIN | POLLERR | POLLHUP)) {
+            poll_wait_remove(&waiter);
+            return 1;
+        }
+        if (has_timeout && arch_timer_get_ticks() >= deadline) {
+            poll_wait_remove(&waiter);
+            return 0;
+        }
+
+        struct poll_sleep sleep = {0};
+        INIT_LIST_HEAD(&sleep.node);
+        if (has_timeout)
+            poll_sleep_arm(&sleep, curr, deadline);
+        int rc = proc_sleep_on(NULL, has_timeout ? (void *)&sleep : (void *)curr,
+                               true);
+        if (has_timeout)
+            poll_sleep_cancel(&sleep);
+        poll_wait_remove(&waiter);
+
+        if (rc == -EINTR)
+            return -EINTR;
+    }
+}
 
 static struct socket *sock_from_fd(struct process *p, int fd,
                                    struct file **filep) {
@@ -665,7 +753,7 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
 int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t timeout_ptr, uint64_t a5) {
-    (void)timeout_ptr; (void)a5;
+    (void)a5;
     if (!vlen) {
         return 0;
     }
@@ -680,6 +768,15 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
         return -ENOTSOCK;
     }
 
+    bool has_timeout = false;
+    uint64_t deadline = 0;
+    int timeout_rc = socket_copy_timeout_deadline(timeout_ptr, &has_timeout,
+                                                  &deadline);
+    if (timeout_rc < 0) {
+        file_put(sock_file);
+        return timeout_rc;
+    }
+
     int recved = 0;
     for (uint64_t i = 0; i < vlen; i++) {
         uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
@@ -692,8 +789,28 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
         if (recved > 0 && (flags & MSG_WAITFORONE)) {
             recv_flags |= MSG_DONTWAIT;
         }
+
+        bool timeout_managed = has_timeout && !(recv_flags & MSG_DONTWAIT);
+        if (timeout_managed)
+            recv_flags |= MSG_DONTWAIT;
+
+    retry_recv:
+        if (timeout_managed && arch_timer_get_ticks() >= deadline) {
+            file_put(sock_file);
+            return recved;
+        }
+
         int64_t ret = socket_recvmsg(sock, &msg.msg_hdr, recv_flags, &msg.msg_len);
         if (ret < 0) {
+            if (ret == -EAGAIN && timeout_managed) {
+                int wait_rc = socket_wait_readable(sock, sock_file, true, deadline);
+                if (wait_rc > 0)
+                    goto retry_recv;
+                file_put(sock_file);
+                if (wait_rc == 0)
+                    return recved;
+                return recved ? recved : wait_rc;
+            }
             file_put(sock_file);
             return recved ? recved : ret;
         }
