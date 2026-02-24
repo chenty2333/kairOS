@@ -21,8 +21,16 @@ static inline int64_t sysproc_abi_fd(uint64_t v) {
     return (int64_t)(int32_t)(uint32_t)v;
 }
 
+static inline int32_t sysproc_abi_i32(uint64_t v) {
+    return (int32_t)(uint32_t)v;
+}
+
 static inline uint32_t sysproc_abi_u32(uint64_t v) {
     return (uint32_t)v;
+}
+
+static inline pid_t sysproc_abi_pid(uint64_t v) {
+    return (pid_t)sysproc_abi_i32(v);
 }
 
 int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
@@ -31,7 +39,7 @@ int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
 int64_t sys_exit(uint64_t status, uint64_t a1, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    proc_exit((int)status);
+    proc_exit(sysproc_abi_i32(status));
 }
 
 int64_t sys_fork(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -87,20 +95,25 @@ int64_t sys_set_tid_address(uint64_t tidptr, uint64_t a1, uint64_t a2,
 int64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if ((int64_t)tgid <= 0 || (int64_t)tid <= 0)
+    pid_t ktgid = sysproc_abi_pid(tgid);
+    pid_t ktid = sysproc_abi_pid(tid);
+    int32_t ksig = sysproc_abi_i32(sig);
+    if (ktgid <= 0 || ktid <= 0)
         return -EINVAL;
-    struct process *target = proc_find((pid_t)tid);
-    if (!target || target->tgid != (pid_t)tgid)
+    struct process *target = proc_find(ktid);
+    if (!target || target->tgid != ktgid)
         return -ESRCH;
-    return (int64_t)signal_send((pid_t)tid, (int)sig);
+    return (int64_t)signal_send(ktid, ksig);
 }
 
 int64_t sys_tkill(uint64_t tid, uint64_t sig, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if ((int64_t)tid <= 0)
+    pid_t ktid = sysproc_abi_pid(tid);
+    int32_t ksig = sysproc_abi_i32(sig);
+    if (ktid <= 0)
         return -EINVAL;
-    return (int64_t)signal_send((pid_t)tid, (int)sig);
+    return (int64_t)signal_send(ktid, ksig);
 }
 
 int64_t sys_getppid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
@@ -274,13 +287,15 @@ int64_t sys_getresgid(uint64_t rgid_ptr, uint64_t egid_ptr, uint64_t sgid_ptr,
 int64_t sys_getpriority(uint64_t which, uint64_t who, uint64_t a2, uint64_t a3,
                         uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    if (which != PRIO_PROCESS)
+    int32_t kwhich = sysproc_abi_i32(which);
+    pid_t kwho = sysproc_abi_pid(who);
+    if (kwhich != PRIO_PROCESS)
         return -EINVAL;
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (who != 0) {
-        p = proc_find((pid_t)who);
+    if (kwho != 0) {
+        p = proc_find(kwho);
         if (!p)
             return -ESRCH;
     }
@@ -290,31 +305,35 @@ int64_t sys_getpriority(uint64_t which, uint64_t who, uint64_t a2, uint64_t a3,
 int64_t sys_setpriority(uint64_t which, uint64_t who, uint64_t prio,
                         uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (which != PRIO_PROCESS)
+    int32_t kwhich = sysproc_abi_i32(which);
+    pid_t kwho = sysproc_abi_pid(who);
+    int32_t kprio = sysproc_abi_i32(prio);
+    if (kwhich != PRIO_PROCESS)
         return -EINVAL;
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (who != 0) {
-        p = proc_find((pid_t)who);
+    if (kwho != 0) {
+        p = proc_find(kwho);
         if (!p)
             return -ESRCH;
     }
-    return (int64_t)sched_setnice(p, (int)prio);
+    return (int64_t)sched_setnice(p, kprio);
 }
 
 int64_t sys_sched_getaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
                               uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     if (!mask_ptr)
         return -EFAULT;
     if (len < sizeof(unsigned long))
         return -EINVAL;
     struct process *target = NULL;
-    if (pid == 0)
+    if (kpid == 0)
         target = proc_current();
     else
-        target = proc_find((pid_t)pid);
+        target = proc_find(kpid);
     if (!target)
         return -ESRCH;
 
@@ -337,6 +356,7 @@ int64_t sys_sched_getaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
 int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
                               uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     if (!mask_ptr)
         return -EFAULT;
     if (len < sizeof(unsigned long))
@@ -347,10 +367,10 @@ int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
         return -EINVAL;
 
     struct process *target = NULL;
-    if (pid == 0)
+    if (kpid == 0)
         target = curr;
     else
-        target = proc_find((pid_t)pid);
+        target = proc_find(kpid);
     if (!target)
         return -ESRCH;
     if (target != curr && curr->uid != 0)
@@ -409,8 +429,9 @@ int64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
                  uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
     uint32_t uoptions = (uint32_t)options;
+    pid_t kpid = sysproc_abi_pid(pid);
     int status = 0;
-    pid_t ret = proc_wait((pid_t)pid, &status, (int)uoptions);
+    pid_t ret = proc_wait(kpid, &status, (int)uoptions);
     if (ret >= 0 && status_ptr) {
         if (copy_to_user((void *)status_ptr, &status, sizeof(status)) < 0)
             return -EFAULT;
@@ -428,13 +449,14 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
                    uint64_t options, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
     enum { P_ALL = 0, P_PID = 1, P_PGID = 2 };
+    int32_t ktype = sysproc_abi_i32(type);
     uint32_t uoptions = (uint32_t)options;
     if (uoptions & ~(WNOHANG | WEXITED))
         return -EINVAL;
     pid_t pid = -1;
-    if (type == P_PID) {
-        pid = (pid_t)id;
-    } else if (type == P_ALL) {
+    if (ktype == P_PID) {
+        pid = sysproc_abi_pid(id);
+    } else if (ktype == P_ALL) {
         pid = -1;
     } else {
         return -EINVAL;
@@ -544,37 +566,39 @@ int64_t sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2,
 int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
                       uint64_t old_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
+    uint32_t kresource = sysproc_abi_u32(resource);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && (pid_t)pid != p->pid) {
-        struct process *target = proc_find((pid_t)pid);
+    if (kpid != 0 && kpid != p->pid) {
+        struct process *target = proc_find(kpid);
         if (!target)
             return -ESRCH;
         return -EPERM;
     }
-    if (resource >= RLIM_NLIMITS)
+    if (kresource >= RLIM_NLIMITS)
         return -EINVAL;
 
     if (old_ptr) {
-        struct rlimit old = p->rlimits[resource];
+        struct rlimit old = p->rlimits[kresource];
         if (copy_to_user((void *)old_ptr, &old, sizeof(old)) < 0)
             return -EFAULT;
     }
 
     if (new_ptr) {
-        if (resource != RLIMIT_NOFILE && resource != RLIMIT_STACK)
+        if (kresource != RLIMIT_NOFILE && kresource != RLIMIT_STACK)
             return -EINVAL;
         struct rlimit rl;
         if (copy_from_user(&rl, (void *)new_ptr, sizeof(rl)) < 0)
             return -EFAULT;
         if (rl.rlim_cur > rl.rlim_max)
             return -EINVAL;
-        if (resource == RLIMIT_NOFILE &&
+        if (kresource == RLIMIT_NOFILE &&
             (rl.rlim_cur > CONFIG_MAX_FILES_PER_PROC ||
              rl.rlim_max > CONFIG_MAX_FILES_PER_PROC))
             return -EINVAL;
-        p->rlimits[resource] = rl;
+        p->rlimits[kresource] = rl;
     }
 
     return 0;
@@ -645,10 +669,11 @@ int64_t sys_set_robust_list(uint64_t head_ptr, uint64_t len, uint64_t a2,
 int64_t sys_get_robust_list(uint64_t pid, uint64_t head_ptr, uint64_t len_ptr,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && (pid_t)pid != p->pid)
+    if (kpid != 0 && kpid != p->pid)
         return -EPERM;
     if (head_ptr &&
         copy_to_user((void *)head_ptr, &p->robust_list,
@@ -664,10 +689,11 @@ int64_t sys_get_robust_list(uint64_t pid, uint64_t head_ptr, uint64_t len_ptr,
 int64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && (pid_t)pid != p->pid)
+    if (kpid != 0 && kpid != p->pid)
         return -ESRCH;
     if (!param_ptr)
         return -EFAULT;
@@ -682,7 +708,7 @@ int64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr, uint64_t a2,
 int64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy, uint64_t param_ptr,
                                uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (policy != SCHED_OTHER)
+    if (sysproc_abi_i32(policy) != SCHED_OTHER)
         return -EINVAL;
     return sys_sched_setparam(pid, param_ptr, 0, 0, 0, 0);
 }
@@ -690,10 +716,11 @@ int64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy, uint64_t param_ptr
 int64_t sys_sched_getscheduler(uint64_t pid, uint64_t a1, uint64_t a2,
                                uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && !proc_find((pid_t)pid))
+    if (kpid != 0 && !proc_find(kpid))
         return -ESRCH;
     return SCHED_OTHER;
 }
@@ -701,10 +728,11 @@ int64_t sys_sched_getscheduler(uint64_t pid, uint64_t a1, uint64_t a2,
 int64_t sys_sched_getparam(uint64_t pid, uint64_t param_ptr, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && !proc_find((pid_t)pid))
+    if (kpid != 0 && !proc_find(kpid))
         return -ESRCH;
     if (!param_ptr)
         return -EFAULT;
@@ -724,12 +752,14 @@ int64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_setpgid(uint64_t pid, uint64_t pgid, uint64_t a2, uint64_t a3,
                     uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
+    pid_t kpgid = sysproc_abi_pid(pgid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0 && (pid_t)pid != p->pid)
+    if (kpid != 0 && kpid != p->pid)
         return -EPERM;
-    pid_t new_pgid = (pgid == 0) ? p->pid : (pid_t)pgid;
+    pid_t new_pgid = (kpgid == 0) ? p->pid : kpgid;
     p->pgid = new_pgid;
     return 0;
 }
@@ -737,11 +767,12 @@ int64_t sys_setpgid(uint64_t pid, uint64_t pgid, uint64_t a2, uint64_t a3,
 int64_t sys_getpgid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
                     uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0) {
-        p = proc_find((pid_t)pid);
+    if (kpid != 0) {
+        p = proc_find(kpid);
         if (!p)
             return -ESRCH;
     }
@@ -751,11 +782,12 @@ int64_t sys_getpgid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_getsid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    pid_t kpid = sysproc_abi_pid(pid);
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (pid != 0) {
-        p = proc_find((pid_t)pid);
+    if (kpid != 0) {
+        p = proc_find(kpid);
         if (!p)
             return -ESRCH;
     }

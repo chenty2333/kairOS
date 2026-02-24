@@ -14,6 +14,10 @@ extern int do_sem_init(int count);
 extern int do_sem_wait(int sem_id);
 extern int do_sem_post(int sem_id);
 
+static inline int syssync_abi_int32(uint64_t v) {
+    return (int32_t)(uint32_t)v;
+}
+
 int64_t sys_futex(uint64_t uaddr, uint64_t op, uint64_t val, uint64_t timeout_ptr,
                   uint64_t uaddr2, uint64_t val3) {
     (void)uaddr2; (void)val3;
@@ -94,19 +98,19 @@ int64_t sys_futex_waitv(uint64_t waiters_ptr, uint64_t nr_futexes, uint64_t flag
 int64_t sys_sem_init(uint64_t count, uint64_t a1, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)do_sem_init((int)count);
+    return (int64_t)do_sem_init(syssync_abi_int32(count));
 }
 
 int64_t sys_sem_wait(uint64_t sem_id, uint64_t a1, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)do_sem_wait((int)sem_id);
+    return (int64_t)do_sem_wait(syssync_abi_int32(sem_id));
 }
 
 int64_t sys_sem_post(uint64_t sem_id, uint64_t a1, uint64_t a2, uint64_t a3,
                      uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return (int64_t)do_sem_post((int)sem_id);
+    return (int64_t)do_sem_post(syssync_abi_int32(sem_id));
 }
 
 static int64_t syslog_read_helper(uint64_t bufp, uint64_t len, bool all,

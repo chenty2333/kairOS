@@ -35,6 +35,7 @@ Other:
 - userspace `/init` supervises the login shell in a restart loop, logs exit cause (exit code / signal), and uses bounded exponential backoff on repeated failures
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
 - Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` and `dirfd` as 32-bit `int`; `setuid`/`setgid` and `setre*id`/`setres*id` decode uid/gid arguments as 32-bit values (`-1` sentinel is `0xffffffff`)
+- Linux ABI process compatibility also normalizes `pid`/`signal`/`priority` scalar args to 32-bit ABI width for `tgkill`/`tkill`, `getpriority`/`setpriority`, `prlimit64`, `sched_{get,set}affinity`, `setpgid`, `getpgid`, and `getsid`
 
 ## Scheduler (core/sched/sched.c)
 
@@ -82,7 +83,7 @@ Core functions:
 
 sync.c:
 - mutex: sleeping lock based on spinlock + wait_queue, supports holder tracking, recursive deadlock detection, interruptible and timeout variants
-- semaphore: counting semaphore, supports userspace semaphores (do_sem_init/wait/post, max 128)
+- semaphore: counting semaphore, supports userspace semaphores (do_sem_init/wait/post, max 128); syscall `count`/`sem_id` are decoded as Linux ABI `int` (32-bit)
 - rwlock: read-write lock, writer-priority (writers_waiting blocks new readers)
 
 wait.c:
