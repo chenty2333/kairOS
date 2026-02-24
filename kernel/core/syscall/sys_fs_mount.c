@@ -239,9 +239,10 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
                     uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
+    uint32_t uflags = (uint32_t)flags;
     if (!target_ptr)
         return -EFAULT;
-    if (flags != 0)
+    if (uflags != 0)
         return -EINVAL;
     if (sysfs_copy_path(target_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;

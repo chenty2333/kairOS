@@ -33,6 +33,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `fchmodat2` is wired to `fchmodat` semantics and flag validation
   - `openat2` supports `struct open_how` parsing; `RESOLVE_NO_MAGICLINKS` is accepted, other `resolve` constraints are pending
   - `statfs` now resolves the target path before filesystem stat (non-existent paths return `ENOENT`), and `fstatfs` falls back to fd dentry mount when available (`EINVAL` only when no mount context exists)
+  - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); currently only `flags=0` is implemented
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 
 ## Dentry Cache (fs/vfs/dentry.c)
