@@ -253,10 +253,14 @@ void proc_free(struct process *p) {
     proc_free_internal(p);
 }
 
-#if defined(ARCH_riscv64)
+#if defined(ARCH_riscv64) || defined(ARCH_aarch64)
 static inline uint64_t proc_read_sp(void) {
     uint64_t sp;
+#if defined(ARCH_riscv64)
     __asm__ __volatile__("mv %0, sp" : "=r"(sp));
+#else
+    __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#endif
     return sp;
 }
 
@@ -281,13 +285,23 @@ static struct process *proc_current_from_sp(uint64_t sp) {
 
 struct process *proc_current(void) {
     struct process *curr = arch_get_percpu()->curr_proc;
-#if defined(ARCH_riscv64)
+#if defined(ARCH_riscv64) || defined(ARCH_aarch64)
     uint64_t sp = proc_read_sp();
     if (proc_stack_contains_sp(curr, sp))
         return curr;
     struct process *fallback = proc_current_from_sp(sp);
-    if (fallback)
+    if (fallback) {
+        if (curr && curr != fallback) {
+            static int corrected_warn_count;
+            int n = __atomic_fetch_add(&corrected_warn_count, 1,
+                                       __ATOMIC_RELAXED);
+            if (n < 8) {
+                pr_warn("proc_current: corrected stale curr_proc cpu=%d curr=%d fallback=%d sp=%p\n",
+                        arch_cpu_id(), curr->pid, fallback->pid, (void *)sp);
+            }
+        }
         return fallback;
+    }
 #endif
     return curr;
 }
