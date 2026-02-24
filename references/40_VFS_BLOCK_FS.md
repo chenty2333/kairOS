@@ -108,6 +108,7 @@ Special:
 - `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
 - AF_UNIX stream send paths honor `MSG_NOSIGNAL` (suppress `SIGPIPE`, return `EPIPE` only)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
+- socket message/accept syscall `flags` are decoded using Linux ABI width (`int`/32-bit) for `accept4`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
 - `select` updates user `timeval` with remaining time on return (`success`/`EINTR`)

@@ -238,7 +238,7 @@ static int socket_msg_copyout_iov(uint64_t iov_ptr, size_t iovcnt,
 }
 
 static int64_t socket_sendmsg(struct socket *sock,
-                              const struct socket_msghdr *msg, uint64_t flags,
+                              const struct socket_msghdr *msg, uint32_t flags,
                               uint32_t *sent_out) {
     if (!sock || !sock->ops || !sock->ops->sendto) {
         return -EOPNOTSUPP;
@@ -299,7 +299,7 @@ static int64_t socket_sendmsg(struct socket *sock,
 }
 
 static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
-                              uint64_t flags, uint32_t *recv_out) {
+                              uint32_t flags, uint32_t *recv_out) {
     if (!sock || !sock->ops || !sock->ops->recvfrom) {
         return -EOPNOTSUPP;
     }
@@ -444,9 +444,11 @@ int64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t a2,
 }
 
 static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
-                                 uint64_t addrlen_ptr, uint64_t flags) {
+                                 uint64_t addrlen_ptr, uint32_t flags) {
     if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
         return -EINVAL;
+    if ((addr == 0) != (addrlen_ptr == 0))
+        return -EFAULT;
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
@@ -467,17 +469,39 @@ static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
     }
 
     /* Copy peer address to user if requested */
-    if (addr && addrlen_ptr && newsock->ops && newsock->ops->getpeername) {
+    if (addr && addrlen_ptr) {
         int ulen = 0;
-        if (copy_from_user(&ulen, (const void *)addrlen_ptr,
-                           sizeof(ulen)) == 0) {
+        if (copy_from_user(&ulen, (const void *)addrlen_ptr, sizeof(ulen)) < 0) {
+            sock_destroy(newsock);
+            file_put(sock_file);
+            return -EFAULT;
+        }
+        if (ulen < 0) {
+            sock_destroy(newsock);
+            file_put(sock_file);
+            return -EINVAL;
+        }
+        if (newsock->ops && newsock->ops->getpeername) {
             struct sockaddr_storage kaddr;
             int klen = (int)sizeof(kaddr);
-            if (newsock->ops->getpeername(newsock, (struct sockaddr *)&kaddr,
-                                          &klen) == 0) {
-                int copylen = (klen < ulen) ? klen : ulen;
-                copy_to_user((void *)addr, &kaddr, (size_t)copylen);
-                copy_to_user((void *)addrlen_ptr, &klen, sizeof(klen));
+            int gp = newsock->ops->getpeername(newsock, (struct sockaddr *)&kaddr,
+                                               &klen);
+            if (gp < 0) {
+                sock_destroy(newsock);
+                file_put(sock_file);
+                return (int64_t)gp;
+            }
+            int copylen = (klen < ulen) ? klen : ulen;
+            if (copylen > 0 &&
+                copy_to_user((void *)addr, &kaddr, (size_t)copylen) < 0) {
+                sock_destroy(newsock);
+                file_put(sock_file);
+                return -EFAULT;
+            }
+            if (copy_to_user((void *)addrlen_ptr, &klen, sizeof(klen)) < 0) {
+                sock_destroy(newsock);
+                file_put(sock_file);
+                return -EFAULT;
             }
         }
     }
@@ -515,7 +539,7 @@ int64_t sys_accept(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
 int64_t sys_accept4(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
                     uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    return sys_accept_common(fd, addr, addrlen_ptr, flags);
+    return sys_accept_common(fd, addr, addrlen_ptr, (uint32_t)flags);
 }
 
 int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
@@ -680,7 +704,8 @@ int64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
         file_put(sock_file);
         return -EFAULT;
     }
-    int64_t ret = socket_sendmsg(sock, &msg, flags, NULL);
+    uint32_t uflags = (uint32_t)flags;
+    int64_t ret = socket_sendmsg(sock, &msg, uflags, NULL);
     file_put(sock_file);
     return ret;
 }
@@ -700,7 +725,8 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
         file_put(sock_file);
         return -EFAULT;
     }
-    int64_t ret = socket_recvmsg(sock, &msg, flags, NULL);
+    uint32_t uflags = (uint32_t)flags;
+    int64_t ret = socket_recvmsg(sock, &msg, uflags, NULL);
     if (ret >= 0 &&
         copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0) {
         file_put(sock_file);
@@ -713,6 +739,7 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
 int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
+    uint32_t uflags = (uint32_t)flags;
     if (!vlen) {
         return 0;
     }
@@ -735,7 +762,8 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
             file_put(sock_file);
             return sent ? sent : -EFAULT;
         }
-        int64_t ret = socket_sendmsg(sock, &msg.msg_hdr, flags, &msg.msg_len);
+        int64_t ret =
+            socket_sendmsg(sock, &msg.msg_hdr, uflags, &msg.msg_len);
         if (ret < 0) {
             file_put(sock_file);
             return sent ? sent : ret;
@@ -754,6 +782,7 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t timeout_ptr, uint64_t a5) {
     (void)a5;
+    uint32_t uflags = (uint32_t)flags;
     if (!vlen) {
         return 0;
     }
@@ -785,8 +814,8 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
             file_put(sock_file);
             return recved ? recved : -EFAULT;
         }
-        uint64_t recv_flags = flags;
-        if (recved > 0 && (flags & MSG_WAITFORONE)) {
+        uint32_t recv_flags = uflags;
+        if (recved > 0 && (uflags & MSG_WAITFORONE)) {
             recv_flags |= MSG_DONTWAIT;
         }
 
