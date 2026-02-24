@@ -24,6 +24,7 @@
 #define RESOLVE_BENEATH 0x08U
 #define RESOLVE_IN_ROOT 0x10U
 #define RESOLVE_CACHED 0x20U
+#define RENAME_NOREPLACE 0x01U
 
 struct linux_open_how {
     uint64_t flags;
@@ -851,8 +852,28 @@ int64_t sys_renameat2(uint64_t olddirfd, uint64_t oldpath_ptr,
                       uint64_t newdirfd, uint64_t newpath_ptr, uint64_t flags,
                       uint64_t a5) {
     (void)a5;
-    if (flags != 0)
+    if (flags == 0)
+        return sys_renameat(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, 0, 0);
+    if (flags != RENAME_NOREPLACE)
         return -EINVAL;
+
+    char newpath[CONFIG_PATH_MAX];
+    if (sysfs_copy_path(newpath_ptr, newpath, sizeof(newpath)) < 0)
+        return -EFAULT;
+
+    struct path newp;
+    path_init(&newp);
+    int ret = sysfs_resolve_at((int64_t)newdirfd, newpath, &newp, NAMEI_CREATE);
+    if (ret < 0)
+        return ret;
+    if (!newp.dentry)
+        return -ENOENT;
+    if (!(newp.dentry->flags & DENTRY_NEGATIVE)) {
+        dentry_put(newp.dentry);
+        return -EEXIST;
+    }
+    dentry_put(newp.dentry);
+
     return sys_renameat(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, 0, 0);
 }
 
