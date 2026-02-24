@@ -553,6 +553,9 @@ doctor: check-tools
 # Boot prerequisites: UEFI firmware + Limine boot image + disk (all architectures)
 RUN_DEPS := check-tools $(KERNEL) uefi disk
 
+# Avoid self-contention on image locks when make runs with global -j.
+.NOTPARALLEL: $(ROOTFS_STAMP) run-direct run-e1000-direct debug
+
 run:
 	$(Q)if [ "$(RUN_ISOLATED)" = "1" ]; then \
 		if [ "$(RUN_GC_AUTO)" = "1" ]; then \
