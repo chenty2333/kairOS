@@ -160,6 +160,138 @@ jobs:
             build/riscv64/test.log
             build/riscv64/run.log
 
+  x86_64-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(
+            clang
+            lld
+            llvm
+            make
+            python3
+            git
+            cmake
+            ninja-build
+            rsync
+            curl
+            unzip
+            ca-certificates
+            e2fsprogs
+            dosfstools
+            mtools
+            qemu-system-x86
+            qemu-utils
+            ovmf
+          )
+          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
+            pkgs+=(edk2-ovmf)
+          fi
+          sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Restore third-party source cache
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+          restore-keys: |
+            third-party-${{ runner.os }}-
+
+      - name: Fetch required third-party sources
+        run: |
+          set -euo pipefail
+          deps=(lwip limine musl busybox tcc)
+          for dep in "${deps[@]}"; do
+            ok=0
+            for attempt in 1 2 3; do
+              echo "Fetching ${dep} (attempt ${attempt}/3)"
+              if scripts/kairos.sh deps fetch "${dep}"; then
+                ok=1
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            if [[ "${ok}" -ne 1 ]]; then
+              echo "Failed to fetch dependency: ${dep}" >&2
+              exit 2
+            fi
+          done
+
+      - name: Locate x86_64 UEFI firmware
+        run: |
+          set -euo pipefail
+          pairs=(
+            "/usr/share/edk2/ovmf/OVMF_CODE.fd|/usr/share/edk2/ovmf/OVMF_VARS.fd"
+            "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd|/usr/share/edk2/ovmf/OVMF_VARS_4M.fd"
+            "/usr/share/OVMF/OVMF_CODE.fd|/usr/share/OVMF/OVMF_VARS.fd"
+            "/usr/share/OVMF/OVMF_CODE_4M.fd|/usr/share/OVMF/OVMF_VARS_4M.fd"
+            "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd|/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"
+            "/usr/share/edk2-ovmf/x64/OVMF_CODE_4M.fd|/usr/share/edk2-ovmf/x64/OVMF_VARS_4M.fd"
+          )
+          code_src=""
+          vars_src=""
+          for pair in "${pairs[@]}"; do
+            IFS='|' read -r code vars <<< "${pair}"
+            if [[ -f "${code}" && -f "${vars}" ]]; then
+              code_src="${code}"
+              vars_src="${vars}"
+              break
+            fi
+          done
+          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
+            echo "Unable to locate x86_64 UEFI firmware on runner" >&2
+            exit 2
+          fi
+          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
+          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
+          echo "Using UEFI_CODE_SRC=${code_src}"
+          echo "Using UEFI_VARS_SRC=${vars_src}"
+
+      - name: Run x86_64 driver smoke gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=240 test-driver
+
+      - name: Capture latest isolated run
+        id: latest_run_x86_64
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload x86_64 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-x86_64-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ steps.latest_run_x86_64.outputs.path }}/manifest.json
+            ${{ steps.latest_run_x86_64.outputs.path }}/result.json
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/logs/test.log
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/test.log
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/run.log
+            build/runs/*/manifest.json
+            build/runs/*/result.json
+            build/runs/*/x86_64/logs/*.log
+            build/runs/*/x86_64/*.log
+            build/x86_64/test.log
+            build/x86_64/run.log
+
   aarch64-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
