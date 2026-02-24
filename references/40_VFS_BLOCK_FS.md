@@ -35,7 +35,8 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `statfs` now resolves the target path before filesystem stat (non-existent paths return `ENOENT`), and `fstatfs` falls back to fd dentry mount when available (`EINVAL` only when no mount context exists)
   - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); currently only `flags=0` is implemented
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
-- `mount`/`umount2` syscall entry handling rejects non-zero high 32-bit flag bits (`EINVAL`) and then applies low-32 Linux flag decoding
+- `umount2` follows Linux `int` ABI flag decoding (upper 32 bits ignored); only `flags=0` is currently implemented
+- `mount` syscall entry handling currently rejects non-zero high 32-bit flag bits (`EINVAL`) and then applies low-32 flag validation for the implemented subset
 
 ## Dentry Cache (fs/vfs/dentry.c)
 

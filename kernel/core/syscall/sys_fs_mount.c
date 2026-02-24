@@ -14,6 +14,10 @@
 
 #include "sys_fs_helpers.h"
 
+static inline int32_t sysmount_abi_i32(uint64_t raw) {
+    return (int32_t)(uint32_t)raw;
+}
+
 int64_t sys_chroot(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -231,7 +235,7 @@ int64_t sys_umask(uint64_t mask, uint64_t a1, uint64_t a2, uint64_t a3,
     if (!p)
         return -EINVAL;
     mode_t old = p->umask;
-    p->umask = (mode_t)mask & 0777;
+    p->umask = (mode_t)((uint32_t)mask & 0777U);
     return (int64_t)old;
 }
 
@@ -239,9 +243,7 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
                     uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
-    uint32_t uflags = (uint32_t)flags;
-    if ((flags >> 32) != 0)
-        return -EINVAL;
+    uint32_t uflags = (uint32_t)sysmount_abi_i32(flags);
     if (!target_ptr)
         return -EFAULT;
     if (uflags != 0)
