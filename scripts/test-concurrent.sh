@@ -102,9 +102,6 @@ except Exception:
     print("invalid_result_json invalid_result_json")
 PY
             )
-        elif grep -Eq 'lock_busy' "${log}"; then
-            status="error"
-            reason="lock_busy"
         fi
 
         case "${status}" in

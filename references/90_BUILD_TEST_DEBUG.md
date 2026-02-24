@@ -105,7 +105,7 @@ QEMU configuration:
 - `make test-matrix` — SMP × DEBUG test matrix
 - GitHub Actions `ci-quick` runs `riscv64` quick regression (`make test` + `make test-exec-elf-smoke` + `make test-busybox-applets-smoke`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make test-syscall-trap` + `make test-tcc-smoke`)
 - GitHub Actions `soak-long` runs `riscv64` long soak-pr profile and `x86_64` bootstrap soak-pr profile (shorter default duration and timeout for CI cost control)
-- `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
+- `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`, `doomgeneric`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
 - `scripts/impl/fetch-deps.sh` defaults to preserving tracked `kernel/include/boot/limine.h`; refresh only when `FORCE_LIMINE_HEADER_FETCH=1`.
 - TCC source for `deps fetch tcc` is configurable: `TCC_GIT_URL` / `TCC_GIT_REF` / `TCC_GIT_COMMIT` (default URL currently `https://github.com/chenty2333/tinycc.git`, ref `mob`).
 - Test module selection uses `CONFIG_KERNEL_TEST_MASK` via `TEST_EXTRA_CFLAGS` (default mask `0x7FF`)
@@ -119,7 +119,7 @@ Run/test sessions are executed via `scripts/run-qemu-session.sh` and `scripts/ru
 For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - Default `<run_id>` format is short-readable `YYMMDD-HHMM-xxxx` (example: `250222-2315-7f3a`)
 - `manifest.json` (command, arch, build root, git sha, timestamps)
-- `result.json` (status/reason/verdict source + structured test summary + marker flags + log path)
+- `result.json` (status/reason/verdict source + structured block + summary block + marker flags + log path)
 - `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
 - Default isolated test logs live under the run directory; explicit `TEST_LOG` / `SOAK_PR_LOG` / `TCC_SMOKE_LOG` / `EXEC_ELF_SMOKE_LOG` overrides keep caller-provided paths
 
@@ -149,18 +149,19 @@ Run retention:
 
 Result decision policy:
 - `scripts/run-qemu-test.sh` writes `manifest.json` at start and `result.json` at end.
-- `TEST_RESULT_JSON` (kernel-emitted single-line JSON) is the primary verdict source for marker-required test runs.
+- Structured mode is default for kernel test/smoke paths (`TEST_REQUIRE_STRUCTURED=auto`, resolved to `1` when `TEST_REQUIRE_MARKERS=1`).
+- Structured verdict requires both `TEST_RESULT_JSON` and `TEST_SUMMARY` and checks `failed` consistency.
 - When structured result is complete and passed, `qemu_rc=0/124/2` are accepted (`2` covers firmware-reset style exits seen on some runs).
-- If structured output is missing/invalid, the runner uses timeout/failure markers as guarded fallback and reports non-pass status.
+- If structured output is missing/invalid/inconsistent, verdict is non-pass (`infra_fail`).
 - `run-qemu-session.sh` / `run-qemu-test.sh` emit signal telemetry in `result.json` under `signals`:
   `qemu_exit_signal`, `qemu_term_signal`, `qemu_term_sender_pid` (nullable when unavailable)
 - When no kernel failure markers are present and the runner exits by signal (`qemu_rc` in 128+N, non-timeout),
   verdict is treated as infrastructure interruption (`external_sigterm` / `external_sigkill` / `external_signal`).
-- `run-qemu-test.sh` also supports optional log assertions:
+- `run-qemu-test.sh` also supports optional log assertions (diagnostic/extra constraints, not primary verdict source in structured mode):
   - `TEST_REQUIRED_MARKER_REGEX`: at least one required regex
   - `TEST_REQUIRED_MARKERS_ALL`: newline-delimited required regex list (all must match)
   - `TEST_FORBIDDEN_MARKER_REGEX`: forbidden regex (any match fails)
-- `result.json` is the primary machine-readable test outcome consumed by automation.
+- CI gate steps validate `result.json` with `scripts/impl/assert-result-pass.py` (`--require-structured`).
 
 Primary verification architecture is ARCH=riscv64 (run, test, test-soak, uefi).
 

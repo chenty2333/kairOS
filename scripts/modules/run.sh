@@ -78,6 +78,7 @@ kairos_run_test_once() {
     local log_path="$3"
     local require_markers="$4"
     local expect_timeout="$5"
+    local require_structured="$6"
 
     local qemu_cmd
     printf -v qemu_cmd \
@@ -85,7 +86,7 @@ kairos_run_test_once() {
         "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
         "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" "" 1
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" "" "${require_structured}" 1
 }
 
 kairos_run_test_tcc_smoke_once() {
@@ -196,13 +197,15 @@ printf 'done_tag=__TCC_\n' >&3
 sleep "$step_delay"
 printf 'done_tag=${done_tag}SMOKE_DONE__\n' >&3
 sleep "$step_delay"
-printf 'echo "$done_tag"\n' >&3
+printf 'echo TEST_SUMMARY: failed=$failed\n' >&3
 sleep "$step_delay"
 printf 'json_tag=TEST_RESULT\n' >&3
 sleep "$step_delay"
 printf 'json_tag=${json_tag}_JSON:\n' >&3
 sleep "$step_delay"
 printf 'echo "$json_tag {\\"schema_version\\":1,\\"failed\\":$failed,\\"done\\":true,\\"enabled_mask\\":1}"\n' >&3
+sleep "$step_delay"
+printf 'echo "$done_tag"\n' >&3
 sleep "$step_delay"
 for _ in $(seq 1 "$ready_wait"); do
     grep -q '__TCC_SMOKE_DONE__' "$log_path" 2>/dev/null && break
@@ -225,7 +228,7 @@ EOF
         'bash %q' \
         "${smoke_script}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 1 0 "${required_any}" "${required_all}" "${forbidden}" 0
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 1 0 "${required_any}" "${required_all}" "${forbidden}" 1 0
 }
 
 kairos_run_test_busybox_applets_smoke_once() {
@@ -260,6 +263,7 @@ kairos_run_test_busybox_applets_smoke_once() {
         "${expected_count}"
 
     smoke_script="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/busybox-applets-smoke-host.sh"
+    mkdir -p "$(dirname "${smoke_script}")"
     {
         printf 'run_log=%q\n' "${run_log}"
         printf 'ready_wait=%q\n' "${ready_wait}"
@@ -279,7 +283,7 @@ for _ in $(seq 1 "$ready_wait"); do
     sleep 1
 done
 sleep "$boot_delay"
-printf 'bad=0; for a in %s; do if [ ! -x "/bin/$a" ]; then bad=1; echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1; rc=$?; if [ "$rc" -gt 128 ]; then bad=1; echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
+printf 'bad=0; for a in %s; do if [ ! -x "/bin/$a" ]; then bad=$((bad+1)); echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1; rc=$?; if [ "$rc" -gt 128 ]; then bad=$((bad+1)); echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo TEST_SUMMARY: failed=$bad; echo TEST_RESULT_JSON: {\"schema_version\":1,\"failed\":$bad,\"done\":true,\"enabled_mask\":1}; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
 sleep "$step_delay"
 for _ in $(seq 1 "$ready_wait"); do
     grep -q '__BB_APPLET_SMOKE_DONE__' "$log_path" 2>/dev/null && break
@@ -302,7 +306,7 @@ EOF
         'bash %q' \
         "${smoke_script}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}" 0
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}" 1 0
 }
 
 kairos_run_test_locked() {
@@ -314,7 +318,8 @@ kairos_run_test_locked() {
     local required_marker_regex="${6:-}"
     local required_markers_all="${7:-}"
     local forbidden_marker_regex="${8:-}"
-    local clean_artifacts="${9:-1}"
+    local require_structured="${9:-1}"
+    local clean_artifacts="${10:-1}"
     local test_lock_file="${TEST_LOCK_FILE:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/.locks/test.lock}"
 
     if [[ "${clean_artifacts}" -eq 1 ]]; then
@@ -334,6 +339,7 @@ kairos_run_test_locked() {
             TEST_LOG="${log_path}" \
             TEST_REQUIRE_MARKERS="${require_markers}" \
             TEST_EXPECT_TIMEOUT="${expect_timeout}" \
+            TEST_REQUIRE_STRUCTURED="${require_structured}" \
             TEST_REQUIRED_MARKER_REGEX="${required_marker_regex}" \
             TEST_REQUIRED_MARKERS_ALL="${required_markers_all}" \
             TEST_FORBIDDEN_MARKER_REGEX="${forbidden_marker_regex}" \
@@ -400,7 +406,7 @@ kairos_run_dispatch() {
             timeout_s="${TEST_TIMEOUT:-180}"
             log_path="${TEST_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/test.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
-            kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
+            kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0 1
             ;;
         test-exec-elf-smoke)
             extra="${EXEC_ELF_SMOKE_EXTRA_CFLAGS:-${TCC_SMOKE_EXTRA_CFLAGS:-}}"
@@ -428,14 +434,14 @@ kairos_run_dispatch() {
             timeout_s="${SOAK_TIMEOUT:-600}"
             log_path="${SOAK_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/soak.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
-            kairos_run_test_once "$extra" "$timeout_s" "$log_path" 0 1
+            kairos_run_test_once "$extra" "$timeout_s" "$log_path" 0 1 0
             ;;
         test-debug)
             extra="${default_extra} -DCONFIG_DEBUG=1"
             timeout_s="${TEST_TIMEOUT:-180}"
             log_path="${TEST_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/test.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
-            kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
+            kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0 1
             ;;
         test-matrix)
             (

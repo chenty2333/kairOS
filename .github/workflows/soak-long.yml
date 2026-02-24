@@ -181,6 +181,12 @@ jobs:
             SOAK_PR_TIMEOUT="${SOAK_TEST_TIMEOUT_SEC}" \
             SOAK_PR_EXTRA_CFLAGS="${extra_cflags[*]}" \
             test-soak-pr
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 soak-pr" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
       - name: Capture latest isolated run
         id: latest_run
@@ -346,6 +352,12 @@ jobs:
             SOAK_PR_TIMEOUT="${SOAK_TEST_TIMEOUT_SEC}" \
             SOAK_PR_EXTRA_CFLAGS="${extra_cflags[*]}" \
             test-soak-pr
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after x86_64 soak-pr" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
       - name: Capture latest isolated run
         id: latest_run_x86_64
