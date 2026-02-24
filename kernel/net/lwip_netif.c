@@ -18,6 +18,11 @@
 
 static struct netif lwip_netif;
 static struct netdev *lwip_netdev;
+static bool lwip_netif_ready;
+
+bool lwip_netif_is_ready(void) {
+    return __atomic_load_n(&lwip_netif_ready, __ATOMIC_ACQUIRE);
+}
 
 #if CONFIG_KERNEL_TESTS
 static uint64_t lwip_netif_test_rx_input_count;
@@ -83,7 +88,7 @@ static err_t kairos_netif_init(struct netif *netif) {
  * Called from the network driver's RX interrupt handler.
  */
 void lwip_netif_input(const void *data, size_t len) {
-    if (!data || len == 0) {
+    if (!data || len == 0 || !lwip_netif_is_ready() || !lwip_netif.input) {
         return;
     }
 
@@ -121,6 +126,7 @@ static void lwip_init_done(void *arg) {
  */
 void lwip_net_init(void) {
     struct netdev *dev = netdev_first();
+    __atomic_store_n(&lwip_netif_ready, false, __ATOMIC_RELEASE);
     if (!dev) {
         pr_info("lwip: no network device, skipping init\n");
         return;
@@ -145,6 +151,7 @@ void lwip_net_init(void) {
 
     dhcp_start(&lwip_netif);
     UNLOCK_TCPIP_CORE();
+    __atomic_store_n(&lwip_netif_ready, true, __ATOMIC_RELEASE);
 
     pr_info("lwip: attached to %s, DHCP started\n", dev->name);
 }

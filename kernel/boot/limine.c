@@ -78,7 +78,7 @@ static void *efi_find_dtb(void *system_table) {
 
 /* Limine base revision */
 __attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(5);
+static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(0);
 
 /* Request markers */
 __attribute__((used, section(".limine_requests_start_marker")))

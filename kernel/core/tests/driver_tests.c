@@ -19,6 +19,7 @@ extern int virtio_net_test_rx_deliver_len(uint32_t len);
 extern void lwip_netif_test_reset_rx_stats(void);
 extern uint64_t lwip_netif_test_rx_input_count_get(void);
 extern uint64_t lwip_netif_test_rx_input_last_len_get(void);
+extern bool lwip_netif_is_ready(void);
 #endif
 
 static void test_check(bool cond, const char *name) {
@@ -317,6 +318,11 @@ static void test_netdev_registry(void) {
 
 #if CONFIG_KERNEL_TESTS
 static void test_virtio_net_rx_to_lwip_bridge(void) {
+    if (!lwip_netif_is_ready()) {
+        pr_info("tests: skip virtio_net rx bridge (lwip netif not ready)\n");
+        return;
+    }
+
     lwip_netif_test_reset_rx_stats();
     uint64_t before = lwip_netif_test_rx_input_count_get();
 
