@@ -22,6 +22,7 @@ extern char _bss_end[];
 /* Secondary CPU handling */
 static volatile int secondary_cpus_online = 0;
 int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque);
+uint64_t arch_cpu_start_debug(int cpu);
 extern void _secondary_start(void);
 
 void secondary_cpu_main(unsigned long cpu_id) {
@@ -86,6 +87,16 @@ static void smp_init(void) {
     int online = secondary_cpus_online + 1;
     if (online < 1)
         online = 1;
+    if (secondary_cpus_online < started) {
+        for (int cpu = 0; cpu < cpu_count; cpu++) {
+            if (cpu == bsp_cpu)
+                continue;
+            uint64_t dbg = arch_cpu_start_debug(cpu);
+            if (dbg)
+                pr_warn("SMP: cpu%d start debug=0x%lx\n",
+                        cpu, (unsigned long)dbg);
+        }
+    }
     pr_info("SMP: %d/%d CPUs active\n", online, started + 1);
     sched_set_steal_enabled(online > 1);
 }

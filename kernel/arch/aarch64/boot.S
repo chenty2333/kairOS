@@ -115,6 +115,14 @@ _secondary_start:
     add x2, x2, x3
     mov sp, x2
 
+    /* Stage marker: AP reached virtual secondary entry. */
+    adrp x9, aarch64_secondary_entry_stage
+    add  x9, x9, :lo12:aarch64_secondary_entry_stage
+    lsl  x10, x1, #3
+    add  x9, x9, x10
+    mov  x11, #1
+    str  x11, [x9]
+
     mov x0, x1
     bl secondary_cpu_main
 
@@ -128,6 +136,8 @@ _secondary_start:
  */
 _secondary_start_psci:
     mov x20, x0
+    mov x9, #1
+    str x9, [x20]
     DROP_TO_EL1
 
     ldr x1, [x20, #PSCI_CTX_CPU_ID]
@@ -137,6 +147,8 @@ _secondary_start_psci:
     ldr x5, [x20, #PSCI_CTX_TTBR1]
     ldr x6, [x20, #PSCI_CTX_SCTLR]
     ldr x7, [x20, #PSCI_CTX_TARGET]
+    mov x9, #2
+    str x9, [x20]
 
     msr mair_el1, x3
     msr tcr_el1, x2
@@ -144,6 +156,8 @@ _secondary_start_psci:
     msr ttbr1_el1, x5
     isb
 
+    mov x9, #3
+    str x9, [x20]
     /* Keep AP caches off during bring-up; avoids coherency issues before EL1 init. */
     bic x6, x6, #(1 << 2)   /* SCTLR_EL1.C */
     bic x6, x6, #(1 << 12)  /* SCTLR_EL1.I */

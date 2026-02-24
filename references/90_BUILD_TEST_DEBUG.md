@@ -69,7 +69,7 @@ Variables:
 - `make run-iso` — boot from ISO (x86_64 only; not a primary verification path for other architectures)
 
 QEMU configuration:
-- 256MB RAM, SMP default 4 cores (aarch64 defaults to 1 core, SMP path still unstable)
+- 256MB RAM, SMP default 4 cores (aarch64 run/debug default remains 1 core for conservative local runs; `QEMU_SMP=2` is supported via DTB+PSCI fallback path)
 - Network: virtio-net + user mode; `HOSTFWD_PORT=8080` forwards host port to guest :80
 - Graphics: `QEMU_GUI=1` enables GTK display
 - Disk: virtio-blk; riscv64 uses virtio-mmio, x86_64/aarch64 use virtio-pci

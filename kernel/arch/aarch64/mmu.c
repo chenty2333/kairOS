@@ -260,6 +260,16 @@ void arch_mmu_init(const struct boot_info *bi) {
         panic("mmu: kernel map failed");
     }
 
+    /*
+     * Keep a low VA identity alias for kernel image.
+     * Secondary CPUs started via PSCI enable MMU while executing from PA.
+     */
+    if (mmu_map_region(kernel_pgdir, bi->kernel_phys_base, bi->kernel_phys_base,
+                       ksize,
+                       PTE_READ | PTE_WRITE | PTE_EXEC | PTE_GLOBAL) < 0) {
+        panic("mmu: kernel identity map failed");
+    }
+
     const struct platform_desc *plat = platform_get();
     if (plat) {
         for (int i = 0; i < plat->num_early_mmio; i++) {

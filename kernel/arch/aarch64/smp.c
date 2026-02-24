@@ -33,9 +33,27 @@ extern void _secondary_start_psci(void);
 extern void _secondary_start_psci_end(void);
 
 static struct aarch64_psci_boot_ctx psci_ctx[CONFIG_MAX_CPUS];
+volatile uint64_t aarch64_secondary_entry_stage[CONFIG_MAX_CPUS];
 static int psci_conduit_cached = -1;
 static bool psci_trampoline_ready;
 static bool psci_fallback_logged;
+
+static size_t dcache_line_size(void) {
+    uint64_t ctr = 0;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    return 4UL << ((ctr >> 16) & 0xFUL);
+}
+
+static void dcache_clean_range(const void *addr, size_t len) {
+    if (!addr || len == 0)
+        return;
+    size_t line = dcache_line_size();
+    uintptr_t start = ALIGN_DOWN((uintptr_t)addr, line);
+    uintptr_t end = ALIGN_UP((uintptr_t)addr + len, line);
+    for (uintptr_t p = start; p < end; p += line)
+        __asm__ __volatile__("dc cvac, %0" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb ish" ::: "memory");
+}
 
 static const char *psci_conduit_name(enum psci_conduit conduit) {
     return (conduit == PSCI_CONDUIT_SMC) ? "smc" : "hvc";
@@ -84,21 +102,6 @@ static int32_t psci_cpu_on(enum psci_conduit conduit, uint64_t target_mpidr,
 static int psci_prepare_trampoline(void) {
     if (psci_trampoline_ready)
         return 0;
-
-    paddr_t start = ALIGN_DOWN(virt_to_phys((void *)_secondary_start_psci),
-                               CONFIG_PAGE_SIZE);
-    paddr_t end = ALIGN_UP(virt_to_phys((void *)_secondary_start_psci_end),
-                           CONFIG_PAGE_SIZE);
-    paddr_t pgdir = arch_mmu_get_kernel_pgdir();
-
-    for (paddr_t pa = start; pa < end; pa += CONFIG_PAGE_SIZE) {
-        int rc = arch_mmu_map_merge(pgdir, (vaddr_t)pa, pa,
-                                    PTE_READ | PTE_EXEC | PTE_GLOBAL);
-        if (rc < 0 && rc != -EEXIST)
-            return rc;
-    }
-
-    arch_mmu_flush_tlb_all();
     psci_trampoline_ready = true;
     return 0;
 }
@@ -122,6 +125,7 @@ int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
     __asm__ __volatile__("mrs %0, ttbr1_el1" : "=r"(ttbr1));
     __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
 
+    psci_ctx[cpu].reserved0 = 0;
     psci_ctx[cpu].cpu_id = opaque;
     psci_ctx[cpu].tcr_el1 = tcr;
     psci_ctx[cpu].mair_el1 = mair;
@@ -129,6 +133,10 @@ int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
     psci_ctx[cpu].ttbr1_el1 = ttbr1;
     psci_ctx[cpu].sctlr_el1 = sctlr;
     psci_ctx[cpu].target_va = start_addr;
+    dcache_clean_range(&psci_ctx[cpu], sizeof(psci_ctx[cpu]));
+    dcache_clean_range((const void *)_secondary_start_psci,
+                       (size_t)((uintptr_t)_secondary_start_psci_end -
+                                (uintptr_t)_secondary_start_psci));
     __asm__ __volatile__("dsb ishst" ::: "memory");
 
     enum psci_conduit conduit = psci_detect_conduit(bi);
@@ -144,4 +152,11 @@ int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
     pr_info("SMP: PSCI CPU_ON cpu=%d hwid=%p rc=%d\n",
             cpu, (void *)bi->cpus[cpu].hw_id, psci_rc);
     return (int)psci_rc;
+}
+
+uint64_t arch_cpu_start_debug(int cpu) {
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        return 0;
+    return (psci_ctx[cpu].reserved0 << 32) |
+           (aarch64_secondary_entry_stage[cpu] & 0xffffffffULL);
 }

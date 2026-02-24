@@ -19,6 +19,12 @@ int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
     return -ENODEV;
 }
 
+__attribute__((weak))
+uint64_t arch_cpu_start_debug(int cpu) {
+    (void)cpu;
+    return 0;
+}
+
 int arch_cpu_count(void) {
     const struct boot_info *bi = boot_info_get();
     if (bi && bi->cpu_count) {
