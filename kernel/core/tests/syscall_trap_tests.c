@@ -707,6 +707,41 @@ out:
         user_map_end(&um);
 }
 
+static void test_strncpy_from_user_nul_before_unmapped_tail_regression(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc = user_map_begin(&um, 2 * CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "uaccess_strncpy_nul_tail user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    char *u_tail = (char *)user_map_ptr(&um, CONFIG_PAGE_SIZE - 3);
+    test_check(u_tail != NULL, "uaccess_strncpy_nul_tail u_tail");
+    if (!u_tail)
+        goto out;
+
+    static const char src[] = {'O', 'K', '\0'};
+    rc = copy_to_user(u_tail, src, sizeof(src));
+    test_check(rc == 0, "uaccess_strncpy_nul_tail copy_src");
+    if (rc == 0) {
+        rc = mm_munmap(um.active_mm, um.base + CONFIG_PAGE_SIZE, CONFIG_PAGE_SIZE);
+        test_check(rc == 0, "uaccess_strncpy_nul_tail munmap_next_page");
+        if (rc == 0) {
+            char out[CONFIG_PATH_MAX];
+            memset(out, 0xcc, sizeof(out));
+            long len = strncpy_from_user(out, u_tail, sizeof(out));
+            test_check(len == 2, "uaccess_strncpy_nul_tail len_ok");
+            test_check(out[0] == 'O' && out[1] == 'K' && out[2] == '\0',
+                       "uaccess_strncpy_nul_tail content_ok");
+        }
+    }
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_uaccess_arg_validation_regression(void) {
     uint8_t src = 0x5a;
     uint8_t dst = 0;
@@ -1193,6 +1228,7 @@ int run_syscall_trap_tests(void) {
     test_uaccess_large_range_regression();
     test_strncpy_from_user_len_regression();
     test_strncpy_from_user_unmapped_tail_regression();
+    test_strncpy_from_user_nul_before_unmapped_tail_regression();
     test_uaccess_arg_validation_regression();
     test_sched_affinity_syscalls_regression();
     test_mount_umount_flag_semantics();

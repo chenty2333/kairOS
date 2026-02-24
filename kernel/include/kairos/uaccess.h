@@ -98,8 +98,6 @@ static inline long strncpy_from_user(char *dest, const char *src,
     if (!access_ok(src, count)) {
         return -EFAULT;
     }
-    if (uaccess_prefault(src, count, false) < 0)
-        return -EFAULT;
     return __arch_strncpy_from_user(dest, src, count);
 }
 
