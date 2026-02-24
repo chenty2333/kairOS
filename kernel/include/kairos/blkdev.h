@@ -14,6 +14,8 @@ struct blkdev {
     uint32_t sector_size;
     struct blkdev_ops *ops;
     void *private;
+    struct blkdev *parent;
+    uint64_t start_lba;
     struct list_head list;
     uint32_t refcount;
 };

@@ -23,12 +23,47 @@ static void test_check(bool cond, const char *name) {
 static int dummy_blk_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
     (void)dev;
     (void)lba;
+    if (buf && count && dev)
+        memset(buf, 0, count * dev->sector_size);
+    return 0;
+}
+
+static int dummy_blk_write(struct blkdev *dev, uint64_t lba, const void *buf, size_t count) {
+    (void)dev;
+    (void)lba;
     (void)buf;
     (void)count;
     return 0;
 }
 
-static int dummy_blk_write(struct blkdev *dev, uint64_t lba, const void *buf, size_t count) {
+struct partition_test_image {
+    uint8_t mbr[512];
+    uint64_t last_lba;
+    size_t last_count;
+};
+
+static void write_le32(uint8_t *dst, uint32_t v) {
+    dst[0] = (uint8_t)(v & 0xff);
+    dst[1] = (uint8_t)((v >> 8) & 0xff);
+    dst[2] = (uint8_t)((v >> 16) & 0xff);
+    dst[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+static int partition_img_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
+    if (!dev || !buf || !count || !dev->private)
+        return -EINVAL;
+
+    struct partition_test_image *img = dev->private;
+    memset(buf, 0, count * dev->sector_size);
+    if (lba == 0 && count >= 1)
+        memcpy(buf, img->mbr, sizeof(img->mbr));
+    img->last_lba = lba;
+    img->last_count = count;
+    return 0;
+}
+
+static int partition_img_write(struct blkdev *dev, uint64_t lba, const void *buf,
+                               size_t count) {
     (void)dev;
     (void)lba;
     (void)buf;
@@ -114,6 +149,61 @@ static void test_blkdev_registry(void) {
     blkdev_unregister(&dev);
 }
 
+static void test_blkdev_partition_children(void) {
+    struct partition_test_image img;
+    memset(&img, 0, sizeof(img));
+    img.last_lba = UINT64_MAX;
+
+    /* MBR signature */
+    img.mbr[510] = 0x55;
+    img.mbr[511] = 0xAA;
+    /* First entry: Linux partition, lba=2048, sectors=1024 */
+    uint8_t *entry = &img.mbr[446];
+    entry[4] = 0x83;
+    write_le32(entry + 8, 2048U);
+    write_le32(entry + 12, 1024U);
+
+    struct blkdev_ops ops = {
+        .read = partition_img_read,
+        .write = partition_img_write,
+    };
+    struct blkdev dev;
+    memset(&dev, 0, sizeof(dev));
+    strncpy(dev.name, "testblk1", sizeof(dev.name) - 1);
+    dev.sector_count = 32768;
+    dev.sector_size = 512;
+    dev.ops = &ops;
+    dev.private = &img;
+
+    int ret = blkdev_register(&dev);
+    test_check(ret == 0, "blkdev partition parent register");
+    if (ret < 0)
+        return;
+
+    struct blkdev *part = blkdev_get("testblk1p1");
+    test_check(part != NULL, "blkdev partition child discovered");
+    if (part) {
+        test_check(part->parent == &dev, "blkdev partition child parent link");
+        test_check(part->start_lba == 2048ULL, "blkdev partition child start lba");
+        test_check(part->sector_count == 1024ULL, "blkdev partition child sectors");
+
+        uint8_t buf[512];
+        memset(buf, 0, sizeof(buf));
+        img.last_lba = UINT64_MAX;
+        ret = blkdev_read(part, 0, buf, 1);
+        test_check(ret == 0, "blkdev partition child read");
+        test_check(img.last_lba == 2048ULL, "blkdev partition child lba translate");
+
+        blkdev_put(part);
+    }
+
+    blkdev_unregister(&dev);
+    part = blkdev_get("testblk1p1");
+    test_check(part == NULL, "blkdev partition child removed on parent unregister");
+    if (part)
+        blkdev_put(part);
+}
+
 static void test_netdev_registry(void) {
     struct netdev_ops ops = {
         .xmit = dummy_net_xmit,
@@ -166,6 +256,7 @@ int run_driver_tests(void) {
     test_ringbuf();
     test_virtqueue();
     test_blkdev_registry();
+    test_blkdev_partition_children();
     test_netdev_registry();
     test_vfs_umount_busy_with_child_mount();
 

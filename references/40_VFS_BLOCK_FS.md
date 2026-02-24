@@ -81,7 +81,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - bwrite(): writes block back to device
 - brelse(): release buffer (unlock + decrement refcount + update LRU)
 - Buffers protected by mutex for concurrent access
-- blkdev registration now probes partition tables: logs valid MBR entries, and if protective MBR is present, scans GPT entries (discovery/logging only, no partition child device registration yet)
+- blkdev registration now probes partition tables and registers partition child block devices (`vda1`, `nvme0n1p1` style naming); protective MBR triggers GPT-first scan, otherwise valid MBR entries are used
 
 ## Implemented Filesystems
 
