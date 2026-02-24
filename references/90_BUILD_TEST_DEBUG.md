@@ -104,6 +104,7 @@ QEMU configuration:
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
 - GitHub Actions `ci-quick` runs `riscv64` quick regression (`make test` + `make test-exec-elf-smoke` + `make test-busybox-applets-smoke`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make test-syscall-trap` + `make test-tcc-smoke`)
+- GitHub Actions `soak-long` runs `riscv64` long soak-pr profile and `x86_64` bootstrap soak-pr profile (shorter default duration and timeout for CI cost control)
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
 - `scripts/impl/fetch-deps.sh` defaults to preserving tracked `kernel/include/boot/limine.h`; refresh only when `FORCE_LIMINE_HEADER_FETCH=1`.
 - TCC source for `deps fetch tcc` is configurable: `TCC_GIT_URL` / `TCC_GIT_REF` / `TCC_GIT_COMMIT` (default URL currently `https://github.com/chenty2333/tinycc.git`, ref `mob`).

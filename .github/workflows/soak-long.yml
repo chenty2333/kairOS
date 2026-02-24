@@ -210,3 +210,168 @@ jobs:
             build/riscv64/soak-pr.log
             build/riscv64/test.log
             build/riscv64/run.log
+
+  x86_64-soak-pr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH: x86_64
+      SOAK_DURATION_SEC: ${{ github.event.inputs.soak_duration_sec || '3600' }}
+      SOAK_FAULT_PERMILLE: ${{ github.event.inputs.soak_fault_permille || '1' }}
+      SOAK_SUITE_MASK: ${{ github.event.inputs.soak_suite_mask || '0xFF' }}
+      SOAK_MIN_RUNS_PER_SUITE: ${{ github.event.inputs.soak_min_runs_per_suite || '1' }}
+      SOAK_SUITE_TIMEOUT_SEC: ${{ github.event.inputs.soak_suite_timeout_sec || '180' }}
+      SOAK_TEST_TIMEOUT_SEC: ${{ github.event.inputs.soak_test_timeout_sec || '4500' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(
+            clang
+            lld
+            llvm
+            make
+            python3
+            git
+            cmake
+            ninja-build
+            rsync
+            curl
+            unzip
+            ca-certificates
+            e2fsprogs
+            dosfstools
+            mtools
+            qemu-system-x86
+            qemu-utils
+            ovmf
+          )
+          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
+            pkgs+=(edk2-ovmf)
+          fi
+          sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Restore third-party source cache
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+          restore-keys: |
+            third-party-${{ runner.os }}-
+
+      - name: Fetch required third-party sources
+        run: |
+          set -euo pipefail
+          deps=(lwip limine musl busybox tcc)
+          for dep in "${deps[@]}"; do
+            ok=0
+            for attempt in 1 2 3; do
+              echo "Fetching ${dep} (attempt ${attempt}/3)"
+              if scripts/kairos.sh deps fetch "${dep}"; then
+                ok=1
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            if [[ "${ok}" -ne 1 ]]; then
+              echo "Failed to fetch dependency: ${dep}" >&2
+              exit 2
+            fi
+          done
+
+      - name: Locate x86_64 UEFI firmware
+        run: |
+          set -euo pipefail
+          pairs=(
+            "/usr/share/edk2/ovmf/OVMF_CODE.fd|/usr/share/edk2/ovmf/OVMF_VARS.fd"
+            "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd|/usr/share/edk2/ovmf/OVMF_VARS_4M.fd"
+            "/usr/share/OVMF/OVMF_CODE.fd|/usr/share/OVMF/OVMF_VARS.fd"
+            "/usr/share/OVMF/OVMF_CODE_4M.fd|/usr/share/OVMF/OVMF_VARS_4M.fd"
+            "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd|/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"
+            "/usr/share/edk2-ovmf/x64/OVMF_CODE_4M.fd|/usr/share/edk2-ovmf/x64/OVMF_VARS_4M.fd"
+          )
+          code_src=""
+          vars_src=""
+          for pair in "${pairs[@]}"; do
+            IFS='|' read -r code vars <<< "${pair}"
+            if [[ -f "${code}" && -f "${vars}" ]]; then
+              code_src="${code}"
+              vars_src="${vars}"
+              break
+            fi
+          done
+          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
+            echo "Unable to locate x86_64 UEFI firmware on runner" >&2
+            exit 2
+          fi
+          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
+          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
+          echo "Using UEFI_CODE_SRC=${code_src}"
+          echo "Using UEFI_VARS_SRC=${vars_src}"
+
+      - name: Validate soak params
+        run: |
+          set -euo pipefail
+          re_uint='^[0-9]+$'
+          re_mask='^(0x[0-9A-Fa-f]+|[0-9]+)$'
+          [[ "${SOAK_DURATION_SEC}" =~ ${re_uint} ]]
+          [[ "${SOAK_FAULT_PERMILLE}" =~ ${re_uint} ]]
+          [[ "${SOAK_MIN_RUNS_PER_SUITE}" =~ ${re_uint} ]]
+          [[ "${SOAK_SUITE_TIMEOUT_SEC}" =~ ${re_uint} ]]
+          [[ "${SOAK_TEST_TIMEOUT_SEC}" =~ ${re_uint} ]]
+          [[ "${SOAK_SUITE_MASK}" =~ ${re_mask} ]]
+          if (( SOAK_FAULT_PERMILLE < 0 || SOAK_FAULT_PERMILLE > 1000 )); then
+            echo "SOAK_FAULT_PERMILLE must be in [0, 1000]" >&2
+            exit 2
+          fi
+
+      - name: Run x86_64 soak-pr profile
+        run: |
+          set -euo pipefail
+          extra_cflags=(
+            "-DCONFIG_KERNEL_FAULT_INJECT=1"
+            "-DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=${SOAK_DURATION_SEC}"
+            "-DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=${SOAK_FAULT_PERMILLE}"
+            "-DCONFIG_KERNEL_SOAK_PR_SUITE_MASK=${SOAK_SUITE_MASK}"
+            "-DCONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE=${SOAK_MIN_RUNS_PER_SUITE}"
+            "-DCONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC=${SOAK_SUITE_TIMEOUT_SEC}"
+          )
+          printf 'soak cflags: %s\n' "${extra_cflags[*]}"
+          make --no-print-directory ARCH="${ARCH}" \
+            SOAK_PR_TIMEOUT="${SOAK_TEST_TIMEOUT_SEC}" \
+            SOAK_PR_EXTRA_CFLAGS="${extra_cflags[*]}" \
+            test-soak-pr
+
+      - name: Capture latest isolated run
+        id: latest_run_x86_64
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload x86_64 soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-long-x86_64-${{ github.run_id }}
+          retention-days: 21
+          if-no-files-found: warn
+          path: |
+            ${{ steps.latest_run_x86_64.outputs.path }}/manifest.json
+            ${{ steps.latest_run_x86_64.outputs.path }}/result.json
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/logs/test.log
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/test.log
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/run.log
+            build/x86_64/soak-pr.log
+            build/x86_64/test.log
+            build/x86_64/run.log
