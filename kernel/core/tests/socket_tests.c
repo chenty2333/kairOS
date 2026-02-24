@@ -28,6 +28,8 @@
 #define SOCKET_TEST_UNIX_DGRAM_TX_PATH "/tmp/.kairos_sock_dgram_tx"
 #define SOCKET_TEST_UNIX_MSG_RX_PATH "/tmp/.kairos_sock_msg_rx"
 #define SOCKET_TEST_UNIX_MSG_TX_PATH "/tmp/.kairos_sock_msg_tx"
+#define SOCKET_TEST_UNIX_NB_SRV_PATH "/tmp/.kairos_sock_nb_srv"
+#define SOCKET_TEST_UNIX_NB_DGRAM_PATH "/tmp/.kairos_sock_nb_dgram"
 #define TEST_MSG_WAITFORONE 0x10000U
 #define TEST_MSG_CMSG_CLOEXEC 0x40000000U
 #define SOCKET_TEST_DGRAM_OVERSIZE (65536U + 1U)
@@ -260,7 +262,7 @@ static int unix_stream_client_worker(void *arg) {
     }
 
     int ret = client->ops->connect(client, (const struct sockaddr *)&ctx->srv_addr,
-                                   sizeof(ctx->srv_addr));
+                                   sizeof(ctx->srv_addr), 0);
     if (ret < 0)
         goto out;
 
@@ -298,7 +300,7 @@ static int accept4_client_worker(void *arg) {
         goto out;
 
     ret = client->ops->connect(client, (const struct sockaddr *)&ctx->srv_addr,
-                               sizeof(ctx->srv_addr));
+                               sizeof(ctx->srv_addr), 0);
     if (ret < 0)
         goto out;
 
@@ -356,7 +358,7 @@ static void test_unix_stream_semantics(void) {
     ssize_t wr = connector->ops->sendto(connector, "x", 1, 0, NULL, 0);
     test_check(wr == -ENOTCONN, "unix_stream send before connect enotconn");
     ret = connector->ops->connect(connector, (const struct sockaddr *)&missing_addr,
-                                  sizeof(missing_addr));
+                                  sizeof(missing_addr), 0);
     test_check(ret == -ECONNREFUSED, "unix_stream connect missing econnrefused");
 
     int pre = listener->ops->poll(listener, POLLIN);
@@ -477,7 +479,7 @@ static void test_unix_stream_accept_stability(void) {
 
         struct socket *accepted = NULL;
         if (listener_ready) {
-            ret = listener->ops->accept(listener, &accepted);
+            ret = listener->ops->accept(listener, &accepted, 0);
             test_check(ret == 0, "unix_accept_stress accept");
             if (ret == 0 && accepted) {
                 bool accepted_ops_ok = accepted->ops && accepted->ops->recvfrom &&
@@ -1286,8 +1288,10 @@ static void test_socket_syscall_abi_width_edges(void) {
     mapped = true;
 
     int *u_on = (int *)user_map_ptr(&um, 0x0);
+    uint8_t *u_buf = (uint8_t *)user_map_ptr(&um, 0x80);
     test_check(u_on != NULL, "sockabi user ptr");
-    if (!u_on)
+    test_check(u_buf != NULL, "sockabi user buf ptr");
+    if (!u_on || !u_buf)
         goto out;
     int on = 1;
     rc = copy_to_user(u_on, &on, sizeof(on));
@@ -1322,8 +1326,152 @@ static void test_socket_syscall_abi_width_edges(void) {
         file_put(f);
     }
 
+    ret64 = sys_recvfrom((uint64_t)fd, (uint64_t)u_buf, 8, 0, 0, 0);
+    test_check(ret64 == -EAGAIN, "sockabi recvfrom fd nonblock");
+
 out:
     close_fd_if_open(&fd);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_socket_nonblock_syscall_semantics(void) {
+    struct socket *listener = NULL;
+    struct socket *client = NULL;
+    struct socket *dgram = NULL;
+    int listener_fd = -1;
+    int client_fd = -1;
+    int dgram_fd = -1;
+    int accepted_fd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    struct sockaddr_un srv_addr;
+    struct sockaddr_un dgram_addr;
+    make_unix_addr(&srv_addr, SOCKET_TEST_UNIX_NB_SRV_PATH);
+    make_unix_addr(&dgram_addr, SOCKET_TEST_UNIX_NB_DGRAM_PATH);
+
+    int rc = sock_create(AF_UNIX, SOCK_STREAM, 0, &listener);
+    test_check(rc == 0, "socknb create listener");
+    rc = sock_create(AF_UNIX, SOCK_STREAM, 0, &client);
+    test_check(rc == 0, "socknb create client");
+    rc = sock_create(AF_UNIX, SOCK_DGRAM, 0, &dgram);
+    test_check(rc == 0, "socknb create dgram");
+    if (!listener || !client || !dgram)
+        goto out;
+
+    rc = listener->ops->bind(listener, (const struct sockaddr *)&srv_addr,
+                             sizeof(srv_addr));
+    test_check(rc == 0, "socknb bind listener");
+    if (rc < 0)
+        goto out;
+
+    rc = listener->ops->listen(listener, 8);
+    test_check(rc == 0, "socknb listen listener");
+    if (rc < 0)
+        goto out;
+
+    rc = dgram->ops->bind(dgram, (const struct sockaddr *)&dgram_addr,
+                          sizeof(dgram_addr));
+    test_check(rc == 0, "socknb bind dgram");
+    if (rc < 0)
+        goto out;
+
+    listener_fd = socket_install_fd(&listener);
+    client_fd = socket_install_fd(&client);
+    dgram_fd = socket_install_fd(&dgram);
+    test_check(listener_fd >= 0, "socknb install listener fd");
+    test_check(client_fd >= 0, "socknb install client fd");
+    test_check(dgram_fd >= 0, "socknb install dgram fd");
+    if (listener_fd < 0 || client_fd < 0 || dgram_fd < 0)
+        goto out;
+
+    rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "socknb user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    int *u_on = (int *)user_map_ptr(&um, 0x000);
+    struct sockaddr_un *u_srv_addr = (struct sockaddr_un *)user_map_ptr(&um, 0x040);
+    uint8_t *u_buf = (uint8_t *)user_map_ptr(&um, 0x180);
+    int *u_optval = (int *)user_map_ptr(&um, 0x220);
+    int *u_optlen = (int *)user_map_ptr(&um, 0x260);
+    test_check(u_on && u_srv_addr && u_buf && u_optval && u_optlen,
+               "socknb user pointers");
+    if (!u_on || !u_srv_addr || !u_buf || !u_optval || !u_optlen)
+        goto out;
+
+    int on = 1;
+    rc = copy_to_user(u_on, &on, sizeof(on));
+    test_check(rc == 0, "socknb copy on");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_srv_addr, &srv_addr, sizeof(srv_addr));
+    test_check(rc == 0, "socknb copy srv addr");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_ioctl((uint64_t)listener_fd, (uint64_t)FIONBIO,
+                              (uint64_t)u_on, 0, 0, 0);
+    test_check(ret64 == 0, "socknb listener fionbio");
+    ret64 = sys_ioctl((uint64_t)client_fd, (uint64_t)FIONBIO, (uint64_t)u_on, 0,
+                      0, 0);
+    test_check(ret64 == 0, "socknb client fionbio");
+    ret64 = sys_ioctl((uint64_t)dgram_fd, (uint64_t)FIONBIO, (uint64_t)u_on, 0, 0,
+                      0);
+    test_check(ret64 == 0, "socknb dgram fionbio");
+
+    ret64 = sys_accept((uint64_t)listener_fd, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EAGAIN, "socknb accept nonblock eagain");
+
+    ret64 = sys_connect((uint64_t)client_fd, (uint64_t)u_srv_addr,
+                        sizeof(srv_addr), 0, 0, 0);
+    test_check(ret64 == -EINPROGRESS || ret64 == 0,
+               "socknb connect nonblock inprogress");
+
+    if (ret64 == -EINPROGRESS) {
+        int64_t acc = -EAGAIN;
+        for (int i = 0; i < 4000 && acc == -EAGAIN; i++) {
+            acc = sys_accept((uint64_t)listener_fd, 0, 0, 0, 0, 0);
+            if (acc == -EAGAIN)
+                proc_yield();
+        }
+        test_check(acc >= 0, "socknb accept after connect");
+        if (acc >= 0)
+            accepted_fd = (int)acc;
+    }
+
+    int optlen = sizeof(int);
+    rc = copy_to_user(u_optlen, &optlen, sizeof(optlen));
+    test_check(rc == 0, "socknb copy optlen");
+    if (rc == 0) {
+        ret64 = sys_getsockopt((uint64_t)client_fd, SOL_SOCKET, SO_ERROR,
+                               (uint64_t)u_optval, (uint64_t)u_optlen, 0);
+        test_check(ret64 == 0, "socknb getsockopt so_error");
+    }
+    if (rc == 0 && ret64 == 0) {
+        int soerr = -1;
+        int got_optlen = 0;
+        rc = copy_from_user(&soerr, u_optval, sizeof(soerr));
+        test_check(rc == 0, "socknb read so_error");
+        rc = copy_from_user(&got_optlen, u_optlen, sizeof(got_optlen));
+        test_check(rc == 0, "socknb read so_error len");
+        test_check(got_optlen == (int)sizeof(int), "socknb so_error len");
+        test_check(soerr == 0, "socknb so_error clear");
+    }
+
+    ret64 = sys_recvfrom((uint64_t)dgram_fd, (uint64_t)u_buf, 8, 0, 0, 0);
+    test_check(ret64 == -EAGAIN, "socknb recvfrom fd nonblock");
+
+out:
+    close_fd_if_open(&accepted_fd);
+    close_fd_if_open(&dgram_fd);
+    close_fd_if_open(&client_fd);
+    close_fd_if_open(&listener_fd);
+    close_socket_if_open(&dgram);
+    close_socket_if_open(&client);
+    close_socket_if_open(&listener);
     if (mapped)
         user_map_end(&um);
 }
@@ -1363,10 +1511,12 @@ static void test_unix_dgram_semantics(void) {
     ssize_t wr = tx->ops->sendto(tx, "x", 1, 0, NULL, 0);
     test_check(wr == -ENOTCONN, "unix_dgram send before connect enotconn");
 
-    ret = tmp->ops->connect(tmp, (const struct sockaddr *)&bad_addr, sizeof(bad_addr));
+    ret = tmp->ops->connect(tmp, (const struct sockaddr *)&bad_addr,
+                            sizeof(bad_addr), 0);
     test_check(ret == -ECONNREFUSED, "unix_dgram connect missing econnrefused");
 
-    ret = tx->ops->connect(tx, (const struct sockaddr *)&rx_addr, sizeof(rx_addr));
+    ret = tx->ops->connect(tx, (const struct sockaddr *)&rx_addr,
+                           sizeof(rx_addr), 0);
     test_check(ret == 0, "unix_dgram connect");
     if (ret < 0) {
         goto out;
@@ -1446,7 +1596,7 @@ static bool run_inet_udp_attempt_inner(uint32_t loopback_ip, uint16_t server_por
     }
 
     ret = client->ops->connect(client, (const struct sockaddr *)&server_addr,
-                               sizeof(server_addr));
+                               sizeof(server_addr), 0);
     if (ret < 0) {
         goto out;
     }
@@ -1455,6 +1605,14 @@ static bool run_inet_udp_attempt_inner(uint32_t loopback_ip, uint16_t server_por
     if ((pre & POLLOUT) == 0) {
         goto out;
     }
+
+    memset(buf, 0, sizeof(buf));
+    int srclen = sizeof(src);
+    memset(&src, 0, sizeof(src));
+    ssize_t rd = server->ops->recvfrom(server, buf, sizeof(buf), MSG_DONTWAIT,
+                                       (struct sockaddr *)&src, &srclen);
+    if (rd != -EAGAIN)
+        goto out;
 
     ssize_t wr = client->ops->sendto(client, "inet-udp", 8, 0, NULL, 0);
     if (wr != 8) {
@@ -1465,11 +1623,11 @@ static bool run_inet_udp_attempt_inner(uint32_t loopback_ip, uint16_t server_por
         goto out;
     }
 
-    int srclen = sizeof(src);
+    srclen = sizeof(src);
     memset(&src, 0, sizeof(src));
     memset(buf, 0, sizeof(buf));
-    ssize_t rd =
-        server->ops->recvfrom(server, buf, sizeof(buf), 0, (struct sockaddr *)&src, &srclen);
+    rd = server->ops->recvfrom(server, buf, sizeof(buf), 0,
+                               (struct sockaddr *)&src, &srclen);
     if (rd != 8) {
         goto out;
     }
@@ -1518,21 +1676,45 @@ static bool run_inet_tcp_attempt(uint32_t loopback_ip, uint16_t server_port,
                             sizeof(client_addr));
     if (ret < 0)
         goto out;
-    ret = client->ops->connect(client, (const struct sockaddr *)&listener_addr,
-                               sizeof(listener_addr));
-    if (ret < 0)
+    ret = listener->ops->accept(listener, &server, MSG_DONTWAIT);
+    if (ret != -EAGAIN)
         goto out;
 
-    int cre = client->ops->poll(client, POLLOUT);
-    if ((cre & POLLOUT) == 0)
+    ret = client->ops->connect(client, (const struct sockaddr *)&listener_addr,
+                               sizeof(listener_addr), MSG_DONTWAIT);
+    if (ret != -EINPROGRESS && ret != 0)
         goto out;
+
+    if (ret == -EINPROGRESS) {
+        int cre = 0;
+        for (int i = 0; i < 4000; i++) {
+            cre = client->ops->poll(client, POLLOUT | POLLERR);
+            if (cre & (POLLOUT | POLLERR))
+                break;
+            proc_yield();
+        }
+        if ((cre & POLLOUT) == 0)
+            goto out;
+        int so_error = -1;
+        int so_error_len = sizeof(so_error);
+        ret = client->ops->getsockopt(client, SOL_SOCKET, SO_ERROR, &so_error,
+                                      &so_error_len);
+        if (ret < 0 || so_error_len != (int)sizeof(so_error) || so_error != 0)
+            goto out;
+    }
 
     int lre = listener->ops->poll(listener, POLLIN);
     if ((lre & POLLIN) == 0)
         goto out;
 
-    ret = listener->ops->accept(listener, &server);
+    ret = listener->ops->accept(listener, &server, 0);
     if (ret < 0 || !server)
+        goto out;
+
+    memset(buf, 0, sizeof(buf));
+    ssize_t rd =
+        server->ops->recvfrom(server, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL);
+    if (rd != -EAGAIN)
         goto out;
 
     ssize_t wr = client->ops->sendto(client, "tcp-ping", 8, 0, NULL, 0);
@@ -1542,7 +1724,7 @@ static bool run_inet_tcp_attempt(uint32_t loopback_ip, uint16_t server_port,
         goto out;
 
     memset(buf, 0, sizeof(buf));
-    ssize_t rd = server->ops->recvfrom(server, buf, sizeof(buf), 0, NULL, NULL);
+    rd = server->ops->recvfrom(server, buf, sizeof(buf), 0, NULL, NULL);
     if (rd != 8 || memcmp(buf, "tcp-ping", 8) != 0)
         goto out;
 
@@ -1714,6 +1896,7 @@ int run_socket_tests(void) {
     test_accept4_syscall_functional();
     test_socket_msg_syscall_semantics();
     test_socket_syscall_abi_width_edges();
+    test_socket_nonblock_syscall_semantics();
     test_unix_dgram_semantics();
     test_inet_tcp_primary();
     test_inet_udp_secondary();

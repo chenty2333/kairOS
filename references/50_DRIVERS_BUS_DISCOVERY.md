@@ -81,11 +81,13 @@ AF_UNIX (net/af_unix.c):
 - Connection mode: bind/listen/accept/connect
 - Stream/Dgram peer and bind-table object lifetime is refcounted internally to avoid close/connect/send race UAFs
 - Listener close now propagates connect errors to pending clients instead of leaving blocked connectors indefinitely
+- Stream connect/accept support non-blocking mode (`MSG_DONTWAIT`), including connect-in-progress state and `SO_ERROR` readout
 
 AF_INET (net/af_inet.c):
 - Based on lwIP raw/callback API
 - Each socket maps to a tcp_pcb or udp_pcb
 - Receive buffer 64KB; INET_ACCEPT_BACKLOG=16 defines accept queue size, but listen() backlog parameter is currently ignored
+- Stream connect/accept/recv and UDP recv honor non-blocking behavior (`EINPROGRESS`/`EALREADY`/`EAGAIN`), with connect readiness surfaced via poll + `SO_ERROR`
 
 lwIP integration:
 - net/lwip_netif.c: network interface adapter; lwip_netif_input() is implemented but not yet called from virtio_net RX interrupt

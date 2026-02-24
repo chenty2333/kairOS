@@ -218,8 +218,13 @@ static err_t inet_tcp_connected_cb(void *arg, struct tcp_pcb *pcb,
     mutex_lock(&is->lock);
     is->connect_err = (err == ERR_OK) ? 0 : -ECONNREFUSED;
     is->connect_done = true;
+    if (is->connect_err == 0)
+        is->sock->state = SS_CONNECTED;
+    else if (is->sock->state == SS_CONNECTING)
+        is->sock->state = SS_UNCONNECTED;
     mutex_unlock(&is->lock);
     wait_queue_wakeup_all(&is->connect_wait);
+    poll_wait_wake(&is->sock->pollers, POLLOUT | POLLERR);
     return ERR_OK;
 }
 
@@ -233,6 +238,8 @@ static void inet_tcp_err_cb(void *arg, err_t err) {
     is->pcb.tcp = NULL;
     is->connect_err = -ECONNRESET;
     is->connect_done = true;
+    if (is->sock->state == SS_CONNECTING)
+        is->sock->state = SS_UNCONNECTED;
     mutex_unlock(&is->lock);
 
     wait_queue_wakeup_all(&is->recv_wait);
@@ -380,17 +387,38 @@ static int inet_tcp_listen(struct socket *sock, int backlog) {
 }
 
 static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
-                             int addrlen) {
+                            int addrlen, int flags) {
     struct inet_sock *is = inet_ensure(sock);
     if (!is) {
         return -ENOMEM;
     }
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
 
     if (addrlen < (int)sizeof(struct sockaddr_in)) {
         return -EINVAL;
     }
     if (sock->state == SS_CONNECTED) {
         return -EISCONN;
+    }
+    if (sock->state == SS_CONNECTING) {
+        if (nonblock)
+            return -EALREADY;
+        mutex_lock(&is->lock);
+        while (!is->connect_done) {
+            int rc = proc_sleep_on_mutex(&is->connect_wait, &is->connect_wait,
+                                         &is->lock, true);
+            if (rc == -EINTR) {
+                mutex_unlock(&is->lock);
+                return -EINTR;
+            }
+        }
+        int in_progress_ret = is->connect_err;
+        if (in_progress_ret == 0)
+            sock->state = SS_CONNECTED;
+        else
+            sock->state = SS_UNCONNECTED;
+        mutex_unlock(&is->lock);
+        return in_progress_ret;
     }
 
     if (!is->pcb.tcp) {
@@ -418,11 +446,17 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
     sockaddr_to_lwip(addr, &ip, &port);
 
     is->connect_done = false;
+    is->connect_err = 0;
+    sock->state = SS_CONNECTING;
     err_t err = tcp_connect(is->pcb.tcp, &ip, port, inet_tcp_connected_cb);
     inet_lwip_unlock();
     if (err != ERR_OK) {
+        sock->state = SS_UNCONNECTED;
         return -ECONNREFUSED;
     }
+
+    if (nonblock)
+        return -EINPROGRESS;
 
     /* Wait for connection completion */
     mutex_lock(&is->lock);
@@ -434,20 +468,22 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
             return -EINTR;
         }
     }
-    ret = is->connect_err;
-    mutex_unlock(&is->lock);
-
-    if (ret == 0) {
+    int connect_ret = is->connect_err;
+    if (connect_ret == 0)
         sock->state = SS_CONNECTED;
-    }
-    return ret;
+    else
+        sock->state = SS_UNCONNECTED;
+    mutex_unlock(&is->lock);
+    return connect_ret;
 }
 
-static int inet_tcp_accept(struct socket *sock, struct socket **newsock) {
+static int inet_tcp_accept(struct socket *sock, struct socket **newsock,
+                           int flags) {
     struct inet_sock *is = inet_ensure(sock);
     if (!is) {
         return -ENOMEM;
     }
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
     if (sock->state != SS_LISTENING) {
         return -EINVAL;
     }
@@ -455,6 +491,10 @@ static int inet_tcp_accept(struct socket *sock, struct socket **newsock) {
     /* Wait for a pending connection */
     mutex_lock(&is->lock);
     while (list_empty(&is->accept_queue)) {
+        if (nonblock) {
+            mutex_unlock(&is->lock);
+            return -EAGAIN;
+        }
         int rc = proc_sleep_on_mutex(&is->accept_wait, &is->accept_wait,
                                      &is->lock, true);
         if (rc == -EINTR) {
@@ -526,6 +566,8 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
         return -ENOTCONN;
     }
 
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
+
     mutex_lock(&is->lock);
     bool peer_closed = is->peer_closed;
     mutex_unlock(&is->lock);
@@ -547,6 +589,8 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
         sndbuf = tcp_sndbuf(pcb);
         if (sndbuf == 0) {
             inet_lwip_unlock();
+            if (nonblock)
+                return total ? (ssize_t)total : -EAGAIN;
             /* Wait for send space */
             is->send_ready = false;
             mutex_lock(&is->lock);
@@ -591,11 +635,12 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
 static ssize_t inet_tcp_recvfrom(struct socket *sock, void *buf, size_t len,
                                   int flags, struct sockaddr *src,
                                   int *addrlen) {
-    (void)flags; (void)src; (void)addrlen;
+    (void)src; (void)addrlen;
     struct inet_sock *is = inet_ensure(sock);
     if (!is) {
         return -ENOMEM;
     }
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
     if (sock->state != SS_CONNECTED) {
         return -ENOTCONN;
     }
@@ -605,6 +650,10 @@ static ssize_t inet_tcp_recvfrom(struct socket *sock, void *buf, size_t len,
         if (is->peer_closed) {
             mutex_unlock(&is->lock);
             return 0; /* EOF */
+        }
+        if (nonblock) {
+            mutex_unlock(&is->lock);
+            return -EAGAIN;
         }
         int rc = proc_sleep_on_mutex(&is->recv_wait, &is->recv_wait,
                                      &is->lock, true);
@@ -630,6 +679,15 @@ static int inet_tcp_poll(struct socket *sock, uint32_t events) {
         mutex_lock(&is->lock);
         if (!list_empty(&is->accept_queue)) {
             revents |= POLLIN;
+        }
+        mutex_unlock(&is->lock);
+    } else if (sock->state == SS_CONNECTING) {
+        mutex_lock(&is->lock);
+        if (is->connect_done) {
+            if (is->connect_err == 0)
+                revents |= POLLOUT;
+            else
+                revents |= POLLERR;
         }
         mutex_unlock(&is->lock);
     } else if (sock->state == SS_CONNECTED) {
@@ -694,7 +752,8 @@ static int inet_udp_bind(struct socket *sock, const struct sockaddr *addr,
 }
 
 static int inet_udp_connect(struct socket *sock, const struct sockaddr *addr,
-                             int addrlen) {
+                            int addrlen, int flags) {
+    (void)flags;
     struct inet_sock *is = inet_ensure(sock);
     if (!is) {
         return -ENOMEM;
@@ -775,14 +834,18 @@ static ssize_t inet_udp_sendto(struct socket *sock, const void *buf,
 static ssize_t inet_udp_recvfrom(struct socket *sock, void *buf, size_t len,
                                   int flags, struct sockaddr *src,
                                   int *addrlen) {
-    (void)flags;
     struct inet_sock *is = inet_ensure(sock);
     if (!is) {
         return -ENOMEM;
     }
+    bool nonblock = (flags & MSG_DONTWAIT) != 0;
 
     mutex_lock(&is->lock);
     while (is->recv_count == 0) {
+        if (nonblock) {
+            mutex_unlock(&is->lock);
+            return -EAGAIN;
+        }
         int rc = proc_sleep_on_mutex(&is->recv_wait, &is->recv_wait,
                                      &is->lock, true);
         if (rc == -EINTR) {
@@ -966,11 +1029,20 @@ static int inet_setsockopt(struct socket *sock, int level, int optname,
 
 static int inet_getsockopt(struct socket *sock, int level, int optname,
                             void *optval, int *optlen) {
-    (void)sock; (void)level; (void)optname;
-    if (optlen && *optlen >= (int)sizeof(int)) {
-        *(int *)optval = 0;
-        *optlen = sizeof(int);
+    if (!optlen || !optval || *optlen < (int)sizeof(int))
+        return -EINVAL;
+    int value = 0;
+    if (level == SOL_SOCKET && optname == SO_ERROR) {
+        struct inet_sock *is = sock ? sock->proto_data : NULL;
+        if (is) {
+            mutex_lock(&is->lock);
+            value = (is->connect_err < 0) ? -is->connect_err : 0;
+            is->connect_err = 0;
+            mutex_unlock(&is->lock);
+        }
     }
+    *(int *)optval = value;
+    *optlen = sizeof(int);
     return 0;
 }
 

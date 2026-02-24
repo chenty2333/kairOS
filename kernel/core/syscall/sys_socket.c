@@ -409,6 +409,13 @@ static struct socket *sock_from_fd(struct process *p, uint64_t fd_arg,
     return sock;
 }
 
+static uint32_t socket_effective_msg_flags(const struct file *sock_file,
+                                           uint32_t flags) {
+    if (sock_file && (sock_file->flags & O_NONBLOCK))
+        flags |= MSG_DONTWAIT;
+    return flags;
+}
+
 static int copy_sockaddr_from_user(struct sockaddr_storage *kaddr,
                                    uint64_t uaddr, uint64_t ulen) {
     if (!uaddr || !ulen) {
@@ -771,7 +778,8 @@ static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
     }
 
     struct socket *newsock = NULL;
-    int ret = sock->ops->accept(sock, &newsock);
+    uint32_t accept_flags = socket_effective_msg_flags(sock_file, 0);
+    int ret = sock->ops->accept(sock, &newsock, (int)accept_flags);
     if (ret < 0) {
         file_put(sock_file);
         return (int64_t)ret;
@@ -873,14 +881,16 @@ int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
         file_put(sock_file);
         return (int64_t)len;
     }
-    int64_t ret = (int64_t)sock->ops->connect(sock, (struct sockaddr *)&kaddr, len);
+    uint32_t connect_flags = socket_effective_msg_flags(sock_file, 0);
+    int64_t ret =
+        (int64_t)sock->ops->connect(sock, (struct sockaddr *)&kaddr, len,
+                                    (int)connect_flags);
     file_put(sock_file);
     return ret;
 }
 
 int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
                    uint64_t flags, uint64_t dest, uint64_t addrlen) {
-    uint32_t uflags = syssock_abi_u32(flags);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -891,6 +901,7 @@ int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
         file_put(sock_file);
         return -EOPNOTSUPP;
     }
+    uint32_t uflags = socket_effective_msg_flags(sock_file, syssock_abi_u32(flags));
 
     struct sockaddr_storage kaddr;
     struct sockaddr *destp = NULL;
@@ -935,7 +946,6 @@ int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
 
 int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
                      uint64_t flags, uint64_t src, uint64_t addrlen_ptr) {
-    uint32_t uflags = syssock_abi_u32(flags);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
     struct socket *sock = sock_from_fd(p, fd, &sock_file);
@@ -946,6 +956,7 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
         file_put(sock_file);
         return -EOPNOTSUPP;
     }
+    uint32_t uflags = socket_effective_msg_flags(sock_file, syssock_abi_u32(flags));
 
     size_t klen = (size_t)len;
     if (klen > 65536) {
@@ -1022,7 +1033,7 @@ int64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
         file_put(sock_file);
         return -EFAULT;
     }
-    uint32_t uflags = syssock_abi_u32(flags);
+    uint32_t uflags = socket_effective_msg_flags(sock_file, syssock_abi_u32(flags));
     int64_t ret = socket_sendmsg(sock, &msg, uflags, NULL);
     file_put(sock_file);
     return ret;
@@ -1043,7 +1054,7 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
         file_put(sock_file);
         return -EFAULT;
     }
-    uint32_t uflags = syssock_abi_u32(flags);
+    uint32_t uflags = socket_effective_msg_flags(sock_file, syssock_abi_u32(flags));
     int64_t ret = socket_recvmsg(sock, &msg, uflags, NULL);
     if (ret >= 0 &&
         copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0) {
@@ -1072,6 +1083,7 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
     if (!sock) {
         return -ENOTSOCK;
     }
+    uflags = socket_effective_msg_flags(sock_file, uflags);
 
     int sent = 0;
     for (uint32_t i = 0; i < uvlen; i++) {
@@ -1116,6 +1128,7 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
     if (!sock) {
         return -ENOTSOCK;
     }
+    uflags = socket_effective_msg_flags(sock_file, uflags);
 
     bool has_timeout = false;
     uint64_t deadline = 0;

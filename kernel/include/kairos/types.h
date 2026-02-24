@@ -133,6 +133,8 @@ struct rlimit {
 #define EADDRINUSE 98
 #define ENOTCONN 107
 #define EISCONN 106
+#define EALREADY 114
+#define EINPROGRESS 115
 #define ECONNREFUSED 111
 #define ECONNRESET 104
 #define ECONNABORTED 103

@@ -56,6 +56,7 @@ struct vnode;
 #define SS_BOUND       1
 #define SS_LISTENING   2
 #define SS_CONNECTED   3
+#define SS_CONNECTING  4
 
 struct sockaddr {
     uint16_t sa_family;
@@ -103,9 +104,9 @@ struct socket;
 struct proto_ops {
     int (*bind)(struct socket *sock, const struct sockaddr *addr, int addrlen);
     int (*connect)(struct socket *sock, const struct sockaddr *addr,
-                   int addrlen);
+                   int addrlen, int flags);
     int (*listen)(struct socket *sock, int backlog);
-    int (*accept)(struct socket *sock, struct socket **newsock);
+    int (*accept)(struct socket *sock, struct socket **newsock, int flags);
     ssize_t (*sendto)(struct socket *sock, const void *buf, size_t len,
                       int flags, const struct sockaddr *dest, int addrlen);
     ssize_t (*recvfrom)(struct socket *sock, void *buf, size_t len, int flags,

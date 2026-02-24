@@ -121,6 +121,8 @@ Special:
 - `recvmsg(MSG_CMSG_CLOEXEC)` installs received `SCM_RIGHTS` file descriptors with `FD_CLOEXEC`
 - `recvmsg` bounds source-address copy length by `min(user_msg_namelen, kernel_sockaddr_len)` using width-safe arithmetic (no signed wrap on large `msg_namelen`)
 - AF_UNIX stream send paths honor `MSG_NOSIGNAL` (suppress `SIGPIPE`, return `EPIPE` only)
+- socket syscalls now merge fd `O_NONBLOCK` into runtime message flags (`MSG_DONTWAIT`) for `connect`/`accept`/`send*`/`recv*` paths, so `fcntl(F_SETFL)` and `ioctl(FIONBIO)` affect behavior consistently
+- AF_INET stream/dgram and AF_UNIX stream now implement non-blocking `connect`/`accept`/`recv` return paths (`EINPROGRESS`/`EALREADY`/`EAGAIN`) and expose connect completion/failure via `poll(POLLOUT|POLLERR)` + `getsockopt(SO_ERROR)`
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
 - socket message/accept syscall `flags` are decoded using Linux ABI width (`int`/32-bit) for `accept4`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`
 - socket control/int arguments are decoded with Linux ABI `int` width (`socket`/`socketpair` domain/type/protocol, socket syscalls `fd`, `listen` backlog, `shutdown` how, `setsockopt`/`getsockopt` level/optname/optlen, `getsockopt` user `optlen_ptr` value, `sendto`/`recvfrom` flags, sockaddr lengths)
