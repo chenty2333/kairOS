@@ -12,6 +12,10 @@
 #include <kairos/types.h>
 
 #define PSCI_CPU_ON_64 0xC4000003U
+#define PSCI_RET_SUCCESS 0
+#define PSCI_RET_NOT_SUPPORTED (-1)
+#define PSCI_RET_ALREADY_ON (-4)
+#define PSCI_RET_ON_PENDING (-5)
 
 enum psci_conduit {
     PSCI_CONDUIT_HVC = 0,
@@ -99,6 +103,12 @@ static int32_t psci_cpu_on(enum psci_conduit conduit, uint64_t target_mpidr,
     return (int32_t)x0;
 }
 
+static bool psci_request_accepted(int32_t rc) {
+    return (rc == PSCI_RET_SUCCESS ||
+            rc == PSCI_RET_ALREADY_ON ||
+            rc == PSCI_RET_ON_PENDING);
+}
+
 static int psci_prepare_trampoline(void) {
     if (psci_trampoline_ready)
         return 0;
@@ -143,15 +153,32 @@ int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
     paddr_t entry_pa = virt_to_phys((void *)_secondary_start_psci);
     paddr_t ctx_pa = virt_to_phys(&psci_ctx[cpu]);
     int32_t psci_rc = psci_cpu_on(conduit, bi->cpus[cpu].hw_id, entry_pa, ctx_pa);
+    bool retried = false;
+    if (psci_rc == PSCI_RET_NOT_SUPPORTED) {
+        enum psci_conduit alt =
+            (conduit == PSCI_CONDUIT_SMC) ? PSCI_CONDUIT_HVC : PSCI_CONDUIT_SMC;
+        int32_t alt_rc = psci_cpu_on(alt, bi->cpus[cpu].hw_id, entry_pa, ctx_pa);
+        retried = true;
+        if (psci_request_accepted(alt_rc)) {
+            conduit = alt;
+            psci_conduit_cached = (int)alt;
+        }
+        psci_rc = alt_rc;
+    }
+    int norm_rc = psci_request_accepted(psci_rc) ? 0 : (int)psci_rc;
 
     if (!psci_fallback_logged) {
         psci_fallback_logged = true;
         pr_info("SMP: aarch64 fallback start via PSCI (%s) entry=%p\n",
                 psci_conduit_name(conduit), (void *)entry_pa);
     }
-    pr_info("SMP: PSCI CPU_ON cpu=%d hwid=%p rc=%d\n",
-            cpu, (void *)bi->cpus[cpu].hw_id, psci_rc);
-    return (int)psci_rc;
+    if (retried) {
+        pr_warn("SMP: PSCI CPU_ON cpu=%d retried with conduit=%s\n",
+                cpu, psci_conduit_name(conduit));
+    }
+    pr_info("SMP: PSCI CPU_ON cpu=%d hwid=0x%llx rc=%d norm=%d\n",
+            cpu, (unsigned long long)bi->cpus[cpu].hw_id, psci_rc, norm_rc);
+    return norm_rc;
 }
 
 uint64_t arch_cpu_start_debug(int cpu) {

@@ -78,7 +78,16 @@ static void smp_init(void) {
         return;
     }
 
-    uint64_t wait_ticks = arch_timer_ns_to_ticks(2ULL * 1000 * 1000 * 1000);
+    uint64_t wait_ns = 2ULL * 1000 * 1000 * 1000;
+#if defined(ARCH_aarch64)
+    if (started > 1) {
+        uint64_t extra = (uint64_t)(started - 1) * 500ULL * 1000 * 1000;
+        wait_ns += extra;
+        if (wait_ns > 6ULL * 1000 * 1000 * 1000)
+            wait_ns = 6ULL * 1000 * 1000 * 1000;
+    }
+#endif
+    uint64_t wait_ticks = arch_timer_ns_to_ticks(wait_ns);
     if (wait_ticks == 0)
         wait_ticks = CONFIG_HZ;
     uint64_t deadline = arch_timer_ticks() + wait_ticks;
