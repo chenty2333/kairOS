@@ -64,6 +64,12 @@ jobs:
             make
             python3
             git
+            cmake
+            ninja-build
+            rsync
+            curl
+            unzip
+            ca-certificates
             e2fsprogs
             dosfstools
             mtools
@@ -78,6 +84,34 @@ jobs:
             pkgs+=(edk2-ovmf)
           fi
           sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Restore third-party source cache
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+          restore-keys: |
+            third-party-${{ runner.os }}-
+
+      - name: Fetch required third-party sources
+        run: |
+          set -euo pipefail
+          deps=(lwip limine musl busybox tcc)
+          for dep in "${deps[@]}"; do
+            ok=0
+            for attempt in 1 2 3; do
+              echo "Fetching ${dep} (attempt ${attempt}/3)"
+              if scripts/kairos.sh deps fetch "${dep}"; then
+                ok=1
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            if [[ "${ok}" -ne 1 ]]; then
+              echo "Failed to fetch dependency: ${dep}" >&2
+              exit 2
+            fi
+          done
 
       - name: Locate riscv64 UEFI firmware
         run: |
