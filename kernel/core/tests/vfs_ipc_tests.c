@@ -64,6 +64,34 @@ static void close_fd_if_open(int *fd) {
     *fd = -1;
 }
 
+static uint64_t abs_diff_u64(uint64_t a, uint64_t b) {
+    return (a >= b) ? (a - b) : (b - a);
+}
+
+static int64_t signed_delta_ns(uint64_t lhs, uint64_t rhs) {
+    if (lhs >= rhs) {
+        uint64_t d = lhs - rhs;
+        if (d > (uint64_t)INT64_MAX)
+            return INT64_MAX;
+        return (int64_t)d;
+    }
+    uint64_t d = rhs - lhs;
+    if (d > (uint64_t)INT64_MAX)
+        return -INT64_MAX;
+    return -(int64_t)d;
+}
+
+static uint64_t apply_signed_offset(uint64_t base, int64_t off) {
+    if (off >= 0) {
+        uint64_t uoff = (uint64_t)off;
+        if (base > UINT64_MAX - uoff)
+            return UINT64_MAX;
+        return base + uoff;
+    }
+    uint64_t neg = (uint64_t)(-off);
+    return (base > neg) ? (base - neg) : 0;
+}
+
 static ssize_t fd_read_once(int fd, void *buf, size_t len) {
     struct file *f = fd_get(proc_current(), fd);
     if (!f)
@@ -2423,6 +2451,121 @@ out:
         user_map_end(&um);
 }
 
+static void test_clock_tai_settime_functional(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int64_t old_tai_offset_ns = (int64_t)(37ULL * TEST_NS_PER_SEC);
+    void *u_rt = NULL;
+    void *u_tai = NULL;
+    void *u_set = NULL;
+    bool restore_needed = false;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "clock_tai user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    uint8_t *u_base = (uint8_t *)user_map_ptr(&um, 0);
+    test_check(u_base != NULL, "clock_tai user ptr");
+    if (!u_base)
+        goto out;
+    u_rt = u_base;
+    u_tai = u_base + sizeof(struct timespec);
+    u_set = u_base + 2 * sizeof(struct timespec);
+
+    int64_t ret64 = sys_clock_gettime(CLOCK_REALTIME, (uint64_t)u_rt, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai get realtime before");
+    if (ret64 < 0)
+        goto out;
+    ret64 = sys_clock_gettime(CLOCK_TAI, (uint64_t)u_tai, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai get tai before");
+    if (ret64 < 0)
+        goto out;
+
+    struct timespec ts_rt_before;
+    struct timespec ts_tai_before;
+    rc = copy_from_user(&ts_rt_before, u_rt, sizeof(ts_rt_before));
+    test_check(rc == 0, "clock_tai copy realtime before");
+    if (rc < 0)
+        goto out;
+    rc = copy_from_user(&ts_tai_before, u_tai, sizeof(ts_tai_before));
+    test_check(rc == 0, "clock_tai copy tai before");
+    if (rc < 0)
+        goto out;
+
+    uint64_t rt_before_ns =
+        (uint64_t)ts_rt_before.tv_sec * TEST_NS_PER_SEC + (uint64_t)ts_rt_before.tv_nsec;
+    uint64_t tai_before_ns =
+        (uint64_t)ts_tai_before.tv_sec * TEST_NS_PER_SEC + (uint64_t)ts_tai_before.tv_nsec;
+    old_tai_offset_ns = signed_delta_ns(tai_before_ns, rt_before_ns);
+
+    const uint64_t target_offset_ns = 45ULL * TEST_NS_PER_SEC;
+    uint64_t tai_set_ns = rt_before_ns + target_offset_ns;
+    if (tai_set_ns < rt_before_ns)
+        tai_set_ns = UINT64_MAX;
+    struct timespec ts_set = {
+        .tv_sec = (time_t)(tai_set_ns / TEST_NS_PER_SEC),
+        .tv_nsec = (int64_t)(tai_set_ns % TEST_NS_PER_SEC),
+    };
+    rc = copy_to_user(u_set, &ts_set, sizeof(ts_set));
+    test_check(rc == 0, "clock_tai copy set");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_clock_settime(CLOCK_TAI, (uint64_t)u_set, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai settime");
+    if (ret64 < 0)
+        goto out;
+    restore_needed = true;
+
+    ret64 = sys_clock_gettime(CLOCK_REALTIME, (uint64_t)u_rt, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai get realtime after");
+    if (ret64 < 0)
+        goto out;
+    ret64 = sys_clock_gettime(CLOCK_TAI, (uint64_t)u_tai, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock_tai get tai after");
+    if (ret64 < 0)
+        goto out;
+
+    struct timespec ts_rt_after;
+    struct timespec ts_tai_after;
+    rc = copy_from_user(&ts_rt_after, u_rt, sizeof(ts_rt_after));
+    test_check(rc == 0, "clock_tai copy realtime after");
+    if (rc < 0)
+        goto out;
+    rc = copy_from_user(&ts_tai_after, u_tai, sizeof(ts_tai_after));
+    test_check(rc == 0, "clock_tai copy tai after");
+    if (rc < 0)
+        goto out;
+
+    uint64_t rt_after_ns =
+        (uint64_t)ts_rt_after.tv_sec * TEST_NS_PER_SEC + (uint64_t)ts_rt_after.tv_nsec;
+    uint64_t tai_after_ns =
+        (uint64_t)ts_tai_after.tv_sec * TEST_NS_PER_SEC + (uint64_t)ts_tai_after.tv_nsec;
+    int64_t observed_offset_ns = signed_delta_ns(tai_after_ns, rt_after_ns);
+    test_check(observed_offset_ns >= 0, "clock_tai observed offset non-negative");
+    if (observed_offset_ns >= 0) {
+        uint64_t drift = abs_diff_u64((uint64_t)observed_offset_ns, target_offset_ns);
+        test_check(drift <= 500ULL * 1000ULL * 1000ULL,
+                   "clock_tai observed offset near target");
+    }
+
+out:
+    if (restore_needed && mapped && u_set) {
+        uint64_t now_rt_ns = time_realtime_ns();
+        uint64_t restore_tai_ns = apply_signed_offset(now_rt_ns, old_tai_offset_ns);
+        struct timespec ts_restore = {
+            .tv_sec = (time_t)(restore_tai_ns / TEST_NS_PER_SEC),
+            .tv_nsec = (int64_t)(restore_tai_ns % TEST_NS_PER_SEC),
+        };
+        if (copy_to_user(u_set, &ts_restore, sizeof(ts_restore)) == 0)
+            (void)sys_clock_settime(CLOCK_TAI, (uint64_t)u_set, 0, 0, 0, 0);
+    }
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_signalfd_syscall_functional(void) {
     int sfd = -1;
     struct user_map_ctx um = {0};
@@ -2777,6 +2920,7 @@ int run_vfs_ipc_tests(void) {
     test_timerfd_syscall_semantics();
     test_timerfd_syscall_functional();
     test_timerfd_cancel_on_set_functional();
+    test_clock_tai_settime_functional();
     test_signalfd_syscall_semantics();
     test_signalfd_syscall_functional();
     test_signalfd_syscall_rebind();

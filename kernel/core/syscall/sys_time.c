@@ -16,8 +16,9 @@
 
 #define NS_PER_SEC 1000000000ULL
 #define TIMER_ABSTIME 1U
-#define CLOCK_TAI_OFFSET_SEC 37ULL
-#define CLOCK_TAI_OFFSET_NS (CLOCK_TAI_OFFSET_SEC * NS_PER_SEC)
+#define CLOCK_TAI_DEFAULT_OFFSET_SEC 37ULL
+#define CLOCK_TAI_DEFAULT_OFFSET_NS (CLOCK_TAI_DEFAULT_OFFSET_SEC * NS_PER_SEC)
+#define CLOCK_TAI_OFFSET_MAX_NS (~(1ULL << 63))
 
 struct linux_utsname {
     char sysname[65];
@@ -52,6 +53,8 @@ struct linux_tms {
     long tms_cstime;
 };
 
+static int64_t clock_tai_offset_ns = (int64_t)CLOCK_TAI_DEFAULT_OFFSET_NS;
+
 static uint64_t ns_to_sched_ticks(uint64_t ns) {
     if (ns == 0)
         return 0;
@@ -71,16 +74,42 @@ static inline int32_t systime_abi_i32(uint64_t raw) {
     return (int32_t)(uint32_t)raw;
 }
 
+static uint64_t apply_signed_offset_ns(uint64_t base_ns, int64_t off_ns) {
+    if (off_ns >= 0) {
+        uint64_t off = (uint64_t)off_ns;
+        if (base_ns > UINT64_MAX - off)
+            return UINT64_MAX;
+        return base_ns + off;
+    }
+    uint64_t neg = (uint64_t)(-off_ns);
+    return (base_ns > neg) ? (base_ns - neg) : 0;
+}
+
 static uint64_t realtime_to_tai_ns(uint64_t realtime_ns) {
-    if (realtime_ns > UINT64_MAX - CLOCK_TAI_OFFSET_NS)
-        return UINT64_MAX;
-    return realtime_ns + CLOCK_TAI_OFFSET_NS;
+    int64_t off = __atomic_load_n(&clock_tai_offset_ns, __ATOMIC_RELAXED);
+    return apply_signed_offset_ns(realtime_ns, off);
 }
 
 static uint64_t tai_to_realtime_ns(uint64_t tai_ns) {
-    if (tai_ns <= CLOCK_TAI_OFFSET_NS)
-        return 0;
-    return tai_ns - CLOCK_TAI_OFFSET_NS;
+    int64_t off = __atomic_load_n(&clock_tai_offset_ns, __ATOMIC_RELAXED);
+    return apply_signed_offset_ns(tai_ns, -off);
+}
+
+static int time_set_tai_ns(uint64_t tai_ns, uint64_t realtime_ns) {
+    int64_t off = 0;
+    if (tai_ns >= realtime_ns) {
+        uint64_t delta = tai_ns - realtime_ns;
+        if (delta > CLOCK_TAI_OFFSET_MAX_NS)
+            return -ERANGE;
+        off = (int64_t)delta;
+    } else {
+        uint64_t delta = realtime_ns - tai_ns;
+        if (delta > CLOCK_TAI_OFFSET_MAX_NS)
+            return -ERANGE;
+        off = -(int64_t)delta;
+    }
+    __atomic_store_n(&clock_tai_offset_ns, off, __ATOMIC_RELAXED);
+    return 0;
 }
 
 static int clockid_sleep_base(int32_t clockid, int32_t *base_clockid) {
@@ -129,10 +158,6 @@ static int clockid_now_ns(int32_t clockid, uint64_t *out_ns) {
         *out_ns = time_realtime_ns();
         return 0;
     case CLOCK_TAI:
-        /*
-         * Keep a fixed UTC->TAI delta until adjtimex/clock_adjtime style
-         * leap-second management is introduced.
-         */
         *out_ns = realtime_to_tai_ns(time_realtime_ns());
         return 0;
     default:
@@ -235,8 +260,6 @@ int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     int32_t kclockid = systime_abi_i32(clockid);
-    if (kclockid != CLOCK_REALTIME)
-        return -EINVAL;
     struct timespec ts;
     int rc = sys_copy_timespec(tp_ptr, &ts, false);
     if (rc < 0)
@@ -244,7 +267,11 @@ int64_t sys_clock_settime(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
 
     uint64_t req_ns =
         (uint64_t)ts.tv_sec * NS_PER_SEC + (uint64_t)ts.tv_nsec;
-    return time_set_realtime_ns(req_ns);
+    if (kclockid == CLOCK_REALTIME)
+        return time_set_realtime_ns(req_ns);
+    if (kclockid == CLOCK_TAI)
+        return time_set_tai_ns(req_ns, time_realtime_ns());
+    return -EINVAL;
 }
 
 int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
