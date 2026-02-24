@@ -10,6 +10,7 @@
  * CLOCK_REALTIME is represented as MONOTONIC + adjustable offset.
  */
 static int64_t realtime_offset_ns = 0;
+static uint64_t realtime_generation = 0;
 
 uint64_t time_now_ns(void) {
     return arch_timer_ticks_to_ns(arch_timer_ticks());
@@ -27,6 +28,10 @@ uint64_t time_realtime_ns(void) {
 
     uint64_t neg = (uint64_t)(-off);
     return (mono > neg) ? (mono - neg) : 0;
+}
+
+uint64_t time_realtime_generation(void) {
+    return __atomic_load_n(&realtime_generation, __ATOMIC_RELAXED);
 }
 
 int time_set_realtime_ns(uint64_t realtime_ns) {
@@ -47,5 +52,6 @@ int time_set_realtime_ns(uint64_t realtime_ns) {
     }
 
     __atomic_store_n(&realtime_offset_ns, off, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&realtime_generation, 1, __ATOMIC_RELAXED);
     return 0;
 }

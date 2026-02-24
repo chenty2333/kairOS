@@ -137,6 +137,7 @@ struct rlimit {
 #define EMSGSIZE 90
 #define ETIMEDOUT 110
 #define ESTALE 116
+#define ECANCELED 125
 
 #undef NULL
 #define NULL ((void *)0)

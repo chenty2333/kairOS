@@ -22,6 +22,7 @@
 #define EFD_NONBLOCK O_NONBLOCK
 
 #define TFD_TIMER_ABSTIME 0x1
+#define TFD_TIMER_CANCEL_ON_SET 0x2
 #define TFD_CLOEXEC O_CLOEXEC
 #define TFD_NONBLOCK O_NONBLOCK
 
@@ -93,7 +94,10 @@ struct timerfd_ctx {
     uint64_t interval_ns;
     uint64_t next_expire_ns;
     uint64_t expirations;
+    uint64_t realtime_gen;
     int clockid;
+    bool cancel_on_set;
+    bool canceled;
     bool armed;
     bool closed;
 };
@@ -901,9 +905,33 @@ static int timerfd_normalize_clockid(uint64_t clockid, int *out_clockid) {
     }
 }
 
+static bool timerfd_cancel_on_set_locked(struct timerfd_ctx *ctx,
+                                         uint64_t realtime_gen) {
+    if (!ctx || !ctx->armed || !ctx->cancel_on_set ||
+        ctx->clockid != CLOCK_REALTIME) {
+        return false;
+    }
+    if (ctx->realtime_gen == realtime_gen)
+        return false;
+
+    ctx->armed = false;
+    ctx->next_expire_ns = 0;
+    ctx->interval_ns = 0;
+    ctx->expirations = 0;
+    ctx->cancel_on_set = false;
+    ctx->canceled = true;
+    return true;
+}
+
 static bool timerfd_refresh_locked(struct timerfd_ctx *ctx, uint64_t mono_ns,
                                    uint64_t realtime_ns) {
-    if (!ctx || !ctx->armed)
+    if (!ctx)
+        return false;
+
+    if (timerfd_cancel_on_set_locked(ctx, time_realtime_generation()))
+        return true;
+
+    if (!ctx->armed)
         return false;
 
     uint64_t now_ns = timerfd_now_ns(ctx->clockid, mono_ns, realtime_ns);
@@ -984,7 +1012,7 @@ static int timerfd_poll(struct file *file, uint32_t events) {
     bool irq;
     spin_lock_irqsave(&ctx->lock, &irq);
     (void)timerfd_refresh_locked(ctx, mono_ns, realtime_ns);
-    uint32_t revents = (ctx->expirations > 0) ? POLLIN : 0;
+    uint32_t revents = (ctx->expirations > 0 || ctx->canceled) ? POLLIN : 0;
     spin_unlock_irqrestore(&ctx->lock, irq);
     return (int)(revents & events);
 }
@@ -1005,6 +1033,10 @@ static ssize_t timerfd_fread(struct file *file, void *buf, size_t len) {
         bool irq;
         spin_lock_irqsave(&ctx->lock, &irq);
         (void)timerfd_refresh_locked(ctx, mono_ns, realtime_ns);
+        if (ctx->canceled) {
+            spin_unlock_irqrestore(&ctx->lock, irq);
+            return -ECANCELED;
+        }
         if (ctx->expirations > 0) {
             uint64_t out = ctx->expirations;
             ctx->expirations = 0;
@@ -1047,6 +1079,9 @@ static int timerfd_create_file(int clockid, uint64_t flags, struct file **out) {
     ctx->interval_ns = 0;
     ctx->next_expire_ns = 0;
     ctx->expirations = 0;
+    ctx->realtime_gen = time_realtime_generation();
+    ctx->cancel_on_set = false;
+    ctx->canceled = false;
     ctx->armed = false;
     ctx->closed = false;
 
@@ -1143,7 +1178,7 @@ int64_t sys_timerfd_create(uint64_t clockid, uint64_t flags, uint64_t a2,
 int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
                             uint64_t old_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~TFD_TIMER_ABSTIME)
+    if (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET))
         return -EINVAL;
     if (!new_ptr)
         return -EFAULT;
@@ -1180,6 +1215,16 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
         return rc;
     }
 
+    bool cancel_on_set = (flags & TFD_TIMER_CANCEL_ON_SET) != 0;
+    if (cancel_on_set && !(flags & TFD_TIMER_ABSTIME)) {
+        file_put(file);
+        return -EINVAL;
+    }
+    if (cancel_on_set && ctx->clockid != CLOCK_REALTIME) {
+        file_put(file);
+        return -EINVAL;
+    }
+
     uint64_t mono_ns = time_now_ns();
     uint64_t realtime_ns = time_realtime_ns();
     bool wake = false;
@@ -1190,11 +1235,15 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
     if (old_ptr)
         timerfd_fill_curr_locked(ctx, mono_ns, realtime_ns, &old_its);
 
+    ctx->canceled = false;
     ctx->interval_ns = interval_ns;
     ctx->expirations = 0;
+    ctx->realtime_gen = time_realtime_generation();
+    ctx->cancel_on_set = cancel_on_set;
     if (value_ns == 0) {
         ctx->armed = false;
         ctx->next_expire_ns = 0;
+        ctx->cancel_on_set = false;
     } else {
         uint64_t first_ns = value_ns;
         if (!(flags & TFD_TIMER_ABSTIME)) {
