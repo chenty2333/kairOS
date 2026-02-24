@@ -12,7 +12,9 @@
 #include <kairos/socket.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
+#include <kairos/uaccess.h>
 #include <kairos/vfs.h>
+#include <kairos/arch.h>
 
 #if CONFIG_KERNEL_TESTS
 
@@ -20,12 +22,113 @@
 #define SOCKET_TEST_UNIX_STREAM_MISSING_PATH "/tmp/.kairos_sock_stream_missing"
 #define SOCKET_TEST_UNIX_STREAM_STRESS_PATH "/tmp/.kairos_sock_stream_stress"
 #define SOCKET_TEST_UNIX_ACCEPT4_PATH "/tmp/.kairos_sock_accept4_sys"
+#define SOCKET_TEST_UNIX_ACCEPT4_CLIENT_PATH "/tmp/.kairos_sock_accept4_client"
 #define SOCKET_TEST_UNIX_DGRAM_RX_PATH "/tmp/.kairos_sock_dgram_rx"
 #define SOCKET_TEST_UNIX_DGRAM_TX_PATH "/tmp/.kairos_sock_dgram_tx"
+#define SOCKET_TEST_UNIX_MSG_RX_PATH "/tmp/.kairos_sock_msg_rx"
+#define SOCKET_TEST_UNIX_MSG_TX_PATH "/tmp/.kairos_sock_msg_tx"
+#define TEST_MSG_WAITFORONE 0x10000U
 #define SOCKET_TEST_DGRAM_OVERSIZE (65536U + 1U)
 
 static int tests_failed;
 static int tests_skipped;
+
+struct user_map_ctx {
+    struct process *proc;
+    struct mm_struct *saved_mm;
+    struct mm_struct *active_mm;
+    struct mm_struct *temp_mm;
+    paddr_t saved_pgdir;
+    vaddr_t base;
+    size_t len;
+    bool switched_pgdir;
+};
+
+struct test_socket_iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct test_socket_msghdr {
+    void *msg_name;
+    uint32_t msg_namelen;
+    uint32_t __pad0;
+    void *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    uint32_t msg_flags;
+    uint32_t __pad1;
+};
+
+struct test_socket_mmsghdr {
+    struct test_socket_msghdr msg_hdr;
+    uint32_t msg_len;
+    uint32_t __pad;
+};
+
+static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
+    if (!ctx || len == 0)
+        return -EINVAL;
+
+    memset(ctx, 0, sizeof(*ctx));
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    ctx->proc = p;
+    ctx->saved_mm = p->mm;
+    ctx->active_mm = p->mm;
+    ctx->saved_pgdir = arch_mmu_current();
+
+    if (!ctx->active_mm) {
+        ctx->temp_mm = mm_create();
+        if (!ctx->temp_mm)
+            return -ENOMEM;
+        p->mm = ctx->temp_mm;
+        ctx->active_mm = ctx->temp_mm;
+    }
+
+    if (ctx->saved_pgdir != ctx->active_mm->pgdir) {
+        arch_mmu_switch(ctx->active_mm->pgdir);
+        ctx->switched_pgdir = true;
+    }
+
+    int rc = mm_mmap(ctx->active_mm, 0, len, VM_READ | VM_WRITE, 0, NULL, 0,
+                     false, &ctx->base);
+    if (rc < 0) {
+        if (ctx->switched_pgdir)
+            arch_mmu_switch(ctx->saved_pgdir);
+        if (ctx->temp_mm) {
+            p->mm = ctx->saved_mm;
+            mm_destroy(ctx->temp_mm);
+        }
+        memset(ctx, 0, sizeof(*ctx));
+        return rc;
+    }
+
+    ctx->len = len;
+    return 0;
+}
+
+static void user_map_end(struct user_map_ctx *ctx) {
+    if (!ctx || !ctx->proc)
+        return;
+    if (ctx->active_mm && ctx->base && ctx->len)
+        (void)mm_munmap(ctx->active_mm, ctx->base, ctx->len);
+    if (ctx->switched_pgdir)
+        arch_mmu_switch(ctx->saved_pgdir);
+    if (ctx->temp_mm) {
+        ctx->proc->mm = ctx->saved_mm;
+        mm_destroy(ctx->temp_mm);
+    }
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static void *user_map_ptr(const struct user_map_ctx *ctx, size_t off) {
+    if (!ctx || off >= ctx->len)
+        return NULL;
+    return (void *)(ctx->base + off);
+}
 
 static void test_check(bool cond, const char *name) {
     if (!cond) {
@@ -117,6 +220,13 @@ struct unix_stream_client_ctx {
     int ret;
 };
 
+struct accept4_client_ctx {
+    struct sockaddr_un srv_addr;
+    struct sockaddr_un client_addr;
+    volatile int started;
+    int ret;
+};
+
 static int unix_stream_client_worker(void *arg) {
     struct unix_stream_client_ctx *ctx = (struct unix_stream_client_ctx *)arg;
     struct socket *client = NULL;
@@ -142,6 +252,32 @@ static int unix_stream_client_worker(void *arg) {
     if (rd != (ssize_t)sizeof(echo))
         goto out;
     if (echo != ctx->token)
+        goto out;
+
+    ctx->ret = 0;
+
+out:
+    close_socket_if_open(&client);
+    proc_exit(0);
+}
+
+static int accept4_client_worker(void *arg) {
+    struct accept4_client_ctx *ctx = (struct accept4_client_ctx *)arg;
+    struct socket *client = NULL;
+    ctx->started = 1;
+    ctx->ret = -1;
+
+    if (sock_create(AF_UNIX, SOCK_STREAM, 0, &client) < 0 || !client)
+        proc_exit(0);
+
+    int ret = client->ops->bind(client, (const struct sockaddr *)&ctx->client_addr,
+                                sizeof(ctx->client_addr));
+    if (ret < 0)
+        goto out;
+
+    ret = client->ops->connect(client, (const struct sockaddr *)&ctx->srv_addr,
+                               sizeof(ctx->srv_addr));
+    if (ret < 0)
         goto out;
 
     ctx->ret = 0;
@@ -398,6 +534,495 @@ static void test_accept4_syscall_semantics(void) {
 out:
     close_fd_if_open(&listener_fd);
     close_socket_if_open(&listener);
+}
+
+static void test_accept4_syscall_functional(void) {
+    struct socket *listener = NULL;
+    struct sockaddr_un srv_addr;
+    int listener_fd = -1;
+    int accepted_fd = -1;
+    struct accept4_client_ctx *ctx = NULL;
+    struct process *child = NULL;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &listener);
+    test_check(ret == 0, "accept4_func create listener");
+    if (ret < 0 || !listener)
+        goto out;
+
+    make_unix_addr(&srv_addr, SOCKET_TEST_UNIX_ACCEPT4_PATH);
+    ret = listener->ops->bind(listener, (const struct sockaddr *)&srv_addr,
+                              sizeof(srv_addr));
+    test_check(ret == 0, "accept4_func bind");
+    if (ret < 0)
+        goto out;
+
+    ret = listener->ops->listen(listener, 4);
+    test_check(ret == 0, "accept4_func listen");
+    if (ret < 0)
+        goto out;
+
+    listener_fd = socket_install_fd(&listener);
+    test_check(listener_fd >= 0, "accept4_func install listener fd");
+    if (listener_fd < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "accept4_func user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    struct sockaddr_un *u_peer_addr = (struct sockaddr_un *)user_map_ptr(&um, 0x0);
+    int *u_peer_len = (int *)user_map_ptr(&um, 0x100);
+    test_check(u_peer_addr != NULL, "accept4_func u peer addr");
+    test_check(u_peer_len != NULL, "accept4_func u peer len");
+    if (!u_peer_addr || !u_peer_len)
+        goto out;
+
+    int peer_len = (int)sizeof(*u_peer_addr);
+    ret = copy_to_user(u_peer_len, &peer_len, sizeof(peer_len));
+    test_check(ret == 0, "accept4_func copy peer len");
+    if (ret < 0)
+        goto out;
+
+    ctx = kzalloc(sizeof(*ctx));
+    test_check(ctx != NULL, "accept4_func alloc ctx");
+    if (!ctx)
+        goto out;
+    make_unix_addr(&ctx->srv_addr, SOCKET_TEST_UNIX_ACCEPT4_PATH);
+    make_unix_addr(&ctx->client_addr, SOCKET_TEST_UNIX_ACCEPT4_CLIENT_PATH);
+    ctx->ret = -1;
+
+    child = kthread_create_joinable(accept4_client_worker, ctx, "acc4cli");
+    test_check(child != NULL, "accept4_func create client");
+    if (!child)
+        goto out;
+    pid_t cpid = child->pid;
+    sched_enqueue(child);
+
+    for (int i = 0; i < 2000 && !ctx->started; i++)
+        proc_yield();
+    test_check(ctx->started != 0, "accept4_func client started");
+
+    bool ready = wait_socket_event(listener, POLLIN, POLLIN, 4000);
+    test_check(ready, "accept4_func listener readable");
+
+    int64_t ret64 =
+        sys_accept4((uint64_t)listener_fd, (uint64_t)u_peer_addr,
+                    (uint64_t)u_peer_len, SOCK_NONBLOCK | SOCK_CLOEXEC, 0, 0);
+    test_check(ret64 >= 0, "accept4_func accept4");
+    if (ret64 >= 0) {
+        accepted_fd = (int)ret64;
+
+        struct sockaddr_un peer_addr = {0};
+        int peer_len_out = 0;
+        ret = copy_from_user(&peer_len_out, u_peer_len, sizeof(peer_len_out));
+        test_check(ret == 0, "accept4_func read peer len");
+        if (ret == 0)
+            test_check(peer_len_out >= (int)sizeof(peer_addr.sun_family),
+                       "accept4_func peer len updated");
+
+        ret = copy_from_user(&peer_addr, u_peer_addr, sizeof(peer_addr));
+        test_check(ret == 0, "accept4_func read peer addr");
+        if (ret == 0) {
+            test_check(peer_addr.sun_family == AF_UNIX,
+                       "accept4_func peer family");
+            test_check(strcmp(peer_addr.sun_path,
+                              SOCKET_TEST_UNIX_ACCEPT4_CLIENT_PATH) == 0,
+                       "accept4_func peer path");
+        }
+
+        struct file *accepted = fd_get(proc_current(), accepted_fd);
+        test_check(accepted != NULL, "accept4_func accepted fd get");
+        if (accepted) {
+            test_check((accepted->flags & O_NONBLOCK) != 0,
+                       "accept4_func accepted nonblock");
+            file_put(accepted);
+        }
+
+        struct process *p = proc_current();
+        bool cloexec_ok = false;
+        if (p && p->fdtable && accepted_fd >= 0 &&
+            accepted_fd < CONFIG_MAX_FILES_PER_PROC) {
+            mutex_lock(&p->fdtable->lock);
+            cloexec_ok = (p->fdtable->fd_flags[accepted_fd] & FD_CLOEXEC) != 0;
+            mutex_unlock(&p->fdtable->lock);
+        }
+        test_check(cloexec_ok, "accept4_func accepted cloexec");
+    }
+
+    int status = 0;
+    pid_t wp = proc_wait(cpid, &status, 0);
+    test_check(wp == cpid, "accept4_func client reaped");
+    if (wp == cpid)
+        test_check(ctx->ret == 0, "accept4_func client result");
+
+out:
+    close_fd_if_open(&accepted_fd);
+    close_fd_if_open(&listener_fd);
+    close_socket_if_open(&listener);
+    if (mapped)
+        user_map_end(&um);
+    kfree(ctx);
+}
+
+static void test_socket_msg_syscall_semantics(void) {
+    struct socket *rx = NULL;
+    struct socket *tx = NULL;
+    int rxfd = -1;
+    int txfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int ret = sock_create(AF_UNIX, SOCK_DGRAM, 0, &rx);
+    test_check(ret == 0, "sockmsg create rx");
+    ret = sock_create(AF_UNIX, SOCK_DGRAM, 0, &tx);
+    test_check(ret == 0, "sockmsg create tx");
+    if (!rx || !tx)
+        goto out;
+
+    struct sockaddr_un rx_addr;
+    struct sockaddr_un tx_addr;
+    make_unix_addr(&rx_addr, SOCKET_TEST_UNIX_MSG_RX_PATH);
+    make_unix_addr(&tx_addr, SOCKET_TEST_UNIX_MSG_TX_PATH);
+
+    ret = rx->ops->bind(rx, (const struct sockaddr *)&rx_addr, sizeof(rx_addr));
+    test_check(ret == 0, "sockmsg bind rx");
+    ret = tx->ops->bind(tx, (const struct sockaddr *)&tx_addr, sizeof(tx_addr));
+    test_check(ret == 0, "sockmsg bind tx");
+    if (ret < 0)
+        goto out;
+
+    rxfd = socket_install_fd(&rx);
+    txfd = socket_install_fd(&tx);
+    test_check(rxfd >= 0, "sockmsg install rx fd");
+    test_check(txfd >= 0, "sockmsg install tx fd");
+    if (rxfd < 0 || txfd < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "sockmsg user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    struct sockaddr_un *u_rx_addr = (struct sockaddr_un *)user_map_ptr(&um, 0x000);
+    struct sockaddr_un *u_src_addr = (struct sockaddr_un *)user_map_ptr(&um, 0x080);
+    struct test_socket_iovec *u_send_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x100);
+    struct test_socket_iovec *u_recv_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x180);
+    struct test_socket_msghdr *u_send_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x200);
+    struct test_socket_msghdr *u_recv_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x280);
+    struct test_socket_mmsghdr *u_send_vec =
+        (struct test_socket_mmsghdr *)user_map_ptr(&um, 0x300);
+    struct test_socket_mmsghdr *u_recv_vec =
+        (struct test_socket_mmsghdr *)user_map_ptr(&um, 0x400);
+    struct timespec *u_timeout = (struct timespec *)user_map_ptr(&um, 0x500);
+    char *u_send_buf0 = (char *)user_map_ptr(&um, 0x580);
+    char *u_send_buf1 = (char *)user_map_ptr(&um, 0x5C0);
+    char *u_recv_buf0 = (char *)user_map_ptr(&um, 0x600);
+    char *u_recv_buf1 = (char *)user_map_ptr(&um, 0x640);
+    char *u_sendm_buf0 = (char *)user_map_ptr(&um, 0x680);
+    char *u_sendm_buf1 = (char *)user_map_ptr(&um, 0x6C0);
+    char *u_recvm_buf0 = (char *)user_map_ptr(&um, 0x700);
+    char *u_recvm_buf1 = (char *)user_map_ptr(&um, 0x740);
+    test_check(u_rx_addr && u_src_addr && u_send_iov && u_recv_iov && u_send_msg &&
+                   u_recv_msg && u_send_vec && u_recv_vec && u_timeout &&
+                   u_send_buf0 && u_send_buf1 && u_recv_buf0 && u_recv_buf1 &&
+                   u_sendm_buf0 && u_sendm_buf1 && u_recvm_buf0 && u_recvm_buf1,
+               "sockmsg user pointers");
+    if (!u_rx_addr || !u_src_addr || !u_send_iov || !u_recv_iov || !u_send_msg ||
+        !u_recv_msg || !u_send_vec || !u_recv_vec || !u_timeout || !u_send_buf0 ||
+        !u_send_buf1 || !u_recv_buf0 || !u_recv_buf1 || !u_sendm_buf0 ||
+        !u_sendm_buf1 || !u_recvm_buf0 || !u_recvm_buf1) {
+        goto out;
+    }
+
+    ret = copy_to_user(u_rx_addr, &rx_addr, sizeof(rx_addr));
+    test_check(ret == 0, "sockmsg copy rx addr");
+    if (ret < 0)
+        goto out;
+
+    ret = copy_to_user(u_send_buf0, "msg-", 4);
+    test_check(ret == 0, "sockmsg copy send buf0");
+    ret = copy_to_user(u_send_buf1, "one", 3);
+    test_check(ret == 0, "sockmsg copy send buf1");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_iovec send_iov[2] = {
+        { .iov_base = u_send_buf0, .iov_len = 4 },
+        { .iov_base = u_send_buf1, .iov_len = 3 },
+    };
+    struct test_socket_iovec recv_iov[2] = {
+        { .iov_base = u_recv_buf0, .iov_len = 3 },
+        { .iov_base = u_recv_buf1, .iov_len = 8 },
+    };
+    ret = copy_to_user(u_send_iov, send_iov, sizeof(send_iov));
+    test_check(ret == 0, "sockmsg copy send iov");
+    ret = copy_to_user(u_recv_iov, recv_iov, sizeof(recv_iov));
+    test_check(ret == 0, "sockmsg copy recv iov");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_msghdr send_msg = {
+        .msg_name = u_rx_addr,
+        .msg_namelen = sizeof(rx_addr),
+        .msg_iov = u_send_iov,
+        .msg_iovlen = 2,
+    };
+    struct test_socket_msghdr recv_msg = {
+        .msg_name = u_src_addr,
+        .msg_namelen = sizeof(*u_src_addr),
+        .msg_iov = u_recv_iov,
+        .msg_iovlen = 2,
+    };
+
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg copy send msg");
+    if (ret < 0)
+        goto out;
+
+    int64_t ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 7, "sockmsg sendmsg len7");
+
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg copy recv msg");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 7, "sockmsg recvmsg len7");
+    if (ret64 == 7) {
+        char got0[3] = {0};
+        char got1[5] = {0};
+        ret = copy_from_user(got0, u_recv_buf0, sizeof(got0));
+        test_check(ret == 0, "sockmsg read recv buf0");
+        ret = copy_from_user(got1, u_recv_buf1, 4);
+        test_check(ret == 0, "sockmsg read recv buf1");
+        if (ret == 0) {
+            test_check(memcmp(got0, "msg", 3) == 0, "sockmsg recv buf0 data");
+            test_check(memcmp(got1, "-one", 4) == 0, "sockmsg recv buf1 data");
+        }
+
+        ret = copy_from_user(&recv_msg, u_recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg read recv msg");
+        if (ret == 0) {
+            test_check(recv_msg.msg_namelen >= sizeof(recv_msg.msg_namelen),
+                       "sockmsg recv namelen update");
+        }
+
+        struct sockaddr_un src_addr = {0};
+        ret = copy_from_user(&src_addr, u_src_addr, sizeof(src_addr));
+        test_check(ret == 0, "sockmsg read src addr");
+        if (ret == 0) {
+            test_check(src_addr.sun_family == AF_UNIX,
+                       "sockmsg recv src family");
+            test_check(strcmp(src_addr.sun_path, SOCKET_TEST_UNIX_MSG_TX_PATH) == 0,
+                       "sockmsg recv src path");
+        }
+    }
+
+    send_msg.msg_controllen = 8;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg copy send msg ctrl");
+    if (ret == 0) {
+        ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+        test_check(ret64 == -EOPNOTSUPP, "sockmsg sendmsg control eopnotsupp");
+    }
+    send_msg.msg_controllen = 0;
+    send_msg.msg_iovlen = 1025;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg copy send msg iovlen");
+    if (ret == 0) {
+        ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+        test_check(ret64 == -EINVAL, "sockmsg sendmsg iovlen einval");
+    }
+
+    recv_msg.msg_controllen = 8;
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg copy recv msg ctrl");
+    if (ret == 0) {
+        ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+        test_check(ret64 == -EOPNOTSUPP, "sockmsg recvmsg control eopnotsupp");
+    }
+    recv_msg.msg_controllen = 0;
+    recv_msg.msg_iovlen = 1025;
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg copy recv msg iovlen");
+    if (ret == 0) {
+        ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+        test_check(ret64 == -EINVAL, "sockmsg recvmsg iovlen einval");
+    }
+
+    send_msg.msg_iovlen = 2;
+    send_msg.msg_controllen = 0;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg copy send msg flags");
+    if (ret == 0) {
+        ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 1ULL << 32, 0,
+                            0, 0);
+        test_check(ret64 == 7, "sockmsg sendmsg flags width");
+    }
+
+    recv_msg.msg_iovlen = 2;
+    recv_msg.msg_controllen = 0;
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg copy recv msg flags");
+    if (ret == 0) {
+        ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+        test_check(ret64 == 7, "sockmsg recvmsg flags width");
+    }
+
+    ret = copy_to_user(u_sendm_buf0, "aa", 2);
+    test_check(ret == 0, "sockmsg copy sendm buf0");
+    ret = copy_to_user(u_sendm_buf1, "bbb", 3);
+    test_check(ret == 0, "sockmsg copy sendm buf1");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_iovec sendm_iov[2] = {
+        { .iov_base = u_sendm_buf0, .iov_len = 2 },
+        { .iov_base = u_sendm_buf1, .iov_len = 3 },
+    };
+    struct test_socket_iovec recvm_iov[2] = {
+        { .iov_base = u_recvm_buf0, .iov_len = 8 },
+        { .iov_base = u_recvm_buf1, .iov_len = 8 },
+    };
+    ret = copy_to_user(u_send_iov, sendm_iov, sizeof(sendm_iov));
+    test_check(ret == 0, "sockmsg copy sendm iov");
+    ret = copy_to_user(u_recv_iov, recvm_iov, sizeof(recvm_iov));
+    test_check(ret == 0, "sockmsg copy recvm iov");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_mmsghdr send_vec[2] = {0};
+    send_vec[0].msg_hdr.msg_name = u_rx_addr;
+    send_vec[0].msg_hdr.msg_namelen = sizeof(rx_addr);
+    send_vec[0].msg_hdr.msg_iov = &u_send_iov[0];
+    send_vec[0].msg_hdr.msg_iovlen = 1;
+    send_vec[1].msg_hdr.msg_name = u_rx_addr;
+    send_vec[1].msg_hdr.msg_namelen = sizeof(rx_addr);
+    send_vec[1].msg_hdr.msg_iov = &u_send_iov[1];
+    send_vec[1].msg_hdr.msg_iovlen = 1;
+    ret = copy_to_user(u_send_vec, send_vec, sizeof(send_vec));
+    test_check(ret == 0, "sockmsg copy send vec");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_sendmmsg((uint64_t)txfd, (uint64_t)u_send_vec, 2, 0, 0, 0);
+    test_check(ret64 == 2, "sockmsg sendmmsg count2");
+    if (ret64 == 2) {
+        ret = copy_from_user(send_vec, u_send_vec, sizeof(send_vec));
+        test_check(ret == 0, "sockmsg read send vec");
+        if (ret == 0) {
+            test_check(send_vec[0].msg_len == 2, "sockmsg sendmmsg len0");
+            test_check(send_vec[1].msg_len == 3, "sockmsg sendmmsg len1");
+        }
+    }
+
+    struct test_socket_mmsghdr recv_vec[2] = {0};
+    recv_vec[0].msg_hdr.msg_name = u_src_addr;
+    recv_vec[0].msg_hdr.msg_namelen = sizeof(*u_src_addr);
+    recv_vec[0].msg_hdr.msg_iov = &u_recv_iov[0];
+    recv_vec[0].msg_hdr.msg_iovlen = 1;
+    recv_vec[1].msg_hdr.msg_name = u_src_addr;
+    recv_vec[1].msg_hdr.msg_namelen = sizeof(*u_src_addr);
+    recv_vec[1].msg_hdr.msg_iov = &u_recv_iov[1];
+    recv_vec[1].msg_hdr.msg_iovlen = 1;
+    ret = copy_to_user(u_recv_vec, recv_vec, sizeof(recv_vec));
+    test_check(ret == 0, "sockmsg copy recv vec");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 2, 0, 0, 0);
+    test_check(ret64 == 2, "sockmsg recvmmsg count2");
+    if (ret64 == 2) {
+        char got0[3] = {0};
+        char got1[4] = {0};
+        ret = copy_from_user(got0, u_recvm_buf0, 2);
+        test_check(ret == 0, "sockmsg read recvm buf0");
+        ret = copy_from_user(got1, u_recvm_buf1, 3);
+        test_check(ret == 0, "sockmsg read recvm buf1");
+        if (ret == 0) {
+            test_check(memcmp(got0, "aa", 2) == 0, "sockmsg recvmmsg data0");
+            test_check(memcmp(got1, "bbb", 3) == 0, "sockmsg recvmmsg data1");
+        }
+
+        ret = copy_from_user(recv_vec, u_recv_vec, sizeof(recv_vec));
+        test_check(ret == 0, "sockmsg read recv vec");
+        if (ret == 0) {
+            test_check(recv_vec[0].msg_len == 2, "sockmsg recvmmsg len0");
+            test_check(recv_vec[1].msg_len == 3, "sockmsg recvmmsg len1");
+        }
+    }
+
+    ret64 = sys_sendmmsg((uint64_t)txfd, (uint64_t)u_send_vec, 0, 0, 0, 0);
+    test_check(ret64 == 0, "sockmsg sendmmsg vlen0");
+    ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 0, 0, 0, 0);
+    test_check(ret64 == 0, "sockmsg recvmmsg vlen0");
+
+    ret64 = sys_sendmmsg((uint64_t)txfd, (uint64_t)u_send_vec, 1025, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "sockmsg sendmmsg vlen einval");
+    ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 1025, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "sockmsg recvmmsg vlen einval");
+
+    ret64 = sys_sendmmsg((uint64_t)txfd, (uint64_t)u_send_vec,
+                         (1ULL << 32) | 1ULL, 0, 0, 0);
+    test_check(ret64 == 1, "sockmsg sendmmsg vlen width");
+    if (ret64 == 1) {
+        ret = copy_to_user(u_recv_vec, recv_vec, sizeof(recv_vec));
+        test_check(ret == 0, "sockmsg recvm width copy vec");
+        if (ret == 0) {
+            ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec,
+                                 (1ULL << 32) | 1ULL, 0, 0, 0);
+            test_check(ret64 == 1, "sockmsg recvmmsg vlen width");
+        }
+    }
+
+    struct timespec timeout_zero = { .tv_sec = 0, .tv_nsec = 0 };
+    ret = copy_to_user(u_timeout, &timeout_zero, sizeof(timeout_zero));
+    test_check(ret == 0, "sockmsg copy timeout zero");
+    if (ret == 0) {
+        ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 1, 0,
+                             (uint64_t)u_timeout, 0);
+        test_check(ret64 == 0, "sockmsg recvmmsg timeout zero");
+    }
+
+    struct timespec timeout_bad = { .tv_sec = 0, .tv_nsec = 1000000000LL };
+    ret = copy_to_user(u_timeout, &timeout_bad, sizeof(timeout_bad));
+    test_check(ret == 0, "sockmsg copy timeout bad");
+    if (ret == 0) {
+        ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 1, 0,
+                             (uint64_t)u_timeout, 0);
+        test_check(ret64 == -EINVAL, "sockmsg recvmmsg timeout einval");
+    }
+
+    ret64 = sys_sendmmsg((uint64_t)txfd, (uint64_t)u_send_vec, 1, 0, 0, 0);
+    test_check(ret64 == 1, "sockmsg sendmmsg waitforone seed");
+    if (ret64 == 1) {
+        struct timespec timeout_short = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
+        ret = copy_to_user(u_timeout, &timeout_short, sizeof(timeout_short));
+        test_check(ret == 0, "sockmsg copy timeout short");
+        if (ret == 0) {
+            ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 2,
+                                 TEST_MSG_WAITFORONE, (uint64_t)u_timeout, 0);
+            test_check(ret64 == 1, "sockmsg recvmmsg waitforone");
+        }
+    }
+
+out:
+    close_fd_if_open(&txfd);
+    close_fd_if_open(&rxfd);
+    close_socket_if_open(&tx);
+    close_socket_if_open(&rx);
+    if (mapped)
+        user_map_end(&um);
 }
 
 static void test_unix_dgram_semantics(void) {
@@ -783,6 +1408,8 @@ int run_socket_tests(void) {
     test_unix_stream_semantics();
     test_unix_stream_accept_stability();
     test_accept4_syscall_semantics();
+    test_accept4_syscall_functional();
+    test_socket_msg_syscall_semantics();
     test_unix_dgram_semantics();
     test_inet_tcp_primary();
     test_inet_udp_secondary();
