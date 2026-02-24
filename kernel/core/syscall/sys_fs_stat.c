@@ -328,17 +328,18 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
     (void)a4; (void)a5;
     if (!st_ptr)
         return -EFAULT;
-    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT))
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
-    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+    if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
     struct stat st;
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((uflags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
@@ -366,7 +367,7 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
     }
 
     int nflags = NAMEI_FOLLOW;
-    if (flags & AT_SYMLINK_NOFOLLOW)
+    if (uflags & AT_SYMLINK_NOFOLLOW)
         nflags = NAMEI_NOFOLLOW;
 
     struct path resolved;
