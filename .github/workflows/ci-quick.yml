@@ -122,17 +122,6 @@ jobs:
           set -euo pipefail
           make --no-print-directory ARCH=riscv64 test-ci-default
 
-      - name: Run BusyBox applet smoke regression
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=riscv64 test-busybox-applets-smoke
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after BusyBox applet smoke regression" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
       - name: Capture latest isolated run
         id: latest_run
         if: always()

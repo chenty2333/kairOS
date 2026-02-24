@@ -788,7 +788,8 @@ test-ci-default:
 			python3 scripts/impl/assert-result-pass.py "$$latest/result.json" --require-structured; \
 		}; \
 		run_and_assert "quick regression" test; \
-		run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke
+		run_and_assert "exec/ELF smoke regression" test-exec-elf-smoke; \
+		run_and_assert "BusyBox applet smoke regression" test-busybox-applets-smoke
 
 test-exec-elf-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 		$(Q)if [ "$(EXEC_ELF_SMOKE_ISOLATED)" = "1" ]; then \
@@ -1041,7 +1042,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests (isolated by default)"
-	@echo "  test-ci-default - Run default CI gates (test + exec/ELF smoke)"
+	@echo "  test-ci-default - Run default CI gates (test + exec/ELF smoke + busybox applet smoke)"
 	@echo "  test-exec-elf-smoke - Run exec/ELF interactive smoke regression"
 	@echo "  test-busybox-applets-smoke - Run busybox applet interactive smoke regression"
 	@echo "  test-tcc-smoke - Run tcc interactive smoke regression"
