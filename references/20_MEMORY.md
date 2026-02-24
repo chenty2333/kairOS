@@ -70,6 +70,7 @@ mm_struct manages each process's address space:
 VMA management (vma.c):
 - mm_add_vma() / mm_add_vma_file(): add anonymous/file-mapped VMAs; anonymous VMAs support automatic merging
 - mm_mmap() / mm_munmap() / mm_mremap() / mm_mprotect(): standard mmap family interfaces
+- Linux syscall ABI compatibility: `mmap`/`mprotect` decode `prot` as 32-bit `int`, and `mmap`/`mremap` decode `flags` as 32-bit `int`
 - mm_find_vma(): red-black tree lookup
 - mm_brk(): heap management, checks for conflicts with other VMAs
 

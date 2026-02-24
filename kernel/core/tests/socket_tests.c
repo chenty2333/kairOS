@@ -11,12 +11,15 @@
 #include <kairos/signal.h>
 #include <kairos/socket.h>
 #include <kairos/string.h>
+#include <kairos/syscall.h>
+#include <kairos/vfs.h>
 
 #if CONFIG_KERNEL_TESTS
 
 #define SOCKET_TEST_UNIX_STREAM_PATH "/tmp/.kairos_sock_stream_srv"
 #define SOCKET_TEST_UNIX_STREAM_MISSING_PATH "/tmp/.kairos_sock_stream_missing"
 #define SOCKET_TEST_UNIX_STREAM_STRESS_PATH "/tmp/.kairos_sock_stream_stress"
+#define SOCKET_TEST_UNIX_ACCEPT4_PATH "/tmp/.kairos_sock_accept4_sys"
 #define SOCKET_TEST_UNIX_DGRAM_RX_PATH "/tmp/.kairos_sock_dgram_rx"
 #define SOCKET_TEST_UNIX_DGRAM_TX_PATH "/tmp/.kairos_sock_dgram_tx"
 #define SOCKET_TEST_DGRAM_OVERSIZE (65536U + 1U)
@@ -41,6 +44,34 @@ static void close_socket_if_open(struct socket **sock) {
         sock_destroy(*sock);
         *sock = NULL;
     }
+}
+
+static void close_fd_if_open(int *fd) {
+    if (!fd || *fd < 0)
+        return;
+    (void)fd_close(proc_current(), *fd);
+    *fd = -1;
+}
+
+static int socket_install_fd(struct socket **sock) {
+    if (!sock || !*sock || !(*sock)->vnode)
+        return -EINVAL;
+
+    struct file *file = vfs_file_alloc();
+    if (!file)
+        return -ENOMEM;
+
+    file->vnode = (*sock)->vnode;
+    vnode_get(file->vnode);
+    file->flags = O_RDWR;
+
+    int fd = fd_alloc(proc_current(), file);
+    if (fd < 0) {
+        vfs_close(file);
+        return fd;
+    }
+
+    return fd;
 }
 
 static void make_unix_addr(struct sockaddr_un *sun, const char *path) {
@@ -325,6 +356,47 @@ static void test_unix_stream_accept_stability(void) {
     }
 
 out:
+    close_socket_if_open(&listener);
+}
+
+static void test_accept4_syscall_semantics(void) {
+    struct socket *listener = NULL;
+    struct sockaddr_un srv_addr;
+    int listener_fd = -1;
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &listener);
+    test_check(ret == 0, "accept4_sys create listener");
+    if (ret < 0 || !listener)
+        goto out;
+
+    make_unix_addr(&srv_addr, SOCKET_TEST_UNIX_ACCEPT4_PATH);
+    ret = listener->ops->bind(listener, (const struct sockaddr *)&srv_addr,
+                              sizeof(srv_addr));
+    test_check(ret == 0, "accept4_sys bind");
+    if (ret < 0)
+        goto out;
+
+    ret = listener->ops->listen(listener, 8);
+    test_check(ret == 0, "accept4_sys listen");
+    if (ret < 0)
+        goto out;
+
+    listener_fd = socket_install_fd(&listener);
+    test_check(listener_fd >= 0, "accept4_sys install listener fd");
+    if (listener_fd < 0)
+        goto out;
+    int64_t ret64 = sys_accept4((uint64_t)listener_fd, 0, 0, SOCK_NONBLOCK | 1U,
+                                0, 0);
+    test_check(ret64 == -EINVAL, "accept4_sys invalid flags einval");
+
+    ret64 = sys_accept4((uint64_t)listener_fd, 0x1000, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "accept4_sys addr only efault");
+
+    ret64 = sys_accept4((uint64_t)listener_fd, 0, 0x1000, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "accept4_sys addrlen only efault");
+
+out:
+    close_fd_if_open(&listener_fd);
     close_socket_if_open(&listener);
 }
 
@@ -710,6 +782,7 @@ int run_socket_tests(void) {
 
     test_unix_stream_semantics();
     test_unix_stream_accept_stability();
+    test_accept4_syscall_semantics();
     test_unix_dgram_semantics();
     test_inet_tcp_primary();
     test_inet_udp_secondary();

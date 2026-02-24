@@ -455,8 +455,9 @@ int64_t sys_pwritev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
 
 int64_t sys_preadv2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                     uint64_t pos_l, uint64_t pos_h, uint64_t flags) {
-    const uint64_t supported = RWF_HIPRI | RWF_NOWAIT;
-    if (flags & ~supported)
+    const uint32_t supported = RWF_HIPRI | RWF_NOWAIT;
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~supported)
         return -EOPNOTSUPP;
     uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
     if (offset == UINT64_MAX)
@@ -466,8 +467,9 @@ int64_t sys_preadv2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
 
 int64_t sys_pwritev2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                      uint64_t pos_l, uint64_t pos_h, uint64_t flags) {
-    const uint64_t supported = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT;
-    if (flags & ~supported)
+    const uint32_t supported = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT;
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~supported)
         return -EOPNOTSUPP;
     uint64_t offset = sysfs_linux_split_off(pos_l, pos_h);
     if (offset == UINT64_MAX)
@@ -478,7 +480,8 @@ int64_t sys_pwritev2(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
 int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
                             uint64_t fd_out, uint64_t off_out_ptr,
                             uint64_t len, uint64_t flags) {
-    if (flags != 0)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags != 0)
         return -EINVAL;
     if (len == 0)
         return 0;

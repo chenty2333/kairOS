@@ -62,16 +62,17 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         return -EINVAL;
     if (!len)
         return -EINVAL;
-    prot = sysmm_normalize_prot(prot);
-    if (prot & ~PROT_MASK)
+    uint32_t uprot = (uint32_t)sysmm_normalize_prot(prot);
+    uint32_t uflags = (uint32_t)flags;
+    if (uprot & ~PROT_MASK)
         return -EINVAL;
-    if (flags & ~MAP_MASK)
+    if (uflags & ~MAP_MASK)
         return -EINVAL;
 
-    bool fixed = (flags & MAP_FIXED) != 0;
-    bool anon = (flags & MAP_ANONYMOUS) != 0;
-    bool priv = (flags & MAP_PRIVATE) != 0;
-    bool shared = (flags & MAP_SHARED) != 0;
+    bool fixed = (uflags & MAP_FIXED) != 0;
+    bool anon = (uflags & MAP_ANONYMOUS) != 0;
+    bool priv = (uflags & MAP_PRIVATE) != 0;
+    bool shared = (uflags & MAP_SHARED) != 0;
 
     if (!priv && !shared)
         return -EINVAL;
@@ -99,11 +100,11 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         return -EINVAL;
     }
 
-    uint32_t vm_flags = prot_to_vm(prot);
+    uint32_t vm_flags = prot_to_vm(uprot);
     uint32_t map_flags = 0;
     if (shared)
         map_flags |= VM_SHARED;
-    if (flags & MAP_STACK)
+    if (uflags & MAP_STACK)
         map_flags |= VM_STACK;
     vaddr_t start = fixed ? (vaddr_t)addr : 0;
     if (fixed) {
@@ -113,7 +114,7 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
             return (int64_t)uret;
         }
     }
-    if (flags & MAP_GROWSDOWN)
+    if (uflags & MAP_GROWSDOWN)
         map_flags |= VM_STACK;
     vaddr_t res = 0;
     int ret = mm_mmap(p->mm, start, (size_t)len, vm_flags, map_flags, vn,
@@ -123,7 +124,7 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         return (int64_t)ret;
 
     /* MAP_POPULATE: pre-fault all pages in the mapping */
-    if (flags & MAP_POPULATE) {
+    if (uflags & MAP_POPULATE) {
         size_t aligned_len = ALIGN_UP(len, CONFIG_PAGE_SIZE);
         for (size_t off = 0; off < aligned_len; off += CONFIG_PAGE_SIZE) {
             mm_handle_fault(p->mm, res + off, vm_flags);
@@ -148,16 +149,17 @@ int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot, uint64_t a3,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    prot = sysmm_normalize_prot(prot);
-    if (prot & ~PROT_MASK)
+    uint32_t uprot = (uint32_t)sysmm_normalize_prot(prot);
+    if (uprot & ~PROT_MASK)
         return -EINVAL;
     return (int64_t)mm_mprotect(p->mm, (vaddr_t)addr, (size_t)len,
-                                prot_to_vm(prot));
+                                prot_to_vm(uprot));
 }
 
 int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len,
                    uint64_t flags, uint64_t new_addr, uint64_t a5) {
     (void)a5;
+    uint32_t uflags = (uint32_t)flags;
     struct process *p = proc_current();
     if (!p) {
         return -EINVAL;
@@ -168,18 +170,18 @@ int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len,
     if (old_addr & (CONFIG_PAGE_SIZE - 1)) {
         return -EINVAL;
     }
-    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) {
+    if (uflags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) {
         return -EINVAL;
     }
-    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE)) {
+    if ((uflags & MREMAP_FIXED) && !(uflags & MREMAP_MAYMOVE)) {
         return -EINVAL;
     }
-    if ((flags & MREMAP_FIXED) && (new_addr & (CONFIG_PAGE_SIZE - 1))) {
+    if ((uflags & MREMAP_FIXED) && (new_addr & (CONFIG_PAGE_SIZE - 1))) {
         return -EINVAL;
     }
 
     /* For MREMAP_FIXED, check old/new don't overlap */
-    if (flags & MREMAP_FIXED) {
+    if (uflags & MREMAP_FIXED) {
         vaddr_t old_end = (vaddr_t)(old_addr + old_len);
         vaddr_t new_end = (vaddr_t)(new_addr + new_len);
         if (!(new_end <= old_addr || new_addr >= old_end)) {
@@ -190,7 +192,7 @@ int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len,
 
     vaddr_t result = 0;
     int ret = mm_mremap(p->mm, (vaddr_t)old_addr, (size_t)old_len,
-                        (size_t)new_len, (uint32_t)flags,
+                        (size_t)new_len, uflags,
                         (vaddr_t)new_addr, &result);
     if (ret < 0) {
         return (int64_t)ret;

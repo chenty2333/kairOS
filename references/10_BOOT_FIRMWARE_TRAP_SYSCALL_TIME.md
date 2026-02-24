@@ -78,6 +78,7 @@ Two-layer structure:
   - Linux sleep ABI compatibility:
     - `nanosleep` on `EINTR` now fills remaining time (`rem`) when provided
     - `clock_nanosleep` supports both relative sleep and `TIMER_ABSTIME` absolute deadlines
+    - `clock_nanosleep` decodes `flags` using Linux ABI width (`int`/32-bit)
     - `clock_nanosleep` accepts `CLOCK_BOOTTIME` and `CLOCK_TAI` (currently mapped to monotonic/realtime base clocks)
     - `CLOCK_REALTIME` is implemented as `CLOCK_MONOTONIC + realtime_offset`; `clock_settime(CLOCK_REALTIME, ...)` updates this offset while `CLOCK_MONOTONIC` remains non-settable
     - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) on current realtime/monotonic sources, plus CPU clocks (`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`) from scheduler accounting

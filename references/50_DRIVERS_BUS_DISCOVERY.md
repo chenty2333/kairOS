@@ -55,6 +55,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - blkdev_register(): registers block device, validates sector_size/sector_count/ops
 - blkdev_read() / blkdev_write(): dispatched through blkdev_ops to specific driver
 - Current implementation: virtio_blk (drivers/block/virtio_blk.c)
+- DMA mapping path uses `dma_map_single()/dma_unmap_single()`; on aarch64 this now performs cache clean/invalidate for non-coherent DMA directions (TO/FROM/BIDIRECTIONAL)
 
 ## Driver Overview
 

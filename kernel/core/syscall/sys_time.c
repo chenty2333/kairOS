@@ -262,7 +262,8 @@ int64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
 int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
                             uint64_t rem_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~TIMER_ABSTIME)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~TIMER_ABSTIME)
         return -EINVAL;
     uint64_t sleep_clockid = 0;
     int rc = clockid_sleep_base(clockid, &sleep_clockid);
@@ -274,7 +275,7 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
         return rc;
 
     uint64_t req_ns = (uint64_t)req.tv_sec * NS_PER_SEC + (uint64_t)req.tv_nsec;
-    if (flags & TIMER_ABSTIME)
+    if (uflags & TIMER_ABSTIME)
         return clock_nanosleep_abstime(sleep_clockid, req_ns);
 
     uint64_t delta = ns_to_sched_ticks(req_ns);
@@ -282,7 +283,7 @@ int64_t sys_clock_nanosleep(uint64_t clockid, uint64_t flags, uint64_t req_ptr,
         return 0;
     uint64_t deadline = arch_timer_get_ticks() + delta;
     return sleep_until_deadline(deadline, rem_ptr,
-                                (flags & TIMER_ABSTIME) == 0);
+                                (uflags & TIMER_ABSTIME) == 0);
 }
 
 int64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
