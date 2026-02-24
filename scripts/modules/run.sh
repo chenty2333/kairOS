@@ -147,6 +147,8 @@ printf 'first_fail=""\n' >&3
 sleep "$step_delay"
 printf 'mark_failed(){ failed=1; if [ -n "${1:-}" ]; then echo SMOKE_FAIL:$1; [ -z "$first_fail" ] && first_fail="$1"; fi; }\n' >&3
 sleep "$step_delay"
+printf 'classify_exec_fail(){ rc="${1:-1}"; msg="${2:-}"; case "$msg" in *"Permission denied"*) echo exec_perm_denied; return;; *"Exec format error"*|*"not an ELF"*) echo exec_invalid_elf; return;; *"error while loading shared libraries"*|*"Error loading shared library"*) echo exec_missing_shared_object; return;; *"No such file"*|*"not found"*) if [ -n "${expected_interp:-}" ] && [ ! -e "$expected_interp" ]; then echo exec_interp_missing; else echo exec_missing_file_or_so; fi; return;; *"cannot execute"*) echo exec_not_executable; return;; esac; if [ "$rc" -eq 126 ]; then echo exec_perm_denied; elif [ "$rc" -eq 127 ]; then echo exec_missing_file_or_loader; else echo exec_runtime_failed; fi; }\n' >&3
+sleep "$step_delay"
 printf 'arch="$(uname -m)"\n' >&3
 sleep "$step_delay"
 printf 'if [ -z "$expected_interp" ]; then\n' >&3
@@ -179,13 +181,13 @@ printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_dyn || mark_failed dyn_compi
 sleep "$step_delay"
 printf '[ -x /tmp/tcc_smoke_dyn ] || mark_failed dyn_output_missing\n' >&3
 sleep "$step_delay"
-printf '/tmp/tcc_smoke_dyn\n' >&3
-sleep "$step_delay"
-printf 'rc_dyn=$?\n' >&3
+printf 'dyn_err="$(/tmp/tcc_smoke_dyn 2>&1)"; rc_dyn=$?\n' >&3
 sleep "$step_delay"
 printf 'echo RC_DYN:$rc_dyn\n' >&3
 sleep "$step_delay"
-printf '[ "$rc_dyn" -eq 0 ] || mark_failed dyn_exec_failed\n' >&3
+printf '[ -z "$dyn_err" ] || echo DYN_ERR:$dyn_err\n' >&3
+sleep "$step_delay"
+printf 'if [ "$rc_dyn" -ne 0 ]; then dyn_reason="$(classify_exec_fail "$rc_dyn" "$dyn_err")"; mark_failed "$dyn_reason"; fi\n' >&3
 sleep "$step_delay"
 printf 'tr '\''\\000'\'' '\''\\n'\'' < /tmp/tcc_smoke_dyn > /tmp/tcc_smoke_dyn.str\n' >&3
 sleep "$step_delay"
@@ -213,9 +215,11 @@ printf 'hello_out="$(/tmp/hello_dyn 2>&1)"; rc_dyn_hello=$?; echo RC_DYN_HELLO:$
 sleep "$step_delay"
 printf '[ "$rc_dyn_hello" -eq 0 ] || mark_failed dyn_hello_exec_failed\n' >&3
 sleep "$step_delay"
-printf 'echo "$hello_out" | grep -F "hello world" >/dev/null 2>&1 || mark_failed dyn_hello_output_mismatch\n' >&3
+printf 'hello_match=0; case "$hello_out" in *"hello world"*) hello_match=1;; esac\n' >&3
 sleep "$step_delay"
-printf 'if [ "$rc_dyn_hello" -eq 0 ] && echo "$hello_out" | grep -F "hello world" >/dev/null 2>&1; then echo HELLO_DYN_OK; fi\n' >&3
+printf '[ "$hello_match" -eq 1 ] || mark_failed dyn_hello_output_mismatch\n' >&3
+sleep "$step_delay"
+printf 'if [ "$rc_dyn_hello" -eq 0 ] && [ "$hello_match" -eq 1 ]; then echo HELLO_DYN_OK; fi\n' >&3
 sleep "$step_delay"
 printf '[ -z "$first_fail" ] || echo SMOKE_FAIL_FIRST:$first_fail\n' >&3
 sleep "$step_delay"
