@@ -212,6 +212,12 @@ int64_t sys_futex(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_futex_waitv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                         uint64_t);
 int64_t sys_eventfd2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_inotify_init1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                          uint64_t);
+int64_t sys_inotify_add_watch(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                              uint64_t);
+int64_t sys_inotify_rm_watch(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                             uint64_t);
 int64_t sys_fcntl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_ioctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_pipe2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);

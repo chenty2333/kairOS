@@ -101,6 +101,7 @@ Special:
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + sigmask size checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
 - Linux ABI compatibility also includes `eventfd2`, `timerfd_create/settime/gettime`, and `signalfd4` via anon-vnode pollable file descriptors
+- `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
 - `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior; timeout argument is currently ignored
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately

@@ -1,6 +1,9 @@
 #include <kairos/arch.h>
+#include <kairos/dentry.h>
+#include <kairos/inotify.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
+#include <kairos/namei.h>
 #include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
@@ -9,6 +12,8 @@
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 #include <kairos/wait.h>
+
+#include "sys_fs_helpers.h"
 
 #define NS_PER_SEC 1000000000ULL
 
@@ -27,6 +32,9 @@
 #define EVENTFD_MAGIC 0x65766466U
 #define TIMERFD_MAGIC 0x746d6664U
 #define SIGNALFD_MAGIC 0x73666466U
+#define INOTIFY_MAGIC 0x696e6664U
+
+#define INOTIFY_Q_MAX_BYTES (64U * 1024U)
 
 struct linux_itimerspec {
     struct timespec it_interval;
@@ -56,6 +64,13 @@ struct linux_signalfd_siginfo {
     uint64_t ssi_call_addr;
     uint32_t ssi_arch;
     uint8_t __pad[128 - 14 * 4 - 5 * 8 - 2 * 2];
+};
+
+struct linux_inotify_event {
+    int32_t wd;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t len;
 };
 
 struct eventfd_ctx {
@@ -91,8 +106,43 @@ struct signalfd_ctx {
     bool closed;
 };
 
+struct inotify_watch {
+    struct list_head node;
+    int wd;
+    struct vnode *vn;
+    uint32_t mask;
+};
+
+struct inotify_event_node {
+    struct list_head node;
+    int wd;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t len;
+    char name[CONFIG_NAME_MAX];
+};
+
+struct inotify_ctx {
+    uint32_t magic;
+    struct mutex lock;
+    struct wait_queue rd_wait;
+    struct vnode *vnode;
+    struct list_head node;
+    struct list_head watches;
+    struct list_head events;
+    size_t queued_bytes;
+    int next_wd;
+    bool overflow_pending;
+    bool closed;
+};
+
 static LIST_HEAD(timerfd_list);
 static spinlock_t timerfd_list_lock = SPINLOCK_INIT;
+static struct list_head inotify_instances;
+static struct mutex inotify_instances_lock;
+static spinlock_t inotify_init_lock = SPINLOCK_INIT;
+static bool inotify_ready;
+static uint32_t inotify_cookie_seed;
 
 static int eventfd_close(struct vnode *vn);
 static int eventfd_poll(struct file *file, uint32_t events);
@@ -124,6 +174,16 @@ static struct file_ops signalfd_file_ops = {
     .close = signalfd_close,
     .fread = signalfd_fread,
     .poll = signalfd_poll,
+};
+
+static int inotify_close(struct vnode *vn);
+static int inotify_poll(struct file *file, uint32_t events);
+static ssize_t inotify_fread(struct file *file, void *buf, size_t len);
+
+static struct file_ops inotify_file_ops = {
+    .close = inotify_close,
+    .fread = inotify_fread,
+    .poll = inotify_poll,
 };
 
 static uint64_t u64_add_sat(uint64_t lhs, uint64_t rhs) {
@@ -480,6 +540,341 @@ static int signalfd_create_file(sigset_t mask, uint64_t flags, struct file **out
         file->flags |= O_NONBLOCK;
     *out = file;
     return 0;
+}
+
+static void inotify_global_init(void) {
+    if (__atomic_load_n(&inotify_ready, __ATOMIC_ACQUIRE))
+        return;
+    bool irq;
+    spin_lock_irqsave(&inotify_init_lock, &irq);
+    if (__atomic_load_n(&inotify_ready, __ATOMIC_RELAXED)) {
+        spin_unlock_irqrestore(&inotify_init_lock, irq);
+        return;
+    }
+    mutex_init(&inotify_instances_lock, "inotify_instances");
+    INIT_LIST_HEAD(&inotify_instances);
+    inotify_cookie_seed = 0;
+    __atomic_store_n(&inotify_ready, true, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&inotify_init_lock, irq);
+}
+
+uint32_t inotify_next_cookie(void) {
+    inotify_global_init();
+    uint32_t cookie = __atomic_add_fetch(&inotify_cookie_seed, 1, __ATOMIC_RELAXED);
+    if (cookie == 0)
+        cookie = __atomic_add_fetch(&inotify_cookie_seed, 1, __ATOMIC_RELAXED);
+    return cookie;
+}
+
+static size_t inotify_name_payload_len(const char *name) {
+    if (!name || !name[0])
+        return 0;
+    size_t n = strnlen(name, CONFIG_NAME_MAX - 1) + 1;
+    size_t align = sizeof(uint32_t) - 1;
+    return (n + align) & ~align;
+}
+
+static size_t inotify_event_size(const struct inotify_event_node *ev) {
+    return sizeof(struct linux_inotify_event) + (size_t)ev->len;
+}
+
+static struct inotify_watch *inotify_find_watch_by_wd(struct inotify_ctx *ctx,
+                                                      int wd) {
+    if (!ctx)
+        return NULL;
+    struct inotify_watch *watch;
+    list_for_each_entry(watch, &ctx->watches, node) {
+        if (watch->wd == wd)
+            return watch;
+    }
+    return NULL;
+}
+
+static struct inotify_watch *inotify_find_watch_by_vnode(struct inotify_ctx *ctx,
+                                                         struct vnode *vn) {
+    if (!ctx || !vn)
+        return NULL;
+    struct inotify_watch *watch;
+    list_for_each_entry(watch, &ctx->watches, node) {
+        if (watch->vn == vn)
+            return watch;
+    }
+    return NULL;
+}
+
+static void inotify_queue_event_locked(struct inotify_ctx *ctx, int wd,
+                                       uint32_t mask, uint32_t cookie,
+                                       const char *name) {
+    if (!ctx || ctx->closed)
+        return;
+
+    size_t payload = inotify_name_payload_len(name);
+    size_t need = sizeof(struct linux_inotify_event) + payload;
+    if (ctx->queued_bytes + need > INOTIFY_Q_MAX_BYTES) {
+        if (ctx->overflow_pending)
+            return;
+        struct inotify_event_node *overflow = kzalloc(sizeof(*overflow));
+        if (!overflow)
+            return;
+        overflow->wd = -1;
+        overflow->mask = IN_Q_OVERFLOW;
+        overflow->cookie = 0;
+        overflow->len = 0;
+        list_add_tail(&overflow->node, &ctx->events);
+        ctx->queued_bytes += sizeof(struct linux_inotify_event);
+        ctx->overflow_pending = true;
+        wait_queue_wakeup_all(&ctx->rd_wait);
+        vfs_poll_wake(ctx->vnode, POLLIN);
+        return;
+    }
+
+    struct inotify_event_node *ev = kzalloc(sizeof(*ev));
+    if (!ev)
+        return;
+
+    ev->wd = wd;
+    ev->mask = mask;
+    ev->cookie = cookie;
+    ev->len = (uint32_t)payload;
+    if (payload > 0 && name) {
+        size_t n = strnlen(name, CONFIG_NAME_MAX - 1);
+        memcpy(ev->name, name, n);
+        ev->name[n] = '\0';
+    }
+
+    list_add_tail(&ev->node, &ctx->events);
+    ctx->queued_bytes += need;
+    wait_queue_wakeup_all(&ctx->rd_wait);
+    vfs_poll_wake(ctx->vnode, POLLIN);
+}
+
+static void inotify_watch_destroy(struct inotify_watch *watch) {
+    if (!watch)
+        return;
+    if (watch->vn)
+        vnode_put(watch->vn);
+    kfree(watch);
+}
+
+static void inotify_remove_watch_locked(struct inotify_ctx *ctx,
+                                        struct inotify_watch *watch,
+                                        bool emit_ignored) {
+    if (!ctx || !watch)
+        return;
+    int wd = watch->wd;
+    list_del(&watch->node);
+    inotify_watch_destroy(watch);
+    if (emit_ignored)
+        inotify_queue_event_locked(ctx, wd, IN_IGNORED, 0, NULL);
+}
+
+static void inotify_drop_all_locked(struct inotify_ctx *ctx) {
+    if (!ctx)
+        return;
+    struct inotify_watch *watch, *wtmp;
+    list_for_each_entry_safe(watch, wtmp, &ctx->watches, node) {
+        list_del(&watch->node);
+        inotify_watch_destroy(watch);
+    }
+    struct inotify_event_node *ev, *etmp;
+    list_for_each_entry_safe(ev, etmp, &ctx->events, node) {
+        list_del(&ev->node);
+        kfree(ev);
+    }
+    ctx->queued_bytes = 0;
+    ctx->overflow_pending = false;
+}
+
+static int inotify_close(struct vnode *vn) {
+    if (!vn)
+        return 0;
+    struct inotify_ctx *ctx = (struct inotify_ctx *)vn->fs_data;
+    if (ctx && ctx->magic == INOTIFY_MAGIC) {
+        inotify_global_init();
+        mutex_lock(&inotify_instances_lock);
+        if (!list_empty(&ctx->node))
+            list_del(&ctx->node);
+        mutex_unlock(&inotify_instances_lock);
+
+        mutex_lock(&ctx->lock);
+        ctx->closed = true;
+        inotify_drop_all_locked(ctx);
+        mutex_unlock(&ctx->lock);
+
+        wait_queue_wakeup_all(&ctx->rd_wait);
+        vfs_poll_wake(vn, POLLIN | POLLHUP);
+        ctx->magic = 0;
+        kfree(ctx);
+    }
+    kfree(vn);
+    return 0;
+}
+
+static int inotify_poll(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+    struct inotify_ctx *ctx = (struct inotify_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != INOTIFY_MAGIC)
+        return POLLNVAL;
+
+    uint32_t revents = 0;
+    mutex_lock(&ctx->lock);
+    if (!list_empty(&ctx->events))
+        revents |= POLLIN;
+    if (ctx->closed)
+        revents |= POLLHUP;
+    mutex_unlock(&ctx->lock);
+    return (int)(revents & events);
+}
+
+static ssize_t inotify_fread(struct file *file, void *buf, size_t len) {
+    if (!file || !file->vnode || !buf)
+        return -EINVAL;
+    if (len < sizeof(struct linux_inotify_event))
+        return -EINVAL;
+
+    struct inotify_ctx *ctx = (struct inotify_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != INOTIFY_MAGIC)
+        return -EINVAL;
+
+    while (1) {
+        mutex_lock(&ctx->lock);
+        if (!list_empty(&ctx->events)) {
+            size_t copied = 0;
+            uint8_t *dst = (uint8_t *)buf;
+            struct inotify_event_node *ev, *tmp;
+            list_for_each_entry_safe(ev, tmp, &ctx->events, node) {
+                size_t need = inotify_event_size(ev);
+                if (copied == 0 && need > len) {
+                    mutex_unlock(&ctx->lock);
+                    return -EINVAL;
+                }
+                if (copied + need > len)
+                    break;
+
+                struct linux_inotify_event hdr = {
+                    .wd = ev->wd,
+                    .mask = ev->mask,
+                    .cookie = ev->cookie,
+                    .len = ev->len,
+                };
+                memcpy(dst + copied, &hdr, sizeof(hdr));
+                copied += sizeof(hdr);
+                if (ev->len > 0) {
+                    memcpy(dst + copied, ev->name, ev->len);
+                    copied += ev->len;
+                }
+
+                list_del(&ev->node);
+                ctx->queued_bytes -= need;
+                if (ev->mask == IN_Q_OVERFLOW)
+                    ctx->overflow_pending = false;
+                kfree(ev);
+            }
+            mutex_unlock(&ctx->lock);
+            return (ssize_t)copied;
+        }
+
+        if (ctx->closed) {
+            mutex_unlock(&ctx->lock);
+            return -EINVAL;
+        }
+        bool nonblock = (file->flags & O_NONBLOCK) != 0;
+        mutex_unlock(&ctx->lock);
+        if (nonblock)
+            return -EAGAIN;
+
+        int rc = proc_sleep_on_mutex(&ctx->rd_wait, ctx, &file->lock, true);
+        if (rc < 0)
+            return rc;
+    }
+}
+
+static int inotify_create_file(uint64_t flags, struct file **out) {
+    inotify_global_init();
+
+    struct inotify_ctx *ctx = kzalloc(sizeof(*ctx));
+    struct vnode *vn = kzalloc(sizeof(*vn));
+    struct file *file = vfs_file_alloc();
+    if (!ctx || !vn || !file) {
+        kfree(ctx);
+        kfree(vn);
+        if (file)
+            vfs_file_free(file);
+        return -ENOMEM;
+    }
+
+    ctx->magic = INOTIFY_MAGIC;
+    mutex_init(&ctx->lock, "inotify");
+    wait_queue_init(&ctx->rd_wait);
+    ctx->vnode = vn;
+    INIT_LIST_HEAD(&ctx->node);
+    INIT_LIST_HEAD(&ctx->watches);
+    INIT_LIST_HEAD(&ctx->events);
+    ctx->queued_bytes = 0;
+    ctx->next_wd = 1;
+    ctx->overflow_pending = false;
+    ctx->closed = false;
+
+    mutex_lock(&inotify_instances_lock);
+    list_add_tail(&ctx->node, &inotify_instances);
+    mutex_unlock(&inotify_instances_lock);
+
+    vn->type = VNODE_FILE;
+    vn->mode = S_IFREG | 0600;
+    vn->nlink = 1;
+    vn->ops = &inotify_file_ops;
+    vn->fs_data = ctx;
+    atomic_init(&vn->refcount, 1);
+    vn->parent = NULL;
+    vn->name[0] = '\0';
+    rwlock_init(&vn->lock, "inotify_vnode");
+    poll_wait_head_init(&vn->pollers);
+
+    file->vnode = vn;
+    file->flags = O_RDONLY;
+    if (flags & IN_NONBLOCK)
+        file->flags |= O_NONBLOCK;
+    *out = file;
+    return 0;
+}
+
+void inotify_fsnotify(struct vnode *vn, const char *name, uint32_t mask,
+                      uint32_t cookie) {
+    if (!vn || !(mask & (IN_ALL_EVENTS | IN_IGNORED | IN_Q_OVERFLOW)))
+        return;
+    inotify_global_init();
+
+    char stable_name[CONFIG_NAME_MAX];
+    stable_name[0] = '\0';
+    if (name) {
+        strncpy(stable_name, name, sizeof(stable_name) - 1);
+        stable_name[sizeof(stable_name) - 1] = '\0';
+    }
+
+    mutex_lock(&inotify_instances_lock);
+    struct inotify_ctx *ctx;
+    list_for_each_entry(ctx, &inotify_instances, node) {
+        mutex_lock(&ctx->lock);
+        if (ctx->closed) {
+            mutex_unlock(&ctx->lock);
+            continue;
+        }
+        struct inotify_watch *watch, *tmp;
+        list_for_each_entry_safe(watch, tmp, &ctx->watches, node) {
+            if (watch->vn != vn)
+                continue;
+            uint32_t event_bits = mask & IN_ALL_EVENTS;
+            if (event_bits && !(watch->mask & event_bits))
+                continue;
+            inotify_queue_event_locked(ctx, watch->wd, mask, cookie,
+                                       stable_name[0] ? stable_name : NULL);
+            if (watch->mask & IN_ONESHOT)
+                inotify_remove_watch_locked(ctx, watch, true);
+        }
+        mutex_unlock(&ctx->lock);
+    }
+    mutex_unlock(&inotify_instances_lock);
 }
 
 static uint64_t timerfd_now_ns(int clockid, uint64_t mono_ns, uint64_t realtime_ns) {
@@ -893,4 +1288,144 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
     spin_unlock_irqrestore(&ctx->lock, irq);
     file_put(file);
     return (int64_t)(int)fd;
+}
+
+static struct inotify_ctx *inotify_ctx_from_fd(struct file *file) {
+    if (!file || !file->vnode)
+        return NULL;
+    struct inotify_ctx *ctx = (struct inotify_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != INOTIFY_MAGIC)
+        return NULL;
+    return ctx;
+}
+
+int64_t sys_inotify_init1(uint64_t flags, uint64_t a1, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (flags & ~(IN_CLOEXEC | IN_NONBLOCK))
+        return -EINVAL;
+
+    struct file *file = NULL;
+    int rc = inotify_create_file(flags, &file);
+    if (rc < 0)
+        return rc;
+
+    uint32_t fd_flags = (flags & IN_CLOEXEC) ? FD_CLOEXEC : 0;
+    int fd = fd_alloc_flags(proc_current(), file, fd_flags);
+    if (fd < 0) {
+        vfs_close(file);
+        return fd;
+    }
+    return fd;
+}
+
+int64_t sys_inotify_add_watch(uint64_t fd, uint64_t path_ptr, uint64_t mask,
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    if (!path_ptr)
+        return -EFAULT;
+    if ((mask & IN_MASK_ADD) && (mask & IN_MASK_CREATE))
+        return -EINVAL;
+
+    uint32_t watch_mask = (uint32_t)(mask & (IN_ALL_EVENTS | IN_ONESHOT |
+                                             IN_EXCL_UNLINK));
+    if ((watch_mask & IN_ALL_EVENTS) == 0)
+        return -EINVAL;
+
+    struct path resolved;
+    path_init(&resolved);
+    int nflags = NAMEI_FOLLOW;
+    if (mask & IN_DONT_FOLLOW)
+        nflags = NAMEI_NOFOLLOW;
+    int rc = sysfs_resolve_at_user(AT_FDCWD, path_ptr, &resolved, nflags);
+    if (rc < 0)
+        return rc;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    if ((mask & IN_ONLYDIR) && resolved.dentry->vnode->type != VNODE_DIR) {
+        dentry_put(resolved.dentry);
+        return -ENOTDIR;
+    }
+
+    struct file *file = fd_get(proc_current(), (int)fd);
+    if (!file) {
+        dentry_put(resolved.dentry);
+        return -EBADF;
+    }
+    struct inotify_ctx *ctx = inotify_ctx_from_fd(file);
+    if (!ctx) {
+        file_put(file);
+        dentry_put(resolved.dentry);
+        return -EINVAL;
+    }
+
+    int wd = -EINVAL;
+    mutex_lock(&ctx->lock);
+    struct inotify_watch *watch =
+        inotify_find_watch_by_vnode(ctx, resolved.dentry->vnode);
+    if (watch) {
+        if (mask & IN_MASK_CREATE) {
+            wd = -EEXIST;
+        } else {
+            if (mask & IN_MASK_ADD)
+                watch->mask |= watch_mask;
+            else
+                watch->mask = watch_mask;
+            wd = watch->wd;
+        }
+    } else {
+        if (mask & IN_MASK_ADD) {
+            wd = -EINVAL;
+        } else {
+            struct inotify_watch *new_watch = kzalloc(sizeof(*new_watch));
+            if (!new_watch) {
+                wd = -ENOMEM;
+            } else {
+                int next = ctx->next_wd++;
+                if (ctx->next_wd <= 0)
+                    ctx->next_wd = 1;
+                if (next <= 0)
+                    next = ctx->next_wd++;
+                new_watch->wd = next;
+                new_watch->vn = resolved.dentry->vnode;
+                vnode_get(new_watch->vn);
+                new_watch->mask = watch_mask;
+                list_add_tail(&new_watch->node, &ctx->watches);
+                wd = new_watch->wd;
+            }
+        }
+    }
+    mutex_unlock(&ctx->lock);
+
+    file_put(file);
+    dentry_put(resolved.dentry);
+    return wd;
+}
+
+int64_t sys_inotify_rm_watch(uint64_t fd, uint64_t wd, uint64_t a2, uint64_t a3,
+                             uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    struct file *file = fd_get(proc_current(), (int)fd);
+    if (!file)
+        return -EBADF;
+    struct inotify_ctx *ctx = inotify_ctx_from_fd(file);
+    if (!ctx) {
+        file_put(file);
+        return -EINVAL;
+    }
+
+    int rc = -EINVAL;
+    mutex_lock(&ctx->lock);
+    struct inotify_watch *watch = inotify_find_watch_by_wd(ctx, (int)wd);
+    if (watch) {
+        inotify_remove_watch_locked(ctx, watch, true);
+        rc = 0;
+    }
+    mutex_unlock(&ctx->lock);
+
+    file_put(file);
+    return rc;
 }

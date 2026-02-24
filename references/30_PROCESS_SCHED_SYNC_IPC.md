@@ -119,6 +119,7 @@ Current IPC mechanisms:
 - Signals: inter-process notification
 - Event FDs: `eventfd2` and `timerfd_*` are exposed as anon-vnode file descriptors (pollable, Linux ABI wiring)
 - Signal FDs: `signalfd4` is wired; read consumes matching pending signals from the task signal bitmap
+- Inotify: `inotify_init1/add_watch/rm_watch` is wired with vnode-based watches and pollable event queue delivery
 
 Related references:
 - references/00_REPO_MAP.md

@@ -3,6 +3,7 @@
  */
 
 #include <kairos/printk.h>
+#include <kairos/inotify.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -10,6 +11,12 @@
 #include <kairos/dentry.h>
 #include <kairos/namei.h>
 #include <kairos/pipe.h>
+
+static inline uint32_t inotify_dir_flag(const struct vnode *vn) {
+    if (!vn)
+        return 0;
+    return (vn->type == VNODE_DIR) ? IN_ISDIR : 0;
+}
 
 int vfs_open_at_path(const struct path *base, const char *path, int flags,
                      mode_t mode, struct file **fp) {
@@ -49,6 +56,10 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
         return -ENOENT;
 
     struct vnode *vn = NULL;
+    struct vnode *created_parent = NULL;
+    char created_name[CONFIG_NAME_MAX];
+    bool created = false;
+    created_name[0] = '\0';
     if (resolved.dentry->flags & DENTRY_NEGATIVE) {
         if (!(flags & O_CREAT)) {
             dentry_put(resolved.dentry);
@@ -73,6 +84,10 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
             dentry_put(resolved.dentry);
             return -EIO;
         }
+        created_parent = resolved.dentry->parent->vnode;
+        strncpy(created_name, resolved.dentry->name, sizeof(created_name) - 1);
+        created_name[sizeof(created_name) - 1] = '\0';
+        created = true;
         dentry_add(resolved.dentry, vn);
         vnode_put(vn);
     } else {
@@ -137,6 +152,10 @@ int vfs_open_at_path(const struct path *base, const char *path, int flags,
         }
     }
     *fp = file;
+    inotify_fsnotify(vn, NULL, IN_OPEN | inotify_dir_flag(vn), 0);
+    if (created && created_parent) {
+        inotify_fsnotify(created_parent, created_name, IN_CREATE, 0);
+    }
     dentry_put(resolved.dentry);
     return 0;
 }
@@ -186,6 +205,13 @@ int vfs_close(struct file *file) {
     if (file->dentry) {
         dentry_put(file->dentry);
         file->dentry = NULL;
+    }
+    if (file->vnode) {
+        uint32_t close_mask = (file->flags & O_ACCMODE) == O_RDONLY
+                                  ? IN_CLOSE_NOWRITE
+                                  : IN_CLOSE_WRITE;
+        inotify_fsnotify(file->vnode, NULL,
+                         close_mask | inotify_dir_flag(file->vnode), 0);
     }
     vnode_put(file->vnode);
     vfs_file_free(file);
@@ -240,6 +266,8 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
         if (ret > 0)
             file->offset += ret;
         mutex_unlock(&file->lock);
+        if (ret > 0)
+            inotify_fsnotify(file->vnode, NULL, IN_MODIFY, 0);
         return ret;
     }
     if (!file->vnode->ops->write)
@@ -253,6 +281,8 @@ ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
         file->offset += ret;
     mutex_unlock(&file->lock);
     rwlock_write_unlock(&file->vnode->lock);
+    if (ret > 0)
+        inotify_fsnotify(file->vnode, NULL, IN_MODIFY, 0);
     return ret;
 }
 
@@ -376,6 +406,8 @@ int vfs_mkdir(const char *path, mode_t mode) {
     ret = resolved.mnt->ops->mkdir(resolved.dentry->parent->vnode,
                                    resolved.dentry->name, mode);
     if (ret == 0) {
+        inotify_fsnotify(resolved.dentry->parent->vnode, resolved.dentry->name,
+                         IN_CREATE | IN_ISDIR, 0);
         struct vnode *vn =
             resolved.mnt->ops->lookup(resolved.dentry->parent->vnode,
                                       resolved.dentry->name);
@@ -407,10 +439,28 @@ int vfs_rmdir(const char *path) {
         dentry_put(resolved.dentry);
         return -EBUSY;
     }
+    struct vnode *parent_vn = resolved.dentry->parent->vnode;
+    struct vnode *target_vn = resolved.dentry->vnode;
+    if (parent_vn)
+        vnode_get(parent_vn);
+    if (target_vn)
+        vnode_get(target_vn);
+    char target_name[CONFIG_NAME_MAX];
+    strncpy(target_name, resolved.dentry->name, sizeof(target_name) - 1);
+    target_name[sizeof(target_name) - 1] = '\0';
     ret = resolved.mnt->ops->rmdir(resolved.dentry->parent->vnode,
                                    resolved.dentry->name);
-    if (ret == 0)
+    if (ret == 0) {
         dentry_drop(resolved.dentry);
+        if (parent_vn)
+            inotify_fsnotify(parent_vn, target_name, IN_DELETE | IN_ISDIR, 0);
+        if (target_vn)
+            inotify_fsnotify(target_vn, NULL, IN_DELETE_SELF | IN_ISDIR, 0);
+    }
+    if (target_vn)
+        vnode_put(target_vn);
+    if (parent_vn)
+        vnode_put(parent_vn);
     dentry_put(resolved.dentry);
     return ret;
 }
@@ -445,10 +495,29 @@ int vfs_unlink(const char *path) {
         dentry_put(resolved.dentry);
         return -EBUSY;
     }
+    struct vnode *parent_vn = resolved.dentry->parent->vnode;
+    struct vnode *target_vn = resolved.dentry->vnode;
+    if (parent_vn)
+        vnode_get(parent_vn);
+    if (target_vn)
+        vnode_get(target_vn);
+    char target_name[CONFIG_NAME_MAX];
+    strncpy(target_name, resolved.dentry->name, sizeof(target_name) - 1);
+    target_name[sizeof(target_name) - 1] = '\0';
+    uint32_t dir_flag = inotify_dir_flag(target_vn);
     ret = resolved.mnt->ops->unlink(resolved.dentry->parent->vnode,
                                     resolved.dentry->name);
-    if (ret == 0)
+    if (ret == 0) {
         dentry_drop(resolved.dentry);
+        if (parent_vn)
+            inotify_fsnotify(parent_vn, target_name, IN_DELETE | dir_flag, 0);
+        if (target_vn)
+            inotify_fsnotify(target_vn, NULL, IN_DELETE_SELF | dir_flag, 0);
+    }
+    if (target_vn)
+        vnode_put(target_vn);
+    if (parent_vn)
+        vnode_put(parent_vn);
     dentry_put(resolved.dentry);
     return ret;
 }
@@ -481,6 +550,22 @@ int vfs_rename(const char *old, const char *new) {
         dentry_put(newp.dentry);
         return -EBUSY;
     }
+    char old_name[CONFIG_NAME_MAX];
+    char new_name[CONFIG_NAME_MAX];
+    strncpy(old_name, oldp.dentry->name, sizeof(old_name) - 1);
+    old_name[sizeof(old_name) - 1] = '\0';
+    strncpy(new_name, newp.dentry->name, sizeof(new_name) - 1);
+    new_name[sizeof(new_name) - 1] = '\0';
+    struct vnode *old_parent = oldp.dentry->parent->vnode;
+    struct vnode *new_parent = newp.dentry->parent->vnode;
+    struct vnode *target = oldp.dentry->vnode;
+    if (old_parent)
+        vnode_get(old_parent);
+    if (new_parent && new_parent != old_parent)
+        vnode_get(new_parent);
+    if (target)
+        vnode_get(target);
+    uint32_t dir_flag = inotify_dir_flag(target);
 
     ret = oldp.mnt->ops->rename(oldp.dentry->parent->vnode, oldp.dentry->name,
                                 newp.dentry->parent->vnode, newp.dentry->name);
@@ -488,7 +573,22 @@ int vfs_rename(const char *old, const char *new) {
         if (newp.dentry && !(newp.dentry->flags & DENTRY_NEGATIVE))
             dentry_drop(newp.dentry);
         dentry_move(oldp.dentry, newp.dentry->parent, newp.dentry->name);
+        uint32_t cookie = inotify_next_cookie();
+        if (old_parent)
+            inotify_fsnotify(old_parent, old_name, IN_MOVED_FROM | dir_flag,
+                             cookie);
+        if (new_parent)
+            inotify_fsnotify(new_parent, new_name, IN_MOVED_TO | dir_flag,
+                             cookie);
+        if (target)
+            inotify_fsnotify(target, NULL, IN_MOVE_SELF | dir_flag, 0);
     }
+    if (target)
+        vnode_put(target);
+    if (new_parent && new_parent != old_parent)
+        vnode_put(new_parent);
+    if (old_parent)
+        vnode_put(old_parent);
     if (oldp.dentry)
         dentry_put(oldp.dentry);
     if (newp.dentry)
@@ -519,6 +619,8 @@ int vfs_symlink(const char *target, const char *linkpath) {
     ret = resolved.mnt->ops->symlink(resolved.dentry->parent->vnode,
                                      resolved.dentry->name, target);
     if (ret == 0) {
+        inotify_fsnotify(resolved.dentry->parent->vnode, resolved.dentry->name,
+                         IN_CREATE, 0);
         struct vnode *vn =
             resolved.mnt->ops->lookup(resolved.dentry->parent->vnode,
                                       resolved.dentry->name);
