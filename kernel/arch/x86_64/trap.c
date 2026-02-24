@@ -90,17 +90,21 @@ extern void isr240(void);
 
 static void handle_irq(struct trap_frame *tf);
 
-static void idt_set_gate(int n, void (*handler)(void)) {
+static void idt_set_gate_dpl(int n, void (*handler)(void), uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
     uint16_t cs;
     __asm__ __volatile__("mov %%cs, %0" : "=r"(cs));
     idt[n].off_low = addr & 0xffff;
     idt[n].sel = cs;
     idt[n].ist = 0;
-    idt[n].type_attr = 0x8E;
+    idt[n].type_attr = (uint8_t)(0x8E | ((dpl & 0x3) << 5));
     idt[n].off_mid = (addr >> 16) & 0xffff;
     idt[n].off_high = (addr >> 32) & 0xffffffff;
     idt[n].zero = 0;
+}
+
+static inline void idt_set_gate(int n, void (*handler)(void)) {
+    idt_set_gate_dpl(n, handler, 0);
 }
 
 static void idt_load(void) {
@@ -296,7 +300,7 @@ void arch_trap_init(void) {
     idt_set_gate(45, isr45);
     idt_set_gate(46, isr46);
     idt_set_gate(47, isr47);
-    idt_set_gate(SYSCALL_VEC, isr128);
+    idt_set_gate_dpl(SYSCALL_VEC, isr128, 3);
     idt_set_gate(0xF0, isr240);
 
     idt_load();
