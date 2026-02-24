@@ -258,7 +258,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -713,7 +713,6 @@ SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
 SOAK_PR_TIMEOUT ?= 1800
-SOAK_PR_LOG ?= $(BUILD_DIR)/soak-pr.log
 SOAK_PR_EXTRA_CFLAGS ?= -DCONFIG_KERNEL_FAULT_INJECT=1 -DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=900 -DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=3
 TEST_RUNS_ROOT ?= build/runs
 RUNS_KEEP ?= 20
@@ -757,6 +756,12 @@ RUN_ID := $(shell sh -c 'ts="$$(date +%y%m%d-%H%M)"; rnd="$$(od -An -N2 -tx1 /de
 endif
 TEST_BUILD_ROOT ?= $(TEST_RUNS_ROOT)/$(RUN_ID)
 RUN_BUILD_ROOT ?= $(RUN_RUNS_ROOT)/$(RUN_ID)
+ifeq ($(TEST_ISOLATED),1)
+SOAK_PR_LOG_DEFAULT = $(TEST_BUILD_ROOT)/$(ARCH)/test.log
+else
+SOAK_PR_LOG_DEFAULT = $(BUILD_DIR)/soak-pr.log
+endif
+SOAK_PR_LOG ?= $(SOAK_PR_LOG_DEFAULT)
 RUN_LOG ?= $(BUILD_DIR)/run.log
 RUN_MANIFEST ?= $(BUILD_ROOT)/manifest.json
 RUN_RESULT ?= $(BUILD_ROOT)/result.json
@@ -896,7 +901,7 @@ test-tty:
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x400" test
 
 test-soak-pr:
-	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(SOAK_PR_TIMEOUT)" TEST_LOG="$(SOAK_PR_LOG)" \
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" RUN_ID="$(RUN_ID)" TEST_TIMEOUT="$(SOAK_PR_TIMEOUT)" TEST_LOG="$(SOAK_PR_LOG)" \
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x800 $(SOAK_PR_EXTRA_CFLAGS)" test
 
 gc-runs:
@@ -989,6 +994,42 @@ test-concurrent-vfs-ipc:
 		TEST_CONCURRENCY="$(TEST_CONCURRENCY)" TEST_ROUNDS="$(TEST_ROUNDS)" \
 		TEST_CONCURRENT_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" test-concurrent-smoke
 
+print-config:
+	@echo "Kairos Effective Configuration"
+	@echo ""
+	@echo "Core:"
+	@echo "  ARCH=$(ARCH)"
+	@echo "  BUILD_ROOT=$(BUILD_ROOT)"
+	@echo "  BUILD_DIR=$(BUILD_DIR)"
+	@echo "  RUN_ID=$(RUN_ID)"
+	@echo ""
+	@echo "Run/Test Isolation:"
+	@echo "  RUN_ISOLATED=$(RUN_ISOLATED)"
+	@echo "  TEST_ISOLATED=$(TEST_ISOLATED)"
+	@echo "  RUN_BUILD_ROOT=$(RUN_BUILD_ROOT)"
+	@echo "  TEST_BUILD_ROOT=$(TEST_BUILD_ROOT)"
+	@echo ""
+	@echo "Timeouts:"
+	@echo "  RUN_TIMEOUT=$(RUN_TIMEOUT)"
+	@echo "  TEST_TIMEOUT=$(TEST_TIMEOUT)"
+	@echo "  SOAK_TIMEOUT=$(SOAK_TIMEOUT)"
+	@echo "  SOAK_PR_TIMEOUT=$(SOAK_PR_TIMEOUT)"
+	@echo ""
+	@echo "Logs:"
+	@echo "  RUN_LOG=$(RUN_LOG)"
+	@echo "  TEST_LOG=$(TEST_LOG)"
+	@echo "  SOAK_LOG=$(SOAK_LOG)"
+	@echo "  SOAK_PR_LOG=$(SOAK_PR_LOG)"
+	@echo ""
+	@echo "Locks and Retention:"
+	@echo "  LOCK_WAIT=$(LOCK_WAIT)"
+	@echo "  RUN_LOCK_WAIT=$(RUN_LOCK_WAIT)"
+	@echo "  TEST_LOCK_WAIT=$(TEST_LOCK_WAIT)"
+	@echo "  GC_RUNS_AUTO=$(GC_RUNS_AUTO)"
+	@echo "  RUN_GC_AUTO=$(RUN_GC_AUTO)"
+	@echo "  RUNS_KEEP=$(RUNS_KEEP)"
+	@echo "  RUNS_KEEP_RUN=$(RUNS_KEEP_RUN)"
+
 # Show help
 help:
 	@echo "Kairos Kernel Build System"
@@ -1004,23 +1045,31 @@ help:
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
 	@echo "  test-device-virtio - Run device model + virtio probe-path module only"
 	@echo "  test-concurrent-vfs-ipc - Concurrent smoke preset for test-vfs-ipc"
+	@echo "  print-config - Show effective build/run/test configuration"
 	@echo "  gc-runs  - Keep only latest N isolated runs"
 	@echo "  lock-status - List lock files and metadata (pid/state)"
 	@echo "  clean    - Remove current BUILD_ROOT/ARCH artifacts"
 	@echo "  clean-all - Remove all build/ artifacts"
 	@echo ""
-	@echo "Common Variables:"
+	@echo "Daily Variables:"
 	@echo "  ARCH     - Target architecture (riscv64, x86_64, aarch64)"
 	@echo "  TEST_TIMEOUT - Timeout seconds for test targets (default: 180)"
 	@echo "  LOCK_WAIT - Wait seconds for run/test lock acquisition (default: 0)"
-	@echo "  RUN_ID   - Explicit isolated session id (default: YYMMDD-HHMM-xxxx)"
 	@echo "  V        - Verbose mode (V=1)"
+	@echo ""
+	@echo "Isolation/Path Variables:"
+	@echo "  RUN_ID   - Explicit isolated session id (default: YYMMDD-HHMM-xxxx)"
+	@echo "  BUILD_ROOT - Build root base (default: build)"
+	@echo "  TEST_LOG - Test log path (default: <BUILD_ROOT>/<arch>/test.log)"
+	@echo "  RUN_LOG  - Run log path (default: <BUILD_ROOT>/<arch>/run.log)"
+	@echo "  SOAK_PR_LOG - Soak-pr log (isolated: <TEST_BUILD_ROOT>/<arch>/test.log; non-isolated: build/<arch>/soak-pr.log)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make ARCH=riscv64 test-vfs-ipc"
 	@echo "  make LOCK_WAIT=5 test-mm"
 	@echo "  make TEST_TIMEOUT=300 test-sched"
 	@echo "  make run"
+	@echo "  make print-config"
 	@echo ""
 	@echo "Advanced:"
 	@echo "  make HELP_ADVANCED=1 help"
@@ -1061,6 +1110,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-devmodel - Alias of test-device-virtio"
 	@echo "  test-tty - Run tty stack module only (tty_core/n_tty/pty)"
 	@echo "  test-soak-pr - Run PR soak + low-rate fault injection module only"
+	@echo "  print-config - Show effective build/run/test configuration"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  lock-status - List lock files and metadata (pid/state)"
 	@echo "  lock-clean-stale - Remove dead .lock.meta and legacy qemu-run locks"
@@ -1091,6 +1141,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  RUN_LOCK_WAIT - Seconds to wait for run qemu lock before lock_busy (default: 0)"
 	@echo "  TEST_LOCK_WAIT - Seconds to wait for test qemu lock before lock_busy (default: 0)"
 	@echo "  TOOLCHAIN_LOCK_WAIT - Seconds to wait for global toolchain lock (default: 900)"
+	@echo "  SOAK_PR_LOG - test-soak-pr log path (isolated default: <TEST_BUILD_ROOT>/<arch>/test.log)"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  HELP_ADVANCED - Show advanced help sections (set 1)"
 	@echo ""

@@ -32,6 +32,7 @@ Core:
 - `make` — build kernel
 - `make help` — show common targets/variables (minimal daily surface)
 - `make HELP_ADVANCED=1 help` — show advanced targets/variables
+- `make print-config` — print effective build/run/test configuration (paths, timeouts, locks, retention)
 - `make clean` — remove current `<BUILD_ROOT>/<arch>`
 - `make clean-all` — remove entire `build/`
 - `make distclean` — `clean-all` + third_party/musl and third_party/busybox build artifacts
@@ -99,7 +100,7 @@ QEMU configuration:
 - `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module only
 - `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo/isig semantics, blocking read wakeup and EINTR paths, controlling-tty `/dev/tty` attach/detach lifecycle, pty pair EOF + reopen stability)
 - `make test-soak-pr` — PR-level soak module only (default 15 min, low-rate fault injection, deterministic round-based suite scheduling, summary-based pass/fail)
-- `test-soak-pr` log path is controlled by `SOAK_PR_LOG` (default `build/<arch>/soak-pr.log`, even when tests run in isolated mode)
+- `test-soak-pr` log path is controlled by `SOAK_PR_LOG` (default isolated mode: `<TEST_BUILD_ROOT>/<arch>/test.log`; non-isolated mode: `build/<arch>/soak-pr.log`)
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
@@ -121,7 +122,7 @@ For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - `manifest.json` (command, arch, build root, git sha, timestamps)
 - `result.json` (status/reason/verdict source + structured block + summary block + marker flags + log path)
 - `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
-- Default isolated test logs live under the run directory; explicit `TEST_LOG` / `SOAK_PR_LOG` / `TCC_SMOKE_LOG` / `EXEC_ELF_SMOKE_LOG` overrides keep caller-provided paths
+- Default isolated test logs live under the run directory (including `test-soak-pr`); explicit `TEST_LOG` / `SOAK_PR_LOG` / `TCC_SMOKE_LOG` / `EXEC_ELF_SMOKE_LOG` overrides keep caller-provided paths
 
 Concurrency and locking:
 - Global locks live at `build/.locks/global-<name>.lock` (current shared resource: `global-deps-fetch.lock`).

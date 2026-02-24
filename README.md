@@ -45,6 +45,7 @@ make ARCH=x86_64
 make TEST_TIMEOUT=300 test-sched
 make LOCK_WAIT=5 test-mm
 make V=1 run
+make print-config
 ```
 
 ## Where Results Go
@@ -56,6 +57,7 @@ Run/test are isolated by default.
 - Each run writes:
   - `manifest.json`
   - `result.json`
+- `test-soak-pr` follows isolated test log path by default (`<TEST_BUILD_ROOT>/<arch>/test.log`); non-isolated mode defaults to `build/<arch>/soak-pr.log`
 
 Automation should consume `result.json`.
 
