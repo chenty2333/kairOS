@@ -240,6 +240,8 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     uint32_t uflags = (uint32_t)flags;
+    if ((flags >> 32) != 0)
+        return -EINVAL;
     if (!target_ptr)
         return -EFAULT;
     if (uflags != 0)
@@ -261,7 +263,7 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
     return vfs_umount(full);
 }
 
-static int set_mount_propagation(struct mount *mnt, uint64_t flags) {
+static int set_mount_propagation(struct mount *mnt, uint32_t flags) {
     if (!mnt)
         return -EINVAL;
     if (flags & MS_SHARED)
@@ -282,9 +284,12 @@ static int set_mount_propagation(struct mount *mnt, uint64_t flags) {
 int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
                   uint64_t flags, uint64_t data, uint64_t a5) {
     (void)data; (void)a5;
-    uint64_t allowed = MS_BIND | MS_REC | MS_PRIVATE | MS_SLAVE |
+    uint32_t uflags = (uint32_t)flags;
+    uint32_t allowed = MS_BIND | MS_REC | MS_PRIVATE | MS_SLAVE |
                        MS_SHARED | MS_UNBINDABLE;
-    if (flags & ~allowed)
+    if ((flags >> 32) != 0)
+        return -EINVAL;
+    if (uflags & ~allowed)
         return -EINVAL;
     char source[CONFIG_PATH_MAX];
     char target[CONFIG_PATH_MAX];
@@ -308,19 +313,19 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
     if (ret < 0)
         return ret;
 
-    uint64_t prop_mask = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
-    if (flags & prop_mask) {
+    uint32_t prop_mask = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
+    if (uflags & prop_mask) {
         struct mount *mnt = tpath.dentry->mounted
                                 ? tpath.dentry->mounted
                                 : tpath.dentry->mnt;
         vfs_mount_global_lock();
-        ret = set_mount_propagation(mnt, flags);
+        ret = set_mount_propagation(mnt, uflags);
         vfs_mount_global_unlock();
         dentry_put(tpath.dentry);
         return ret;
     }
 
-    if (flags & MS_BIND) {
+    if (uflags & MS_BIND) {
         if (!source_ptr) {
             dentry_put(tpath.dentry);
             return -EINVAL;
@@ -332,7 +337,7 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
         if (ret < 0)
             goto out_tpath;
         vfs_mount_global_lock();
-        ret = vfs_bind_mount(spath.dentry, tpath.dentry, (uint32_t)flags, true);
+        ret = vfs_bind_mount(spath.dentry, tpath.dentry, uflags, true);
         vfs_mount_global_unlock();
         dentry_put(spath.dentry);
         dentry_put(tpath.dentry);
@@ -367,7 +372,7 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
                 dentry_put(spath.dentry);
                 src_use = source_full;
             }
-            ret = vfs_mount(src_use, target_full, fstype, (uint32_t)flags);
+            ret = vfs_mount(src_use, target_full, fstype, uflags);
         }
     }
 out_tpath:

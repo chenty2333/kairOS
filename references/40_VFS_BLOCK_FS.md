@@ -35,6 +35,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `statfs` now resolves the target path before filesystem stat (non-existent paths return `ENOENT`), and `fstatfs` falls back to fd dentry mount when available (`EINVAL` only when no mount context exists)
   - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); currently only `flags=0` is implemented
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
+- `mount`/`umount2` syscall entry handling rejects non-zero high 32-bit flag bits (`EINVAL`) and then applies low-32 Linux flag decoding
 
 ## Dentry Cache (fs/vfs/dentry.c)
 
@@ -114,6 +115,8 @@ Special:
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
 - socket message/accept syscall `flags` are decoded using Linux ABI width (`int`/32-bit) for `accept4`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`
 - socket control/int arguments are decoded with Linux ABI `int` width (`socket`/`socketpair` domain/type/protocol, `listen` backlog, `shutdown` how, `setsockopt`/`getsockopt` level/optname/optlen, `sendto`/`recvfrom` flags, sockaddr lengths)
+- `sendmmsg`/`recvmmsg` decode `vlen` using Linux ABI width (`unsigned int`/32-bit), ignoring upper 32 syscall argument bits
+- socket address-length values read from userspace (`accept*`, `recvfrom`, `getsockname`, `getpeername`) are decoded as 32-bit ABI values before range checks
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
 - `select` updates user `timeval` with remaining time on return (`success`/`EINTR`)
@@ -127,6 +130,7 @@ Special:
 - path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `linkat`) decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit
 - `dup3` and `pipe2` decode `flags` via Linux ABI width (`int`/32-bit)
 - `fcntl` decodes `cmd`/`arg` via Linux ABI `int` width (32-bit)
+- `ioctl` decodes `fd`/`cmd` via Linux ABI width (`unsigned int`/32-bit) before in-kernel command routing
 
 Related references:
 - references/00_REPO_MAP.md

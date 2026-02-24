@@ -9,16 +9,18 @@
 #include <kairos/vfs.h>
 
 /* Network ioctl handler (kernel/net/net_ioctl.c) */
-int net_ioctl(struct file *f, uint64_t cmd, uint64_t arg);
+int net_ioctl(struct file *f, uint32_t cmd, uint64_t arg);
 
 int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), (int)fd);
+    int kfd = (int32_t)(uint32_t)fd;
+    uint32_t ucmd = (uint32_t)cmd;
+    struct file *f = fd_get(proc_current(), kfd);
     if (!f)
         return -EBADF;
 
-    if (cmd == FIONBIO) {
+    if (ucmd == FIONBIO) {
         if (!arg) {
             file_put(f);
             return -EFAULT;
@@ -39,13 +41,13 @@ int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     }
 
     /* Route network ioctls (0x8900-0x89FF) to net_ioctl */
-    if (cmd >= 0x8900 && cmd <= 0x89FF) {
-        int64_t ret = net_ioctl(f, cmd, arg);
+    if (ucmd >= 0x8900U && ucmd <= 0x89FFU) {
+        int64_t ret = net_ioctl(f, ucmd, arg);
         file_put(f);
         return ret;
     }
 
-    int64_t ret = vfs_ioctl(f, cmd, arg);
+    int64_t ret = vfs_ioctl(f, ucmd, arg);
     file_put(f);
     return ret;
 }

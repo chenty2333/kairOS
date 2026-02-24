@@ -68,7 +68,7 @@ static uint32_t ip4_from_sockaddr(const struct sockaddr_kairos *sa) {
 }
 
 int net_ioctl(struct file *f __attribute__((unused)),
-              uint64_t cmd, uint64_t arg) {
+              uint32_t cmd, uint64_t arg) {
     struct ifreq ifr;
 
     if (!arg)

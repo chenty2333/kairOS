@@ -473,12 +473,14 @@ static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
 
     /* Copy peer address to user if requested */
     if (addr && addrlen_ptr) {
-        int ulen = 0;
-        if (copy_from_user(&ulen, (const void *)addrlen_ptr, sizeof(ulen)) < 0) {
+        uint32_t ulen_raw = 0;
+        if (copy_from_user(&ulen_raw, (const void *)addrlen_ptr,
+                           sizeof(ulen_raw)) < 0) {
             sock_destroy(newsock);
             file_put(sock_file);
             return -EFAULT;
         }
+        int ulen = (int32_t)ulen_raw;
         if (ulen < 0) {
             sock_destroy(newsock);
             file_put(sock_file);
@@ -665,11 +667,14 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
 
     /* Copy source address to user */
     if (ret >= 0 && src && addrlen_ptr) {
-        int ulen = 0;
-        if (copy_from_user(&ulen, (const void *)addrlen_ptr,
-                           sizeof(ulen)) == 0) {
-            int copylen = (alen < ulen) ? alen : ulen;
-            copy_to_user((void *)src, &kaddr, (size_t)copylen);
+        uint32_t ulen_raw = 0;
+        if (copy_from_user(&ulen_raw, (const void *)addrlen_ptr,
+                           sizeof(ulen_raw)) == 0) {
+            int ulen = (int32_t)ulen_raw;
+            if (ulen > 0) {
+                int copylen = (alen < ulen) ? alen : ulen;
+                copy_to_user((void *)src, &kaddr, (size_t)copylen);
+            }
             copy_to_user((void *)addrlen_ptr, &alen, sizeof(alen));
         }
     }
@@ -747,10 +752,11 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
     uint32_t uflags = (uint32_t)flags;
-    if (!vlen) {
+    uint32_t uvlen = (uint32_t)vlen;
+    if (!uvlen) {
         return 0;
     }
-    if (vlen > SOCKET_MSG_IOV_MAX) {
+    if (uvlen > SOCKET_MSG_IOV_MAX) {
         return -EINVAL;
     }
 
@@ -762,7 +768,7 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
     }
 
     int sent = 0;
-    for (uint64_t i = 0; i < vlen; i++) {
+    for (uint32_t i = 0; i < uvlen; i++) {
         uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
         struct socket_mmsghdr msg;
         if (copy_from_user(&msg, (const void *)ent_ptr, sizeof(msg)) < 0) {
@@ -790,10 +796,11 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
                      uint64_t flags, uint64_t timeout_ptr, uint64_t a5) {
     (void)a5;
     uint32_t uflags = (uint32_t)flags;
-    if (!vlen) {
+    uint32_t uvlen = (uint32_t)vlen;
+    if (!uvlen) {
         return 0;
     }
-    if (vlen > SOCKET_MSG_IOV_MAX) {
+    if (uvlen > SOCKET_MSG_IOV_MAX) {
         return -EINVAL;
     }
 
@@ -814,7 +821,7 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
     }
 
     int recved = 0;
-    for (uint64_t i = 0; i < vlen; i++) {
+    for (uint32_t i = 0; i < uvlen; i++) {
         uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
         struct socket_mmsghdr msg;
         if (copy_from_user(&msg, (const void *)ent_ptr, sizeof(msg)) < 0) {
@@ -875,10 +882,16 @@ int64_t sys_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
         return -EOPNOTSUPP;
     }
 
-    int ulen = 0;
-    if (copy_from_user(&ulen, (const void *)addrlen_ptr, sizeof(ulen)) < 0) {
+    uint32_t ulen_raw = 0;
+    if (copy_from_user(&ulen_raw, (const void *)addrlen_ptr,
+                       sizeof(ulen_raw)) < 0) {
         file_put(sock_file);
         return -EFAULT;
+    }
+    int ulen = (int32_t)ulen_raw;
+    if (ulen < 0) {
+        file_put(sock_file);
+        return -EINVAL;
     }
 
     struct sockaddr_storage kaddr;
@@ -916,10 +929,16 @@ int64_t sys_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
         return -EOPNOTSUPP;
     }
 
-    int ulen = 0;
-    if (copy_from_user(&ulen, (const void *)addrlen_ptr, sizeof(ulen)) < 0) {
+    uint32_t ulen_raw = 0;
+    if (copy_from_user(&ulen_raw, (const void *)addrlen_ptr,
+                       sizeof(ulen_raw)) < 0) {
         file_put(sock_file);
         return -EFAULT;
+    }
+    int ulen = (int32_t)ulen_raw;
+    if (ulen < 0) {
+        file_put(sock_file);
+        return -EINVAL;
     }
 
     struct sockaddr_storage kaddr;
