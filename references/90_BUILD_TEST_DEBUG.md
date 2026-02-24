@@ -30,6 +30,8 @@ Artifacts:
 
 Core:
 - `make` — build kernel
+- `make help` — show common targets/variables (minimal daily surface)
+- `make HELP_ADVANCED=1 help` — show advanced targets/variables
 - `make clean` — remove current `<BUILD_ROOT>/<arch>`
 - `make clean-all` — remove entire `build/`
 - `make distclean` — `clean-all` + third_party/musl and third_party/busybox build artifacts
@@ -50,6 +52,7 @@ Boot image:
 Variables:
 - `V=1` — verbose output
 - `BUILD_ROOT=...` — override build root (default `build`)
+- Recommended day-to-day knobs: `ARCH`, `TEST_TIMEOUT`, `LOCK_WAIT`, `RUN_ID`
 - Top-level userspace sub-make passes absolute `BUILD_ROOT` to avoid relative-path drift under `make -C user`
 - `EMBEDDED_INIT=1` — embedded init (riscv64 only)
 - `WITH_TCC=0` — exclude tcc from rootfs
@@ -129,7 +132,7 @@ Concurrency troubleshooting:
 - On `lock_busy`, run/test output still prints `manifest.json` and `result.json` paths for the failed attempt.
 - If metadata pid is `dead`, rerun the same command once; stale lock is reclaimed on the next lock attempt.
 - If metadata pid is `alive`, another run/test is still active for the same build directory; wait or switch to a different `BUILD_ROOT`.
-- Quick wait tuning examples: `make LOCK_WAIT=5 test-mm`, `make RUN_LOCK_WAIT=10 run`.
+- Quick wait tuning examples: `make LOCK_WAIT=5 test-mm` (default); advanced override: `make RUN_LOCK_WAIT=10 run`.
 
 Run retention:
 - `make gc-runs` keeps latest `RUNS_KEEP` runs (default `20`)
