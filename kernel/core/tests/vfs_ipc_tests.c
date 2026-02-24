@@ -22,6 +22,10 @@
 #if CONFIG_KERNEL_TESTS
 
 #define VFS_IPC_MNT "/tmp/.kairos_vfs_ipc"
+#define TEST_EFD_SEMAPHORE 0x1U
+#define TEST_TFD_TIMER_ABSTIME 0x1U
+#define TEST_TFD_TIMER_CANCEL_ON_SET 0x2U
+#define TEST_NS_PER_SEC 1000000000ULL
 
 static int tests_failed;
 
@@ -87,6 +91,17 @@ static off_t fd_get_offset(int fd) {
     mutex_unlock(&f->lock);
     file_put(f);
     return off;
+}
+
+static bool fd_has_cloexec(int fd) {
+    struct process *p = proc_current();
+    if (!p || !p->fdtable || fd < 0 || fd >= CONFIG_MAX_FILES_PER_PROC)
+        return false;
+    bool cloexec = false;
+    mutex_lock(&p->fdtable->lock);
+    cloexec = (p->fdtable->fd_flags[fd] & FD_CLOEXEC) != 0;
+    mutex_unlock(&p->fdtable->lock);
+    return cloexec;
 }
 
 struct user_map_ctx {
@@ -801,6 +816,9 @@ static void test_epoll_edge_oneshot_semantics(void) {
 
 static void test_eventfd_syscall_semantics(void) {
     int efd = -1;
+    int efd_sem = -1;
+    int efd_cloexec = -1;
+    int efd_width = -1;
 
     int64_t ret64 = sys_eventfd2(0, 0x4U, 0, 0, 0, 0);
     test_check(ret64 == -EINVAL, "eventfd2 invalid flags einval");
@@ -825,7 +843,40 @@ static void test_eventfd_syscall_semantics(void) {
     if (rd == (ssize_t)sizeof(counter))
         test_check(counter == 2, "eventfd2 read value");
 
+    ret64 = sys_eventfd2(2, TEST_EFD_SEMAPHORE | O_NONBLOCK, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "eventfd2 semaphore create");
+    if (ret64 >= 0) {
+        efd_sem = (int)ret64;
+        counter = 0;
+        rd = fd_read_once(efd_sem, &counter, sizeof(counter));
+        test_check(rd == (ssize_t)sizeof(counter), "eventfd2 semaphore read1");
+        if (rd == (ssize_t)sizeof(counter))
+            test_check(counter == 1, "eventfd2 semaphore value1");
+        counter = 0;
+        rd = fd_read_once(efd_sem, &counter, sizeof(counter));
+        test_check(rd == (ssize_t)sizeof(counter), "eventfd2 semaphore read2");
+        if (rd == (ssize_t)sizeof(counter))
+            test_check(counter == 1, "eventfd2 semaphore value2");
+        rd = fd_read_once(efd_sem, &counter, sizeof(counter));
+        test_check(rd == -EAGAIN, "eventfd2 semaphore drained");
+    }
+
+    ret64 = sys_eventfd2(0, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "eventfd2 cloexec create");
+    if (ret64 >= 0) {
+        efd_cloexec = (int)ret64;
+        test_check(fd_has_cloexec(efd_cloexec), "eventfd2 cloexec set");
+    }
+
+    ret64 = sys_eventfd2(0, (1ULL << 32) | O_NONBLOCK, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "eventfd2 flags width");
+    if (ret64 >= 0)
+        efd_width = (int)ret64;
+
     close_fd_if_open(&efd);
+    close_fd_if_open(&efd_sem);
+    close_fd_if_open(&efd_cloexec);
+    close_fd_if_open(&efd_width);
 }
 
 static void test_copy_file_range_syscall_semantics(void) {
@@ -1177,6 +1228,121 @@ out:
         user_map_end(&um);
 }
 
+static void test_timerfd_cancel_on_set_functional(void) {
+    int tfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    bool clock_shifted = false;
+    const uint64_t shift_ns = 2ULL * TEST_NS_PER_SEC;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "timerfd cancel user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    uint8_t *u_base = (uint8_t *)user_map_ptr(&um, 0);
+    test_check(u_base != NULL, "timerfd cancel user ptr");
+    if (!u_base)
+        goto out;
+
+    void *u_new = u_base;
+    void *u_clock = u_base + sizeof(struct test_linux_itimerspec);
+
+    int64_t ret64 =
+        sys_timerfd_create(CLOCK_REALTIME, O_NONBLOCK | O_CLOEXEC, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "timerfd cancel create");
+    if (ret64 < 0)
+        goto out;
+    tfd = (int)ret64;
+    test_check(fd_has_cloexec(tfd), "timerfd cancel cloexec");
+
+    uint64_t now_rt_ns = time_realtime_ns();
+    struct test_linux_itimerspec abs_arm = {
+        .it_interval = { .tv_sec = 0, .tv_nsec = 0 },
+        .it_value = {
+            .tv_sec = (time_t)((now_rt_ns + TEST_NS_PER_SEC) / TEST_NS_PER_SEC),
+            .tv_nsec = (int64_t)((now_rt_ns + TEST_NS_PER_SEC) % TEST_NS_PER_SEC),
+        },
+    };
+
+    rc = copy_to_user(u_new, &abs_arm, sizeof(abs_arm));
+    test_check(rc == 0, "timerfd cancel copy arm");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_timerfd_settime((uint64_t)tfd,
+                                TEST_TFD_TIMER_ABSTIME |
+                                    TEST_TFD_TIMER_CANCEL_ON_SET,
+                                (uint64_t)u_new, 0, 0, 0);
+    test_check(ret64 == 0, "timerfd cancel settime");
+    if (ret64 < 0)
+        goto out;
+
+    uint64_t expirations = 0;
+    ssize_t rd = fd_read_once(tfd, &expirations, sizeof(expirations));
+    test_check(rd == -EAGAIN, "timerfd cancel pre-change eagain");
+
+    uint64_t changed_ns = now_rt_ns + shift_ns;
+    struct timespec ts_changed = {
+        .tv_sec = (time_t)(changed_ns / TEST_NS_PER_SEC),
+        .tv_nsec = (int64_t)(changed_ns % TEST_NS_PER_SEC),
+    };
+    rc = copy_to_user(u_clock, &ts_changed, sizeof(ts_changed));
+    test_check(rc == 0, "timerfd cancel copy clock");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_clock_settime(CLOCK_REALTIME, (uint64_t)u_clock, 0, 0, 0, 0);
+    test_check(ret64 == 0, "timerfd cancel clock_settime");
+    if (ret64 == 0)
+        clock_shifted = true;
+    if (ret64 < 0)
+        goto out;
+
+    rd = fd_read_once(tfd, &expirations, sizeof(expirations));
+    test_check(rd == -ECANCELED, "timerfd cancel read ecanceled");
+
+    struct test_linux_itimerspec rel_arm = {
+        .it_interval = { .tv_sec = 0, .tv_nsec = 0 },
+        .it_value = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 },
+    };
+    rc = copy_to_user(u_new, &rel_arm, sizeof(rel_arm));
+    test_check(rc == 0, "timerfd cancel copy rearm");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_timerfd_settime((uint64_t)tfd, 0, (uint64_t)u_new, 0, 0, 0);
+    test_check(ret64 == 0, "timerfd cancel rearm");
+    if (ret64 == 0) {
+        rd = fd_read_until_ready(tfd, &expirations, sizeof(expirations),
+                                 1000ULL * 1000ULL * 1000ULL);
+        test_check(rd == (ssize_t)sizeof(expirations),
+                   "timerfd cancel read after rearm");
+        if (rd == (ssize_t)sizeof(expirations))
+            test_check(expirations >= 1, "timerfd cancel rearm count");
+    }
+
+out:
+    if (clock_shifted && mapped && u_clock) {
+        uint64_t restore_ns = time_realtime_ns();
+        if (restore_ns > shift_ns)
+            restore_ns -= shift_ns;
+        else
+            restore_ns = 0;
+        struct timespec ts_restore = {
+            .tv_sec = (time_t)(restore_ns / TEST_NS_PER_SEC),
+            .tv_nsec = (int64_t)(restore_ns % TEST_NS_PER_SEC),
+        };
+        if (copy_to_user(u_clock, &ts_restore, sizeof(ts_restore)) == 0)
+            (void)sys_clock_settime(CLOCK_REALTIME, (uint64_t)u_clock, 0, 0, 0,
+                                    0);
+    }
+    close_fd_if_open(&tfd);
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_signalfd_syscall_functional(void) {
     int sfd = -1;
     struct user_map_ctx um = {0};
@@ -1238,6 +1404,86 @@ out:
     if (blocked_saved)
         __atomic_store_n(&p->sig_blocked, old_blocked, __ATOMIC_RELEASE);
     __atomic_fetch_and(&p->sig_pending, ~test_mask, __ATOMIC_RELEASE);
+    close_fd_if_open(&sfd);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_signalfd_syscall_rebind(void) {
+    int sfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    bool blocked_saved = false;
+    sigset_t old_blocked = 0;
+    sigset_t mask_usr1 = (1ULL << (SIGUSR1 - 1));
+    sigset_t mask_usr2 = (1ULL << (SIGUSR2 - 1));
+    sigset_t clear_mask = mask_usr1 | mask_usr2;
+    struct process *p = proc_current();
+    test_check(p != NULL, "signalfd rebind proc current");
+    if (!p)
+        return;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "signalfd rebind user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    void *u_mask = user_map_ptr(&um, 0);
+    test_check(u_mask != NULL, "signalfd rebind user ptr");
+    if (!u_mask)
+        goto out;
+
+    old_blocked = __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&p->sig_blocked, old_blocked | clear_mask, __ATOMIC_RELEASE);
+    blocked_saved = true;
+    __atomic_fetch_and(&p->sig_pending, ~clear_mask, __ATOMIC_RELEASE);
+
+    rc = copy_to_user(u_mask, &mask_usr1, sizeof(mask_usr1));
+    test_check(rc == 0, "signalfd rebind copy mask1");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 =
+        sys_signalfd4((uint64_t)-1, (uint64_t)u_mask, sizeof(sigset_t),
+                      O_NONBLOCK | O_CLOEXEC, 0, 0);
+    test_check(ret64 >= 0, "signalfd rebind create");
+    if (ret64 < 0)
+        goto out;
+    sfd = (int)ret64;
+    test_check(fd_has_cloexec(sfd), "signalfd rebind cloexec");
+
+    int sret = signal_send(p->pid, SIGUSR2);
+    test_check(sret == 0, "signalfd rebind send sigusr2");
+
+    struct test_linux_signalfd_siginfo info = {0};
+    ssize_t rd = fd_read_once(sfd, &info, sizeof(info));
+    test_check(rd == -EAGAIN, "signalfd rebind filtered eagain");
+
+    rc = copy_to_user(u_mask, &mask_usr2, sizeof(mask_usr2));
+    test_check(rc == 0, "signalfd rebind copy mask2");
+    if (rc < 0)
+        goto out;
+
+    ret64 =
+        sys_signalfd4((uint64_t)sfd, (uint64_t)u_mask, sizeof(sigset_t), 0, 0, 0);
+    test_check(ret64 == sfd, "signalfd rebind update existing");
+
+    rd = fd_read_until_ready(sfd, &info, sizeof(info),
+                             500ULL * 1000ULL * 1000ULL);
+    test_check(rd == (ssize_t)sizeof(info), "signalfd rebind read sigusr2");
+    if (rd == (ssize_t)sizeof(info))
+        test_check(info.ssi_signo == SIGUSR2, "signalfd rebind signo sigusr2");
+
+    sret = signal_send(p->pid, SIGUSR1);
+    test_check(sret == 0, "signalfd rebind send sigusr1");
+    rd = fd_read_once(sfd, &info, sizeof(info));
+    test_check(rd == -EAGAIN, "signalfd rebind usr1 filtered");
+
+out:
+    if (blocked_saved)
+        __atomic_store_n(&p->sig_blocked, old_blocked, __ATOMIC_RELEASE);
+    __atomic_fetch_and(&p->sig_pending, ~clear_mask, __ATOMIC_RELEASE);
     close_fd_if_open(&sfd);
     if (mapped)
         user_map_end(&um);
@@ -1340,8 +1586,10 @@ int run_vfs_ipc_tests(void) {
     test_copy_file_range_syscall_semantics();
     test_timerfd_syscall_semantics();
     test_timerfd_syscall_functional();
+    test_timerfd_cancel_on_set_functional();
     test_signalfd_syscall_semantics();
     test_signalfd_syscall_functional();
+    test_signalfd_syscall_rebind();
     test_inotify_syscall_semantics();
     test_inotify_syscall_functional();
 
