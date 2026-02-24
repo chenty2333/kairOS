@@ -105,6 +105,7 @@ Special:
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
 - `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
 - `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
+- AF_UNIX stream send paths honor `MSG_NOSIGNAL` (suppress `SIGPIPE`, return `EPIPE` only)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics

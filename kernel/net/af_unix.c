@@ -597,9 +597,10 @@ static ssize_t unix_stream_sendto(struct socket *sock, const void *buf,
     }
     if (us->shutdown_flags & (int)UNIX_SHUT_WR_BIT) {
         mutex_unlock(&us->lock);
-        struct process *curr = proc_current();
-        if (curr) {
-            signal_send(curr->pid, SIGPIPE);
+        if (!(flags & MSG_NOSIGNAL)) {
+            struct process *curr = proc_current();
+            if (curr)
+                signal_send(curr->pid, SIGPIPE);
         }
         return -EPIPE;
     }

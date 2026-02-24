@@ -37,6 +37,7 @@ struct vnode;
 
 /* Message flags */
 #define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
 
 /* Socket options levels */
 #define SOL_SOCKET 1
