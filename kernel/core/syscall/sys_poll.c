@@ -227,7 +227,7 @@ static int poll_copy_sigmask_from_user(sigset_t *out, uint64_t mask_ptr,
     *out = 0;
     if (!mask_ptr)
         return 0;
-    if (sigsetsize == 0 || sigsetsize > sizeof(sigset_t))
+    if (sigsetsize != sizeof(sigset_t))
         return -EINVAL;
     if (copy_from_user(out, (void *)mask_ptr, (size_t)sigsetsize) < 0)
         return -EFAULT;
