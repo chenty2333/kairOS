@@ -29,6 +29,7 @@ static void test_check(bool cond, const char *name) {
 static int trap_handle_calls;
 static int trap_should_deliver_calls;
 static bool trap_handler_saw_current_tf;
+static bool trap_handler_saw_process_tf;
 static struct trap_frame *trap_handler_tf;
 
 #define TEST_NS_PER_SEC 1000000000ULL
@@ -338,6 +339,9 @@ static int trap_handle_probe(const struct trap_core_event *ev) {
     trap_handler_tf = ev ? ev->tf : NULL;
     trap_handler_saw_current_tf =
         ev && (arch_get_percpu()->current_tf == ev->tf);
+    struct process *p = proc_current();
+    trap_handler_saw_process_tf =
+        ev && p && ((struct trap_frame *)p->active_tf == ev->tf);
     return 0;
 }
 
@@ -1159,11 +1163,14 @@ static void test_trap_dispatch_sets_and_restores_tf(void) {
     };
 
     struct percpu_data *cpu = arch_get_percpu();
+    struct process *p = proc_current();
     struct trap_frame *old_tf = cpu->current_tf;
+    void *old_proc_tf = p ? p->active_tf : NULL;
 
     trap_handle_calls = 0;
     trap_should_deliver_calls = 0;
     trap_handler_saw_current_tf = false;
+    trap_handler_saw_process_tf = false;
     trap_handler_tf = NULL;
 
     trap_core_dispatch(&ev, &ops);
@@ -1172,7 +1179,11 @@ static void test_trap_dispatch_sets_and_restores_tf(void) {
     test_check(trap_should_deliver_calls == 1, "trap_dispatch deliver_called");
     test_check(trap_handler_tf == &tf, "trap_dispatch handler_tf");
     test_check(trap_handler_saw_current_tf, "trap_dispatch saw_current_tf");
+    test_check(trap_handler_saw_process_tf, "trap_dispatch saw_process_tf");
     test_check(cpu->current_tf == old_tf, "trap_dispatch restored_tf");
+    if (p)
+        test_check(p->active_tf == old_proc_tf,
+                   "trap_dispatch restored_process_tf");
 }
 
 static void test_trap_dispatch_restores_preexisting_tf(void) {
@@ -1194,12 +1205,17 @@ static void test_trap_dispatch_restores_preexisting_tf(void) {
     };
 
     struct percpu_data *cpu = arch_get_percpu();
+    struct process *p = proc_current();
     struct trap_frame *saved = cpu->current_tf;
+    void *saved_proc_tf = p ? p->active_tf : NULL;
     cpu->current_tf = &injected_old;
+    if (p)
+        p->active_tf = &injected_old;
 
     trap_handle_calls = 0;
     trap_should_deliver_calls = 0;
     trap_handler_saw_current_tf = false;
+    trap_handler_saw_process_tf = false;
     trap_handler_tf = NULL;
 
     trap_core_dispatch(&ev, &ops);
@@ -1209,10 +1225,44 @@ static void test_trap_dispatch_restores_preexisting_tf(void) {
                "trap_restore_nonnull deliver_called");
     test_check(trap_handler_tf == &tf, "trap_restore_nonnull handler_tf");
     test_check(trap_handler_saw_current_tf, "trap_restore_nonnull saw_current");
+    test_check(trap_handler_saw_process_tf,
+               "trap_restore_nonnull saw_process");
     test_check(cpu->current_tf == &injected_old,
                "trap_restore_nonnull restored_previous");
+    if (p)
+        test_check(p->active_tf == &injected_old,
+                   "trap_restore_nonnull restored_process");
 
     cpu->current_tf = saved;
+    if (p)
+        p->active_tf = saved_proc_tf;
+}
+
+static void test_get_current_trapframe_process_fallback(void) {
+    struct process *p = proc_current();
+    struct percpu_data *cpu = arch_get_percpu();
+    test_check(p != NULL, "trap_tf_fallback proc_current");
+    test_check(cpu != NULL, "trap_tf_fallback percpu");
+    if (!p || !cpu)
+        return;
+
+    struct trap_frame probe;
+    memset(&probe, 0, sizeof(probe));
+
+    struct trap_frame *saved_cpu_tf = cpu->current_tf;
+    void *saved_proc_tf = p->active_tf;
+
+    cpu->current_tf = NULL;
+    p->active_tf = &probe;
+    test_check(get_current_trapframe() == &probe,
+               "trap_tf_fallback active_tf_used");
+
+    p->active_tf = NULL;
+    test_check(get_current_trapframe() == NULL,
+               "trap_tf_fallback null_when_missing");
+
+    p->active_tf = saved_proc_tf;
+    cpu->current_tf = saved_cpu_tf;
 }
 
 int run_syscall_trap_tests(void) {
@@ -1237,6 +1287,7 @@ int run_syscall_trap_tests(void) {
     test_trap_dispatch_guard_clauses();
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();
+    test_get_current_trapframe_process_fallback();
     test_syscall_user_e2e();
 
     if (tests_failed == 0)

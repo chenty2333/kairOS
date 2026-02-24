@@ -101,6 +101,7 @@ struct process {
     struct sched_entity se;
 
     struct mm_struct *mm;
+    void *active_tf; /* trap frame while running in trap/syscall context */
     struct fdtable *fdtable;
     char cwd[CONFIG_PATH_MAX];
     struct vnode *cwd_vnode;

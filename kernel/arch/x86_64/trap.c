@@ -116,7 +116,11 @@ static void idt_load(void) {
 }
 
 struct trap_frame *get_current_trapframe(void) {
-    return arch_get_percpu()->current_tf;
+    struct trap_frame *tf = arch_get_percpu()->current_tf;
+    if (tf)
+        return tf;
+    struct process *p = proc_current();
+    return p ? (struct trap_frame *)p->active_tf : NULL;
 }
 
 void arch_irq_handler(struct trap_frame *tf) {

@@ -31,7 +31,11 @@ extern void trap_entry(void);
 void timer_interrupt_handler(const struct trap_core_event *ev);
 
 struct trap_frame *get_current_trapframe(void) {
-    return arch_get_percpu()->current_tf;
+    struct trap_frame *tf = arch_get_percpu()->current_tf;
+    if (tf)
+        return tf;
+    struct process *p = proc_current();
+    return p ? (struct trap_frame *)p->active_tf : NULL;
 }
 
 static const char *exc_names[] = {

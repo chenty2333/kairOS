@@ -28,7 +28,11 @@ static inline bool aarch64_from_user(const struct trap_frame *tf) {
 }
 
 struct trap_frame *get_current_trapframe(void) {
-    return arch_get_percpu()->current_tf;
+    struct trap_frame *tf = arch_get_percpu()->current_tf;
+    if (tf)
+        return tf;
+    struct process *p = proc_current();
+    return p ? (struct trap_frame *)p->active_tf : NULL;
 }
 
 static void handle_exception(struct trap_frame *tf) {

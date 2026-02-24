@@ -46,9 +46,10 @@ Per-architecture entry:
 
 trap_core.c:trap_core_dispatch() is the architecture-independent dispatch boundary:
 - Saves current trap frame to per-CPU current_tf
+- Mirrors current trap frame into process-scoped `active_tf` while dispatch is in progress, so trapframe-dependent paths remain valid even if syscall paths sleep/yield and CPU-local `current_tf` changes
 - Calls architecture handle_event() (dispatches to interrupt handler / exception handler / syscall)
 - Delivers pending signals
-- Restores per-CPU current_tf
+- Restores per-CPU current_tf and process-scoped `active_tf`
 - RISC-V page-fault diagnostics now log unresolved fault context with `pid/comm/sepc/fault-addr/access-type` before signal/panic path, and MM fault logs include the same context.
 
 Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses GIC.
