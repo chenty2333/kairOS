@@ -205,7 +205,8 @@ static void pty_master_close(struct tty_struct *tty) {
 }
 
 static ssize_t pty_master_write(struct tty_struct *tty, const uint8_t *buf,
-                                size_t count) {
+                                size_t count, uint32_t flags) {
+    (void)flags;
     struct tty_struct *slave = tty->link;
     if (!slave)
         return -EIO;
@@ -243,28 +244,114 @@ static void pty_slave_close(struct tty_struct *tty) {
     (void)tty;
 }
 
-/* Slave write → push to master's input_rb (screen output path) */
-static ssize_t pty_slave_write(struct tty_struct *tty, const uint8_t *buf,
-                               size_t count) {
-    struct tty_struct *master = tty->link;
+static int pty_wait_master_input_space(struct tty_struct *master) {
     if (!master)
         return -EIO;
 
-    bool irq_state = arch_irq_save();
-    spin_lock(&master->lock);
-    for (size_t i = 0; i < count; i++)
-        ringbuf_push(&master->input_rb, (char)buf[i], true);
-    spin_unlock(&master->lock);
-    arch_irq_restore(irq_state);
+    struct vnode *vn = master->vnode;
+    struct process *p = proc_current();
+    if (!vn || !p)
+        return -EAGAIN;
 
-    /* Wake master readers */
-    if (master->vnode)
-        vfs_poll_wake(master->vnode, POLLIN);
-    return (ssize_t)count;
+    for (;;) {
+        bool irq_state = arch_irq_save();
+        spin_lock(&master->lock);
+        bool has_space = ringbuf_avail(&master->input_rb) > 0;
+        bool hungup = (master->flags & TTY_HUPPED) != 0;
+        spin_unlock(&master->lock);
+        arch_irq_restore(irq_state);
+
+        if (has_space)
+            return 1;
+        if (hungup)
+            return 0;
+
+        struct poll_waiter waiter = {0};
+        INIT_LIST_HEAD(&waiter.entry.node);
+        waiter.entry.proc = p;
+        poll_wait_add(&vn->pollers, &waiter);
+
+        irq_state = arch_irq_save();
+        spin_lock(&master->lock);
+        has_space = ringbuf_avail(&master->input_rb) > 0;
+        hungup = (master->flags & TTY_HUPPED) != 0;
+        spin_unlock(&master->lock);
+        arch_irq_restore(irq_state);
+        if (has_space || hungup) {
+            poll_wait_remove(&waiter);
+            return has_space ? 1 : 0;
+        }
+
+        proc_lock(p);
+        if (p->sig_pending) {
+            proc_unlock(p);
+            poll_wait_remove(&waiter);
+            return -EINTR;
+        }
+        p->wait_channel = &waiter;
+        p->sleep_deadline = 0;
+        p->state = PROC_SLEEPING;
+        proc_unlock(p);
+        proc_yield();
+
+        proc_lock(p);
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        bool interrupted = p->sig_pending;
+        proc_unlock(p);
+        poll_wait_remove(&waiter);
+        if (interrupted)
+            return -EINTR;
+    }
+}
+
+/* Slave write → push to master's input_rb (screen output path) */
+static ssize_t pty_slave_write(struct tty_struct *tty, const uint8_t *buf,
+                               size_t count, uint32_t flags) {
+    struct tty_struct *master = tty->link;
+    if (!master)
+        return -EIO;
+    if (!buf)
+        return -EINVAL;
+    if (count == 0)
+        return 0;
+
+    size_t written = 0;
+    while (written < count) {
+        bool irq_state = arch_irq_save();
+        spin_lock(&master->lock);
+        size_t avail = ringbuf_avail(&master->input_rb);
+        bool hungup = (master->flags & TTY_HUPPED) != 0;
+        size_t pushed = 0;
+        while (pushed < avail && written < count) {
+            (void)ringbuf_push(&master->input_rb, (char)buf[written], false);
+            pushed++;
+            written++;
+        }
+        spin_unlock(&master->lock);
+        arch_irq_restore(irq_state);
+
+        if (pushed && master->vnode)
+            vfs_poll_wake(master->vnode, POLLIN);
+        if (written == count)
+            break;
+        if (hungup)
+            return written ? (ssize_t)written : -EIO;
+        if (flags & O_NONBLOCK)
+            return written ? (ssize_t)written : -EAGAIN;
+
+        int wait_rc = pty_wait_master_input_space(master);
+        if (wait_rc < 0)
+            return written ? (ssize_t)written : (ssize_t)wait_rc;
+        if (wait_rc == 0)
+            return written ? (ssize_t)written : -EIO;
+    }
+    return (ssize_t)written;
 }
 
 static void pty_slave_put_char(struct tty_struct *tty, uint8_t ch) {
-    pty_slave_write(tty, &ch, 1);
+    (void)pty_slave_write(tty, &ch, 1, O_NONBLOCK);
 }
 
 static void pty_slave_hangup(struct tty_struct *tty) {
@@ -332,8 +419,11 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
         spin_unlock(&tty->lock);
         arch_irq_restore(irq_state);
 
-        if (got > 0)
+        if (got > 0) {
+            if (vn)
+                vfs_poll_wake(vn, POLLOUT);
             return (ssize_t)got;
+        }
         if (tty->link && (tty->link->flags & TTY_HUPPED))
             return 0; /* slave hung up → EOF */
         if (flags & O_NONBLOCK)
@@ -406,10 +496,9 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
 static ssize_t pty_master_ldisc_write(struct tty_struct *tty,
                                       const uint8_t *buf, size_t count,
                                       uint32_t flags) {
-    (void)flags;
     if (!tty || !tty->driver || !tty->driver->ops || !tty->driver->ops->write)
         return -EIO;
-    return tty->driver->ops->write(tty, buf, count);
+    return tty->driver->ops->write(tty, buf, count, flags);
 }
 
 static int pty_master_ldisc_poll(struct tty_struct *tty, uint32_t events) {
@@ -418,9 +507,10 @@ static int pty_master_ldisc_poll(struct tty_struct *tty, uint32_t events) {
     spin_lock(&tty->lock);
     if (!ringbuf_empty(&tty->input_rb))
         revents |= POLLIN;
+    if (ringbuf_avail(&tty->input_rb) > 0)
+        revents |= POLLOUT;
     spin_unlock(&tty->lock);
     arch_irq_restore(irq_state);
-    revents |= POLLOUT;
     return (int)(revents & events);
 }
 

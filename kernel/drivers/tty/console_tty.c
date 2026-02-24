@@ -19,8 +19,9 @@ static void console_tty_close(struct tty_struct *tty) {
 }
 
 static ssize_t console_tty_write(struct tty_struct *tty, const uint8_t *buf,
-                                  size_t count) {
+                                 size_t count, uint32_t flags) {
     (void)tty;
+    (void)flags;
     for (size_t i = 0; i < count; i++)
         arch_early_putchar((char)buf[i]);
     return (ssize_t)count;

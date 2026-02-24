@@ -64,6 +64,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - drivers/block/: block device framework + virtio_blk
 - drivers/net/: virtio_net
 - drivers/tty/: terminal subsystem (tty_core, console_tty, n_tty line discipline, pty)
+  - PTY slave->master output path now uses bounded buffering with backpressure (no overwrite-on-full); nonblocking writes return `EAGAIN`, and writable readiness is reflected by `POLLOUT`
 - drivers/char/: character devices (console)
 - drivers/gpu/: drm_lite (optional, CONFIG_DRM_LITE)
 - drivers/fb/: framebuffer (directory exists, currently empty)

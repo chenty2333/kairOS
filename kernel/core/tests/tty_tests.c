@@ -245,6 +245,57 @@ static void test_pty_open_read_write_ioctl(void) {
     close_file_if_open(&master);
 }
 
+static void test_pty_nonblock_write_backpressure(void) {
+    struct file *master = NULL;
+    struct file *slave = NULL;
+    int ret = open_pty_pair(&master, &slave);
+    test_check(ret == 0, "pty nonblock open pair");
+    if (ret < 0)
+        return;
+
+    set_nonblock(master, true);
+    set_nonblock(slave, true);
+    drain_nonblock(master);
+    drain_nonblock(slave);
+
+    uint8_t chunk[128];
+    memset(chunk, 'P', sizeof(chunk));
+
+    ssize_t wr = 0;
+    size_t total = 0;
+    bool hit_eagain = false;
+    for (int i = 0; i < 128; i++) {
+        wr = vfs_write(slave, chunk, sizeof(chunk));
+        if (wr > 0) {
+            total += (size_t)wr;
+            continue;
+        }
+        if (wr == -EAGAIN) {
+            hit_eagain = true;
+            break;
+        }
+        test_check(false, "pty nonblock fill unexpected write error");
+        break;
+    }
+
+    test_check(total > 0, "pty nonblock fill progress");
+    test_check(hit_eagain, "pty nonblock fill reaches eagain");
+    if (hit_eagain) {
+        int pe = vfs_poll(master, POLLOUT);
+        test_check((pe & POLLOUT) == 0, "pty nonblock full poll not writable");
+    }
+
+    uint8_t drain[256];
+    ssize_t rd = vfs_read(master, drain, sizeof(drain));
+    test_check(rd > 0, "pty nonblock drain read");
+
+    wr = vfs_write(slave, "z", 1);
+    test_check(wr == 1, "pty nonblock write resumes after drain");
+
+    close_file_if_open(&slave);
+    close_file_if_open(&master);
+}
+
 static void test_n_tty_canonical_echo(void) {
     struct file *master = NULL;
     struct file *slave = NULL;
@@ -548,6 +599,7 @@ int run_tty_tests(void) {
     pr_info("Running tty tests...\n");
 
     test_pty_open_read_write_ioctl();
+    test_pty_nonblock_write_backpressure();
     test_n_tty_canonical_echo();
     test_n_tty_isig_behavior();
     test_n_tty_blocking_read_paths();

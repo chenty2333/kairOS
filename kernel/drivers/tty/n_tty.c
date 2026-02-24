@@ -301,7 +301,6 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
 
 static ssize_t n_tty_write(struct tty_struct *tty, const uint8_t *buf,
                             size_t count, uint32_t flags) {
-    (void)flags;
     if (!tty || !buf)
         return -EINVAL;
     if (!tty->driver || !tty->driver->ops || !tty->driver->ops->write)
@@ -310,31 +309,35 @@ static ssize_t n_tty_write(struct tty_struct *tty, const uint8_t *buf,
     bool do_opost = (tty->termios.c_oflag & OPOST) &&
                     (tty->termios.c_oflag & ONLCR);
 
-    if (!do_opost)
-        return tty->driver->ops->write(tty, buf, count);
+    if (!do_opost) {
+        ssize_t ret = tty->driver->ops->write(tty, buf, count, flags);
+        if (ret < 0)
+            return ret;
+        return ret;
+    }
 
-    /* OPOST with ONLCR: expand \n to \r\n, batch through driver->write */
-    uint8_t tmp[128];
-    size_t ti = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (buf[i] == '\n') {
-            if (ti + 2 > sizeof(tmp)) {
-                tty->driver->ops->write(tty, tmp, ti);
-                ti = 0;
-            }
-            tmp[ti++] = '\r';
-            tmp[ti++] = '\n';
+    /* OPOST with ONLCR: write per-byte to preserve non-blocking semantics. */
+    size_t in_done = 0;
+    for (; in_done < count; in_done++) {
+        uint8_t out[2];
+        size_t out_len = 1;
+        if (buf[in_done] == '\n') {
+            out[0] = '\r';
+            out[1] = '\n';
+            out_len = 2;
         } else {
-            if (ti + 1 > sizeof(tmp)) {
-                tty->driver->ops->write(tty, tmp, ti);
-                ti = 0;
-            }
-            tmp[ti++] = buf[i];
+            out[0] = buf[in_done];
+        }
+
+        for (size_t oi = 0; oi < out_len; oi++) {
+            ssize_t wr = tty->driver->ops->write(tty, &out[oi], 1, flags);
+            if (wr < 0)
+                return in_done ? (ssize_t)in_done : wr;
+            if (wr == 0)
+                return (ssize_t)in_done;
         }
     }
-    if (ti > 0)
-        tty->driver->ops->write(tty, tmp, ti);
-    return (ssize_t)count;
+    return (ssize_t)in_done;
 }
 
 static int n_tty_poll(struct tty_struct *tty, uint32_t events) {

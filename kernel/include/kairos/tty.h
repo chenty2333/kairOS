@@ -44,7 +44,8 @@ struct tty_ldisc {
 struct tty_driver_ops {
     int     (*open)(struct tty_struct *tty);
     void    (*close)(struct tty_struct *tty);
-    ssize_t (*write)(struct tty_struct *tty, const uint8_t *buf, size_t count);
+    ssize_t (*write)(struct tty_struct *tty, const uint8_t *buf, size_t count,
+                     uint32_t flags);
     void    (*put_char)(struct tty_struct *tty, uint8_t ch);
     void    (*set_termios)(struct tty_struct *tty, struct termios *old);
     void    (*hangup)(struct tty_struct *tty);
