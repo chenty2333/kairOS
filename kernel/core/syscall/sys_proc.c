@@ -407,15 +407,13 @@ int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
     uint32_t se_state = __atomic_load_n(&target->se.run_state, __ATOMIC_ACQUIRE);
     if (cpu >= 0 && cpu < max_bits &&
         !(mask & (1UL << cpu)) &&
-        (se_state == SE_STATE_RUNNING ||
-         se_state == SE_STATE_QUEUED ||
-         se_state == SE_STATE_RUNNABLE)) {
+        (se_state == SE_STATE_RUNNING || se_state == SE_STATE_QUEUED)) {
         return -EINVAL;
     }
 
     proc_sched_set_affinity_mask(target, (uint64_t)mask);
     if ((cpu < 0 || cpu >= cpus || !(mask & (1UL << cpu))) &&
-        se_state == SE_STATE_BLOCKED) {
+        (se_state == SE_STATE_BLOCKED || se_state == SE_STATE_RUNNABLE)) {
         for (int i = 0; i < cpus && i < max_bits; i++) {
             if (mask & (1UL << i)) {
                 target->se.cpu = i;
