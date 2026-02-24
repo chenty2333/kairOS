@@ -68,6 +68,19 @@ struct test_socket_mmsghdr {
     uint32_t __pad;
 };
 
+struct test_socket_cmsghdr {
+    size_t cmsg_len;
+    int32_t cmsg_level;
+    int32_t cmsg_type;
+};
+
+#define TEST_SCM_RIGHTS 1
+
+static size_t test_socket_cmsg_align(size_t len) {
+    const size_t align = sizeof(size_t) - 1;
+    return (len + align) & ~align;
+}
+
 static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
     if (!ctx || len == 0)
         return -EINVAL;
@@ -732,15 +745,19 @@ static void test_socket_msg_syscall_semantics(void) {
     char *u_sendm_buf1 = (char *)user_map_ptr(&um, 0x6C0);
     char *u_recvm_buf0 = (char *)user_map_ptr(&um, 0x700);
     char *u_recvm_buf1 = (char *)user_map_ptr(&um, 0x740);
+    struct test_socket_cmsghdr *u_ctrl =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x7C0);
+    int32_t *u_rights = (int32_t *)user_map_ptr(&um, 0x7E0);
     test_check(u_rx_addr && u_src_addr && u_send_iov && u_recv_iov && u_send_msg &&
                    u_recv_msg && u_send_vec && u_recv_vec && u_timeout &&
                    u_send_buf0 && u_send_buf1 && u_recv_buf0 && u_recv_buf1 &&
-                   u_sendm_buf0 && u_sendm_buf1 && u_recvm_buf0 && u_recvm_buf1,
+                   u_sendm_buf0 && u_sendm_buf1 && u_recvm_buf0 && u_recvm_buf1 &&
+                   u_ctrl && u_rights,
                "sockmsg user pointers");
     if (!u_rx_addr || !u_src_addr || !u_send_iov || !u_recv_iov || !u_send_msg ||
         !u_recv_msg || !u_send_vec || !u_recv_vec || !u_timeout || !u_send_buf0 ||
         !u_send_buf1 || !u_recv_buf0 || !u_recv_buf1 || !u_sendm_buf0 ||
-        !u_sendm_buf1 || !u_recvm_buf0 || !u_recvm_buf1) {
+        !u_sendm_buf1 || !u_recvm_buf0 || !u_recvm_buf1 || !u_ctrl || !u_rights) {
         goto out;
     }
 
@@ -829,13 +846,49 @@ static void test_socket_msg_syscall_semantics(void) {
         }
     }
 
+    send_msg.msg_control = NULL;
     send_msg.msg_controllen = 8;
     ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
     test_check(ret == 0, "sockmsg copy send msg ctrl");
     if (ret == 0) {
         ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
-        test_check(ret64 == -EOPNOTSUPP, "sockmsg sendmsg control eopnotsupp");
+        test_check(ret64 == -EFAULT, "sockmsg sendmsg control null efault");
     }
+
+    struct test_socket_cmsghdr ctrl = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_RIGHTS,
+    };
+    ret = copy_to_user(u_ctrl, &ctrl, sizeof(ctrl));
+    test_check(ret == 0, "sockmsg copy control hdr");
+    if (ret == 0) {
+        int32_t rights_fd = txfd;
+        ret = copy_to_user(u_rights, &rights_fd, sizeof(rights_fd));
+        test_check(ret == 0, "sockmsg copy control rights");
+    }
+    if (ret == 0) {
+        send_msg.msg_control = u_ctrl;
+        send_msg.msg_controllen = test_socket_cmsg_align(ctrl.cmsg_len);
+        ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+        test_check(ret == 0, "sockmsg copy send msg ctrl rights");
+    }
+    if (ret == 0) {
+        ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+        test_check(ret64 == 7, "sockmsg sendmsg control rights");
+    }
+    if (ret64 == 7) {
+        recv_msg.msg_iovlen = 2;
+        recv_msg.msg_control = NULL;
+        recv_msg.msg_controllen = 0;
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg copy recv msg ctrl drain");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 7, "sockmsg recvmsg control drain");
+        }
+    }
+    send_msg.msg_control = NULL;
     send_msg.msg_controllen = 0;
     send_msg.msg_iovlen = 1025;
     ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
@@ -845,14 +898,42 @@ static void test_socket_msg_syscall_semantics(void) {
         test_check(ret64 == -EINVAL, "sockmsg sendmsg iovlen einval");
     }
 
+    recv_msg.msg_control = NULL;
     recv_msg.msg_controllen = 8;
     ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
     test_check(ret == 0, "sockmsg copy recv msg ctrl");
     if (ret == 0) {
         ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
-        test_check(ret64 == -EOPNOTSUPP, "sockmsg recvmsg control eopnotsupp");
+        test_check(ret64 == -EFAULT, "sockmsg recvmsg control null efault");
+    }
+
+    send_msg.msg_iovlen = 2;
+    send_msg.msg_control = NULL;
+    send_msg.msg_controllen = 0;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg copy send msg ctrl prep");
+    if (ret == 0) {
+        ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+        test_check(ret64 == 7, "sockmsg sendmsg ctrl prep");
+    }
+    recv_msg.msg_control = u_ctrl;
+    recv_msg.msg_controllen = sizeof(struct test_socket_cmsghdr);
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg copy recv msg ctrl buf");
+    ret64 = -1;
+    if (ret == 0) {
+        ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+        test_check(ret64 == 7, "sockmsg recvmsg control empty");
+    }
+    if (ret64 == 7) {
+        ret = copy_from_user(&recv_msg, u_recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg read recv msg ctrl");
+        if (ret == 0)
+            test_check(recv_msg.msg_controllen == 0,
+                       "sockmsg recvmsg control cleared");
     }
     recv_msg.msg_controllen = 0;
+    recv_msg.msg_control = NULL;
     recv_msg.msg_iovlen = 1025;
     ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
     test_check(ret == 0, "sockmsg copy recv msg iovlen");

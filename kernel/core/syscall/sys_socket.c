@@ -17,6 +17,8 @@
 #define SOCKET_MSG_MAX_LEN 65536
 #define MSG_WAITFORONE 0x10000
 #define NS_PER_SEC 1000000000ULL
+#define SCM_RIGHTS 1
+#define SCM_CREDENTIALS 2
 
 static inline int32_t syssock_abi_i32(uint64_t raw) {
     return (int32_t)(uint32_t)raw;
@@ -48,6 +50,71 @@ struct socket_mmsghdr {
     uint32_t msg_len;
     uint32_t __pad;
 };
+
+struct socket_cmsghdr {
+    size_t cmsg_len;
+    int32_t cmsg_level;
+    int32_t cmsg_type;
+};
+
+struct socket_ucred {
+    int32_t pid;
+    uint32_t uid;
+    uint32_t gid;
+};
+
+static size_t socket_cmsg_align(size_t len) {
+    const size_t align = sizeof(size_t) - 1;
+    return (len + align) & ~align;
+}
+
+static int socket_validate_send_control(uint64_t control_ptr, size_t controllen) {
+    if (!controllen)
+        return 0;
+    if (!control_ptr)
+        return -EFAULT;
+
+    size_t off = 0;
+    while (off < controllen) {
+        if (controllen - off < sizeof(struct socket_cmsghdr))
+            return -EINVAL;
+
+        struct socket_cmsghdr hdr;
+        if (copy_from_user(&hdr, (const void *)(control_ptr + off),
+                           sizeof(hdr)) < 0)
+            return -EFAULT;
+        if (hdr.cmsg_len < sizeof(struct socket_cmsghdr))
+            return -EINVAL;
+        if (hdr.cmsg_len > controllen - off)
+            return -EINVAL;
+
+        size_t payload_len = hdr.cmsg_len - sizeof(struct socket_cmsghdr);
+        if (hdr.cmsg_level != SOL_SOCKET)
+            return -EOPNOTSUPP;
+        switch (hdr.cmsg_type) {
+        case SCM_RIGHTS:
+            if (payload_len % sizeof(int32_t))
+                return -EINVAL;
+            break;
+        case SCM_CREDENTIALS:
+            if (payload_len != sizeof(struct socket_ucred))
+                return -EINVAL;
+            break;
+        default:
+            return -EOPNOTSUPP;
+        }
+
+        size_t adv = socket_cmsg_align(hdr.cmsg_len);
+        if (adv > controllen - off) {
+            if (off + hdr.cmsg_len != controllen)
+                return -EINVAL;
+            off = controllen;
+            break;
+        }
+        off += adv;
+    }
+    return 0;
+}
 
 static uint64_t socket_ns_to_sched_ticks(uint64_t ns) {
     if (ns == 0)
@@ -255,9 +322,10 @@ static int64_t socket_sendmsg(struct socket *sock,
     if (msg->msg_iovlen > SOCKET_MSG_IOV_MAX) {
         return -EINVAL;
     }
-    if (msg->msg_controllen) {
-        return -EOPNOTSUPP;
-    }
+    int rc = socket_validate_send_control((uint64_t)(uintptr_t)msg->msg_control,
+                                          msg->msg_controllen);
+    if (rc < 0)
+        return rc;
 
     struct sockaddr_storage kaddr;
     struct sockaddr *destp = NULL;
@@ -273,7 +341,7 @@ static int64_t socket_sendmsg(struct socket *sock,
 
     uint64_t iov_ptr = (uint64_t)(uintptr_t)msg->msg_iov;
     size_t total = 0;
-    int rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
+    rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
     if (rc < 0) {
         return rc;
     }
@@ -317,9 +385,8 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
     if (msg->msg_iovlen > SOCKET_MSG_IOV_MAX) {
         return -EINVAL;
     }
-    if (msg->msg_controllen) {
-        return -EOPNOTSUPP;
-    }
+    if (msg->msg_controllen && !msg->msg_control)
+        return -EFAULT;
 
     uint64_t iov_ptr = (uint64_t)(uintptr_t)msg->msg_iov;
     size_t total = 0;

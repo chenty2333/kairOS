@@ -828,5 +828,35 @@ int64_t sys_setsid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_acct(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -ENOSYS;
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    if (p->uid != 0)
+        return -EPERM;
+
+    if (!a0) {
+        return 0;
+    }
+
+    char kpath[CONFIG_PATH_MAX];
+    if (sysfs_copy_path(a0, kpath, sizeof(kpath)) < 0)
+        return -EFAULT;
+
+    struct path resolved;
+    path_init(&resolved);
+    int ret = sysfs_resolve_at(AT_FDCWD, kpath, &resolved, NAMEI_FOLLOW);
+    if (ret < 0)
+        return ret;
+    if (!resolved.dentry || !resolved.dentry->vnode) {
+        if (resolved.dentry)
+            dentry_put(resolved.dentry);
+        return -ENOENT;
+    }
+    if (resolved.dentry->vnode->type == VNODE_DIR) {
+        dentry_put(resolved.dentry);
+        return -EISDIR;
+    }
+    dentry_put(resolved.dentry);
+
+    return 0;
 }

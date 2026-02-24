@@ -33,10 +33,10 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `fchmodat2` is wired to `fchmodat` semantics and flag validation
   - `openat2` supports `struct open_how` parsing; `RESOLVE_NO_MAGICLINKS` is accepted, other `resolve` constraints are pending
   - `statfs` now resolves the target path before filesystem stat (non-existent paths return `ENOENT`), and `fstatfs` falls back to fd dentry mount when available (`EINVAL` only when no mount context exists)
-  - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); currently only `flags=0` is implemented
+  - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); supports `UMOUNT_NOFOLLOW` and accepts `MNT_DETACH` as current-behavior alias
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
-- `umount2` follows Linux `int` ABI flag decoding (upper 32 bits ignored); only `flags=0` is currently implemented
-- `mount` validates `mountflags` using Linux ABI `unsigned long` width (native word size); for the currently implemented subset, any unsupported flag bit returns `EINVAL`
+- `umount2` follows Linux `int` ABI flag decoding (upper 32 bits ignored); unsupported flags return `EINVAL`
+- `mount` validates `mountflags` using Linux ABI `unsigned long` width (native word size); supports semantic superblock flags (`MS_RDONLY`/`MS_NO*`/`MS_RELATIME` family), propagation flags, bind, and remount
 
 ## Dentry Cache (fs/vfs/dentry.c)
 
@@ -115,7 +115,7 @@ Special:
 - `timerfd_create` accepts `CLOCK_REALTIME`/`CLOCK_MONOTONIC` plus `CLOCK_BOOTTIME`/`*_ALARM` aliases (mapped to realtime/monotonic base clocks)
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
 - `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
-- `sendmsg`/`recvmsg` currently support iovec payload and optional peer address; ancillary data (`msg_control`) is not implemented (`msg_controllen` must be zero)
+- `sendmsg`/`recvmsg` support iovec payload and optional peer address; ancillary data supports ABI parsing for `SOL_SOCKET` `SCM_RIGHTS`/`SCM_CREDENTIALS` control messages (control transport remains minimal and recv currently returns empty control data)
 - `recvmsg` bounds source-address copy length by `min(user_msg_namelen, kernel_sockaddr_len)` using width-safe arithmetic (no signed wrap on large `msg_namelen`)
 - AF_UNIX stream send paths honor `MSG_NOSIGNAL` (suppress `SIGPIPE`, return `EPIPE` only)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)

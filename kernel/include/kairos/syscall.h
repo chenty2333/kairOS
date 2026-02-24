@@ -31,13 +31,33 @@ typedef uint64_t sigset_t;
 #define W_OK 2
 #define R_OK 4
 
-/* mount flags (subset) */
+/* mount flags */
+#define MS_RDONLY 0x1
+#define MS_NOSUID 0x2
+#define MS_NODEV 0x4
+#define MS_NOEXEC 0x8
+#define MS_SYNCHRONOUS 0x10
+#define MS_REMOUNT 0x20
+#define MS_DIRSYNC 0x80
+#define MS_NOATIME 0x400
+#define MS_NODIRATIME 0x800
 #define MS_BIND 0x1000
 #define MS_REC 0x4000
+#define MS_SILENT 0x8000
+#define MS_POSIXACL 0x10000
+#define MS_UNBINDABLE 0x20000
 #define MS_PRIVATE 0x40000
 #define MS_SLAVE 0x80000
 #define MS_SHARED 0x100000
-#define MS_UNBINDABLE 0x20000
+#define MS_RELATIME 0x200000
+#define MS_STRICTATIME 0x1000000
+#define MS_LAZYTIME 0x2000000
+
+/* umount2 flags */
+#define MNT_FORCE 0x1
+#define MNT_DETACH 0x2
+#define MNT_EXPIRE 0x4
+#define UMOUNT_NOFOLLOW 0x8
 
 #define SYS_exit 1
 #define SYS_fork 2

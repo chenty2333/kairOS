@@ -18,6 +18,18 @@ static inline int32_t sysmount_abi_i32(uint64_t raw) {
     return (int32_t)(uint32_t)raw;
 }
 
+static inline uint32_t sysmount_mount_semantic_flags(void) {
+    return (uint32_t)(MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC |
+                      MS_SYNCHRONOUS | MS_DIRSYNC | MS_NOATIME |
+                      MS_NODIRATIME | MS_RELATIME | MS_STRICTATIME |
+                      MS_LAZYTIME | MS_SILENT | MS_POSIXACL);
+}
+
+static inline uint32_t sysmount_mount_ctrl_flags(void) {
+    return (uint32_t)(MS_BIND | MS_REC | MS_PRIVATE | MS_SLAVE |
+                      MS_SHARED | MS_UNBINDABLE | MS_REMOUNT);
+}
+
 int64_t sys_chroot(uint64_t path_ptr, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
@@ -244,16 +256,21 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     uint32_t uflags = (uint32_t)sysmount_abi_i32(flags);
+    uint32_t supported = MNT_DETACH | UMOUNT_NOFOLLOW;
+    int resolve_flags = NAMEI_DIRECTORY;
     if (!target_ptr)
         return -EFAULT;
-    if (uflags != 0)
+    if (uflags & ~supported)
         return -EINVAL;
+    if (uflags & UMOUNT_NOFOLLOW)
+        resolve_flags |= NAMEI_NOFOLLOW;
+    else
+        resolve_flags |= NAMEI_FOLLOW;
     if (sysfs_copy_path(target_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
     struct path tpath;
     path_init(&tpath);
-    int ret = sysfs_resolve_at(AT_FDCWD, kpath, &tpath,
-                               NAMEI_FOLLOW | NAMEI_DIRECTORY);
+    int ret = sysfs_resolve_at(AT_FDCWD, kpath, &tpath, resolve_flags);
     if (ret < 0)
         return ret;
     char full[CONFIG_PATH_MAX];
@@ -262,6 +279,7 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
         return -ENAMETOOLONG;
     }
     dentry_put(tpath.dentry);
+    // FIXME: MNT_DETACH currently aliases immediate unmount semantics.
     return vfs_umount(full);
 }
 
@@ -286,8 +304,8 @@ static int set_mount_propagation(struct mount *mnt, uint32_t flags) {
 int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
                   uint64_t flags, uint64_t data, uint64_t a5) {
     (void)data; (void)a5;
-    uint64_t allowed = (uint64_t)(MS_BIND | MS_REC | MS_PRIVATE | MS_SLAVE |
-                                  MS_SHARED | MS_UNBINDABLE);
+    uint64_t allowed = (uint64_t)(sysmount_mount_semantic_flags() |
+                                  sysmount_mount_ctrl_flags());
     if (flags & ~allowed)
         return -EINVAL;
     uint32_t uflags = (uint32_t)flags;
@@ -314,7 +332,13 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
         return ret;
 
     uint32_t prop_mask = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
+    uint32_t remount_mask = MS_REMOUNT;
+    uint32_t semantic_mask = sysmount_mount_semantic_flags();
     if (uflags & prop_mask) {
+        if (uflags & ~(prop_mask | MS_REC)) {
+            dentry_put(tpath.dentry);
+            return -EINVAL;
+        }
         struct mount *mnt = tpath.dentry->mounted
                                 ? tpath.dentry->mounted
                                 : tpath.dentry->mnt;
@@ -325,7 +349,30 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
         return ret;
     }
 
+    if (uflags & remount_mask) {
+        if (uflags & (MS_BIND | MS_REC)) {
+            dentry_put(tpath.dentry);
+            return -EINVAL;
+        }
+        struct mount *mnt = tpath.dentry->mounted
+                                ? tpath.dentry->mounted
+                                : tpath.dentry->mnt;
+        if (!mnt) {
+            dentry_put(tpath.dentry);
+            return -EINVAL;
+        }
+        vfs_mount_global_lock();
+        mnt->flags = uflags & semantic_mask;
+        vfs_mount_global_unlock();
+        dentry_put(tpath.dentry);
+        return 0;
+    }
+
     if (uflags & MS_BIND) {
+        if (uflags & ~(MS_BIND | MS_REC | semantic_mask)) {
+            dentry_put(tpath.dentry);
+            return -EINVAL;
+        }
         if (!source_ptr) {
             dentry_put(tpath.dentry);
             return -EINVAL;
@@ -372,7 +419,7 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
                 dentry_put(spath.dentry);
                 src_use = source_full;
             }
-            ret = vfs_mount(src_use, target_full, fstype, uflags);
+            ret = vfs_mount(src_use, target_full, fstype, uflags & semantic_mask);
         }
     }
 out_tpath:
