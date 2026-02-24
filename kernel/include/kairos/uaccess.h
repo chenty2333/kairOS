@@ -10,6 +10,26 @@
 /* Include architecture-specific implementation */
 #include <asm/uaccess.h>
 
+static inline int uaccess_prefault(const void *addr, size_t n, bool write) {
+    if (n == 0)
+        return 0;
+
+    struct process *p = proc_current();
+    if (!p || !p->mm)
+        return -EFAULT;
+
+    uintptr_t start = ALIGN_DOWN((uintptr_t)addr, CONFIG_PAGE_SIZE);
+    uintptr_t end = ALIGN_DOWN((uintptr_t)addr + n - 1, CONFIG_PAGE_SIZE);
+    uint32_t flags = write ? PTE_WRITE : 0;
+
+    for (uintptr_t va = start; va <= end; va += CONFIG_PAGE_SIZE) {
+        int ret = mm_handle_fault(p->mm, (vaddr_t)va, flags);
+        if (ret < 0)
+            return -EFAULT;
+    }
+    return 0;
+}
+
 /**
  * copy_from_user - Copy data from user space to kernel space
  * @to: Kernel destination buffer
@@ -25,6 +45,9 @@ static inline int copy_from_user(void *to, const void *from, size_t n) {
     }
 #endif
     if (!access_ok(from, n)) {
+        return -EFAULT;
+    }
+    if (uaccess_prefault(from, n, false) < 0) {
         return -EFAULT;
     }
     /* __arch_copy_from_user returns bytes NOT copied (0 on success) */
@@ -49,6 +72,9 @@ static inline int copy_to_user(void *to, const void *from, size_t n) {
     }
 #endif
     if (!access_ok(to, n)) {
+        return -EFAULT;
+    }
+    if (uaccess_prefault(to, n, true) < 0) {
         return -EFAULT;
     }
     if (__arch_copy_to_user(to, from, n) != 0) {
