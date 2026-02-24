@@ -122,6 +122,7 @@ kairos_run_test_tcc_smoke_once() {
         printf 'boot_delay=%q\n' "${boot_delay}"
         printf 'step_delay=%q\n' "${step_delay}"
         printf 'expected_interp=%q\n' "${expected_interp}"
+        printf 'expected_interp_strict=%q\n' "${expected_interp_strict}"
         printf 'inner_make_cmd=%q\n' "${inner_make_cmd}"
         printf 'log_path=%q\n' "${log_path}"
         cat <<'EOF'
@@ -237,13 +238,18 @@ kairos_run_test_busybox_applets_smoke_once() {
     local run_log="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/run.log"
     local make_jobs="${KAIROS_JOBS:-$(nproc)}"
     local applet_list="base32 base64 cksum crc32 md5sum sha1sum sha256sum sha3sum sha512sum sum dos2unix expand fsync hostid install less link logname more nohup nproc printenv shuf split tac timeout truncate tsort unexpand unix2dos unlink watch xxd ar cpio gunzip gzip tar unzip zcat"
-    local expected_count=40
+    local -a applet_items=()
+    local expected_count=0
     local inner_make_cmd=""
     local smoke_script=""
     local qemu_cmd=""
-    local required_any="APPLET_SMOKE_OK:${expected_count}"
+    local required_any=""
     local required_all=""
     local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma'
+
+    read -r -a applet_items <<< "${applet_list}"
+    expected_count="${#applet_items[@]}"
+    required_any="APPLET_SMOKE_OK:${expected_count}"
 
     printf -v inner_make_cmd \
         'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
@@ -273,7 +279,7 @@ for _ in $(seq 1 "$ready_wait"); do
     sleep 1
 done
 sleep "$boot_delay"
-printf 'bad=0; for a in %s; do if [ ! -x "/bin/$a" ]; then bad=1; echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1 || true; rc=$?; if [ "$rc" -gt 128 ]; then bad=1; echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
+printf 'bad=0; for a in %s; do if [ ! -x "/bin/$a" ]; then bad=1; echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1; rc=$?; if [ "$rc" -gt 128 ]; then bad=1; echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
 sleep "$step_delay"
 for _ in $(seq 1 "$ready_wait"); do
     grep -q '__BB_APPLET_SMOKE_DONE__' "$log_path" 2>/dev/null && break

@@ -84,11 +84,21 @@ fi
 BUILD_DIR="$(realpath -m "$BUILD_ROOT/${ARCH}/tcc-build")"
 mkdir -p "$BUILD_DIR"
 
-if [[ "$QUIET" == "1" ]]; then
-  _out=/dev/null
-else
-  _out=/dev/stdout
-fi
+run_cmd_with_quiet_log() {
+  if [[ "$QUIET" != "1" ]]; then
+    "$@"
+    return
+  fi
+
+  local cmd_log
+  cmd_log="$(mktemp /tmp/kairos-tcc-build.XXXXXX.log)"
+  if ! "$@" >"$cmd_log" 2>&1; then
+    cat "$cmd_log" >&2
+    rm -f "$cmd_log"
+    return 1
+  fi
+  rm -f "$cmd_log"
+}
 
 [[ "$QUIET" != "1" ]] && echo "Configuring TCC for $ARCH (cpu=$TCC_CPU)..."
 
@@ -141,7 +151,7 @@ if [[ -n "$AR" ]]; then
 fi
 
 cd "$BUILD_DIR"
-"$TCC_SRC/configure" "${CONFIGURE_ARGS[@]}" >"$_out" 2>&1
+run_cmd_with_quiet_log "$TCC_SRC/configure" "${CONFIGURE_ARGS[@]}"
 
 # c2str.exe is a host build tool that TCC's Makefile compiles with $(CC).
 # When cross-compiling, $(CC) is the cross-compiler which cannot produce
@@ -166,10 +176,10 @@ fi
 # Top-level `make ARCH=aarch64 ...` exports `ARCH` as a command-line override;
 # if that leaks into TinyCC's Makefile it overrides config.mak's `ARCH=arm64`,
 # resulting in empty libtcc object lists and link failures.
-env -u MAKEFLAGS -u MAKEOVERRIDES -u MFLAGS \
-make -C "$BUILD_DIR" "${make_jobs[@]}" \
+run_cmd_with_quiet_log env -u MAKEFLAGS -u MAKEOVERRIDES -u MFLAGS \
+  make -C "$BUILD_DIR" "${make_jobs[@]}" \
   "${TCC_LIBTCC1_TARGET}-libtcc1-usegcc=yes" \
-  tcc libtcc1.a >"$_out" 2>&1
+  tcc libtcc1.a
 
 # --- Install to staging directory (clean first for idempotency) ---
 [[ "$QUIET" != "1" ]] && echo "Installing TCC to $OUT_DIR..."
