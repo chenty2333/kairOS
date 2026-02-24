@@ -468,12 +468,14 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
 int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
                        uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (!dirp || count == 0)
+    if (!dirp)
         return -EINVAL;
-    if (count > 0xffffffffULL)
+    /* Linux ABI takes unsigned int count; ignore upper 32 bits. */
+    uint32_t ucount = (uint32_t)count;
+    if (ucount == 0)
         return -EINVAL;
     const size_t base = offsetof(struct linux_dirent64, d_name);
-    if (count < base + 1)
+    if ((size_t)ucount < base + 1)
         return -EINVAL;
 
     struct file *f = fd_get(proc_current(), (int)fd);
@@ -484,18 +486,14 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
         return -ENOTDIR;
     }
 
-    if (count > (uint64_t)(size_t)-1) {
-        file_put(f);
-        return -EINVAL;
-    }
-    uint8_t *kbuf = kmalloc((size_t)count);
+    uint8_t *kbuf = kmalloc((size_t)ucount);
     if (!kbuf) {
         file_put(f);
         return -ENOMEM;
     }
 
     size_t pos = 0;
-    while (pos < (size_t)count) {
+    while (pos < (size_t)ucount) {
         struct dirent ent;
         int ret = vfs_readdir(f, &ent);
         if (ret < 0) {
@@ -508,7 +506,7 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
 
         size_t name_len = strlen(ent.d_name);
         size_t reclen = ALIGN_UP(base + name_len + 1, 8);
-        if (pos + reclen > (size_t)count)
+        if (pos + reclen > (size_t)ucount)
             break;
 
         struct linux_dirent64 *ld = (struct linux_dirent64 *)(kbuf + pos);

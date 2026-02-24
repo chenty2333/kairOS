@@ -114,6 +114,8 @@ Special:
 - `ppoll`/`pselect6` now temporarily install the provided signal mask during wait and restore the original mask on return
 - raw `ppoll`/`pselect6` also update user `timespec` with remaining timeout on return (`success`/`EINTR`), matching Linux syscall-level ABI
 - `renameat2` supports `flags=0` and `RENAME_NOREPLACE` (`EEXIST` when destination already exists)
+- aarch64 `open/openat` performs userspace `O_*` bit translation at syscall boundary (`O_DIRECTORY`/`O_NOFOLLOW`/`O_LARGEFILE`), while unsupported `O_DIRECT` still returns `EINVAL`
+- `getdents64` follows Linux ABI argument width for `count` (`unsigned int`): upper 32 bits are ignored
 
 Related references:
 - references/00_REPO_MAP.md

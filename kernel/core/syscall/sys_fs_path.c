@@ -64,8 +64,8 @@ static uint32_t sysfs_translate_open_flags(uint64_t flags_raw) {
     const uint32_t ABI_O_SYNC = 04010000;
 #if defined(ARCH_aarch64)
     /*
-     * AArch64 Linux O_* bit assignments differ from the generic values used by
-     * the in-kernel VFS layer. Translate user ABI bits at syscall boundary.
+     * AArch64 userspace O_* assignments in this environment differ from the
+     * in-kernel VFS constants; translate at syscall boundary.
      */
     const uint32_t ABI_O_DIRECTORY = 040000;
     const uint32_t ABI_O_DIRECT = 0200000;
@@ -73,7 +73,9 @@ static uint32_t sysfs_translate_open_flags(uint64_t flags_raw) {
     const uint32_t ABI_O_LARGEFILE = 0400000;
     const uint32_t ABI_FLAG_INVALID = 0x80000000U;
 
-    uint32_t out = flags & ~(ABI_O_DIRECTORY | ABI_O_NOFOLLOW | ABI_O_LARGEFILE);
+    uint32_t out = flags &
+                   ~(ABI_O_DIRECT | ABI_O_DIRECTORY | ABI_O_NOFOLLOW |
+                     ABI_O_LARGEFILE);
     if (flags & ABI_O_DIRECT)
         out |= ABI_FLAG_INVALID;
     if (flags & ABI_O_DIRECTORY)
