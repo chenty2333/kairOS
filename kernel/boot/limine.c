@@ -243,8 +243,10 @@ static uint32_t limine_memmap_type_to_boot(uint32_t type) {
         return BOOT_MEM_FRAMEBUFFER;
     case LIMINE_MEMMAP_BAD_MEMORY:
         return BOOT_MEM_BAD;
+#ifdef LIMINE_MEMMAP_ACPI_TABLES
     case LIMINE_MEMMAP_ACPI_TABLES:
         return BOOT_MEM_ACPI_RECLAIM;
+#endif
     default:
         return BOOT_MEM_RESERVED;
     }

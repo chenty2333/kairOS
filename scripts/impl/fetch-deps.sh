@@ -91,22 +91,38 @@ fetch_musl() {
 }
 
 fetch_limine_header() {
+    local dst="$ROOT_DIR/kernel/include/boot/limine.h"
+    local force_fetch="${FORCE_LIMINE_HEADER_FETCH:-0}"
     echo "=== Fetching Limine protocol header ==="
-    mkdir -p "$ROOT_DIR/kernel/include/boot"
+    mkdir -p "$(dirname "$dst")"
+    if [[ -f "$dst" && "$force_fetch" != "1" ]]; then
+        echo "Limine header already exists ($dst), skipping"
+        echo "Set FORCE_LIMINE_HEADER_FETCH=1 to refresh from upstream"
+        return
+    fi
     curl -L "https://codeberg.org/Limine/limine-protocol/raw/branch/trunk/include/limine.h" \
-        -o "$ROOT_DIR/kernel/include/boot/limine.h"
-    echo "Limine header downloaded to $ROOT_DIR/kernel/include/boot/limine.h"
+        -o "$dst"
+    echo "Limine header downloaded to $dst"
 }
 
 fetch_tcc() {
+    local tcc_git_url="${TCC_GIT_URL:-https://github.com/chenty2333/tinycc.git}"
+    local tcc_git_ref="${TCC_GIT_REF:-mob}"
+    local tcc_git_commit="${TCC_GIT_COMMIT:-}"
+
     echo "=== Fetching TCC (Tiny C Compiler) ==="
     if [ -d "$DEPS_DIR/tinycc" ]; then
         echo "TCC already exists, skipping"
         return
     fi
-    git clone https://repo.or.cz/tinycc.git \
-        --branch=mob --depth=1 "$DEPS_DIR/tinycc"
+    git clone "$tcc_git_url" \
+        --branch="$tcc_git_ref" --depth=1 "$DEPS_DIR/tinycc"
+    if [[ -n "$tcc_git_commit" ]]; then
+        git -C "$DEPS_DIR/tinycc" fetch --depth=1 origin "$tcc_git_commit"
+        git -C "$DEPS_DIR/tinycc" checkout --detach "$tcc_git_commit"
+    fi
     echo "TCC downloaded to $DEPS_DIR/tinycc"
+    echo "Source: $tcc_git_url ($tcc_git_ref${tcc_git_commit:+ @ $tcc_git_commit})"
     echo "License: LGPL-2.1"
 }
 

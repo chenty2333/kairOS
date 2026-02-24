@@ -105,6 +105,8 @@ QEMU configuration:
 - `make test-matrix` — SMP × DEBUG test matrix
 - GitHub Actions `ci-quick` runs `riscv64` quick regression (`make test` + `make test-exec-elf-smoke` + `make test-busybox-applets-smoke`)
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
+- `scripts/impl/fetch-deps.sh` defaults to preserving tracked `kernel/include/boot/limine.h`; refresh only when `FORCE_LIMINE_HEADER_FETCH=1`.
+- TCC source for `deps fetch tcc` is configurable: `TCC_GIT_URL` / `TCC_GIT_REF` / `TCC_GIT_COMMIT` (default URL currently `https://github.com/chenty2333/tinycc.git`, ref `mob`).
 - Test module selection uses `CONFIG_KERNEL_TEST_MASK` via `TEST_EXTRA_CFLAGS` (default mask `0x7FF`)
 - Kernel test module bits: `0x01 driver`, `0x02 mm`, `0x04 sync`, `0x08 vfork`, `0x10 sched`, `0x20 crash`, `0x40 syscall/trap`, `0x80 vfs/ipc`, `0x100 socket`, `0x200 device/virtio`, `0x400 tty`, `0x800 soak-pr`
 - `test-syscall-trap` includes a kernel-launched user-mode ecall regression covering bad user pointer (`-EFAULT`) and positive syscall path
