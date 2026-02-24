@@ -96,8 +96,8 @@ else ifeq ($(ARCH),aarch64)
   QEMU_CPU := cortex-a72
   QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
   INITRAMFS_BUSYBOX := 1
-  # AArch64 SMP path is still unstable; default to single CPU for run/debug.
-  QEMU_SMP := 1
+  # Align local default with CI quick gate coverage.
+  QEMU_SMP := 2
   KERNEL_LOAD := 0x40000000
 else
   $(error Unsupported architecture: $(ARCH))
