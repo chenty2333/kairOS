@@ -393,12 +393,13 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
     if (!stx_ptr)
         return -EFAULT;
 
-    uint64_t allowed_flags = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH |
+    uint32_t uflags = (uint32_t)flags;
+    uint32_t allowed_flags = AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH |
                              AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE;
-    if (flags & ~allowed_flags)
+    if (uflags & ~allowed_flags)
         return -EINVAL;
 
-    uint64_t sync_type = flags & AT_STATX_SYNC_TYPE;
+    uint32_t sync_type = uflags & AT_STATX_SYNC_TYPE;
     if (sync_type != AT_STATX_SYNC_AS_STAT &&
         sync_type != AT_STATX_FORCE_SYNC &&
         sync_type != AT_STATX_DONT_SYNC)
@@ -413,11 +414,11 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
-    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+    if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
     struct stat st;
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((uflags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
@@ -446,7 +447,7 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
     }
 
     int nflags = NAMEI_FOLLOW;
-    if (flags & AT_SYMLINK_NOFOLLOW)
+    if (uflags & AT_SYMLINK_NOFOLLOW)
         nflags = NAMEI_NOFOLLOW;
 
     struct path resolved;

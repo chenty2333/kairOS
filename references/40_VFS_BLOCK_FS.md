@@ -117,6 +117,7 @@ Special:
 - aarch64 `open/openat` performs userspace `O_*` bit translation at syscall boundary (`O_DIRECTORY`/`O_NOFOLLOW`/`O_LARGEFILE`), while unsupported `O_DIRECT` still returns `EINVAL`
 - `getdents64` follows Linux ABI argument width for `count` (`unsigned int`): upper 32 bits are ignored
 - `newfstatat` accepts `AT_NO_AUTOMOUNT` as a compatibility no-op
+- `statx` and `newfstatat` both decode `flags` using Linux ABI width (`int`/32-bit)
 
 Related references:
 - references/00_REPO_MAP.md
