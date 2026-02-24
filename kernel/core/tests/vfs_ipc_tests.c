@@ -5,6 +5,7 @@
 #include <kairos/epoll.h>
 #include <kairos/epoll_internal.h>
 #include <kairos/inotify.h>
+#include <kairos/arch.h>
 #include <kairos/mm.h>
 #include <kairos/pipe.h>
 #include <kairos/poll.h>
@@ -14,6 +15,8 @@
 #include <kairos/signal.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
+#include <kairos/time.h>
+#include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 #if CONFIG_KERNEL_TESTS
@@ -72,6 +75,160 @@ static void fd_set_nonblock(int fd, bool enabled) {
         f->flags &= ~O_NONBLOCK;
     mutex_unlock(&f->lock);
     file_put(f);
+}
+
+struct user_map_ctx {
+    struct process *proc;
+    struct mm_struct *saved_mm;
+    struct mm_struct *active_mm;
+    struct mm_struct *temp_mm;
+    paddr_t saved_pgdir;
+    vaddr_t base;
+    size_t len;
+    bool switched_pgdir;
+};
+
+struct test_linux_itimerspec {
+    struct timespec it_interval;
+    struct timespec it_value;
+};
+
+struct test_linux_signalfd_siginfo {
+    uint32_t ssi_signo;
+    uint8_t pad[124];
+};
+
+struct test_linux_inotify_event {
+    int32_t wd;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t len;
+};
+
+static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
+    if (!ctx || len == 0)
+        return -EINVAL;
+
+    memset(ctx, 0, sizeof(*ctx));
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+    ctx->proc = p;
+    ctx->saved_mm = p->mm;
+    ctx->active_mm = p->mm;
+    ctx->saved_pgdir = arch_mmu_current();
+
+    if (!ctx->active_mm) {
+        ctx->temp_mm = mm_create();
+        if (!ctx->temp_mm)
+            return -ENOMEM;
+        p->mm = ctx->temp_mm;
+        ctx->active_mm = ctx->temp_mm;
+    }
+
+    if (ctx->saved_pgdir != ctx->active_mm->pgdir) {
+        arch_mmu_switch(ctx->active_mm->pgdir);
+        ctx->switched_pgdir = true;
+    }
+
+    int rc = mm_mmap(ctx->active_mm, 0, len, VM_READ | VM_WRITE, 0, NULL, 0,
+                     false, &ctx->base);
+    if (rc < 0) {
+        if (ctx->switched_pgdir)
+            arch_mmu_switch(ctx->saved_pgdir);
+        if (ctx->temp_mm) {
+            p->mm = ctx->saved_mm;
+            mm_destroy(ctx->temp_mm);
+        }
+        memset(ctx, 0, sizeof(*ctx));
+        return rc;
+    }
+    ctx->len = len;
+    return 0;
+}
+
+static void user_map_end(struct user_map_ctx *ctx) {
+    if (!ctx || !ctx->proc)
+        return;
+    if (ctx->active_mm && ctx->base && ctx->len)
+        (void)mm_munmap(ctx->active_mm, ctx->base, ctx->len);
+    if (ctx->switched_pgdir)
+        arch_mmu_switch(ctx->saved_pgdir);
+    if (ctx->temp_mm) {
+        ctx->proc->mm = ctx->saved_mm;
+        mm_destroy(ctx->temp_mm);
+    }
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static void *user_map_ptr(const struct user_map_ctx *ctx, size_t off) {
+    if (!ctx || off >= ctx->len)
+        return NULL;
+    return (void *)(ctx->base + off);
+}
+
+static ssize_t fd_read_until_ready(int fd, void *buf, size_t len,
+                                   uint64_t timeout_ns) {
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    while (time_now_ns() < deadline) {
+        ssize_t rd = fd_read_once(fd, buf, len);
+        if (rd != -EAGAIN)
+            return rd;
+        proc_yield();
+    }
+    return -EAGAIN;
+}
+
+static bool inotify_buffer_has_event(const uint8_t *buf, size_t len, int wd,
+                                     uint32_t mask, const char *name) {
+    if (!buf)
+        return false;
+
+    size_t off = 0;
+    while (off + sizeof(struct test_linux_inotify_event) <= len) {
+        const struct test_linux_inotify_event *ev =
+            (const struct test_linux_inotify_event *)(buf + off);
+        size_t need = sizeof(*ev) + (size_t)ev->len;
+        if (need < sizeof(*ev) || off + need > len)
+            break;
+
+        bool wd_ok = (wd < 0) || (ev->wd == wd);
+        bool mask_ok = (ev->mask & mask) == mask;
+        bool name_ok = true;
+        if (name) {
+            if (ev->len == 0) {
+                name_ok = false;
+            } else {
+                const char *ev_name = (const char *)(buf + off + sizeof(*ev));
+                size_t name_len = strnlen(name, CONFIG_NAME_MAX - 1);
+                size_t ev_len = strnlen(ev_name, ev->len);
+                name_ok = (ev_len == name_len) &&
+                          (memcmp(ev_name, name, name_len) == 0);
+            }
+        }
+        if (wd_ok && mask_ok && name_ok)
+            return true;
+        off += need;
+    }
+    return false;
+}
+
+static bool inotify_wait_event(int ifd, int wd, uint32_t mask, const char *name,
+                               uint64_t timeout_ns) {
+    uint8_t buf[512];
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    while (time_now_ns() < deadline) {
+        ssize_t rd = fd_read_once(ifd, buf, sizeof(buf));
+        if (rd == -EAGAIN) {
+            proc_yield();
+            continue;
+        }
+        if (rd <= 0)
+            return false;
+        if (inotify_buffer_has_event(buf, (size_t)rd, wd, mask, name))
+            return true;
+    }
+    return false;
 }
 
 static int prepare_tmpfs_mount(void) {
@@ -727,6 +884,233 @@ out:
     close_fd_if_open(&ifd);
 }
 
+static void test_timerfd_syscall_functional(void) {
+    int tfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    uint8_t *u_base = NULL;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "timerfd func user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+    u_base = (uint8_t *)user_map_ptr(&um, 0);
+    test_check(u_base != NULL, "timerfd func user ptr");
+    if (!u_base)
+        goto out;
+
+    int64_t ret64 = sys_timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "timerfd func create");
+    if (ret64 < 0)
+        goto out;
+    tfd = (int)ret64;
+
+    struct test_linux_itimerspec arm = {
+        .it_interval = { .tv_sec = 0, .tv_nsec = 0 },
+        .it_value = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 },
+    };
+    struct test_linux_itimerspec curr = {0};
+    struct test_linux_itimerspec disarm = {0};
+    void *u_new = u_base;
+    void *u_curr = u_base + sizeof(arm);
+
+    rc = copy_to_user(u_new, &arm, sizeof(arm));
+    test_check(rc == 0, "timerfd func copy arm");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_timerfd_settime((uint64_t)tfd, 0, (uint64_t)u_new, 0, 0, 0);
+    test_check(ret64 == 0, "timerfd func settime");
+    if (ret64 < 0)
+        goto out;
+
+    ret64 = sys_timerfd_gettime((uint64_t)tfd, (uint64_t)u_curr, 0, 0, 0, 0);
+    test_check(ret64 == 0, "timerfd func gettime");
+    if (ret64 == 0) {
+        rc = copy_from_user(&curr, u_curr, sizeof(curr));
+        test_check(rc == 0, "timerfd func copy curr");
+        if (rc == 0) {
+            bool armed = curr.it_value.tv_sec > 0 || curr.it_value.tv_nsec > 0;
+            test_check(armed, "timerfd func gettime armed");
+        }
+    }
+
+    uint64_t expirations = 0;
+    ssize_t rd = fd_read_until_ready(tfd, &expirations, sizeof(expirations),
+                                     1000ULL * 1000ULL * 1000ULL);
+    test_check(rd == (ssize_t)sizeof(expirations), "timerfd func read expiry");
+    if (rd == (ssize_t)sizeof(expirations))
+        test_check(expirations >= 1, "timerfd func expiry count");
+
+    rc = copy_to_user(u_new, &disarm, sizeof(disarm));
+    test_check(rc == 0, "timerfd func copy disarm");
+    if (rc < 0)
+        goto out;
+    ret64 = sys_timerfd_settime((uint64_t)tfd, 0, (uint64_t)u_new, 0, 0, 0);
+    test_check(ret64 == 0, "timerfd func disarm");
+    if (ret64 == 0) {
+        rd = fd_read_once(tfd, &expirations, sizeof(expirations));
+        test_check(rd == -EAGAIN, "timerfd func disarm eagain");
+    }
+
+out:
+    close_fd_if_open(&tfd);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_signalfd_syscall_functional(void) {
+    int sfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    bool blocked_saved = false;
+    sigset_t old_blocked = 0;
+    sigset_t test_mask = (1ULL << (SIGUSR1 - 1));
+    struct process *p = proc_current();
+    test_check(p != NULL, "signalfd func proc current");
+    if (!p)
+        return;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "signalfd func user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    void *u_mask = user_map_ptr(&um, 0);
+    test_check(u_mask != NULL, "signalfd func user ptr");
+    if (!u_mask)
+        goto out;
+
+    rc = copy_to_user(u_mask, &test_mask, sizeof(test_mask));
+    test_check(rc == 0, "signalfd func copy mask");
+    if (rc < 0)
+        goto out;
+
+    old_blocked = __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&p->sig_blocked, old_blocked | test_mask, __ATOMIC_RELEASE);
+    blocked_saved = true;
+
+    int64_t ret64 =
+        sys_signalfd4((uint64_t)-1, (uint64_t)u_mask, sizeof(sigset_t),
+                      O_NONBLOCK, 0, 0);
+    test_check(ret64 >= 0, "signalfd func create");
+    if (ret64 < 0)
+        goto out;
+    sfd = (int)ret64;
+
+    struct test_linux_signalfd_siginfo info = {0};
+    ssize_t rd = fd_read_once(sfd, &info, sizeof(info));
+    test_check(rd == -EAGAIN, "signalfd func empty eagain");
+
+    int sret = signal_send(p->pid, SIGUSR1);
+    test_check(sret == 0, "signalfd func send sigusr1");
+    if (sret == 0) {
+        rd = fd_read_until_ready(sfd, &info, sizeof(info),
+                                 500ULL * 1000ULL * 1000ULL);
+        test_check(rd == (ssize_t)sizeof(info), "signalfd func read siginfo");
+        if (rd == (ssize_t)sizeof(info))
+            test_check(info.ssi_signo == SIGUSR1, "signalfd func signo");
+    }
+
+    rd = fd_read_once(sfd, &info, sizeof(info));
+    test_check(rd == -EAGAIN, "signalfd func drained eagain");
+
+out:
+    if (blocked_saved)
+        __atomic_store_n(&p->sig_blocked, old_blocked, __ATOMIC_RELEASE);
+    __atomic_fetch_and(&p->sig_pending, ~test_mask, __ATOMIC_RELEASE);
+    close_fd_if_open(&sfd);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_inotify_syscall_functional(void) {
+    int ifd = -1;
+    int wd = -1;
+    struct file *f = NULL;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    bool mounted = false;
+
+    int ret = prepare_tmpfs_mount();
+    test_check(ret == 0, "inotify func mount");
+    if (ret < 0)
+        goto out;
+    mounted = true;
+
+    ret = vfs_mkdir(VFS_IPC_MNT "/watch", 0755);
+    test_check(ret == 0, "inotify func mkdir watch");
+    if (ret < 0)
+        goto out;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "inotify func user map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    char *u_path = (char *)user_map_ptr(&um, 0);
+    test_check(u_path != NULL, "inotify func user ptr");
+    if (!u_path)
+        goto out;
+
+    const char *watch_path = VFS_IPC_MNT "/watch";
+    rc = copy_to_user(u_path, watch_path, strlen(watch_path) + 1);
+    test_check(rc == 0, "inotify func copy path");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_inotify_init1(IN_NONBLOCK, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "inotify func init");
+    if (ret64 < 0)
+        goto out;
+    ifd = (int)ret64;
+
+    ret64 = sys_inotify_add_watch((uint64_t)ifd, (uint64_t)u_path,
+                                  IN_CREATE | IN_DELETE, 0, 0, 0);
+    test_check(ret64 > 0, "inotify func add watch");
+    if (ret64 <= 0)
+        goto out;
+    wd = (int)ret64;
+
+    ret = vfs_open(VFS_IPC_MNT "/watch/new.txt", O_CREAT | O_WRONLY | O_TRUNC,
+                   0644, &f);
+    test_check(ret == 0, "inotify func create file");
+    close_file_if_open(&f);
+    if (ret < 0)
+        goto out;
+
+    bool seen = inotify_wait_event(ifd, wd, IN_CREATE, "new.txt",
+                                   500ULL * 1000ULL * 1000ULL);
+    test_check(seen, "inotify func create event");
+
+    ret = vfs_unlink(VFS_IPC_MNT "/watch/new.txt");
+    test_check(ret == 0, "inotify func unlink file");
+    if (ret == 0) {
+        seen = inotify_wait_event(ifd, wd, IN_DELETE, "new.txt",
+                                  500ULL * 1000ULL * 1000ULL);
+        test_check(seen, "inotify func delete event");
+    }
+
+    ret64 = sys_inotify_rm_watch((uint64_t)ifd, (uint64_t)wd, 0, 0, 0, 0);
+    test_check(ret64 == 0, "inotify func rm watch");
+    if (ret64 == 0) {
+        seen = inotify_wait_event(ifd, wd, IN_IGNORED, NULL,
+                                  500ULL * 1000ULL * 1000ULL);
+        test_check(seen, "inotify func ignored event");
+    }
+
+out:
+    close_file_if_open(&f);
+    close_fd_if_open(&ifd);
+    if (mapped)
+        user_map_end(&um);
+    if (mounted)
+        cleanup_tmpfs_mount();
+}
+
 int run_vfs_ipc_tests(void) {
     tests_failed = 0;
     pr_info("\n=== VFS/IPC Tests ===\n");
@@ -737,8 +1121,11 @@ int run_vfs_ipc_tests(void) {
     test_epoll_edge_oneshot_semantics();
     test_eventfd_syscall_semantics();
     test_timerfd_syscall_semantics();
+    test_timerfd_syscall_functional();
     test_signalfd_syscall_semantics();
+    test_signalfd_syscall_functional();
     test_inotify_syscall_semantics();
+    test_inotify_syscall_functional();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");
