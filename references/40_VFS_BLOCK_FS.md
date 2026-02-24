@@ -118,6 +118,7 @@ Special:
 - `getdents64` follows Linux ABI argument width for `count` (`unsigned int`): upper 32 bits are ignored
 - `newfstatat` accepts `AT_NO_AUTOMOUNT` as a compatibility no-op
 - `statx` and `newfstatat` both decode `flags` using Linux ABI width (`int`/32-bit)
+- path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `linkat`) decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit
 
 Related references:
 - references/00_REPO_MAP.md

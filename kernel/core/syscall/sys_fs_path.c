@@ -196,17 +196,18 @@ int64_t sys_fchdir(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                      uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
-    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+    if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((uflags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
@@ -237,7 +238,8 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
         return 0;
     }
 
-    int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+    int nflags =
+        (uflags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
     struct path resolved;
     path_init(&resolved);
     int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
@@ -268,17 +270,18 @@ int64_t sys_fchmodat2(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
 int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
                      uint64_t group, uint64_t flags, uint64_t a5) {
     (void)a5;
-    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
     if (!path_ptr)
         return -EFAULT;
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
-    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+    if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((uflags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
@@ -312,7 +315,8 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
         return 0;
     }
 
-    int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+    int nflags =
+        (uflags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
     struct path resolved;
     path_init(&resolved);
     int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
@@ -343,7 +347,8 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
 int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
                       uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) {
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) {
         return -EINVAL;
     }
     if (!path_ptr) {
@@ -353,14 +358,14 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0) {
         return -EFAULT;
     }
-    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+    if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
     struct vnode *vn = NULL;
     struct mount *mnt = NULL;
     struct dentry *hold_d = NULL;
     struct file *hold_f = NULL;
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((uflags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
@@ -381,7 +386,8 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
             mnt = vn->mount;
         }
     } else {
-        int nflags = (flags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
+        int nflags =
+            (uflags & AT_SYMLINK_NOFOLLOW) ? NAMEI_NOFOLLOW : NAMEI_FOLLOW;
         struct path resolved;
         path_init(&resolved);
         int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
@@ -564,36 +570,38 @@ static int sysfs_check_access(struct vnode *vn, uint64_t mode,
 int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                       uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
-    if (mode & ~(F_OK | R_OK | W_OK | X_OK))
+    uint32_t umode = (uint32_t)mode;
+    if (umode & ~(F_OK | R_OK | W_OK | X_OK))
         return -EINVAL;
-    bool use_effective_ids = (flags & AT_EACCESS) != 0;
+    bool use_effective_ids = (uflags & AT_EACCESS) != 0;
 
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
-    if (kpath[0] == '\0' && !(flags & AT_EMPTY_PATH))
+    if (kpath[0] == '\0' && !(uflags & AT_EMPTY_PATH))
         return -ENOENT;
 
-    if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
+    if ((uflags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         struct process *p = proc_current();
         if (!p)
             return -EINVAL;
         if ((int64_t)dirfd == AT_FDCWD) {
             struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
-            return sysfs_check_access(cwd_vn, mode, use_effective_ids);
+            return sysfs_check_access(cwd_vn, umode, use_effective_ids);
         }
         struct file *f = fd_get(p, (int)dirfd);
         if (!f)
             return -EBADF;
-        int ret = sysfs_check_access(f->vnode, mode, use_effective_ids);
+        int ret = sysfs_check_access(f->vnode, umode, use_effective_ids);
         file_put(f);
         return ret;
     }
 
     int nflags = NAMEI_FOLLOW;
-    if (flags & AT_SYMLINK_NOFOLLOW)
+    if (uflags & AT_SYMLINK_NOFOLLOW)
         nflags = NAMEI_NOFOLLOW;
 
     struct path resolved;
@@ -608,7 +616,7 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
     }
 
     int access_ret =
-        sysfs_check_access(resolved.dentry->vnode, mode, use_effective_ids);
+        sysfs_check_access(resolved.dentry->vnode, umode, use_effective_ids);
     dentry_put(resolved.dentry);
     return access_ret;
 }
@@ -616,22 +624,24 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
 int64_t sys_faccessat2(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
                        uint64_t flags, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    if (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
         return -EINVAL;
-    return sys_faccessat(dirfd, path_ptr, mode, flags, 0, 0);
+    return sys_faccessat(dirfd, path_ptr, mode, uflags, 0, 0);
 }
 
 int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
                      uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (flags & ~AT_REMOVEDIR)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~AT_REMOVEDIR)
         return -EINVAL;
 
     char kpath[CONFIG_PATH_MAX];
     if (sysfs_copy_path(path_ptr, kpath, sizeof(kpath)) < 0)
         return -EFAULT;
 
-    int nflags = (flags & AT_REMOVEDIR) ? NAMEI_DIRECTORY : 0;
+    int nflags = (uflags & AT_REMOVEDIR) ? NAMEI_DIRECTORY : 0;
     struct path resolved;
     path_init(&resolved);
     int ret = sysfs_resolve_at((int64_t)dirfd, kpath, &resolved, nflags);
@@ -648,7 +658,7 @@ int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
         dentry_put(resolved.dentry);
         return -EBUSY;
     }
-    if (flags & AT_REMOVEDIR) {
+    if (uflags & AT_REMOVEDIR) {
         if (!resolved.mnt->ops->rmdir) {
             dentry_put(resolved.dentry);
             return -EOPNOTSUPP;
@@ -1019,8 +1029,9 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
                    uint64_t newdirfd, uint64_t newpath_ptr,
                    uint64_t flags, uint64_t a5) {
     (void)a5;
+    uint32_t uflags = (uint32_t)flags;
     /* AT_SYMLINK_FOLLOW is currently the only supported linkat flag. */
-    if (flags & ~AT_SYMLINK_FOLLOW) {
+    if (uflags & ~AT_SYMLINK_FOLLOW) {
         return -EINVAL;
     }
 
@@ -1034,7 +1045,7 @@ int64_t sys_linkat(uint64_t olddirfd, uint64_t oldpath_ptr,
     }
 
     /* Resolve old path (target of the link) */
-    int nflags = (flags & AT_SYMLINK_FOLLOW) ? NAMEI_FOLLOW : 0;
+    int nflags = (uflags & AT_SYMLINK_FOLLOW) ? NAMEI_FOLLOW : 0;
     struct path oldp;
     path_init(&oldp);
     int ret = sysfs_resolve_at((int64_t)olddirfd, oldpath, &oldp, nflags);
