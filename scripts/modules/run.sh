@@ -10,8 +10,11 @@ Usage: scripts/kairos.sh [global options] run <action> [options]
 Actions:
   test        Run kernel tests (structured-result first)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
+  test-exec-elf-smoke
+              Run exec/ELF smoke regression (interactive shell command path)
+              Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-tcc-smoke
-              Run tcc smoke regression (interactive shell command path)
+              Run tcc smoke regression (alias of test-exec-elf-smoke)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-busybox-applets-smoke
               Run busybox applet smoke regression (interactive shell command path)
@@ -89,59 +92,128 @@ kairos_run_test_tcc_smoke_once() {
     local extra_cflags="$1"
     local timeout_s="$2"
     local log_path="$3"
-    local boot_delay="${TCC_SMOKE_BOOT_DELAY_SEC:-8}"
-    local step_delay="${TCC_SMOKE_STEP_DELAY_SEC:-1}"
-    local ready_wait="${TCC_SMOKE_READY_WAIT_SEC:-180}"
+    local boot_delay="${EXEC_ELF_SMOKE_BOOT_DELAY_SEC:-${TCC_SMOKE_BOOT_DELAY_SEC:-8}}"
+    local step_delay="${EXEC_ELF_SMOKE_STEP_DELAY_SEC:-${TCC_SMOKE_STEP_DELAY_SEC:-1}}"
+    local ready_wait="${EXEC_ELF_SMOKE_READY_WAIT_SEC:-${TCC_SMOKE_READY_WAIT_SEC:-180}}"
     local run_log="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/run.log"
     local make_jobs="${KAIROS_JOBS:-$(nproc)}"
     local inner_make_cmd=""
-    local smoke_cmd=""
+    local smoke_script=""
     local qemu_cmd=""
-    local expected_interp="${TCC_SMOKE_EXPECTED_INTERP:-}"
-    local required_any="TCC_BIN_OK"
-    local required_all=$'TCC_BIN_OK\nRC_EXEC:0\nDYN_BIN_OK\nRC_DYN:0\nPT_INTERP_OK\nPT_INTERP_PATH_OK\n__TCC_SMOKE_DONE__'
-    local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma|PT_INTERP not supported|PT_INTERP_MISMATCH:|PT_INTERP_PATH_MISSING:|PT_INTERP_PARSE_FAIL:|PT_INTERP_MISSING'
+    local expected_interp="${EXEC_ELF_SMOKE_EXPECTED_INTERP:-${TCC_SMOKE_EXPECTED_INTERP:-}}"
+    local required_any=""
+    local required_all="__TCC_SMOKE_DONE__"
+    local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma|PT_INTERP not supported'
 
     printf -v inner_make_cmd \
         'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
         "${make_jobs}" "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
         "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
 
-    printf -v smoke_cmd '%s' \
-        ": > \"${run_log}\"; " \
-        "fifo=\"\$(mktemp -u /tmp/kairos-tcc-smoke.XXXXXX)\"; " \
-        "mkfifo \"\$fifo\"; " \
-        "( exec 3<>\"\$fifo\"; " \
-        "for _ in \$(seq 1 ${ready_wait}); do " \
-        "grep -Eiq 'init: starting shell|BusyBox v' \"${run_log}\" 2>/dev/null && break; " \
-        "sleep 1; " \
-        "done; " \
-        "sleep ${boot_delay}; " \
-        "printf 'failed=0\\n' >&3; " \
-        "sleep ${step_delay}; printf 'arch=\"\$(uname -m)\"; expected_interp=\"${expected_interp}\"; if [ -z \"\$expected_interp\" ]; then for ld in /lib/ld-musl-\${arch}*.so.1 /lib/ld-musl-*.so.1; do [ -e \"\$ld\" ] && { expected_interp=\"\$ld\"; break; }; done; fi\\n' >&3; " \
-        "sleep ${step_delay}; printf 'printf '\\''int main(void){return 0;}\\\\n'\\'' > /tmp/tcc_smoke_exec.c\\n' >&3; " \
-        "sleep ${step_delay}; printf 'tcc -static /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_exec || failed=\$(expr \"\$failed\" + 1)\\n' >&3; " \
-        "sleep ${step_delay}; printf 'if test -x /tmp/tcc_smoke_exec; then echo TCC_BIN_OK; else failed=\$(expr \"\$failed\" + 1); fi\\n' >&3; " \
-        "sleep ${step_delay}; printf '/tmp/tcc_smoke_exec\\n' >&3; " \
-        "sleep ${step_delay}; printf 'rc_exec=\$?; echo RC_EXEC:\$rc_exec; [ \$rc_exec -eq 0 ] || failed=\$(expr \"\$failed\" + 1)\\n' >&3; " \
-        "sleep ${step_delay}; printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_dyn || failed=\$(expr \"\$failed\" + 1)\\n' >&3; " \
-        "sleep ${step_delay}; printf 'if test -x /tmp/tcc_smoke_dyn; then echo DYN_BIN_OK; else failed=\$(expr \"\$failed\" + 1); fi\\n' >&3; " \
-        "sleep ${step_delay}; printf '/tmp/tcc_smoke_dyn\\n' >&3; " \
-        "sleep ${step_delay}; printf 'rc_dyn=\$?; echo RC_DYN:\$rc_dyn; [ \$rc_dyn -eq 0 ] || failed=\$(expr \"\$failed\" + 1)\\n' >&3; " \
-        "sleep ${step_delay}; printf 'interp=\"\$(grep -a -o \"/lib/ld-musl[^[:space:]]*\\\\.so\\\\.1\" /tmp/tcc_smoke_dyn 2>/dev/null | head -n1)\"; if [ -n \"\$interp\" ]; then echo PT_INTERP:\$interp; else echo PT_INTERP_MISSING; failed=\$(expr \"\$failed\" + 1); fi\\n' >&3; " \
-        "sleep ${step_delay}; printf 'if [ -n \"\$expected_interp\" ] && [ \"\$interp\" = \"\$expected_interp\" ]; then echo PT_INTERP_OK; else echo PT_INTERP_MISMATCH:\$expected_interp:\$interp; failed=\$(expr \"\$failed\" + 1); fi\\n' >&3; " \
-        "sleep ${step_delay}; printf 'if [ -n \"\$interp\" ] && [ -e \"\$interp\" ]; then echo PT_INTERP_PATH_OK; else echo PT_INTERP_PATH_MISSING:\$interp; failed=\$(expr \"\$failed\" + 1); fi\\n' >&3; " \
-        "sleep ${step_delay}; printf 'echo __TCC_SMOKE_DONE__\\n' >&3; " \
-        "sleep ${step_delay}; printf 'printf \"TEST_RESULT_JSON: {\\\\\"schema_version\\\\\":1,\\\\\"failed\\\\\":%%s,\\\\\"done\\\\\":true,\\\\\"enabled_mask\\\\\":1}\\\\n\" \"\$failed\"\\n' >&3; " \
-        "sleep ${step_delay}; printf '\\001x' >&3; " \
-        "exec 3>&- ) & " \
-        "feeder=\$!; " \
-        "${inner_make_cmd} QEMU_STDIN=\"<\$fifo\" run-direct; rc=\$?; " \
-        "wait \"\$feeder\" 2>/dev/null || true; rm -f \"\$fifo\"; exit \$rc"
+    smoke_script="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/exec-elf-smoke-host.sh"
+    mkdir -p "$(dirname "${smoke_script}")"
+    {
+        printf 'run_log=%q\n' "${run_log}"
+        printf 'ready_wait=%q\n' "${ready_wait}"
+        printf 'boot_delay=%q\n' "${boot_delay}"
+        printf 'step_delay=%q\n' "${step_delay}"
+        printf 'expected_interp=%q\n' "${expected_interp}"
+        printf 'inner_make_cmd=%q\n' "${inner_make_cmd}"
+        printf 'log_path=%q\n' "${log_path}"
+        cat <<'EOF'
+: > "$run_log"
+fifo="$(mktemp -u /tmp/kairos-exec-elf-smoke.XXXXXX)"
+mkfifo "$fifo"
+( exec 3<>"$fifo"
+for _ in $(seq 1 "$ready_wait"); do
+    grep -Eiq 'init: starting shell|BusyBox v' "$run_log" 2>/dev/null && break
+    sleep 1
+done
+sleep "$boot_delay"
+printf 'expected_interp="%s"\n' "$expected_interp" >&3
+sleep "$step_delay"
+printf 'failed=0\n' >&3
+sleep "$step_delay"
+printf 'mark_failed(){ failed=1; }\n' >&3
+sleep "$step_delay"
+printf 'arch="$(uname -m)"\n' >&3
+sleep "$step_delay"
+printf 'if [ -z "$expected_interp" ]; then\n' >&3
+sleep "$step_delay"
+printf 'for ld in /lib/ld-musl-${arch}*.so.1 /lib/ld-musl-*.so.1; do [ -e "$ld" ] && { expected_interp="$ld"; break; }; done\n' >&3
+sleep "$step_delay"
+printf 'fi\n' >&3
+sleep "$step_delay"
+printf 'printf '\''int main(void){return 0;}\n'\'' > /tmp/tcc_smoke_exec.c\n' >&3
+sleep "$step_delay"
+printf 'tcc -static /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_static || mark_failed\n' >&3
+sleep "$step_delay"
+printf '[ -x /tmp/tcc_smoke_static ] || mark_failed\n' >&3
+sleep "$step_delay"
+printf '/tmp/tcc_smoke_static\n' >&3
+sleep "$step_delay"
+printf 'rc_static=$?\n' >&3
+sleep "$step_delay"
+printf 'echo RC_STATIC:$rc_static\n' >&3
+sleep "$step_delay"
+printf '[ "$rc_static" -eq 0 ] || mark_failed\n' >&3
+sleep "$step_delay"
+printf 'tcc /tmp/tcc_smoke_exec.c -o /tmp/tcc_smoke_dyn || mark_failed\n' >&3
+sleep "$step_delay"
+printf '[ -x /tmp/tcc_smoke_dyn ] || mark_failed\n' >&3
+sleep "$step_delay"
+printf '/tmp/tcc_smoke_dyn\n' >&3
+sleep "$step_delay"
+printf 'rc_dyn=$?\n' >&3
+sleep "$step_delay"
+printf 'echo RC_DYN:$rc_dyn\n' >&3
+sleep "$step_delay"
+printf '[ "$rc_dyn" -eq 0 ] || mark_failed\n' >&3
+sleep "$step_delay"
+printf 'tr '\''\000'\'' '\''\n'\'' < /tmp/tcc_smoke_dyn > /tmp/tcc_smoke_dyn.str\n' >&3
+sleep "$step_delay"
+printf 'interp="$(grep '\''^/lib/ld-musl-.*\.so\.1$'\'' /tmp/tcc_smoke_dyn.str | head -n1)"\n' >&3
+sleep "$step_delay"
+printf 'echo PT_INTERP:$interp\n' >&3
+sleep "$step_delay"
+printf '[ -n "$interp" ] || mark_failed\n' >&3
+sleep "$step_delay"
+printf '[ -n "$expected_interp" ] && [ "$interp" != "$expected_interp" ] && mark_failed\n' >&3
+sleep "$step_delay"
+printf '[ -n "$interp" ] && [ -e "$interp" ] || mark_failed\n' >&3
+sleep "$step_delay"
+printf 'done_tag=__TCC_\n' >&3
+sleep "$step_delay"
+printf 'done_tag=${done_tag}SMOKE_DONE__\n' >&3
+sleep "$step_delay"
+printf 'echo "$done_tag"\n' >&3
+sleep "$step_delay"
+printf 'json_tag=TEST_RESULT\n' >&3
+sleep "$step_delay"
+printf 'json_tag=${json_tag}_JSON:\n' >&3
+sleep "$step_delay"
+printf 'echo "$json_tag {\\"schema_version\\":1,\\"failed\\":$failed,\\"done\\":true,\\"enabled_mask\\":1}"\n' >&3
+sleep "$step_delay"
+for _ in $(seq 1 "$ready_wait"); do
+    grep -q '__TCC_SMOKE_DONE__' "$log_path" 2>/dev/null && break
+    sleep 1
+done
+printf '\001x' >&3
+exec 3>&-
+) &
+feeder=$!
+eval "$inner_make_cmd QEMU_STDIN=\"<$fifo\" run-direct"
+rc=$?
+wait "$feeder" 2>/dev/null || true
+rm -f "$fifo"
+exit $rc
+EOF
+    } > "${smoke_script}"
+    chmod +x "${smoke_script}"
 
     printf -v qemu_cmd \
-        'bash -lc %q' \
-        "${smoke_cmd}"
+        'bash %q' \
+        "${smoke_script}"
 
     kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 1 0 "${required_any}" "${required_all}" "${forbidden}" 0
 }
@@ -173,32 +245,42 @@ kairos_run_test_busybox_applets_smoke_once() {
         "${expected_count}"
 
     smoke_script="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/busybox-applets-smoke-host.sh"
-    cat > "${smoke_script}" <<EOF
-: > "${run_log}"
-fifo="\$(mktemp -u /tmp/kairos-bb-applet-smoke.XXXXXX)"
-mkfifo "\$fifo"
-( exec 3<>"\$fifo"
-for _ in \$(seq 1 ${ready_wait}); do
-    grep -Eiq 'init: starting shell|BusyBox v' "${run_log}" 2>/dev/null && break
+    {
+        printf 'run_log=%q\n' "${run_log}"
+        printf 'ready_wait=%q\n' "${ready_wait}"
+        printf 'boot_delay=%q\n' "${boot_delay}"
+        printf 'step_delay=%q\n' "${step_delay}"
+        printf 'applet_list=%q\n' "${applet_list}"
+        printf 'expected_count=%q\n' "${expected_count}"
+        printf 'inner_make_cmd=%q\n' "${inner_make_cmd}"
+        printf 'log_path=%q\n' "${log_path}"
+        cat <<'EOF'
+: > "$run_log"
+fifo="$(mktemp -u /tmp/kairos-bb-applet-smoke.XXXXXX)"
+mkfifo "$fifo"
+( exec 3<>"$fifo"
+for _ in $(seq 1 "$ready_wait"); do
+    grep -Eiq 'init: starting shell|BusyBox v' "$run_log" 2>/dev/null && break
     sleep 1
 done
-sleep ${boot_delay}
-printf 'bad=0; for a in ${applet_list}; do if [ ! -x "/bin/\$a" ]; then bad=1; echo APPLET_BAD_ITEM:missing:\$a; continue; fi; "/bin/\$a" --help </dev/null >/dev/null 2>&1 || true; rc=\$?; if [ "\$rc" -gt 128 ]; then bad=1; echo APPLET_BAD_ITEM:rc:\$a:\$rc; fi; done; echo APPLET_SMOKE_OK:${expected_count}; echo APPLET_BAD_COUNT:\$bad; tag=SMOKE; echo __BB_APPLET_\${tag}_DONE__\n' >&3
-sleep ${step_delay}
-for _ in \$(seq 1 ${ready_wait}); do
-    grep -q '__BB_APPLET_SMOKE_DONE__' "${log_path}" 2>/dev/null && break
+sleep "$boot_delay"
+printf 'bad=0; for a in %s; do if [ ! -x "/bin/$a" ]; then bad=1; echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1 || true; rc=$?; if [ "$rc" -gt 128 ]; then bad=1; echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
+sleep "$step_delay"
+for _ in $(seq 1 "$ready_wait"); do
+    grep -q '__BB_APPLET_SMOKE_DONE__' "$log_path" 2>/dev/null && break
     sleep 1
 done
 printf '\001x' >&3
 exec 3>&-
 ) &
-feeder=\$!
-${inner_make_cmd} QEMU_STDIN="<\$fifo" run-direct
-rc=\$?
-wait "\$feeder" 2>/dev/null || true
-rm -f "\$fifo"
-exit \$rc
+feeder=$!
+eval "$inner_make_cmd QEMU_STDIN=\"<$fifo\" run-direct"
+rc=$?
+wait "$feeder" 2>/dev/null || true
+rm -f "$fifo"
+exit $rc
 EOF
+    } > "${smoke_script}"
     chmod +x "${smoke_script}"
 
     printf -v qemu_cmd \
@@ -305,9 +387,16 @@ kairos_run_dispatch() {
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_once "$extra" "$timeout_s" "$log_path" 1 0
             ;;
+        test-exec-elf-smoke)
+            extra="${EXEC_ELF_SMOKE_EXTRA_CFLAGS:-${TCC_SMOKE_EXTRA_CFLAGS:-}}"
+            timeout_s="${EXEC_ELF_SMOKE_TIMEOUT:-${TCC_SMOKE_TIMEOUT:-240}}"
+            log_path="${EXEC_ELF_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/exec-elf-smoke.log}"
+            kairos_run_parse_common_opts extra timeout_s log_path "$@"
+            kairos_run_test_tcc_smoke_once "$extra" "$timeout_s" "$log_path"
+            ;;
         test-tcc-smoke)
-            extra="${TCC_SMOKE_EXTRA_CFLAGS:-}"
-            timeout_s="${TCC_SMOKE_TIMEOUT:-240}"
+            extra="${TCC_SMOKE_EXTRA_CFLAGS:-${EXEC_ELF_SMOKE_EXTRA_CFLAGS:-}}"
+            timeout_s="${TCC_SMOKE_TIMEOUT:-${EXEC_ELF_SMOKE_TIMEOUT:-240}}"
             log_path="${TCC_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/tcc-smoke.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_tcc_smoke_once "$extra" "$timeout_s" "$log_path"

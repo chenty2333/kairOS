@@ -258,7 +258,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -700,6 +700,9 @@ TEST_LOG ?= $(BUILD_DIR)/test.log
 TCC_SMOKE_TIMEOUT ?= 240
 TCC_SMOKE_LOG ?= $(BUILD_DIR)/tcc-smoke.log
 TCC_SMOKE_EXTRA_CFLAGS ?=
+EXEC_ELF_SMOKE_TIMEOUT ?= $(TCC_SMOKE_TIMEOUT)
+EXEC_ELF_SMOKE_LOG ?= $(BUILD_DIR)/exec-elf-smoke.log
+EXEC_ELF_SMOKE_EXTRA_CFLAGS ?= $(TCC_SMOKE_EXTRA_CFLAGS)
 BUSYBOX_APPLET_SMOKE_TIMEOUT ?= 240
 BUSYBOX_APPLET_SMOKE_LOG ?= $(BUILD_DIR)/busybox-applets-smoke.log
 BUSYBOX_APPLET_SMOKE_EXTRA_CFLAGS ?=
@@ -714,6 +717,7 @@ RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
 TEST_ISOLATED ?= 1
 TCC_SMOKE_ISOLATED ?= 0
+EXEC_ELF_SMOKE_ISOLATED ?= $(TCC_SMOKE_ISOLATED)
 BUSYBOX_APPLET_SMOKE_ISOLATED ?= 0
 TEST_CONCURRENCY ?= 3
 TEST_ROUNDS ?= 3
@@ -731,12 +735,16 @@ TEST_LOCK_WAIT ?= $(LOCK_WAIT)
 TOOLCHAIN_LOCK_WAIT ?= 900
 TEST_LOG_FWD :=
 TCC_SMOKE_LOG_FWD :=
+EXEC_ELF_SMOKE_LOG_FWD :=
 BUSYBOX_APPLET_SMOKE_LOG_FWD :=
 ifneq ($(origin TEST_LOG),file)
 TEST_LOG_FWD := TEST_LOG="$(TEST_LOG)"
 endif
 ifneq ($(origin TCC_SMOKE_LOG),file)
 TCC_SMOKE_LOG_FWD := TCC_SMOKE_LOG="$(TCC_SMOKE_LOG)"
+endif
+ifneq ($(origin EXEC_ELF_SMOKE_LOG),file)
+EXEC_ELF_SMOKE_LOG_FWD := EXEC_ELF_SMOKE_LOG="$(EXEC_ELF_SMOKE_LOG)"
 endif
 ifneq ($(origin BUSYBOX_APPLET_SMOKE_LOG),file)
 BUSYBOX_APPLET_SMOKE_LOG_FWD := BUSYBOX_APPLET_SMOKE_LOG="$(BUSYBOX_APPLET_SMOKE_LOG)"
@@ -761,6 +769,24 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 		else \
 			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 				$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
+		fi
+
+test-exec-elf-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+		$(Q)if [ "$(EXEC_ELF_SMOKE_ISOLATED)" = "1" ]; then \
+			if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+				$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+			fi; \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+				EXEC_ELF_SMOKE_ISOLATED=0 RUN_ID="$(RUN_ID)" EXEC_ELF_SMOKE_EXTRA_CFLAGS="$(EXEC_ELF_SMOKE_EXTRA_CFLAGS)" \
+				EXEC_ELF_SMOKE_TIMEOUT="$(EXEC_ELF_SMOKE_TIMEOUT)" $(EXEC_ELF_SMOKE_LOG_FWD) \
+				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-exec-elf-smoke; \
+		else \
+			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+				EXEC_ELF_SMOKE_BOOT_DELAY_SEC="$(EXEC_ELF_SMOKE_BOOT_DELAY_SEC)" \
+				EXEC_ELF_SMOKE_STEP_DELAY_SEC="$(EXEC_ELF_SMOKE_STEP_DELAY_SEC)" \
+				EXEC_ELF_SMOKE_EXPECTED_INTERP="$(EXEC_ELF_SMOKE_EXPECTED_INTERP)" \
+				$(KAIROS_CMD) run test-exec-elf-smoke --extra-cflags "$(EXEC_ELF_SMOKE_EXTRA_CFLAGS)" \
+				--timeout "$(EXEC_ELF_SMOKE_TIMEOUT)" --log "$(EXEC_ELF_SMOKE_LOG)"; \
 		fi
 
 test-tcc-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
@@ -996,6 +1022,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  check-tools - Verify host toolchain"
 	@echo "  doctor   - Verify host toolchain (alias of check-tools)"
 	@echo "  test     - Run kernel tests (isolated by default)"
+	@echo "  test-exec-elf-smoke - Run exec/ELF interactive smoke regression"
 	@echo "  test-busybox-applets-smoke - Run busybox applet interactive smoke regression"
 	@echo "  test-tcc-smoke - Run tcc interactive smoke regression"
 	@echo "  test-isolated - Alias of isolated test mode"

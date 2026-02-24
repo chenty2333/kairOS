@@ -34,6 +34,7 @@ Other:
 - proc_idle_init(): create idle process
 - userspace `/init` supervises the login shell in a restart loop, logs exit cause (exit code / signal), and uses bounded exponential backoff on repeated failures
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
+- Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` as 32-bit `int`
 
 ## Scheduler (core/sched/sched.c)
 
@@ -95,6 +96,8 @@ completion.c:
 futex.c:
 - futex_wait / futex_wake: 128 hash buckets, multiplicative hash
 - futex_waitv: vectorized wait (`FUTEX_WAITV_MAX=128`), returns awakened waiter index
+- futex opcode/wake count/clockid are decoded using Linux ABI `int`/`unsigned int` widths (32-bit), and futex_waitv decodes `flags` as 32-bit
+- syslog syscall decodes `type`/`len` using Linux ABI `int` width (32-bit)
 - Supports timeout (via poll_sleep mechanism)
 - Used for userspace fast locks (pthread mutex, etc.)
 

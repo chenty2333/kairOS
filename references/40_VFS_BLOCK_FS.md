@@ -64,8 +64,9 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `pread64`/`pwrite64` and `preadv2`/`pwritev2` are wired through existing positional I/O paths
   - `preadv`/`pwritev` and `preadv2`/`pwritev2` follow Linux split-offset ABI (`pos_l`/`pos_h`)
   - `preadv2` supports `RWF_HIPRI|RWF_NOWAIT`; `pwritev2` supports `RWF_HIPRI|RWF_DSYNC|RWF_SYNC|RWF_NOWAIT`
+  - `preadv2`/`pwritev2` decode `flags` using Linux ABI width (`int`/32-bit)
   - `preadv2`/`pwritev2` with offset `-1` follow non-positional `readv`/`writev` fallback
-  - `copy_file_range` is wired through vnode read/write paths; `flags` must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
+  - `copy_file_range` is wired through vnode read/write paths; `flags` (32-bit ABI width) must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
 
 ## Block I/O Layer (fs/bio/bio.c)
 
@@ -104,6 +105,7 @@ Special:
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + strict `sigsetsize == sizeof(sigset_t)` checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
 - Linux ABI compatibility also includes `eventfd2`, `timerfd_create/settime/gettime`, and `signalfd4` via anon-vnode pollable file descriptors
 - `epoll_create1`, `eventfd2`, `timerfd_create`, `timerfd_settime`, `signalfd4`, and `inotify_init1` decode `flags` using Linux ABI width (`int`/32-bit)
+- `epoll_ctl` decodes `op` as Linux ABI `int` (32-bit), and `epoll_wait` decodes `maxevents`/`timeout` as Linux ABI `int` (32-bit)
 - `timerfd_create` accepts `CLOCK_REALTIME`/`CLOCK_MONOTONIC` plus `CLOCK_BOOTTIME`/`*_ALARM` aliases (mapped to realtime/monotonic base clocks)
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
 - `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
@@ -111,6 +113,7 @@ Special:
 - AF_UNIX stream send paths honor `MSG_NOSIGNAL` (suppress `SIGPIPE`, return `EPIPE` only)
 - `recvmmsg` supports `MSG_WAITFORONE` batching behavior and kernel timeout waits (timespec deadline)
 - socket message/accept syscall `flags` are decoded using Linux ABI width (`int`/32-bit) for `accept4`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`
+- socket control/int arguments are decoded with Linux ABI `int` width (`socket`/`socketpair` domain/type/protocol, `listen` backlog, `shutdown` how, `setsockopt`/`getsockopt` level/optname/optlen, `sendto`/`recvfrom` flags, sockaddr lengths)
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics
 - `select` updates user `timeval` with remaining time on return (`success`/`EINTR`)
@@ -122,6 +125,8 @@ Special:
 - `newfstatat` accepts `AT_NO_AUTOMOUNT` as a compatibility no-op
 - `statx` and `newfstatat` both decode `flags` using Linux ABI width (`int`/32-bit)
 - path-based `*at` syscalls (`fchmodat`, `fchownat`, `utimensat`, `faccessat(2)`, `unlinkat`, `linkat`) decode `flags` via Linux ABI width (`int`/32-bit); `faccessat*` also decodes `mode` as 32-bit
+- `dup3` and `pipe2` decode `flags` via Linux ABI width (`int`/32-bit)
+- `fcntl` decodes `cmd`/`arg` via Linux ABI `int` width (32-bit)
 
 Related references:
 - references/00_REPO_MAP.md

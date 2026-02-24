@@ -270,7 +270,7 @@ static int poll_sleep_timeout(int timeout_ms) {
 int64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
                  uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    int64_t tmo = (int64_t)timeout_ms;
+    int64_t tmo = (int64_t)(int32_t)(uint32_t)timeout_ms;
     if (tmo < -1)
         tmo = -1;
     const int64_t tmo_max = 0x7fffffffLL;

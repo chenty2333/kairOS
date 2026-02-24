@@ -390,8 +390,9 @@ int64_t sys_setrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
 int64_t sys_wait(uint64_t pid, uint64_t status_ptr, uint64_t options,
                  uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    uint32_t uoptions = (uint32_t)options;
     int status = 0;
-    pid_t ret = proc_wait((pid_t)pid, &status, (int)options);
+    pid_t ret = proc_wait((pid_t)pid, &status, (int)uoptions);
     if (ret >= 0 && status_ptr) {
         if (copy_to_user((void *)status_ptr, &status, sizeof(status)) < 0)
             return -EFAULT;
@@ -409,7 +410,8 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
                    uint64_t options, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
     enum { P_ALL = 0, P_PID = 1, P_PGID = 2 };
-    if (options & ~(WNOHANG | WEXITED))
+    uint32_t uoptions = (uint32_t)options;
+    if (uoptions & ~(WNOHANG | WEXITED))
         return -EINVAL;
     pid_t pid = -1;
     if (type == P_PID) {
@@ -421,8 +423,8 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
     }
 
     int status = 0;
-    pid_t ret = proc_wait(pid, &status, (int)options);
-    if (ret == 0 && (options & WNOHANG)) {
+    pid_t ret = proc_wait(pid, &status, (int)uoptions);
+    if (ret == 0 && (uoptions & WNOHANG)) {
         if (info_ptr) {
             siginfo_t info = {0};
             if (copy_to_user((void *)info_ptr, &info, sizeof(info)) < 0)
@@ -563,13 +565,17 @@ int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
 int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
                      uint64_t envp, uint64_t flags, uint64_t a5) {
     (void)a5;
-    uint64_t supported_flags = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
-    if (flags & ~supported_flags)
+    uint32_t uflags = (uint32_t)flags;
+    uint32_t supported_flags = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+    int exec_namei_flags = NAMEI_FOLLOW;
+    if (uflags & ~supported_flags)
         return -EINVAL;
+    if (uflags & AT_SYMLINK_NOFOLLOW)
+        exec_namei_flags = NAMEI_NOFOLLOW;
 
     char kpath[CONFIG_PATH_MAX];
 
-    if (flags & AT_EMPTY_PATH) {
+    if (uflags & AT_EMPTY_PATH) {
         /* Execute the file referred to by dirfd directly */
         struct file *f = fd_get(proc_current(), (int)dirfd);
         if (!f)
@@ -600,7 +606,8 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
         }
     }
 
-    return (int64_t)proc_exec(kpath, (char *const *)argv, (char *const *)envp);
+    return (int64_t)proc_exec_resolve(kpath, (char *const *)argv,
+                                      (char *const *)envp, exec_namei_flags);
 }
 
 int64_t sys_set_robust_list(uint64_t head_ptr, uint64_t len, uint64_t a2,

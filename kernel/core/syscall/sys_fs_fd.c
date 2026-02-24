@@ -52,11 +52,12 @@ int64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
 int64_t sys_dup3(uint64_t oldfd, uint64_t newfd, uint64_t flags, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (flags & ~O_CLOEXEC)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~O_CLOEXEC)
         return -EINVAL;
     if (oldfd == newfd)
         return -EINVAL;
-    uint32_t fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (uflags & O_CLOEXEC) ? FD_CLOEXEC : 0;
     return (int64_t)fd_dup2_flags(proc_current(), (int)oldfd, (int)newfd,
                                   fd_flags);
 }
@@ -115,9 +116,10 @@ int64_t sys_pipe2(uint64_t fd_array, uint64_t flags, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     uint32_t allowed = O_NONBLOCK | O_CLOEXEC;
-    if (flags & ~allowed)
+    uint32_t uflags = (uint32_t)flags;
+    if (uflags & ~allowed)
         return -EINVAL;
-    return (int64_t)pipe_create_fds(fd_array, (uint32_t)flags);
+    return (int64_t)pipe_create_fds(fd_array, uflags);
 }
 
 int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
@@ -180,6 +182,8 @@ int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
 int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
+    uint32_t ucmd = (uint32_t)cmd;
+    uint32_t uarg = (uint32_t)arg;
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
@@ -187,14 +191,15 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     if (!f)
         return -EBADF;
 
-    switch ((int)cmd) {
+    switch ((int32_t)ucmd) {
     case F_DUPFD: {
-        int64_t ret = (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, 0);
+        int64_t ret = (int64_t)fd_dup_min_flags(p, (int)fd, (int32_t)uarg, 0);
         file_put(f);
         return ret;
     }
     case F_DUPFD_CLOEXEC: {
-        int64_t ret = (int64_t)fd_dup_min_flags(p, (int)fd, (int)arg, FD_CLOEXEC);
+        int64_t ret =
+            (int64_t)fd_dup_min_flags(p, (int)fd, (int32_t)uarg, FD_CLOEXEC);
         file_put(f);
         return ret;
     }
@@ -219,7 +224,7 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         return flags;
     }
     case F_SETFD: {
-        if (arg & ~FD_CLOEXEC) {
+        if (uarg & ~FD_CLOEXEC) {
             file_put(f);
             return -EINVAL;
         }
@@ -235,7 +240,7 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
             file_put(f);
             return -EBADF;
         }
-        fdt->fd_flags[(int)fd] = (uint32_t)arg & FD_CLOEXEC;
+        fdt->fd_flags[(int)fd] = uarg & FD_CLOEXEC;
         mutex_unlock(&fdt->lock);
         file_put(f);
         return 0;
@@ -250,7 +255,7 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     case F_SETFL: {
         uint32_t setmask = O_NONBLOCK | O_APPEND;
         mutex_lock(&f->lock);
-        f->flags = (f->flags & ~setmask) | ((uint32_t)arg & setmask);
+        f->flags = (f->flags & ~setmask) | (uarg & setmask);
         mutex_unlock(&f->lock);
         file_put(f);
         return 0;

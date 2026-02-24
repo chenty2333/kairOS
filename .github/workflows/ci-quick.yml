@@ -88,6 +88,11 @@ jobs:
           set -euo pipefail
           make --no-print-directory ARCH=riscv64 test
 
+      - name: Run exec/ELF smoke regression
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 test-exec-elf-smoke
+
       - name: Run BusyBox applet smoke regression
         run: |
           set -euo pipefail

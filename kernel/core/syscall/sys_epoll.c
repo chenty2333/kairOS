@@ -99,17 +99,18 @@ int64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
 int64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
                       uint64_t event_ptr, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
+    uint32_t uop = (uint32_t)op;
     struct epoll_event ev = {0};
 
-    if (op != EPOLL_CTL_DEL) {
+    if ((int32_t)uop != EPOLL_CTL_DEL) {
         if (!event_ptr)
             return -EFAULT;
         if (copy_from_user(&ev, (void *)event_ptr, sizeof(ev)) < 0)
             return -EFAULT;
     }
 
-    return epoll_ctl_fd((int)epfd, (int)op, (int)fd,
-                        (op == EPOLL_CTL_DEL) ? NULL : &ev);
+    return epoll_ctl_fd((int)epfd, (int)(int32_t)uop, (int)fd,
+                        ((int32_t)uop == EPOLL_CTL_DEL) ? NULL : &ev);
 }
 
 int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
@@ -122,19 +123,20 @@ int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
             return rc;
         have_sigmask = rc > 0;
     }
-    if (maxevents == 0)
+    int32_t maxevents_i = (int32_t)(uint32_t)maxevents;
+    if (maxevents_i <= 0)
         return -EINVAL;
     if (!events_ptr)
         return -EFAULT;
-    if (maxevents > 0x7fffffffULL ||
-        maxevents > (uint64_t)((size_t)-1) / sizeof(struct epoll_event))
+    size_t maxevents_n = (size_t)maxevents_i;
+    if (maxevents_n > (size_t)-1 / sizeof(struct epoll_event))
         return -EINVAL;
 
-    struct epoll_event *out = kzalloc(maxevents * sizeof(*out));
+    struct epoll_event *out = kzalloc(maxevents_n * sizeof(*out));
     if (!out)
         return -ENOMEM;
 
-    int64_t tmo = (int64_t)timeout_ms;
+    int64_t tmo = (int64_t)(int32_t)(uint32_t)timeout_ms;
     if (tmo < -1)
         tmo = -1;
     if (tmo > 0x7fffffffLL)
@@ -148,7 +150,7 @@ int64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr, uint64_t maxevents,
             return apply_rc;
         }
     }
-    int ready = epoll_wait_events((int)epfd, out, (size_t)maxevents,
+    int ready = epoll_wait_events((int)epfd, out, maxevents_n,
                                   (int)tmo);
     epoll_sigmask_restore(&sigctx);
     int64_t ret = ready;

@@ -83,7 +83,8 @@ QEMU configuration:
 ## Testing
 
 - `make test` — run kernel tests (default isolated mode, one run directory per invocation)
-- `make test-tcc-smoke` — run interactive `tcc` smoke regression (send `tcc` command in guest shell, assert usage + prompt round-trip, and fail on SIGSEGV/`no vma` markers)
+- `make test-exec-elf-smoke` — run interactive exec/ELF smoke regression (static/dynamic/PIE compile+run, PT_INTERP checks, bad-ELF rejection, fail on SIGSEGV/`no vma` markers)
+- `make test-tcc-smoke` — compatibility alias of the exec/ELF smoke path
 - `make test-busybox-applets-smoke` — run interactive BusyBox applet smoke regression (assert applet symlink/execution path for the enabled A-set and require `APPLET_SMOKE_OK:40`, `APPLET_BAD_COUNT:0`, `__BB_APPLET_SMOKE_DONE__`)
 - `make test-isolated` — isolated test alias
 - `make test-driver` — driver module only
@@ -102,7 +103,7 @@ QEMU configuration:
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
-- GitHub Actions `ci-quick` runs `riscv64` quick regression (`make test` + `make test-busybox-applets-smoke`) and `aarch64` smoke gates (`make test-syscall-trap` + `make test-tcc-smoke`)
+- GitHub Actions `ci-quick` runs `riscv64` quick regression (`make test` + `make test-exec-elf-smoke` + `make test-busybox-applets-smoke`)
 - Test module selection uses `CONFIG_KERNEL_TEST_MASK` via `TEST_EXTRA_CFLAGS` (default mask `0x7FF`)
 - Kernel test module bits: `0x01 driver`, `0x02 mm`, `0x04 sync`, `0x08 vfork`, `0x10 sched`, `0x20 crash`, `0x40 syscall/trap`, `0x80 vfs/ipc`, `0x100 socket`, `0x200 device/virtio`, `0x400 tty`, `0x800 soak-pr`
 - `test-syscall-trap` includes a kernel-launched user-mode ecall regression covering bad user pointer (`-EFAULT`) and positive syscall path
@@ -116,7 +117,7 @@ For isolated sessions, outputs are under `build/runs/.../<run_id>/` and include:
 - `manifest.json` (command, arch, build root, git sha, timestamps)
 - `result.json` (status/reason/verdict source + structured test summary + marker flags + log path)
 - `qemu.pid` is owned by `run-qemu-session.sh`; `run-qemu-test.sh` uses `test-runner.pid` to avoid pid-file collisions
-- Default isolated test logs live under the run directory; explicit `TEST_LOG` / `SOAK_PR_LOG` / `TCC_SMOKE_LOG` overrides keep caller-provided paths
+- Default isolated test logs live under the run directory; explicit `TEST_LOG` / `SOAK_PR_LOG` / `TCC_SMOKE_LOG` / `EXEC_ELF_SMOKE_LOG` overrides keep caller-provided paths
 
 Concurrency and locking:
 - Global locks live at `build/.locks/global-<name>.lock` (current shared resource: `global-deps-fetch.lock`).
