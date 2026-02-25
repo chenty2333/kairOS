@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/mm.h>
 #include <kairos/boot.h>
+#include <kairos/config.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/types.h>
@@ -71,6 +72,25 @@ extern void ioapic_route_irq(int irq, int vector, int cpu, bool masked,
 
 static bool ioapic_inited;
 static uint32_t apic_irq_type[IRQCHIP_MAX_IRQS];
+static uint32_t apic_irq_affinity[IRQCHIP_MAX_IRQS];
+
+static uint32_t apic_sanitize_affinity_mask(uint32_t cpu_mask)
+{
+#if CONFIG_MAX_CPUS >= 32
+    uint32_t valid_mask = UINT32_MAX;
+#else
+    uint32_t valid_mask = (1U << CONFIG_MAX_CPUS) - 1U;
+#endif
+    return cpu_mask & valid_mask;
+}
+
+static int apic_pick_cpu(uint32_t cpu_mask)
+{
+    cpu_mask = apic_sanitize_affinity_mask(cpu_mask);
+    if (!cpu_mask)
+        return 0;
+    return (int)__builtin_ctz(cpu_mask);
+}
 
 static void apic_init_ops(const struct platform_desc *plat)
 {
@@ -89,7 +109,8 @@ static void apic_enable(int irq)
     if (irq < 0 || irq >= IRQCHIP_MAX_IRQS)
         return;
     bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
-    ioapic_route_irq(irq, IRQ_BASE + irq, 0, false, level);
+    int cpu = apic_pick_cpu(apic_irq_affinity[irq]);
+    ioapic_route_irq(irq, IRQ_BASE + irq, cpu, false, level);
 }
 
 static void apic_disable(int irq)
@@ -97,7 +118,8 @@ static void apic_disable(int irq)
     if (irq < 0 || irq >= IRQCHIP_MAX_IRQS)
         return;
     bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
-    ioapic_route_irq(irq, IRQ_BASE + irq, 0, true, level);
+    int cpu = apic_pick_cpu(apic_irq_affinity[irq]);
+    ioapic_route_irq(irq, IRQ_BASE + irq, cpu, true, level);
 }
 
 static int apic_set_type(int irq, uint32_t type)
@@ -110,6 +132,20 @@ static int apic_set_type(int irq, uint32_t type)
     if (type == IRQ_FLAG_TRIGGER_MASK)
         return -EINVAL;
     apic_irq_type[irq] = type;
+    return 0;
+}
+
+static int apic_set_affinity(int irq, uint32_t cpu_mask)
+{
+    if (irq < 0 || irq >= IRQCHIP_MAX_IRQS)
+        return -EINVAL;
+    cpu_mask = apic_sanitize_affinity_mask(cpu_mask);
+    if (!cpu_mask)
+        return -EINVAL;
+    apic_irq_affinity[irq] = cpu_mask;
+    bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
+    int cpu = apic_pick_cpu(cpu_mask);
+    ioapic_route_irq(irq, IRQ_BASE + irq, cpu, false, level);
     return 0;
 }
 
@@ -130,6 +166,7 @@ const struct irqchip_ops apic_ops = {
     .enable  = apic_enable,
     .disable = apic_disable,
     .set_type = apic_set_type,
+    .set_affinity = apic_set_affinity,
     .ack     = apic_ack,
     .eoi     = apic_eoi_ops,
 };

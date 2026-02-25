@@ -4,6 +4,7 @@
 
 #include <kairos/platform_core.h>
 #include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/fdt.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
@@ -74,6 +75,7 @@ struct irq_action {
 struct irq_desc {
     struct list_head actions;
     uint32_t flags;
+    uint32_t affinity_mask;
     int enable_count;
     uint32_t hwirq;
     const struct irqchip_ops *chip;
@@ -217,6 +219,7 @@ static void platform_irq_table_init(void)
         for (int i = 0; i < IRQCHIP_MAX_IRQS; i++) {
             INIT_LIST_HEAD(&irq_table[i].actions);
             irq_table[i].flags = 0;
+            irq_table[i].affinity_mask = 1U;
             irq_table[i].enable_count = 0;
             irq_table[i].hwirq = (uint32_t)i;
             irq_table[i].chip = chip;
@@ -236,6 +239,19 @@ static struct irq_desc *platform_irq_desc_get(int irq)
         return NULL;
     platform_irq_table_init();
     return &irq_table[irq];
+}
+
+static uint32_t irq_sanitize_affinity_mask(uint32_t cpu_mask)
+{
+#if CONFIG_MAX_CPUS >= 32
+    uint32_t valid_mask = UINT32_MAX;
+#else
+    uint32_t valid_mask = (1U << CONFIG_MAX_CPUS) - 1U;
+#endif
+    cpu_mask &= valid_mask;
+    if (!cpu_mask)
+        cpu_mask = 1U;
+    return cpu_mask;
 }
 
 static int platform_irq_register_action(int irq, irq_handler_fn handler,
@@ -327,6 +343,24 @@ void platform_irq_set_type(int irq, uint32_t flags)
         (void)chip->set_type(irq, type);
 }
 
+void platform_irq_set_affinity(int irq, uint32_t cpu_mask)
+{
+    struct irq_desc *desc = platform_irq_desc_get(irq);
+    if (!desc)
+        return;
+
+    uint32_t mask = irq_sanitize_affinity_mask(cpu_mask);
+    bool irq_state;
+    spin_lock_irqsave(&desc->lock, &irq_state);
+    desc->affinity_mask = mask;
+    const struct irqchip_ops *chip = desc->chip;
+    int enable_count = desc->enable_count;
+    spin_unlock_irqrestore(&desc->lock, irq_state);
+
+    if (chip && chip->set_affinity && enable_count > 0)
+        (void)chip->set_affinity(irq, mask);
+}
+
 void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev)
 {
     if (irq >= IRQCHIP_MAX_IRQS)
@@ -401,6 +435,7 @@ void arch_irq_enable_nr(int irq)
     const struct irqchip_ops *chip = desc->chip;
     bool is_per_cpu = (desc->flags & IRQ_FLAG_PER_CPU) != 0;
     uint32_t type = desc->flags & IRQ_FLAG_TRIGGER_MASK;
+    uint32_t affinity_mask = desc->affinity_mask;
     bool do_enable = false;
 
     if (is_per_cpu) {
@@ -418,6 +453,8 @@ void arch_irq_enable_nr(int irq)
         return;
     if (chip->set_type && type)
         (void)chip->set_type(irq, type);
+    if (chip->set_affinity)
+        (void)chip->set_affinity(irq, affinity_mask);
     if (chip->enable)
         chip->enable(irq);
 }
@@ -468,6 +505,11 @@ void arch_irq_register_ex(int irq,
 void arch_irq_set_type(int irq, uint32_t flags)
 {
     platform_irq_set_type(irq, flags);
+}
+
+void arch_irq_set_affinity(int irq, uint32_t cpu_mask)
+{
+    platform_irq_set_affinity(irq, cpu_mask);
 }
 
 void arch_irq_register(int irq, void (*handler)(void *), void *arg)

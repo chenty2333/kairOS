@@ -67,8 +67,10 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
 - aarch64 GICv3 now selects Redistributor frame per CPU (`arch_cpu_id`) for local SGI/PPI enable/disable paths.
 - IRQ core now uses per-IRQ descriptors (`irq_desc`) instead of a single handler slot:
   - each IRQ keeps an action list (shared IRQ capable), trigger/per-cpu flags, enable refcount, and dispatch counters
+  - supports deferred/threaded handler mode via `IRQ_FLAG_DEFERRED` (hard IRQ path queues action, `irqd` kthread runs deferred handlers)
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` now apply chip operations with refcount semantics (and per-CPU semantics for PPIs/local timer IRQs)
   - `irqchip_ops` includes `set_type(int irq, uint32_t type)` so trigger mode is configured from IRQ flags when enabling
+  - `irqchip_ops` now includes `set_affinity(int irq, uint32_t cpu_mask)` and IRQ core stores per-IRQ CPU mask (default CPU0) for route programming hooks
 
 ## Syscall
 

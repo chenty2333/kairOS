@@ -17,6 +17,7 @@
 #define GICD_ISENABLER  0x100
 #define GICD_ICENABLER  0x180
 #define GICD_ICFGR      0xC00
+#define GICD_IROUTER    0x6000
 #define GICD_IPRIORITYR 0x400
 
 #define GICD_CTLR_ARE_S     (1U << 4)
@@ -177,6 +178,28 @@ static int gicv3_set_type(int irq, uint32_t type)
     return 0;
 }
 
+static int gicv3_set_affinity(int irq, uint32_t cpu_mask)
+{
+    if (!gicd || irq < 32 || irq >= IRQCHIP_MAX_IRQS)
+        return -EINVAL;
+
+#if CONFIG_MAX_CPUS >= 32
+    uint32_t valid_mask = UINT32_MAX;
+#else
+    uint32_t valid_mask = (1U << CONFIG_MAX_CPUS) - 1U;
+#endif
+    cpu_mask &= valid_mask;
+    if (!cpu_mask)
+        return -EINVAL;
+
+    uint32_t target_cpu = (uint32_t)__builtin_ctz(cpu_mask);
+    volatile uint64_t *router =
+        (volatile uint64_t *)((volatile uint8_t *)gicd + GICD_IROUTER +
+                              ((size_t)(uint32_t)irq * sizeof(uint64_t)));
+    *router = (uint64_t)target_cpu;
+    return 0;
+}
+
 static uint32_t gicv3_ack(void)
 {
     return (uint32_t)gic_read_icc_iar1();
@@ -198,6 +221,7 @@ const struct irqchip_ops gicv3_ops = {
     .enable   = gicv3_enable,
     .disable  = gicv3_disable,
     .set_type = gicv3_set_type,
+    .set_affinity = gicv3_set_affinity,
     .ack      = gicv3_ack,
     .eoi      = gicv3_eoi,
     .send_sgi = gic_send_sgi,

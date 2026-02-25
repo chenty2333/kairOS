@@ -64,6 +64,14 @@ static int plic_set_type(int irq, uint32_t type)
     return 0;
 }
 
+static int plic_set_affinity(int irq, uint32_t cpu_mask)
+{
+    (void)irq;
+    if (!cpu_mask)
+        return -EINVAL;
+    return -EOPNOTSUPP;
+}
+
 static uint32_t plic_ack(void)
 {
     int hart = arch_cpu_id();
@@ -81,6 +89,7 @@ const struct irqchip_ops plic_ops = {
     .enable  = plic_enable,
     .disable = plic_disable,
     .set_type = plic_set_type,
+    .set_affinity = plic_set_affinity,
     .ack     = plic_ack,
     .eoi     = plic_eoi,
 };

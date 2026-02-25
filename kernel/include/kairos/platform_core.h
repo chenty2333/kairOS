@@ -44,6 +44,7 @@ struct irqchip_ops {
     void (*enable)(int irq);
     void (*disable)(int irq);
     int (*set_type)(int irq, uint32_t type);
+    int (*set_affinity)(int irq, uint32_t cpu_mask);
     uint32_t (*ack)(void);
     void (*eoi)(uint32_t irq);
     void (*send_sgi)(uint32_t cpu, uint32_t intid);
@@ -75,6 +76,7 @@ int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,
                              uint32_t flags);
 void platform_irq_register(int irq, irq_handler_fn handler, void *arg);
 void platform_irq_set_type(int irq, uint32_t flags);
+void platform_irq_set_affinity(int irq, uint32_t cpu_mask);
 void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev);
 void platform_irq_dispatch_nr(uint32_t irq);
 

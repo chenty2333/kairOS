@@ -155,6 +155,7 @@ void arch_irq_register_ex(int irq,
                                           const struct trap_core_event *ev),
                           void *arg, uint32_t flags);
 void arch_irq_set_type(int irq, uint32_t flags);
+void arch_irq_set_affinity(int irq, uint32_t cpu_mask);
 
 struct trap_info {
     enum trap_type type;
