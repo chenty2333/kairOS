@@ -7,6 +7,8 @@
 #include <kairos/arch.h>
 #include <kairos/boot.h>
 #include <kairos/console.h>
+#include <kairos/fdt.h>
+#include <kairos/init.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
@@ -26,7 +28,7 @@
 #define SBI_SHUTDOWN 0x08
 
 /* QEMU virt UART0 (16550 compatible) */
-#define UART0_BASE 0x10000000UL
+#define UART0_BASE_FALLBACK 0x10000000UL
 #define UART_RHR   0x00
 #define UART_IER   0x01
 #define UART_FCR   0x02
@@ -37,9 +39,13 @@
 #define UART_FCR_CLEAR_RX 0x02
 #define UART_FCR_CLEAR_TX 0x04
 // WARN: QEMU virt wires ns16550a RX to PLIC IRQ 10.
-#define UART0_IRQ 10
+#define UART0_IRQ_FALLBACK 10
 
 static bool uart_rx_irq_inited;
+static bool uart_cfg_inited;
+static uintptr_t uart_base = UART0_BASE_FALLBACK;
+static int uart_irq = UART0_IRQ_FALLBACK;
+static bool uart_irq_available = true;
 
 static inline long sbi_legacy_call(int ext, unsigned long arg0) {
     register unsigned long a0 __asm__("a0") = arg0;
@@ -49,10 +55,42 @@ static inline long sbi_legacy_call(int ext, unsigned long arg0) {
 }
 
 static inline int uart_getchar_nb(void) {
-    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
+    volatile uint8_t *uart = (volatile uint8_t *)uart_base;
     if (uart[UART_LSR] & UART_LSR_DR)
         return (int)uart[UART_RHR];
     return -1;
+}
+
+static void uart_try_configure_from_fdt(void) {
+    if (uart_cfg_inited)
+        return;
+
+    const void *dtb = init_boot_dtb();
+    if (!dtb)
+        return;
+
+    bool irq_state = arch_irq_save();
+    if (uart_cfg_inited) {
+        arch_irq_restore(irq_state);
+        return;
+    }
+    uart_cfg_inited = true;
+    arch_irq_restore(irq_state);
+
+    static const char *const compat_list[] = {
+        "ns16550a",
+        "snps,dw-apb-uart",
+        "sifive,uart0",
+    };
+    struct fdt_uart_info info;
+    if (fdt_get_stdout_uart(dtb, compat_list, ARRAY_SIZE(compat_list), &info) !=
+        0)
+        return;
+
+    uart_base = (uintptr_t)info.base;
+    uart_irq_available = info.irq > 0;
+    if (uart_irq_available)
+        uart_irq = info.irq;
 }
 
 static void uart_rx_irq_handler(void *arg) {
@@ -88,6 +126,8 @@ int arch_early_getchar_nb(void) {
 }
 
 void arch_console_input_init(void) {
+    uart_try_configure_from_fdt();
+
     bool irq_state = arch_irq_save();
     if (uart_rx_irq_inited) {
         arch_irq_restore(irq_state);
@@ -96,11 +136,15 @@ void arch_console_input_init(void) {
     uart_rx_irq_inited = true;
     arch_irq_restore(irq_state);
 
-    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
+    volatile uint8_t *uart = (volatile uint8_t *)uart_base;
     uart[UART_FCR] = UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RX | UART_FCR_CLEAR_TX;
-    uart[UART_IER] = (uint8_t)(uart[UART_IER] | UART_IER_RDI);
+    if (uart_irq_available) {
+        uart[UART_IER] = (uint8_t)(uart[UART_IER] | UART_IER_RDI);
+        arch_irq_register(uart_irq, uart_rx_irq_handler, NULL);
+    } else {
+        uart[UART_IER] = (uint8_t)(uart[UART_IER] & (uint8_t)(~UART_IER_RDI));
+    }
 
-    arch_irq_register(UART0_IRQ, uart_rx_irq_handler, NULL);
     console_poll_input();
 }
 

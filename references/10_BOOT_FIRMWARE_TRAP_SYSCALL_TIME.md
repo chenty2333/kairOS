@@ -38,6 +38,7 @@ boot_info struct is defined in include/kairos/boot.h, accessed globally through 
 Two parsing paths, both ultimately register into the firmware descriptor table (core/dev/firmware.c):
 
 - FDT path: init_boot() → firmware/fdt.c:fdt_parse() parses memory and reserved regions; init_devices() → fdt_scan_devices() scans device nodes → fw_register_desc() registers descriptors
+- Console UART discovery path: arch console init calls `fdt_get_stdout_uart()` to resolve UART MMIO base/IRQ from `/chosen/stdout-path` (with `/aliases` and interrupt spec parsing), falling back to arch defaults if unresolved
 - ACPI path: init_devices() → firmware/acpi.c:acpi_init() probes RSDP and marks available; on aarch64, pci_enumerate() → arch/aarch64/pci.c:arch_pci_host_init() further parses RSDP → XSDT/RSDT → MCFG to discover PCI ECAM
 
 The firmware descriptor table is the intermediate layer for device discovery: firmware/ writes, bus/ reads and enumerates.
@@ -94,7 +95,7 @@ Two-layer structure:
 
 - Core layer:
   - core/time/tick.c — tick_policy_on_timer_irq() handles timer interrupts, drives scheduler time slices (sched_tick), keeps console poll as fallback, handles poll sleep expiry
-  - Console input wakeup path is IRQ-first: `console_tty_driver_init()` calls `arch_console_input_init()`, UART RX IRQ handlers trigger `console_poll_input()` immediately, and `tty_receive_buf()` wakes sleepers on `tty->read_wait`
+  - Console input wakeup path is IRQ-first: `console_tty_driver_init()` calls `arch_console_input_init()`, which resolves UART config from FDT when available and registers RX IRQ handlers that trigger `console_poll_input()` immediately; `tty_receive_buf()` then wakes sleepers on `tty->read_wait`
   - core/time/time.c — system time management (wall clock, monotonic time, nanosecond-precision timer queue)
   - Linux sleep ABI compatibility:
     - `nanosleep` on `EINTR` now fills remaining time (`rem`) when provided

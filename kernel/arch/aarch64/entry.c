@@ -8,10 +8,12 @@
 #include <kairos/mm.h>
 #include <kairos/boot.h>
 #include <kairos/console.h>
+#include <kairos/fdt.h>
+#include <kairos/init.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
-#define PL011_BASE 0x09000000UL
+#define PL011_BASE_FALLBACK 0x09000000UL
 #define PL011_DR   0x00
 #define PL011_FR   0x18
 #define PL011_IMSC 0x38
@@ -21,10 +23,14 @@
 #define PL011_INT_RX (1U << 4)
 #define PL011_INT_RT (1U << 6)
 // WARN: QEMU virt wires PL011 RX to GIC SPI 33.
-#define PL011_IRQ 33
+#define PL011_IRQ_FALLBACK 33
 
 static bool early_console_ready;
 static bool pl011_rx_irq_inited;
+static bool pl011_cfg_inited;
+static uintptr_t pl011_base = PL011_BASE_FALLBACK;
+static int pl011_irq = PL011_IRQ_FALLBACK;
+static bool pl011_irq_available = true;
 
 void aarch64_early_console_set_ready(bool ready) {
     early_console_ready = ready;
@@ -34,7 +40,7 @@ static inline volatile uint32_t *pl011_regs(void) {
     const struct boot_info *bi = boot_info_get();
     if (!early_console_ready || !bi || !bi->hhdm_offset)
         return NULL;
-    return (volatile uint32_t *)(uintptr_t)(bi->hhdm_offset + PL011_BASE);
+    return (volatile uint32_t *)(uintptr_t)(bi->hhdm_offset + pl011_base);
 }
 
 static inline void pl011_putc(char c) {
@@ -80,7 +86,40 @@ int arch_early_getchar_nb(void) {
     return pl011_getc_nb();
 }
 
+static void pl011_try_configure_from_fdt(void) {
+    if (pl011_cfg_inited)
+        return;
+
+    const void *dtb = init_boot_dtb();
+    if (!dtb)
+        return;
+
+    bool irq_state = arch_irq_save();
+    if (pl011_cfg_inited) {
+        arch_irq_restore(irq_state);
+        return;
+    }
+    pl011_cfg_inited = true;
+    arch_irq_restore(irq_state);
+
+    static const char *const compat_list[] = {
+        "arm,pl011",
+        "arm,sbsa-uart",
+    };
+    struct fdt_uart_info info;
+    if (fdt_get_stdout_uart(dtb, compat_list, ARRAY_SIZE(compat_list), &info) !=
+        0)
+        return;
+
+    pl011_base = (uintptr_t)info.base;
+    pl011_irq_available = info.irq > 0;
+    if (pl011_irq_available)
+        pl011_irq = info.irq;
+}
+
 void arch_console_input_init(void) {
+    pl011_try_configure_from_fdt();
+
     volatile uint32_t *uart = pl011_regs();
     if (!uart)
         return;
@@ -94,9 +133,12 @@ void arch_console_input_init(void) {
     arch_irq_restore(irq_state);
 
     uart[PL011_ICR / 4] = 0x7ff;
-    uart[PL011_IMSC / 4] |= PL011_INT_RX | PL011_INT_RT;
-
-    arch_irq_register(PL011_IRQ, pl011_rx_irq_handler, NULL);
+    if (pl011_irq_available) {
+        uart[PL011_IMSC / 4] |= PL011_INT_RX | PL011_INT_RT;
+        arch_irq_register(pl011_irq, pl011_rx_irq_handler, NULL);
+    } else {
+        uart[PL011_IMSC / 4] &= ~(PL011_INT_RX | PL011_INT_RT);
+    }
     console_poll_input();
 }
 
