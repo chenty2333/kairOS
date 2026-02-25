@@ -8,6 +8,7 @@
 #include <kairos/boot.h>
 #include <kairos/mm.h>
 #include <kairos/pci.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
@@ -47,6 +48,12 @@ struct acpi_mcfg_entry {
     uint8_t bus_end;
     uint32_t reserved;
 } __packed;
+
+#define AARCH64_GICD_SETSPI_NSR 0x40U
+#define AARCH64_MSI_SPI_BASE    64U
+#define AARCH64_MSI_SPI_LIMIT   224U
+
+static uint32_t aarch64_msi_next_spi = AARCH64_MSI_SPI_BASE;
 
 static bool acpi_checksum_ok(const void *data, size_t len) {
     const uint8_t *p = data;
@@ -189,5 +196,27 @@ int arch_pci_host_init(struct pci_host *host) {
             (unsigned long)ecam_size,
             host->bus_start, host->bus_end, host->irq_base);
 
+    return 0;
+}
+
+int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg)
+{
+    if (!pdev || !msg)
+        return -EINVAL;
+
+    const struct platform_desc *plat = platform_get();
+    if (!plat || plat->num_early_mmio < 1 || !plat->early_mmio[0].base)
+        return -EOPNOTSUPP;
+
+    /* WARN: QEMU virt baseline MSI route uses GICD_SETSPI doorbell writes. */
+    uint32_t spi = __atomic_fetch_add(&aarch64_msi_next_spi, 1, __ATOMIC_RELAXED);
+    if (spi >= AARCH64_MSI_SPI_LIMIT)
+        return -ENOSPC;
+
+    uint64_t doorbell = (uint64_t)plat->early_mmio[0].base + AARCH64_GICD_SETSPI_NSR;
+    msg->address_lo = (uint32_t)doorbell;
+    msg->address_hi = (uint32_t)(doorbell >> 32);
+    msg->data = (uint16_t)spi;
+    msg->irq = (uint8_t)spi;
     return 0;
 }

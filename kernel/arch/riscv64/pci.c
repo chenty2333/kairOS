@@ -13,6 +13,8 @@
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
+static bool riscv64_msi_warned;
+
 struct pci_host_match {
     struct pci_host *host;
     bool found;
@@ -69,4 +71,16 @@ int arch_pci_host_init(struct pci_host *host)
         return -ENODEV;
 
     return 0;
+}
+
+int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg)
+{
+    (void)pdev;
+    (void)msg;
+
+    if (!riscv64_msi_warned) {
+        pr_warn("pci: riscv64 MSI backend requires AIA/IMSIC; current PLIC path remains INTx-only\n");
+        riscv64_msi_warned = true;
+    }
+    return -EOPNOTSUPP;
 }
