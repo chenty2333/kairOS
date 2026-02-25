@@ -240,7 +240,8 @@ static struct unix_sock *unix_sock_alloc(struct socket *sock) {
 
 static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
                               void *buf, size_t len, int shutdown,
-                              struct unix_sock *peer, bool nonblock) {
+                              struct unix_sock *peer, bool nonblock,
+                              bool peek) {
     size_t total = 0;
 
     mutex_lock(lock);
@@ -264,22 +265,37 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
 
         size_t want = len - total;
         size_t can = (b->count < want) ? b->count : want;
-        size_t tail_space = UNIX_BUF_SIZE - b->tail;
-        size_t n1 = (can < tail_space) ? can : tail_space;
-        memcpy((uint8_t *)buf + total, b->data + b->tail, n1);
-        b->tail = (b->tail + n1) % UNIX_BUF_SIZE;
-        b->count -= n1;
-        total += n1;
+        if (peek) {
+            size_t scan_tail = b->tail;
+            size_t tail_space = UNIX_BUF_SIZE - scan_tail;
+            size_t n1 = (can < tail_space) ? can : tail_space;
+            memcpy((uint8_t *)buf + total, b->data + scan_tail, n1);
+            total += n1;
 
-        size_t n2 = can - n1;
-        if (n2) {
-            memcpy((uint8_t *)buf + total, b->data + b->tail, n2);
-            b->tail = (b->tail + n2) % UNIX_BUF_SIZE;
-            b->count -= n2;
-            total += n2;
+            size_t n2 = can - n1;
+            if (n2) {
+                scan_tail = (scan_tail + n1) % UNIX_BUF_SIZE;
+                memcpy((uint8_t *)buf + total, b->data + scan_tail, n2);
+                total += n2;
+            }
+        } else {
+            size_t tail_space = UNIX_BUF_SIZE - b->tail;
+            size_t n1 = (can < tail_space) ? can : tail_space;
+            memcpy((uint8_t *)buf + total, b->data + b->tail, n1);
+            b->tail = (b->tail + n1) % UNIX_BUF_SIZE;
+            b->count -= n1;
+            total += n1;
+
+            size_t n2 = can - n1;
+            if (n2) {
+                memcpy((uint8_t *)buf + total, b->data + b->tail, n2);
+                b->tail = (b->tail + n2) % UNIX_BUF_SIZE;
+                b->count -= n2;
+                total += n2;
+            }
+
+            wait_queue_wakeup_one(&b->wwait);
         }
-
-        wait_queue_wakeup_one(&b->wwait);
         break; /* STREAM: return as soon as we have data */
     }
     mutex_unlock(lock);
@@ -379,29 +395,43 @@ static int unix_stream_ctrl_from_send(const struct socket_control *control,
     return 0;
 }
 
-static void unix_stream_ctrl_move_to_recv(struct socket_control *control,
-                                          struct unix_stream_ctrl *msg) {
+static void unix_stream_ctrl_merge_to_recv(struct socket_control *control,
+                                           struct unix_stream_ctrl *msg,
+                                           bool consume) {
     if (!control || !msg)
         return;
-    if (control->has_creds || control->rights_count > 0)
-        return;
 
-    control->has_creds = msg->has_creds;
-    control->creds = msg->creds;
-    control->rights_count = msg->rights_count;
-    if (control->rights_count > SOCKET_MAX_RIGHTS)
-        control->rights_count = SOCKET_MAX_RIGHTS;
-    for (size_t i = 0; i < control->rights_count; i++) {
-        control->rights[i] = msg->rights[i];
-        msg->rights[i] = NULL;
+    if (msg->has_creds && !control->has_creds) {
+        control->has_creds = true;
+        control->creds = msg->creds;
     }
-    msg->rights_count = 0;
-    msg->has_creds = false;
+
+    size_t free_slots = 0;
+    if (control->rights_count < SOCKET_MAX_RIGHTS)
+        free_slots = SOCKET_MAX_RIGHTS - control->rights_count;
+    size_t take = (msg->rights_count < free_slots) ? msg->rights_count : free_slots;
+    if (take < msg->rights_count)
+        control->truncated = true;
+
+    for (size_t i = 0; i < take; i++) {
+        struct file *f = msg->rights[i];
+        if (!f)
+            continue;
+        if (!consume)
+            file_get(f);
+        control->rights[control->rights_count++] = f;
+        if (consume)
+            msg->rights[i] = NULL;
+    }
+    if (consume && take == msg->rights_count) {
+        msg->rights_count = 0;
+        msg->has_creds = false;
+    }
 }
 
-static void unix_stream_ctrl_consume_locked(struct unix_sock *us,
-                                            size_t consumed,
-                                            struct socket_control *control) {
+static void unix_stream_ctrl_scan_locked(struct unix_sock *us, size_t consumed,
+                                         struct socket_control *control,
+                                         bool consume) {
     if (!us || consumed == 0)
         return;
 
@@ -409,29 +439,36 @@ static void unix_stream_ctrl_consume_locked(struct unix_sock *us,
     uint64_t end = start + (uint64_t)consumed;
     if (end < start)
         end = UINT64_MAX;
-    us->stream_rx_read_off = end;
+    if (consume)
+        us->stream_rx_read_off = end;
 
-    while (!list_empty(&us->stream_ctrl_queue)) {
-        struct unix_stream_ctrl *msg = list_first_entry(
-            &us->stream_ctrl_queue, struct unix_stream_ctrl, node);
+    struct list_head *pos = us->stream_ctrl_queue.next;
+    while (pos != &us->stream_ctrl_queue) {
+        struct unix_stream_ctrl *msg = list_entry(pos, struct unix_stream_ctrl, node);
+        struct list_head *next = pos->next;
         if (msg->attach_off >= end)
             break;
-        list_del(&msg->node);
-        if (us->stream_ctrl_count > 0)
-            us->stream_ctrl_count--;
         if (msg->attach_off >= start)
-            unix_stream_ctrl_move_to_recv(control, msg);
-        unix_stream_ctrl_release(msg);
-        kfree(msg);
+            unix_stream_ctrl_merge_to_recv(control, msg, consume);
+        if (consume) {
+            list_del(&msg->node);
+            if (us->stream_ctrl_count > 0)
+                us->stream_ctrl_count--;
+            unix_stream_ctrl_release(msg);
+            kfree(msg);
+        }
+        pos = next;
     }
 }
 
 static void unix_stream_post_recv(struct unix_sock *us, ssize_t ret,
-                                  struct socket_control *control) {
+                                  struct socket_control *control,
+                                  int flags) {
     if (!us || ret <= 0)
         return;
     mutex_lock(&us->lock);
-    unix_stream_ctrl_consume_locked(us, (size_t)ret, control);
+    bool peek = (flags & MSG_PEEK) != 0;
+    unix_stream_ctrl_scan_locked(us, (size_t)ret, control, !peek);
     mutex_unlock(&us->lock);
 }
 
@@ -820,6 +857,7 @@ static ssize_t unix_stream_recvfrom(struct socket *sock, void *buf,
     struct unix_sock *peer = NULL;
     int shutdown_flags = 0;
     bool nonblock = (flags & MSG_DONTWAIT) != 0;
+    bool peek = (flags & MSG_PEEK) != 0;
 
     mutex_lock(&us->lock);
     if (sock->state != SS_CONNECTED || us->closing) {
@@ -832,8 +870,8 @@ static ssize_t unix_stream_recvfrom(struct socket *sock, void *buf,
         unix_sock_get(peer);
     mutex_unlock(&us->lock);
 
-    ssize_t ret = unix_buf_read(&us->buf, &us->lock, buf, len,
-                                shutdown_flags, peer, nonblock);
+    ssize_t ret = unix_buf_read(&us->buf, &us->lock, buf, len, shutdown_flags,
+                                peer, nonblock, peek);
     if (peer)
         unix_sock_put(peer);
     return ret;
@@ -1429,7 +1467,7 @@ static ssize_t unix_stream_recvfrom_wrap(struct socket *sock, void *buf,
     }
     ssize_t ret = unix_stream_recvfrom(sock, buf, len, flags, src, addrlen);
     struct unix_sock *us = sock->proto_data;
-    unix_stream_post_recv(us, ret, NULL);
+    unix_stream_post_recv(us, ret, NULL, flags);
     return ret;
 }
 
@@ -1520,7 +1558,7 @@ static ssize_t unix_stream_recvmsg_wrap(struct socket *sock, void *buf,
     if (control)
         memset(control, 0, sizeof(*control));
     struct unix_sock *us = sock->proto_data;
-    unix_stream_post_recv(us, ret, control);
+    unix_stream_post_recv(us, ret, control, flags);
     return ret;
 }
 

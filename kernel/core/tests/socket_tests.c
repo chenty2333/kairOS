@@ -1513,6 +1513,214 @@ static void test_unix_stream_msg_control_semantics(void) {
         }
     }
 
+    ret = copy_to_user(u_send_buf, "PEEK", 4);
+    test_check(ret == 0, "sockmsg_stream copy peek send buf");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+    test_check(ret == 0, "sockmsg_stream copy peek rights hdr");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights), &rights_fd,
+                           sizeof(rights_fd));
+        test_check(ret == 0, "sockmsg_stream copy peek rights payload");
+    }
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream copy peek send msg");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendmsg peek rights");
+
+    if (ret64 == 4) {
+        recv_iov.iov_len = 4;
+        ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+        test_check(ret == 0, "sockmsg_stream copy peek recv iov");
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy peek recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, MSG_PEEK, 0,
+                                0, 0);
+            test_check(ret64 == 4, "sockmsg_stream recvmsg peek rights");
+        }
+        if (ret64 == 4) {
+            char got_peek[4] = {0};
+            struct test_socket_cmsghdr got_ctrl = {0};
+            int32_t got_fd = -1;
+            ret = copy_from_user(got_peek, u_recv_buf, sizeof(got_peek));
+            test_check(ret == 0, "sockmsg_stream read peek data");
+            ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+            test_check(ret == 0, "sockmsg_stream read peek ctrl");
+            ret = copy_from_user(&got_fd, u_rights, sizeof(got_fd));
+            test_check(ret == 0, "sockmsg_stream read peek fd");
+            if (ret == 0) {
+                test_check(memcmp(got_peek, "PEEK", 4) == 0,
+                           "sockmsg_stream peek data");
+                test_check(got_ctrl.cmsg_type == TEST_SCM_RIGHTS,
+                           "sockmsg_stream peek ctrl type");
+                test_check(got_fd >= 0, "sockmsg_stream peek fd valid");
+            }
+            if (got_fd >= 0)
+                (void)fd_close(proc_current(), got_fd);
+        }
+    }
+
+    if (ret64 == 4) {
+        recv_iov.iov_len = 4;
+        ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+        test_check(ret == 0, "sockmsg_stream copy post-peek recv iov");
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy post-peek recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 4, "sockmsg_stream recvmsg post-peek rights");
+        }
+        if (ret64 == 4) {
+            char got_peek2[4] = {0};
+            struct test_socket_cmsghdr got_ctrl = {0};
+            int32_t got_fd = -1;
+            ret = copy_from_user(got_peek2, u_recv_buf, sizeof(got_peek2));
+            test_check(ret == 0, "sockmsg_stream read post-peek data");
+            ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+            test_check(ret == 0, "sockmsg_stream read post-peek ctrl");
+            ret = copy_from_user(&got_fd, u_rights, sizeof(got_fd));
+            test_check(ret == 0, "sockmsg_stream read post-peek fd");
+            if (ret == 0) {
+                test_check(memcmp(got_peek2, "PEEK", 4) == 0,
+                           "sockmsg_stream post-peek same data");
+                test_check(got_ctrl.cmsg_type == TEST_SCM_RIGHTS,
+                           "sockmsg_stream post-peek ctrl type");
+                test_check(got_fd >= 0, "sockmsg_stream post-peek fd valid");
+            }
+            if (got_fd >= 0)
+                (void)fd_close(proc_current(), got_fd);
+        }
+    }
+
+    ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+    test_check(ret == 0, "sockmsg_stream copy merge rights hdr a");
+    rights_fd = txfd;
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights), &rights_fd,
+                           sizeof(rights_fd));
+        test_check(ret == 0, "sockmsg_stream copy merge rights payload a");
+    }
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_buf, "M1A1", 4);
+    test_check(ret == 0, "sockmsg_stream copy merge send buf a");
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream copy merge send msg a");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendmsg merge rights a");
+
+    if (ret64 == 4) {
+        ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+        test_check(ret == 0, "sockmsg_stream copy merge rights hdr b");
+        rights_fd = rxfd;
+        if (ret == 0) {
+            ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights), &rights_fd,
+                               sizeof(rights_fd));
+            test_check(ret == 0, "sockmsg_stream copy merge rights payload b");
+        }
+    }
+    if (ret < 0)
+        goto out;
+    if (ret64 == 4) {
+        ret = copy_to_user(u_send_buf, "M2B2", 4);
+        test_check(ret == 0, "sockmsg_stream copy merge send buf b");
+        if (ret == 0) {
+            send_msg.msg_control = u_ctrl;
+            send_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+            ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+            test_check(ret == 0, "sockmsg_stream copy merge send msg b");
+        }
+        if (ret == 0) {
+            ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+            test_check(ret64 == 4, "sockmsg_stream sendmsg merge rights b");
+        }
+    }
+
+    if (ret64 == 4) {
+        struct test_socket_cmsghdr ctrl_rights2 = {
+            .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t) * 2,
+            .cmsg_level = SOL_SOCKET,
+            .cmsg_type = TEST_SCM_RIGHTS,
+        };
+        recv_iov.iov_len = 8;
+        ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+        test_check(ret == 0, "sockmsg_stream copy merge recv iov");
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights2.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy merge recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 8, "sockmsg_stream recvmsg merge rights");
+        }
+        if (ret64 == 8) {
+            char got_merge[8] = {0};
+            struct test_socket_cmsghdr got_ctrl = {0};
+            int32_t got_fd0 = -1;
+            int32_t got_fd1 = -1;
+            struct file *src0 = NULL;
+            struct file *src1 = NULL;
+            struct file *got0 = NULL;
+            struct file *got1 = NULL;
+            ret = copy_from_user(got_merge, u_recv_buf, sizeof(got_merge));
+            test_check(ret == 0, "sockmsg_stream read merge data");
+            ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+            test_check(ret == 0, "sockmsg_stream read merge ctrl");
+            ret = copy_from_user(&got_fd0, u_rights, sizeof(got_fd0));
+            test_check(ret == 0, "sockmsg_stream read merge fd0");
+            ret = copy_from_user(&got_fd1, u_rights + 1, sizeof(got_fd1));
+            test_check(ret == 0, "sockmsg_stream read merge fd1");
+            if (ret == 0) {
+                test_check(memcmp(got_merge, "M1A1M2B2", 8) == 0,
+                           "sockmsg_stream merge data");
+                test_check(got_ctrl.cmsg_type == TEST_SCM_RIGHTS,
+                           "sockmsg_stream merge ctrl type");
+                test_check(got_fd0 >= 0 && got_fd1 >= 0,
+                           "sockmsg_stream merge fd valid");
+            }
+            if (got_fd0 >= 0 && got_fd1 >= 0) {
+                src0 = fd_get(proc_current(), txfd);
+                src1 = fd_get(proc_current(), rxfd);
+                got0 = fd_get(proc_current(), got_fd0);
+                got1 = fd_get(proc_current(), got_fd1);
+                test_check(src0 != NULL && src1 != NULL && got0 != NULL && got1 != NULL,
+                           "sockmsg_stream merge fd get");
+                if (src0 && src1 && got0 && got1) {
+                    test_check(src0 == got0, "sockmsg_stream merge fd order 0");
+                    test_check(src1 == got1, "sockmsg_stream merge fd order 1");
+                }
+                if (src0)
+                    file_put(src0);
+                if (src1)
+                    file_put(src1);
+                if (got0)
+                    file_put(got0);
+                if (got1)
+                    file_put(got1);
+                (void)fd_close(proc_current(), got_fd0);
+                (void)fd_close(proc_current(), got_fd1);
+            }
+        }
+    }
+
     ret = copy_to_user(u_send_buf, "AA", 2);
     test_check(ret == 0, "sockmsg_stream copy plain pre-ctrl");
     if (ret < 0)

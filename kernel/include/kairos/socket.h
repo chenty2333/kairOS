@@ -37,6 +37,7 @@ struct vnode;
 
 /* Message flags */
 #define MSG_DONTWAIT 0x40
+#define MSG_PEEK     0x2
 #define MSG_NOSIGNAL 0x4000
 #define MSG_CTRUNC   0x8
 #define MSG_CMSG_CLOEXEC 0x40000000
@@ -94,6 +95,7 @@ struct file;
 struct socket_control {
     bool has_creds;
     struct socket_ucred creds;
+    bool truncated;
     size_t rights_count;
     struct file *rights[SOCKET_MAX_RIGHTS];
 };

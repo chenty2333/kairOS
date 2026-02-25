@@ -227,6 +227,9 @@ static int socket_copyout_recv_control(struct socket_msghdr *msg,
     if (!curr)
         return -EINVAL;
 
+    if (control->truncated)
+        out_flags |= MSG_CTRUNC;
+
     if (control->has_creds) {
         size_t cmsg_len = sizeof(struct socket_cmsghdr) +
                           sizeof(struct socket_ucred);
