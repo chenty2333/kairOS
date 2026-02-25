@@ -19,11 +19,14 @@ static volatile uint64_t tick_irq_seq;
 static volatile uint64_t tick_timekeeper_last_irq_seq;
 extern void timerfd_tick(uint64_t now_ticks);
 
+#define TICK_TK_STALL_IRQ_WINDOW \
+    (((uint64_t)CONFIG_HZ / 20ULL) > 4ULL ? ((uint64_t)CONFIG_HZ / 20ULL) : 4ULL)
+
 void tick_policy_init(int timekeeper_cpu) {
     __atomic_store_n(&system_ticks, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&tick_irq_seq, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&tick_timekeeper_last_irq_seq, 0, __ATOMIC_RELAXED);
-    tick_timekeeper_cpu = timekeeper_cpu;
+    __atomic_store_n(&tick_timekeeper_cpu, timekeeper_cpu, __ATOMIC_RELAXED);
 }
 
 void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
@@ -42,13 +45,17 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
         // WARN: Timer IRQ routing can drift; migrate timekeeper if BSP stalls.
         uint64_t last_tk_irq =
             __atomic_load_n(&tick_timekeeper_last_irq_seq, __ATOMIC_RELAXED);
-        if ((irq_seq - last_tk_irq) > (uint64_t)(CONFIG_HZ * 2)) {
+        bool never_seen = (last_tk_irq == 0);
+        bool stalled = !never_seen &&
+                       ((irq_seq - last_tk_irq) > TICK_TK_STALL_IRQ_WINDOW);
+        if (never_seen || stalled) {
             __atomic_store_n(&tick_timekeeper_cpu, cpu, __ATOMIC_RELAXED);
             __atomic_store_n(&tick_timekeeper_last_irq_seq, irq_seq,
                              __ATOMIC_RELAXED);
             tick = __atomic_add_fetch(&system_ticks, 1, __ATOMIC_RELAXED);
             console_poll_input();
-            pr_warn("tick: migrate timekeeper cpu%d->cpu%d\n", tk_cpu, cpu);
+            if (!never_seen)
+                pr_warn("tick: migrate timekeeper cpu%d->cpu%d\n", tk_cpu, cpu);
         }
     }
 
