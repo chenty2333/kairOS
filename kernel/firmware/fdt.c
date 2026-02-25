@@ -78,6 +78,8 @@ struct fdt_alias_entry {
 struct fdt_irq_domain_entry {
     uint32_t phandle;
     uint32_t irq_cells;
+    uint32_t irq_parent;
+    bool interrupt_controller;
 };
 
 static inline uint32_t fdt_be32(uint32_t val) {
@@ -603,7 +605,12 @@ struct fdt_node_ctx {
     uint32_t compatible_len;
     const uint32_t *reg;
     uint32_t reg_len;
-    const uint32_t *irq;
+    const uint32_t *interrupts;
+    uint32_t interrupts_len;
+    const uint32_t *interrupts_extended;
+    uint32_t interrupts_extended_len;
+    uint32_t irq_parent;
+    uint32_t irq_cells_hint;
     uint32_t address_cells;
     uint32_t size_cells;
 };
@@ -747,16 +754,16 @@ static bool fdt_compat_matches_any(const char *compat, uint32_t compat_len,
     return false;
 }
 
-static uint32_t fdt_irq_domain_lookup(
+static const struct fdt_irq_domain_entry *fdt_irq_domain_lookup(
     const struct fdt_irq_domain_entry *irq_domains, size_t irq_domain_count,
     uint32_t phandle) {
     if (!irq_domains || !phandle)
-        return 0;
+        return NULL;
     for (size_t i = 0; i < irq_domain_count; i++) {
         if (irq_domains[i].phandle == phandle)
-            return irq_domains[i].irq_cells;
+            return &irq_domains[i];
     }
-    return 0;
+    return NULL;
 }
 
 static int fdt_parse_irq_spec(const uint32_t *spec, uint32_t cells) {
@@ -776,10 +783,47 @@ static int fdt_parse_irq_spec(const uint32_t *spec, uint32_t cells) {
     return (int)c0;
 }
 
-static int fdt_irq_to_virq(int irq)
+static void fdt_bind_root_irq_domain(
+    const struct fdt_irq_domain_entry *irq_domains, size_t irq_domain_count)
+{
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip || !irq_domains || irq_domain_count == 0)
+        return;
+
+    uint32_t root_irqs = plat->irqchip_root_irqs;
+    if (!root_irqs || root_irqs > IRQCHIP_MAX_IRQS)
+        root_irqs = IRQCHIP_MAX_IRQS;
+
+    for (size_t i = 0; i < irq_domain_count; i++) {
+        const struct fdt_irq_domain_entry *entry = &irq_domains[i];
+        if (!entry->phandle || !entry->interrupt_controller ||
+            entry->irq_parent != 0)
+            continue;
+        if (platform_irq_domain_bind_fwnode(plat->irqchip, 0, root_irqs,
+                                            entry->phandle) == 0)
+            return;
+    }
+
+    for (size_t i = 0; i < irq_domain_count; i++) {
+        const struct fdt_irq_domain_entry *entry = &irq_domains[i];
+        if (!entry->phandle || !entry->interrupt_controller)
+            continue;
+        if (platform_irq_domain_bind_fwnode(plat->irqchip, 0, root_irqs,
+                                            entry->phandle) == 0)
+            return;
+    }
+}
+
+static int fdt_irq_to_virq(uint32_t parent_phandle, int irq)
 {
     if (irq <= 0)
         return irq;
+    if (parent_phandle) {
+        int virq = platform_irq_domain_map_fwnode(parent_phandle,
+                                                  (uint32_t)irq);
+        if (virq >= 0)
+            return virq;
+    }
     const struct platform_desc *plat = platform_get();
     if (!plat || !plat->irqchip)
         return irq;
@@ -799,20 +843,22 @@ static int fdt_parse_uart_irq(
         uint32_t idx = 0;
         while (idx + 1 < total_cells) {
             uint32_t parent = fdt_be32(interrupts_extended[idx++]);
-            uint32_t spec_cells = fdt_irq_domain_lookup(
-                irq_domains, irq_domain_count, parent);
+            const struct fdt_irq_domain_entry *entry =
+                fdt_irq_domain_lookup(irq_domains, irq_domain_count, parent);
+            uint32_t spec_cells = entry ? entry->irq_cells : 0;
             if (spec_cells == 0 || idx + spec_cells > total_cells)
                 break;
             int irq = fdt_parse_irq_spec(interrupts_extended + idx, spec_cells);
             if (irq > 0)
-                return fdt_irq_to_virq(irq);
+                return fdt_irq_to_virq(parent, irq);
             idx += spec_cells;
         }
     }
 
     if (interrupts && interrupts_len >= 4) {
-        uint32_t spec_cells = fdt_irq_domain_lookup(
-            irq_domains, irq_domain_count, irq_parent);
+        const struct fdt_irq_domain_entry *entry =
+            fdt_irq_domain_lookup(irq_domains, irq_domain_count, irq_parent);
+        uint32_t spec_cells = entry ? entry->irq_cells : 0;
         if (spec_cells == 0)
             spec_cells = irq_cells_hint;
         if (spec_cells == 0)
@@ -822,7 +868,7 @@ static int fdt_parse_uart_irq(
             spec_cells = available;
         int irq = fdt_parse_irq_spec(interrupts, spec_cells);
         if (irq > 0)
-            return fdt_irq_to_virq(irq);
+            return fdt_irq_to_virq(irq_parent, irq);
     }
 
     return 0;
@@ -844,6 +890,8 @@ static int fdt_collect_stdout_context(
     char path_stack[MAX_FDT_DEPTH][FDT_NODE_PATH_MAX] = { { 0 } };
     uint32_t node_phandle[MAX_FDT_DEPTH] = { 0 };
     uint32_t node_irq_cells[MAX_FDT_DEPTH] = { 0 };
+    uint32_t node_irq_parent[MAX_FDT_DEPTH] = { 0 };
+    bool node_interrupt_controller[MAX_FDT_DEPTH] = { false };
 
     while (1) {
         uint32_t token = 0;
@@ -866,26 +914,33 @@ static int fdt_collect_stdout_context(
                           sizeof(path_stack[it.depth]));
             node_phandle[it.depth] = 0;
             node_irq_cells[it.depth] = 0;
+            node_irq_parent[it.depth] = node_irq_parent[parent];
+            node_interrupt_controller[it.depth] = false;
             break;
         }
         case FDT_END_NODE: {
             int ended_depth = it.depth + 1;
             if (ended_depth > 0 && ended_depth < MAX_FDT_DEPTH &&
                 node_phandle[ended_depth] && node_irq_cells[ended_depth] &&
-                irq_domains && *irq_domain_count < FDT_IRQ_DOMAIN_MAX) {
+                irq_domains && node_interrupt_controller[ended_depth]) {
                 bool seen = false;
                 for (size_t i = 0; i < *irq_domain_count; i++) {
                     if (irq_domains[i].phandle == node_phandle[ended_depth]) {
                         irq_domains[i].irq_cells = node_irq_cells[ended_depth];
+                        irq_domains[i].irq_parent = node_irq_parent[ended_depth];
+                        irq_domains[i].interrupt_controller = true;
                         seen = true;
                         break;
                     }
                 }
-                if (!seen) {
+                if (!seen && *irq_domain_count < FDT_IRQ_DOMAIN_MAX) {
                     irq_domains[*irq_domain_count].phandle =
                         node_phandle[ended_depth];
                     irq_domains[*irq_domain_count].irq_cells =
                         node_irq_cells[ended_depth];
+                    irq_domains[*irq_domain_count].irq_parent =
+                        node_irq_parent[ended_depth];
+                    irq_domains[*irq_domain_count].interrupt_controller = true;
                     (*irq_domain_count)++;
                 }
             }
@@ -893,6 +948,8 @@ static int fdt_collect_stdout_context(
                 path_stack[ended_depth][0] = '\0';
                 node_phandle[ended_depth] = 0;
                 node_irq_cells[ended_depth] = 0;
+                node_irq_parent[ended_depth] = 0;
+                node_interrupt_controller[ended_depth] = false;
             }
             break;
         }
@@ -907,6 +964,12 @@ static int fdt_collect_stdout_context(
                        prop_len >= 4) {
                 node_irq_cells[it.depth] =
                     fdt_be32(*(const uint32_t *)prop_data);
+            } else if (strcmp(prop_name, "interrupt-parent") == 0 &&
+                       prop_len >= 4) {
+                node_irq_parent[it.depth] =
+                    fdt_be32(*(const uint32_t *)prop_data);
+            } else if (strcmp(prop_name, "interrupt-controller") == 0) {
+                node_interrupt_controller[it.depth] = true;
             }
 
             if (stdout_target && stdout_target[0] == '\0' &&
@@ -1142,6 +1205,7 @@ int fdt_get_stdout_uart(const void *fdt, const char *const *compat_list,
                                          &irq_domain_count);
     if (ret)
         return ret;
+    fdt_bind_root_irq_domain(irq_domains, irq_domain_count);
 
     const char *preferred = NULL;
     if (fdt_resolve_stdout_path(stdout_target, aliases, alias_count,
@@ -1153,7 +1217,9 @@ int fdt_get_stdout_uart(const void *fdt, const char *const *compat_list,
                               irq_domains, irq_domain_count, out);
 }
 
-static void fdt_handle_virtio_mmio(const struct fdt_node_ctx *ctx) {
+static void fdt_handle_virtio_mmio(
+    const struct fdt_node_ctx *ctx,
+    const struct fdt_irq_domain_entry *irq_domains, size_t irq_domain_count) {
     if (!ctx)
         return;
     if (!fdt_compat_has(ctx->compatible, ctx->compatible_len, "virtio,mmio"))
@@ -1167,7 +1233,11 @@ static void fdt_handle_virtio_mmio(const struct fdt_node_ctx *ctx) {
                      ctx->size_cells, &base, &size))
         return;
 
-    int irq = ctx->irq ? fdt_irq_to_virq((int)fdt_be32(*ctx->irq)) : 0;
+    int irq = fdt_parse_uart_irq(ctx->interrupts, ctx->interrupts_len,
+                                 ctx->interrupts_extended,
+                                 ctx->interrupts_extended_len, ctx->irq_parent,
+                                 ctx->irq_cells_hint, irq_domains,
+                                 irq_domain_count);
 
     struct fw_device_desc *desc = kzalloc(sizeof(*desc));
     struct platform_device_info *info = kzalloc(sizeof(*info));
@@ -1207,7 +1277,9 @@ static void fdt_handle_virtio_mmio(const struct fdt_node_ctx *ctx) {
     }
 }
 
-static void fdt_handle_pci_ecam(const struct fdt_node_ctx *ctx) {
+static void fdt_handle_pci_ecam(
+    const struct fdt_node_ctx *ctx,
+    const struct fdt_irq_domain_entry *irq_domains, size_t irq_domain_count) {
     if (!ctx)
         return;
     if (!fdt_compat_has(ctx->compatible, ctx->compatible_len,
@@ -1223,10 +1295,12 @@ static void fdt_handle_pci_ecam(const struct fdt_node_ctx *ctx) {
         return;
 
     /* Default INTx IRQ base for QEMU virt: PLIC IRQ 32 */
-    uint32_t irq_base = ctx->irq ? fdt_be32(*ctx->irq) : 32;
-    int virq_base = fdt_irq_to_virq((int)irq_base);
-    if (virq_base > 0)
-        irq_base = (uint32_t)virq_base;
+    int parsed_irq = fdt_parse_uart_irq(ctx->interrupts, ctx->interrupts_len,
+                                        ctx->interrupts_extended,
+                                        ctx->interrupts_extended_len,
+                                        ctx->irq_parent, ctx->irq_cells_hint,
+                                        irq_domains, irq_domain_count);
+    uint32_t irq_base = (parsed_irq > 0) ? (uint32_t)parsed_irq : 32;
 
     struct fw_device_desc *desc = kzalloc(sizeof(*desc));
     struct resource *res = kzalloc(2 * sizeof(*res));
@@ -1263,10 +1337,25 @@ int fdt_scan_devices(const void *fdt) {
     if (fdt_init_view(fdt, &view))
         return -EINVAL;
 
+    struct fdt_irq_domain_entry irq_domains[FDT_IRQ_DOMAIN_MAX] = { { 0 } };
+    size_t alias_count = 0;
+    size_t irq_domain_count = 0;
+    char unused_stdout[1] = { '\0' };
+    int collect_ret =
+        fdt_collect_stdout_context(&view, unused_stdout, sizeof(unused_stdout),
+                                   NULL, &alias_count, irq_domains,
+                                   &irq_domain_count);
+    if (collect_ret)
+        return collect_ret;
+    fdt_bind_root_irq_domain(irq_domains, irq_domain_count);
+
     uint32_t addr_cells_stack[MAX_FDT_DEPTH] = { 0 };
     uint32_t size_cells_stack[MAX_FDT_DEPTH] = { 0 };
+    uint32_t irq_parent_stack[MAX_FDT_DEPTH] = { 0 };
+    uint32_t irq_cells_stack[MAX_FDT_DEPTH] = { 0 };
     addr_cells_stack[0] = 2;
     size_cells_stack[0] = 2;
+    irq_cells_stack[0] = 1;
 
     struct fdt_iter it = { .p = view.struct_blk, .depth = 0 };
     struct fdt_node_ctx ctx = { 0 };
@@ -1288,6 +1377,8 @@ int fdt_scan_devices(const void *fdt) {
             uint32_t parent = (it.depth > 0) ? (uint32_t)(it.depth - 1) : 0;
             addr_cells_stack[it.depth] = addr_cells_stack[parent];
             size_cells_stack[it.depth] = size_cells_stack[parent];
+            irq_parent_stack[it.depth] = irq_parent_stack[parent];
+            irq_cells_stack[it.depth] = irq_cells_stack[parent];
 
             strncpy(ctx.name, node_name, sizeof(ctx.name) - 1);
             ctx.name[sizeof(ctx.name) - 1] = '\0';
@@ -1295,19 +1386,29 @@ int fdt_scan_devices(const void *fdt) {
             ctx.compatible_len = 0;
             ctx.reg = NULL;
             ctx.reg_len = 0;
-            ctx.irq = NULL;
+            ctx.interrupts = NULL;
+            ctx.interrupts_len = 0;
+            ctx.interrupts_extended = NULL;
+            ctx.interrupts_extended_len = 0;
+            ctx.irq_parent = irq_parent_stack[parent];
+            ctx.irq_cells_hint = irq_cells_stack[parent];
             ctx.address_cells = addr_cells_stack[parent];
             ctx.size_cells = size_cells_stack[parent];
             break;
         }
         case FDT_END_NODE:
-            fdt_handle_virtio_mmio(&ctx);
-            fdt_handle_pci_ecam(&ctx);
+            fdt_handle_virtio_mmio(&ctx, irq_domains, irq_domain_count);
+            fdt_handle_pci_ecam(&ctx, irq_domains, irq_domain_count);
             ctx.compatible = NULL;
             ctx.compatible_len = 0;
             ctx.reg = NULL;
             ctx.reg_len = 0;
-            ctx.irq = NULL;
+            ctx.interrupts = NULL;
+            ctx.interrupts_len = 0;
+            ctx.interrupts_extended = NULL;
+            ctx.interrupts_extended_len = 0;
+            ctx.irq_parent = 0;
+            ctx.irq_cells_hint = 0;
             ctx.name[0] = '\0';
             break;
         case FDT_PROP:
@@ -1315,6 +1416,16 @@ int fdt_scan_devices(const void *fdt) {
                 addr_cells_stack[it.depth] = fdt_be32(*(const uint32_t *)prop_data);
             } else if (strcmp(prop_name, "#size-cells") == 0 && prop_len >= 4) {
                 size_cells_stack[it.depth] = fdt_be32(*(const uint32_t *)prop_data);
+            } else if (strcmp(prop_name, "#interrupt-cells") == 0 &&
+                       prop_len >= 4) {
+                irq_cells_stack[it.depth] =
+                    fdt_be32(*(const uint32_t *)prop_data);
+                ctx.irq_cells_hint = irq_cells_stack[it.depth];
+            } else if (strcmp(prop_name, "interrupt-parent") == 0 &&
+                       prop_len >= 4) {
+                irq_parent_stack[it.depth] =
+                    fdt_be32(*(const uint32_t *)prop_data);
+                ctx.irq_parent = irq_parent_stack[it.depth];
             } else if (strcmp(prop_name, "compatible") == 0) {
                 ctx.compatible = prop_data;
                 ctx.compatible_len = prop_len;
@@ -1322,7 +1433,11 @@ int fdt_scan_devices(const void *fdt) {
                 ctx.reg = prop_data;
                 ctx.reg_len = prop_len;
             } else if (strcmp(prop_name, "interrupts") == 0) {
-                ctx.irq = prop_data;
+                ctx.interrupts = prop_data;
+                ctx.interrupts_len = prop_len;
+            } else if (strcmp(prop_name, "interrupts-extended") == 0) {
+                ctx.interrupts_extended = prop_data;
+                ctx.interrupts_extended_len = prop_len;
             }
             break;
         case FDT_END:

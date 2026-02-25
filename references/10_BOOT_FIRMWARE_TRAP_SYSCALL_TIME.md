@@ -39,6 +39,7 @@ Two parsing paths, both ultimately register into the firmware descriptor table (
 
 - FDT path: init_boot() → firmware/fdt.c:fdt_parse() parses memory and reserved regions; init_devices() → fdt_scan_devices() scans device nodes → fw_register_desc() registers descriptors
 - Console UART discovery path: arch console init calls `fdt_get_stdout_uart()` to resolve UART MMIO base/IRQ from `/chosen/stdout-path` (with `/aliases` and interrupt spec parsing), falling back to arch defaults if unresolved
+- FDT IRQ translation now records interrupt-controller nodes (`phandle`, `#interrupt-cells`, `interrupt-parent`) and binds the root controller phandle to the root irq_domain; device `interrupts` / `interrupts-extended` specs are mapped via parent-phandle-aware domain lookup before root fallback
 - ACPI path: init_devices() → firmware/acpi.c:acpi_init() probes RSDP and marks available; on aarch64, pci_enumerate() → arch/aarch64/pci.c:arch_pci_host_init() further parses RSDP → XSDT/RSDT → MCFG to discover PCI ECAM
 
 The firmware descriptor table is the intermediate layer for device discovery: firmware/ writes, bus/ reads and enumerates.
@@ -73,6 +74,7 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `irqchip_ops` now includes `set_affinity(int irq, uint32_t cpu_mask)` and IRQ core stores per-IRQ CPU mask (default CPU0) for route programming hooks
   - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
   - `irq_domain` now supports auto-allocated virq ranges (`platform_irq_domain_alloc_linear` / `IRQ_DOMAIN_AUTO_VIRQ`) for child/cascaded controllers
+  - `irq_domain` now supports firmware-node (`phandle`) bindings and mapping/dispatch (`platform_irq_domain_*_fwnode`) so cascaded controllers can resolve IRQs in per-controller namespaces
   - root domain coverage is now board-configurable (`platform_desc.irqchip_root_irqs`) so root mappings no longer have to occupy the full global virq space
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
   - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions
@@ -124,11 +126,11 @@ Two-layer structure:
     - `getitimer`/`setitimer` decode `which` using Linux ABI width (`int`/32-bit)
     - `clock_nanosleep` accepts `CLOCK_BOOTTIME` and `CLOCK_TAI`; `CLOCK_TAI` absolute deadlines are converted to realtime base using the current in-kernel TAI offset
     - `CLOCK_REALTIME` is implemented as `CLOCK_MONOTONIC + realtime_offset`; `clock_settime(CLOCK_REALTIME, ...)` updates this offset while `CLOCK_MONOTONIC` remains non-settable; `clock_settime(CLOCK_TAI, ...)` updates user-adjustable TAI delta relative to the in-kernel UTC->TAI leap table baseline
-    - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) on current realtime/monotonic sources; `CLOCK_TAI` reports `CLOCK_REALTIME + (leap-table baseline + user delta)` with current default baseline +37s (post-2017), plus CPU clocks (`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`) from scheduler accounting
+    - `clock_gettime`/`clock_getres` accept Linux alias clock IDs (`*_COARSE`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`, `*_ALARM`, `CLOCK_TAI`) with distinct source semantics: `CLOCK_MONOTONIC_RAW` uses raw arch timer ticks, `*_COARSE` clocks return quantized values on scheduler-tick granularity, and `CLOCK_TAI` reports `CLOCK_REALTIME + (leap-table baseline + user delta)` with current default baseline +37s (post-2017); CPU clocks (`CLOCK_PROCESS_CPUTIME_ID`/`CLOCK_THREAD_CPUTIME_ID`) come from scheduler accounting
     - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
-BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU, and tick policy can hand over timekeeper duty when the original CPU stops receiving timer IRQs for an extended interval.
+BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU, and tick policy can hand over timekeeper duty when the original CPU stops receiving timer IRQs for an extended interval. Timekeeper handover uses atomic single-winner CAS so only one CPU commits each migration; stalled-handover WARN logs are rate-limited (tick-based window).
 
 Related references:
 - references/00_REPO_MAP.md

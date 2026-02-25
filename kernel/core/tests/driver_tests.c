@@ -496,10 +496,12 @@ static void test_irq_domain_programming(void) {
     irq_mock_state.last_affinity_irq = -1;
     irq_mock_dispatch_hits = 0;
 
+    const uint32_t fwnode = 0xD00D0010U;
     uint32_t virq_base = 0;
-    int ret = platform_irq_domain_alloc_linear("test-mock-domain",
-                                               &test_irq_mock_ops,
-                                               32, 8, &virq_base);
+    int ret = platform_irq_domain_alloc_linear_fwnode("test-mock-domain",
+                                                      &test_irq_mock_ops,
+                                                      fwnode, 32, 8,
+                                                      &virq_base);
     test_check(ret == 0, "irq domain auto alloc");
     if (ret < 0)
         return;
@@ -507,6 +509,8 @@ static void test_irq_domain_programming(void) {
     int virq = (int)(virq_base + 1);
     int mapped = platform_irq_domain_map(&test_irq_mock_ops, 33);
     test_check(mapped == virq, "irq domain hwirq map");
+    int mapped_fwnode = platform_irq_domain_map_fwnode(fwnode, 33);
+    test_check(mapped_fwnode == virq, "irq domain fwnode map");
 
     arch_irq_register_ex(virq, test_irq_mock_handler, NULL,
                          IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_NO_AUTO_ENABLE);
@@ -533,9 +537,9 @@ static void test_irq_domain_programming(void) {
                    irq_mock_state.last_affinity_mask == expected_mask,
                "irq chip set_affinity uses hwirq");
 
-    platform_irq_dispatch_hwirq(&test_irq_mock_ops, 33, NULL);
+    platform_irq_dispatch_fwnode_hwirq(fwnode, 33, NULL);
     test_check(__atomic_load_n(&irq_mock_dispatch_hits, __ATOMIC_RELAXED) == 1,
-               "irq domain dispatch hwirq");
+               "irq domain dispatch fwnode hwirq");
 
     arch_irq_disable_nr(virq);
     test_check(irq_mock_state.disable_hits == 1 &&

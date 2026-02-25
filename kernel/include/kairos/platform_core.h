@@ -89,14 +89,32 @@ int platform_irq_domain_add_linear(const char *name,
                                    const struct irqchip_ops *chip,
                                    uint32_t hwirq_base, uint32_t virq_base,
                                    uint32_t nr_irqs);
+int platform_irq_domain_add_linear_fwnode(const char *name,
+                                          const struct irqchip_ops *chip,
+                                          uint32_t fwnode,
+                                          uint32_t hwirq_base,
+                                          uint32_t virq_base,
+                                          uint32_t nr_irqs);
 int platform_irq_domain_alloc_linear(const char *name,
                                      const struct irqchip_ops *chip,
                                      uint32_t hwirq_base, uint32_t nr_irqs,
                                      uint32_t *virq_base_out);
+int platform_irq_domain_alloc_linear_fwnode(const char *name,
+                                            const struct irqchip_ops *chip,
+                                            uint32_t fwnode,
+                                            uint32_t hwirq_base,
+                                            uint32_t nr_irqs,
+                                            uint32_t *virq_base_out);
+int platform_irq_domain_bind_fwnode(const struct irqchip_ops *chip,
+                                    uint32_t hwirq_base, uint32_t nr_irqs,
+                                    uint32_t fwnode);
 int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq);
+int platform_irq_domain_map_fwnode(uint32_t fwnode, uint32_t hwirq);
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
                                  uint32_t hwirq,
                                  const struct trap_core_event *ev);
+void platform_irq_dispatch_fwnode_hwirq(uint32_t fwnode, uint32_t hwirq,
+                                        const struct trap_core_event *ev);
 void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev);
 void platform_irq_dispatch_nr(uint32_t irq);
 int platform_timer_irq(void);
