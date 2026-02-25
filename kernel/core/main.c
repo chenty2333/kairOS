@@ -156,6 +156,22 @@ static void smp_init(void) {
     sched_set_steal_enabled(online > 1);
 }
 
+static void log_limine_boot_markers(void) {
+    const struct boot_info *bi = boot_info_get();
+    if (!bi)
+        return;
+
+    pr_info("boot: limine firmware type=%llu rev=%llu\n",
+            (unsigned long long)bi->limine_firmware_type,
+            (unsigned long long)bi->limine_firmware_type_revision);
+    pr_info("boot: limine paging mode=%llu rev=%llu\n",
+            (unsigned long long)bi->limine_paging_mode,
+            (unsigned long long)bi->limine_paging_mode_revision);
+    pr_info("boot: limine mp rev=%llu flags=0x%llx\n",
+            (unsigned long long)bi->limine_mp_revision,
+            (unsigned long long)bi->limine_mp_flags);
+}
+
 /**
  * kernel_main - Main kernel entry point
  */
@@ -176,6 +192,7 @@ void kernel_main(const struct boot_info *bi) {
     init_devices();
     init_net();
     init_fs();
+    log_limine_boot_markers();
 
     smp_init();
     init_user();

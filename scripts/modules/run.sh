@@ -82,6 +82,7 @@ kairos_run_test_once() {
     local require_markers="$4"
     local expect_timeout="$5"
     local require_structured="$6"
+    local required_all=""
 
     local qemu_cmd
     printf -v qemu_cmd \
@@ -89,7 +90,12 @@ kairos_run_test_once() {
         "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
         "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "" "" "${require_structured}" 1
+    if [[ "${require_markers}" == "1" ]]; then
+        printf -v required_all \
+            'boot: limine firmware type=.*\nboot: limine paging mode=.*\nboot: limine mp rev=.*'
+    fi
+
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "${required_all}" "" "${require_structured}" 1
 }
 
 kairos_run_test_tcc_smoke_once() {

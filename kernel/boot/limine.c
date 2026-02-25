@@ -126,6 +126,13 @@ static volatile struct limine_executable_cmdline_request limine_cmdline = {
 };
 
 __attribute__((used, section(".limine_requests")))
+static volatile struct limine_firmware_type_request limine_firmware_type = {
+    .id = LIMINE_FIRMWARE_TYPE_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
 static volatile struct limine_hhdm_request limine_hhdm = {
     .id = LIMINE_HHDM_REQUEST_ID,
     .revision = 0,
@@ -179,6 +186,20 @@ static volatile struct limine_efi_system_table_request limine_efi = {
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_executable_address_request limine_exec_addr = {
     .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_date_at_boot_request limine_date_at_boot = {
+    .id = LIMINE_DATE_AT_BOOT_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_bootloader_performance_request limine_boot_perf = {
+    .id = LIMINE_BOOTLOADER_PERFORMANCE_REQUEST_ID,
     .revision = 0,
     .response = NULL,
 };
@@ -301,6 +322,31 @@ static uint32_t limine_memmap_type_to_boot(uint32_t type) {
     }
 }
 
+static const char *limine_fw_type_name(uint64_t fw) {
+    switch (fw) {
+    case LIMINE_FIRMWARE_TYPE_X86BIOS:
+        return "x86bios";
+    case LIMINE_FIRMWARE_TYPE_EFI32:
+        return "efi32";
+    case LIMINE_FIRMWARE_TYPE_EFI64:
+        return "efi64";
+    case LIMINE_FIRMWARE_TYPE_SBI:
+        return "sbi";
+    default:
+        return "unknown";
+    }
+}
+
+static bool limine_fw_type_allowed(uint64_t fw) {
+#if defined(ARCH_x86_64) || defined(ARCH_aarch64)
+    return fw == LIMINE_FIRMWARE_TYPE_EFI64;
+#elif defined(ARCH_riscv64)
+    return fw == LIMINE_FIRMWARE_TYPE_EFI64 || fw == LIMINE_FIRMWARE_TYPE_SBI;
+#else
+    return true;
+#endif
+}
+
 static void boot_init_limine(void) {
     memset(&boot_info, 0, sizeof(boot_info));
 #if defined(ARCH_aarch64)
@@ -312,6 +358,50 @@ static void boot_init_limine(void) {
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
         panic("Limine base revision unsupported");
     }
+
+    struct limine_firmware_type_response *fw_type_resp =
+        (struct limine_firmware_type_response *)
+            limine_ptr_to_virt(limine_firmware_type.response);
+    if (!fw_type_resp) {
+        panic("boot: limine firmware type response missing");
+    }
+    boot_info.limine_firmware_type_revision = fw_type_resp->revision;
+    boot_info.limine_firmware_type = fw_type_resp->firmware_type;
+    if (!limine_fw_type_allowed(boot_info.limine_firmware_type)) {
+        panic("boot: unsupported limine firmware type=%llu",
+              (unsigned long long)boot_info.limine_firmware_type);
+    }
+    pr_info("boot: limine firmware type=%s(%llu) rev=%llu\n",
+            limine_fw_type_name(boot_info.limine_firmware_type),
+            (unsigned long long)boot_info.limine_firmware_type,
+            (unsigned long long)boot_info.limine_firmware_type_revision);
+
+    struct limine_paging_mode_response *paging_resp =
+        (struct limine_paging_mode_response *)
+            limine_ptr_to_virt(limine_paging_mode.response);
+    if (!paging_resp) {
+        panic("boot: limine paging mode response missing");
+    }
+    boot_info.limine_paging_mode_revision = paging_resp->revision;
+    boot_info.limine_paging_mode = paging_resp->mode;
+    if (boot_info.limine_paging_mode < limine_paging_mode.min_mode ||
+        boot_info.limine_paging_mode > limine_paging_mode.max_mode) {
+        panic("boot: limine paging mode out of range mode=%llu range=[%llu,%llu]",
+              (unsigned long long)boot_info.limine_paging_mode,
+              (unsigned long long)limine_paging_mode.min_mode,
+              (unsigned long long)limine_paging_mode.max_mode);
+    }
+    if (limine_paging_mode.min_mode == limine_paging_mode.max_mode &&
+        boot_info.limine_paging_mode != limine_paging_mode.min_mode) {
+        panic("boot: limine paging mode mismatch mode=%llu expected=%llu",
+              (unsigned long long)boot_info.limine_paging_mode,
+              (unsigned long long)limine_paging_mode.min_mode);
+    }
+    pr_info("boot: limine paging mode=%llu rev=%llu req=[%llu,%llu]\n",
+            (unsigned long long)boot_info.limine_paging_mode,
+            (unsigned long long)boot_info.limine_paging_mode_revision,
+            (unsigned long long)limine_paging_mode.min_mode,
+            (unsigned long long)limine_paging_mode.max_mode);
 
     if (limine_hhdm.response) {
         boot_info.hhdm_offset = limine_hhdm.response->offset;
@@ -361,6 +451,32 @@ static void boot_init_limine(void) {
     if (exec_addr_resp) {
         boot_info.kernel_phys_base = exec_addr_resp->physical_base;
         boot_info.kernel_virt_base = exec_addr_resp->virtual_base;
+    }
+
+    struct limine_date_at_boot_response *date_resp =
+        (struct limine_date_at_boot_response *)
+            limine_ptr_to_virt(limine_date_at_boot.response);
+    if (date_resp) {
+        boot_info.boot_timestamp = date_resp->timestamp;
+        boot_info.boot_timestamp_revision = date_resp->revision;
+        pr_info("boot: limine date_at_boot=%lld rev=%llu\n",
+                (long long)boot_info.boot_timestamp,
+                (unsigned long long)boot_info.boot_timestamp_revision);
+    }
+
+    struct limine_bootloader_performance_response *perf_resp =
+        (struct limine_bootloader_performance_response *)
+            limine_ptr_to_virt(limine_boot_perf.response);
+    if (perf_resp) {
+        boot_info.bootloader_perf_revision = perf_resp->revision;
+        boot_info.bootloader_reset_usec = perf_resp->reset_usec;
+        boot_info.bootloader_init_usec = perf_resp->init_usec;
+        boot_info.bootloader_exec_usec = perf_resp->exec_usec;
+        pr_info("boot: limine perf reset=%lluus init=%lluus exec=%lluus rev=%llu\n",
+                (unsigned long long)boot_info.bootloader_reset_usec,
+                (unsigned long long)boot_info.bootloader_init_usec,
+                (unsigned long long)boot_info.bootloader_exec_usec,
+                (unsigned long long)boot_info.bootloader_perf_revision);
     }
 
     if (!boot_info.dtb) {
@@ -484,7 +600,24 @@ static void boot_init_limine(void) {
 #endif
     struct limine_mp_response *mp_resp =
         (struct limine_mp_response *)limine_ptr_to_virt(limine_mp.response);
-    if (mp_resp && mp_resp->cpu_count) {
+    if (!mp_resp) {
+        panic("boot: limine mp response missing");
+    }
+    boot_info.limine_mp_revision = mp_resp->revision;
+    boot_info.limine_mp_flags = (uint64_t)mp_resp->flags;
+    uint64_t requested_mp_flags = limine_mp.flags;
+    uint64_t missing_mp_flags = requested_mp_flags & ~boot_info.limine_mp_flags;
+    uint64_t unknown_mp_flags = boot_info.limine_mp_flags & ~requested_mp_flags;
+    if (missing_mp_flags || unknown_mp_flags) {
+        panic("boot: limine mp flags mismatch req=0x%llx got=0x%llx",
+              (unsigned long long)requested_mp_flags,
+              (unsigned long long)boot_info.limine_mp_flags);
+    }
+    pr_info("boot: limine mp rev=%llu flags=0x%llx cpus=%llu\n",
+            (unsigned long long)boot_info.limine_mp_revision,
+            (unsigned long long)boot_info.limine_mp_flags,
+            (unsigned long long)mp_resp->cpu_count);
+    if (mp_resp->cpu_count) {
         uint64_t count = mp_resp->cpu_count;
         if (count > CONFIG_MAX_CPUS)
             count = CONFIG_MAX_CPUS;

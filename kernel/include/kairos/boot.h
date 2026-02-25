@@ -66,6 +66,20 @@ struct boot_info {
     void *rsdp;
     void *efi_system_table;
 
+    uint64_t limine_firmware_type;
+    uint64_t limine_firmware_type_revision;
+    uint64_t limine_paging_mode;
+    uint64_t limine_paging_mode_revision;
+    uint64_t limine_mp_revision;
+    uint64_t limine_mp_flags;
+
+    int64_t boot_timestamp;
+    uint64_t boot_timestamp_revision;
+    uint64_t bootloader_reset_usec;
+    uint64_t bootloader_init_usec;
+    uint64_t bootloader_exec_usec;
+    uint64_t bootloader_perf_revision;
+
     uint64_t hhdm_offset;
 
     uint64_t kernel_phys_base;

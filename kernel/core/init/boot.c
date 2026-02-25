@@ -46,6 +46,27 @@ void init_boot(const struct boot_info *bi) {
             (void *)bi->hhdm_offset,
             (void *)bi->kernel_phys_base,
             (void *)bi->kernel_virt_base);
+    pr_info("boot: limine firmware type=%llu rev=%llu\n",
+            (unsigned long long)bi->limine_firmware_type,
+            (unsigned long long)bi->limine_firmware_type_revision);
+    pr_info("boot: limine paging mode=%llu rev=%llu\n",
+            (unsigned long long)bi->limine_paging_mode,
+            (unsigned long long)bi->limine_paging_mode_revision);
+    pr_info("boot: limine mp rev=%llu flags=0x%llx\n",
+            (unsigned long long)bi->limine_mp_revision,
+            (unsigned long long)bi->limine_mp_flags);
+    if (bi->boot_timestamp_revision) {
+        pr_info("boot: limine date_at_boot=%lld rev=%llu\n",
+                (long long)bi->boot_timestamp,
+                (unsigned long long)bi->boot_timestamp_revision);
+    }
+    if (bi->bootloader_perf_revision) {
+        pr_info("boot: limine perf reset=%lluus init=%lluus exec=%lluus rev=%llu\n",
+                (unsigned long long)bi->bootloader_reset_usec,
+                (unsigned long long)bi->bootloader_init_usec,
+                (unsigned long long)bi->bootloader_exec_usec,
+                (unsigned long long)bi->bootloader_perf_revision);
+    }
 
 #if defined(ARCH_aarch64)
     platform_select("aarch64");
