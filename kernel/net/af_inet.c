@@ -384,8 +384,14 @@ static int inet_tcp_listen(struct socket *sock, int backlog) {
     int clamped_backlog = inet_listen_backlog_clamp(backlog);
     inet_lwip_lock();
     err_t lwerr = ERR_OK;
+    /*
+     * Keep lwIP's internal SYN/listen backlog roomy and enforce user-visible
+     * listen(backlog) with the AF_INET accept queue limit below.
+     * This avoids second-connection stalls when lwIP drops SYNs at a tiny
+     * internal backlog (e.g. backlog=1) before our accept-queue policy runs.
+     */
     struct tcp_pcb *lpcb =
-        tcp_listen_with_backlog_and_err(is->pcb.tcp, (u8_t)clamped_backlog,
+        tcp_listen_with_backlog_and_err(is->pcb.tcp, (u8_t)INET_ACCEPT_BACKLOG,
                                         &lwerr);
     if (!lpcb) {
         inet_lwip_unlock();

@@ -92,6 +92,7 @@ AF_INET (net/af_inet.c):
 - Based on lwIP raw/callback API
 - Each socket maps to a tcp_pcb or udp_pcb
 - Receive buffer 64KB; listen() backlog is clamped to `[1, INET_ACCEPT_BACKLOG]` and enforced as accept queue upper bound
+  - lwIP internal listen backlog is kept at `INET_ACCEPT_BACKLOG`; user-provided backlog is enforced by AF_INET accept queue policy to avoid small-backlog SYN stall behavior
 - Stream connect/accept/recv and UDP recv honor non-blocking behavior (`EINPROGRESS`/`EALREADY`/`EAGAIN`), with connect readiness surfaced via poll + `SO_ERROR`
   - TCP connect completion races are stabilized: repeated connect returns `EALREADY` while in progress and `EISCONN` after completion
 
