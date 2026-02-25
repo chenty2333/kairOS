@@ -126,6 +126,13 @@ static volatile struct limine_executable_cmdline_request limine_cmdline = {
 };
 
 __attribute__((used, section(".limine_requests")))
+static volatile struct limine_executable_file_request limine_exec_file = {
+    .id = LIMINE_EXECUTABLE_FILE_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
 static volatile struct limine_firmware_type_request limine_firmware_type = {
     .id = LIMINE_FIRMWARE_TYPE_REQUEST_ID,
     .revision = 0,
@@ -347,6 +354,19 @@ static bool limine_fw_type_allowed(uint64_t fw) {
 #endif
 }
 
+static const char *limine_media_type_name(uint64_t media_type) {
+    switch (media_type) {
+    case LIMINE_MEDIA_TYPE_GENERIC:
+        return "generic";
+    case LIMINE_MEDIA_TYPE_OPTICAL:
+        return "optical";
+    case LIMINE_MEDIA_TYPE_TFTP:
+        return "tftp";
+    default:
+        return "unknown";
+    }
+}
+
 static void boot_init_limine(void) {
     memset(&boot_info, 0, sizeof(boot_info));
 #if defined(ARCH_aarch64)
@@ -357,6 +377,11 @@ static void boot_init_limine(void) {
 
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
         panic("Limine base revision unsupported");
+    }
+    if (LIMINE_LOADED_BASE_REVISION_VALID(limine_base_revision)) {
+        boot_info.limine_loaded_base_revision_valid = 1;
+        boot_info.limine_loaded_base_revision =
+            LIMINE_LOADED_BASE_REVISION(limine_base_revision);
     }
 
     struct limine_firmware_type_response *fw_type_resp =
@@ -423,6 +448,30 @@ static void boot_init_limine(void) {
     if (cmdline_resp) {
         boot_info.cmdline =
             (const char *)limine_ptr_to_virt(cmdline_resp->cmdline);
+    }
+
+    struct limine_executable_file_response *exec_file_resp =
+        (struct limine_executable_file_response *)
+            limine_ptr_to_virt(limine_exec_file.response);
+    if (exec_file_resp) {
+        boot_info.limine_executable_revision = exec_file_resp->revision;
+        struct limine_file *exec_file =
+            (struct limine_file *)
+                limine_ptr_to_virt(exec_file_resp->executable_file);
+        if (exec_file) {
+            boot_info.limine_executable_path =
+                (const char *)limine_ptr_to_virt(exec_file->path);
+            boot_info.limine_executable_string =
+                (const char *)limine_ptr_to_virt(exec_file->string);
+            boot_info.limine_executable_media_type = exec_file->media_type;
+            boot_info.limine_executable_partition_index =
+                exec_file->partition_index;
+            pr_info("boot: limine executable media=%s(%llu) part=%llu rev=%llu\n",
+                    limine_media_type_name(boot_info.limine_executable_media_type),
+                    (unsigned long long)boot_info.limine_executable_media_type,
+                    (unsigned long long)boot_info.limine_executable_partition_index,
+                    (unsigned long long)boot_info.limine_executable_revision);
+        }
     }
 
     struct limine_dtb_response *dtb_resp =

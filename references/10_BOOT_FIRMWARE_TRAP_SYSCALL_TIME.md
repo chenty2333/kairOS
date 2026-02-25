@@ -9,10 +9,12 @@ All three architectures share the same path:
    - aarch64 additionally handles EL2→EL1 drop and system register initialization
 2. `boot/limine.c:limine_bootstrap()` — parse Limine protocol responses, populate boot_info (memory map, DTB, RSDP, framebuffer, CPU list, etc.)
    - kernel currently requests Limine protocol base revision `5` (`LIMINE_BASE_REVISION(5)`) and fails fast if unsupported
+   - kernel records loaded base revision (`LIMINE_LOADED_BASE_REVISION`) when provided by bootloader and surfaces it in stable boot logs
    - Limine memmap type `LIMINE_MEMMAP_RESERVED_MAPPED` is treated as `BOOT_MEM_RESERVED` (legacy `LIMINE_MEMMAP_ACPI_TABLES` remains compatibility-mapped to `BOOT_MEM_ACPI_RECLAIM` when present)
    - aarch64 fallback: when Limine MP reports only BSP, `boot_init_limine()` reads DTB `/cpus` to populate CPU topology metadata (`boot_info.cpu_count` / `cpus[].hw_id`)
    - boot path now validates and logs Limine `firmware_type`, `paging_mode`, and MP `revision/flags`; mismatch vs requested constraints triggers early panic (fail-fast)
    - Limine `date_at_boot` and `bootloader_performance` are recorded into `boot_info` when available
+   - Limine `executable_file` metadata (`path/string/media_type/partition_index`) is recorded into `boot_info` for boot-media diagnostics
 3. `arch_cpu_init()` — BSP CPU initialization
 4. `core/main.c:kernel_main()` — main initialization sequence:
    - init_boot → init_mm → syscall_init → arch_trap_init → tick_policy_init → arch_timer_init(100) → sched_init → proc_init → futex_init → proc_idle_init → init_devices → init_net → init_fs → smp_init → init_user

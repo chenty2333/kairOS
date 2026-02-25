@@ -62,12 +62,19 @@ struct boot_info {
     const char *bootloader_name;
     const char *bootloader_version;
     const char *cmdline;
+    const char *limine_executable_path;
+    const char *limine_executable_string;
+    uint64_t limine_executable_media_type;
+    uint64_t limine_executable_partition_index;
+    uint64_t limine_executable_revision;
     void *dtb;
     void *rsdp;
     void *efi_system_table;
 
     uint64_t limine_firmware_type;
     uint64_t limine_firmware_type_revision;
+    uint64_t limine_loaded_base_revision;
+    uint64_t limine_loaded_base_revision_valid;
     uint64_t limine_paging_mode;
     uint64_t limine_paging_mode_revision;
     uint64_t limine_mp_revision;

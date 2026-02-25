@@ -160,16 +160,30 @@ static void log_limine_boot_markers(void) {
     const struct boot_info *bi = boot_info_get();
     if (!bi)
         return;
+    const char *exec_path = bi->limine_executable_path ? bi->limine_executable_path : "-";
+    const char *exec_string = bi->limine_executable_string ? bi->limine_executable_string : "-";
 
     pr_info("boot: limine firmware type=%llu rev=%llu\n",
             (unsigned long long)bi->limine_firmware_type,
             (unsigned long long)bi->limine_firmware_type_revision);
+    if (bi->limine_loaded_base_revision_valid) {
+        pr_info("boot: limine loaded base revision=%llu\n",
+                (unsigned long long)bi->limine_loaded_base_revision);
+    }
     pr_info("boot: limine paging mode=%llu rev=%llu\n",
             (unsigned long long)bi->limine_paging_mode,
             (unsigned long long)bi->limine_paging_mode_revision);
     pr_info("boot: limine mp rev=%llu flags=0x%llx\n",
             (unsigned long long)bi->limine_mp_revision,
             (unsigned long long)bi->limine_mp_flags);
+    if (bi->limine_executable_revision || bi->limine_executable_path ||
+        bi->limine_executable_string) {
+        pr_info("boot: limine executable media=%llu part=%llu path=%s string=%s rev=%llu\n",
+                (unsigned long long)bi->limine_executable_media_type,
+                (unsigned long long)bi->limine_executable_partition_index,
+                exec_path, exec_string,
+                (unsigned long long)bi->limine_executable_revision);
+    }
 }
 
 /**
