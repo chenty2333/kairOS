@@ -32,9 +32,9 @@ struct virtio_blk_req_ctx {
     struct virtio_blk_req hdr;
     uint8_t status;
     bool done;
-    paddr_t dma_hdr;
-    paddr_t dma_buf;
-    paddr_t dma_status;
+    dma_addr_t dma_hdr;
+    dma_addr_t dma_buf;
+    dma_addr_t dma_status;
     size_t byte_len;
 };
 

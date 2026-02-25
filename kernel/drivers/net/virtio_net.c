@@ -34,15 +34,15 @@ struct virtio_net_tx_slot {
     struct virtio_net_hdr hdr;
     uint8_t data[NET_BUF_SIZE];
     bool in_use;
-    paddr_t dma_hdr;
-    paddr_t dma_data;
+    dma_addr_t dma_hdr;
+    dma_addr_t dma_data;
     uint32_t len;
 };
 
 struct virtio_net_rx_slot {
     struct virtio_net_hdr hdr;
     uint8_t data[NET_BUF_SIZE];
-    paddr_t dma_buf;
+    dma_addr_t dma_buf;
 };
 
 struct virtio_net_cookie {

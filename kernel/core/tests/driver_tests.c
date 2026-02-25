@@ -2,10 +2,14 @@
  * kernel/core/tests/driver_tests.c - Driver and helper tests
  */
 
+#include <kairos/arch.h>
 #include <kairos/blkdev.h>
 #include <kairos/config.h>
+#include <kairos/dma.h>
 #include <kairos/net.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
+#include <kairos/process.h>
 #include <kairos/ringbuf.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -316,6 +320,51 @@ static void test_netdev_registry(void) {
     netdev_unregister(&dev);
 }
 
+static void test_dma_coherent_alloc_free(void) {
+    dma_addr_t dma = 0;
+    size_t sz = CONFIG_PAGE_SIZE + 128;
+    uint8_t *buf = dma_alloc_coherent(sz, &dma);
+    test_check(buf != NULL, "dma coherent alloc");
+    if (!buf)
+        return;
+
+    test_check(dma == (dma_addr_t)virt_to_phys(buf), "dma coherent addr mapping");
+    test_check(buf[0] == 0 && buf[sz - 1] == 0, "dma coherent zeroed");
+    dma_free_coherent(buf, sz);
+}
+
+static volatile uint32_t irq_deferred_hits;
+
+static void test_irq_deferred_handler(void *arg,
+                                      const struct trap_core_event *ev __unused) {
+    uint32_t *last = arg;
+    __atomic_add_fetch(&irq_deferred_hits, 1, __ATOMIC_RELAXED);
+    if (last)
+        __atomic_store_n(last, __atomic_load_n(&irq_deferred_hits, __ATOMIC_RELAXED),
+                         __ATOMIC_RELAXED);
+}
+
+static void test_irq_deferred_dispatch(void) {
+    const int irq = 900;
+    static uint32_t last_seen;
+    irq_deferred_hits = 0;
+    last_seen = 0;
+
+    arch_irq_register_ex(irq, test_irq_deferred_handler, &last_seen,
+                         IRQ_FLAG_SHARED | IRQ_FLAG_DEFERRED |
+                             IRQ_FLAG_NO_AUTO_ENABLE);
+    platform_irq_dispatch_nr((uint32_t)irq);
+
+    for (int i = 0; i < 200; i++) {
+        if (__atomic_load_n(&irq_deferred_hits, __ATOMIC_RELAXED) > 0)
+            break;
+        proc_yield();
+    }
+    test_check(__atomic_load_n(&irq_deferred_hits, __ATOMIC_RELAXED) > 0,
+               "irq deferred dispatch");
+    test_check(last_seen > 0, "irq deferred handler ran");
+}
+
 #if CONFIG_KERNEL_TESTS
 static void test_virtio_net_rx_to_lwip_bridge(void) {
     if (!lwip_netif_is_ready()) {
@@ -378,6 +427,8 @@ int run_driver_tests(void) {
     test_blkdev_partition_children();
     test_blkdev_gpt_partition_bounds();
     test_netdev_registry();
+    test_dma_coherent_alloc_free();
+    test_irq_deferred_dispatch();
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();
 #endif
