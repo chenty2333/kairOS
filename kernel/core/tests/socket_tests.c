@@ -1936,6 +1936,455 @@ static void test_unix_stream_msg_control_boundary_drop_semantics(void) {
         SOCKMSG_STREAM_PHASE_BOUNDARY_DROP);
 }
 
+static void test_unix_stream_msg_control_merge_trunc_semantics(void) {
+    struct socket *tx = NULL;
+    struct socket *rx = NULL;
+    int txfd = -1;
+    int rxfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &tx);
+    test_check(ret == 0, "sockmsg_stream_trunc create tx");
+    ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &rx);
+    test_check(ret == 0, "sockmsg_stream_trunc create rx");
+    if (!tx || !rx)
+        goto out;
+
+    ret = unix_socketpair_connect(tx, rx);
+    test_check(ret == 0, "sockmsg_stream_trunc socketpair connect");
+    if (ret < 0)
+        goto out;
+
+    txfd = socket_install_fd(&tx);
+    rxfd = socket_install_fd(&rx);
+    test_check(txfd >= 0, "sockmsg_stream_trunc install tx fd");
+    test_check(rxfd >= 0, "sockmsg_stream_trunc install rx fd");
+    if (txfd < 0 || rxfd < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "sockmsg_stream_trunc user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    struct test_socket_iovec *u_send_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x000);
+    struct test_socket_iovec *u_recv_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x020);
+    struct test_socket_msghdr *u_send_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x040);
+    struct test_socket_msghdr *u_recv_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x080);
+    char *u_send_buf = (char *)user_map_ptr(&um, 0x0C0);
+    char *u_recv_buf = (char *)user_map_ptr(&um, 0x100);
+    struct test_socket_cmsghdr *u_ctrl =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x140);
+    int32_t *u_rights = (int32_t *)user_map_ptr(&um, 0x180);
+    test_check(u_send_iov && u_recv_iov && u_send_msg && u_recv_msg &&
+                   u_send_buf && u_recv_buf && u_ctrl && u_rights,
+               "sockmsg_stream_trunc user pointers");
+    if (!u_send_iov || !u_recv_iov || !u_send_msg || !u_recv_msg ||
+        !u_send_buf || !u_recv_buf || !u_ctrl || !u_rights) {
+        goto out;
+    }
+
+    struct test_socket_iovec send_iov = {
+        .iov_base = u_send_buf,
+        .iov_len = 4,
+    };
+    struct test_socket_iovec recv_iov = {
+        .iov_base = u_recv_buf,
+        .iov_len = 8,
+    };
+    ret = copy_to_user(u_send_iov, &send_iov, sizeof(send_iov));
+    test_check(ret == 0, "sockmsg_stream_trunc copy send iov");
+    ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+    test_check(ret == 0, "sockmsg_stream_trunc copy recv iov");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_msghdr send_msg = {
+        .msg_iov = u_send_iov,
+        .msg_iovlen = 1,
+    };
+    struct test_socket_msghdr recv_msg = {
+        .msg_iov = u_recv_iov,
+        .msg_iovlen = 1,
+    };
+
+    int32_t rights_a[10];
+    int32_t rights_b[10];
+    for (size_t i = 0; i < 10; i++) {
+        rights_a[i] = txfd;
+        rights_b[i] = rxfd;
+    }
+
+    struct test_socket_cmsghdr ctrl_10 = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(rights_a),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_RIGHTS,
+    };
+    size_t ctrl_10_len = test_socket_cmsg_align(ctrl_10.cmsg_len);
+    ret = copy_to_user(u_ctrl, &ctrl_10, sizeof(ctrl_10));
+    test_check(ret == 0, "sockmsg_stream_trunc copy rights hdr a");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_10), rights_a,
+                           sizeof(rights_a));
+        test_check(ret == 0, "sockmsg_stream_trunc copy rights payload a");
+    }
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_buf, "T001", 4);
+    test_check(ret == 0, "sockmsg_stream_trunc copy send buf a");
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = ctrl_10_len;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream_trunc copy send msg a");
+    if (ret < 0)
+        goto out;
+    int64_t ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream_trunc sendmsg a");
+    if (ret64 != 4)
+        goto out;
+
+    ret = copy_to_user(u_ctrl, &ctrl_10, sizeof(ctrl_10));
+    test_check(ret == 0, "sockmsg_stream_trunc copy rights hdr b");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_10), rights_b,
+                           sizeof(rights_b));
+        test_check(ret == 0, "sockmsg_stream_trunc copy rights payload b");
+    }
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_buf, "T002", 4);
+    test_check(ret == 0, "sockmsg_stream_trunc copy send buf b");
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = ctrl_10_len;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream_trunc copy send msg b");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream_trunc sendmsg b");
+    if (ret64 != 4)
+        goto out;
+
+    struct test_socket_cmsghdr ctrl_16 = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t) * 16,
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_RIGHTS,
+    };
+    recv_msg.msg_control = u_ctrl;
+    recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_16.cmsg_len);
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg_stream_trunc copy recv msg");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 8, "sockmsg_stream_trunc recvmsg merged");
+    if (ret64 == 8) {
+        struct test_socket_msghdr got_msg = {0};
+        struct test_socket_cmsghdr got_ctrl = {0};
+        int32_t got_fds[16];
+        bool got_valid = true;
+        bool source_ok = true;
+        bool saw_tx = false;
+        bool saw_rx = false;
+        struct file *src_tx = fd_get(proc_current(), txfd);
+        struct file *src_rx = fd_get(proc_current(), rxfd);
+
+        memset(got_fds, -1, sizeof(got_fds));
+        ret = copy_from_user(&got_msg, u_recv_msg, sizeof(got_msg));
+        test_check(ret == 0, "sockmsg_stream_trunc read recv msg");
+        ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+        test_check(ret == 0, "sockmsg_stream_trunc read ctrl hdr");
+        ret = copy_from_user(got_fds, (uint8_t *)u_ctrl + sizeof(got_ctrl),
+                             sizeof(got_fds));
+        test_check(ret == 0, "sockmsg_stream_trunc read ctrl fds");
+        if (ret == 0) {
+            test_check((got_msg.msg_flags & MSG_CTRUNC) != 0,
+                       "sockmsg_stream_trunc recv ctrunc set");
+            test_check(got_ctrl.cmsg_type == TEST_SCM_RIGHTS,
+                       "sockmsg_stream_trunc recv ctrl type");
+            test_check(got_msg.msg_controllen ==
+                           test_socket_cmsg_align(ctrl_16.cmsg_len),
+                       "sockmsg_stream_trunc recv controllen");
+        }
+
+        for (size_t i = 0; i < 16; i++) {
+            if (got_fds[i] < 0) {
+                got_valid = false;
+                continue;
+            }
+            struct file *gotf = fd_get(proc_current(), got_fds[i]);
+            if (!gotf) {
+                got_valid = false;
+            } else {
+                if ((!src_tx || gotf != src_tx) && (!src_rx || gotf != src_rx))
+                    source_ok = false;
+                if (src_tx && gotf == src_tx)
+                    saw_tx = true;
+                if (src_rx && gotf == src_rx)
+                    saw_rx = true;
+                file_put(gotf);
+            }
+            (void)fd_close(proc_current(), got_fds[i]);
+        }
+        test_check(got_valid, "sockmsg_stream_trunc recv fd valid");
+        test_check(source_ok, "sockmsg_stream_trunc recv fd source");
+        test_check(saw_tx && saw_rx, "sockmsg_stream_trunc recv fd mixed");
+        if (src_tx)
+            file_put(src_tx);
+        if (src_rx)
+            file_put(src_rx);
+    }
+
+out:
+    close_fd_if_open(&txfd);
+    close_fd_if_open(&rxfd);
+    close_socket_if_open(&tx);
+    close_socket_if_open(&rx);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_unix_stream_recvmmsg_control_semantics(void) {
+    struct socket *tx = NULL;
+    struct socket *rx = NULL;
+    int txfd = -1;
+    int rxfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &tx);
+    test_check(ret == 0, "sockmsg_stream_mmsg create tx");
+    ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &rx);
+    test_check(ret == 0, "sockmsg_stream_mmsg create rx");
+    if (!tx || !rx)
+        goto out;
+
+    ret = unix_socketpair_connect(tx, rx);
+    test_check(ret == 0, "sockmsg_stream_mmsg socketpair connect");
+    if (ret < 0)
+        goto out;
+
+    txfd = socket_install_fd(&tx);
+    rxfd = socket_install_fd(&rx);
+    test_check(txfd >= 0, "sockmsg_stream_mmsg install tx fd");
+    test_check(rxfd >= 0, "sockmsg_stream_mmsg install rx fd");
+    if (txfd < 0 || rxfd < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "sockmsg_stream_mmsg user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    struct test_socket_iovec *u_send_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x000);
+    struct test_socket_msghdr *u_send_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x040);
+    char *u_send_buf = (char *)user_map_ptr(&um, 0x080);
+    struct test_socket_cmsghdr *u_send_ctrl =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x0C0);
+    int32_t *u_send_rights = (int32_t *)user_map_ptr(&um, 0x100);
+
+    struct test_socket_iovec *u_recv_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x140);
+    struct test_socket_mmsghdr *u_recv_vec =
+        (struct test_socket_mmsghdr *)user_map_ptr(&um, 0x180);
+    char *u_recv_buf0 = (char *)user_map_ptr(&um, 0x220);
+    char *u_recv_buf1 = (char *)user_map_ptr(&um, 0x260);
+    struct test_socket_cmsghdr *u_recv_ctrl0 =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x2A0);
+    struct test_socket_cmsghdr *u_recv_ctrl1 =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x2E0);
+    int32_t *u_recv_rights0 = (int32_t *)user_map_ptr(&um, 0x2B0);
+    int32_t *u_recv_rights1 = (int32_t *)user_map_ptr(&um, 0x2F0);
+    test_check(u_send_iov && u_send_msg && u_send_buf && u_send_ctrl &&
+                   u_send_rights && u_recv_iov && u_recv_vec && u_recv_buf0 &&
+                   u_recv_buf1 && u_recv_ctrl0 && u_recv_ctrl1 && u_recv_rights0 &&
+                   u_recv_rights1,
+               "sockmsg_stream_mmsg user pointers");
+    if (!u_send_iov || !u_send_msg || !u_send_buf || !u_send_ctrl ||
+        !u_send_rights || !u_recv_iov || !u_recv_vec || !u_recv_buf0 ||
+        !u_recv_buf1 || !u_recv_ctrl0 || !u_recv_ctrl1 || !u_recv_rights0 ||
+        !u_recv_rights1) {
+        goto out;
+    }
+
+    struct test_socket_iovec send_iov = {
+        .iov_base = u_send_buf,
+        .iov_len = 4,
+    };
+    ret = copy_to_user(u_send_iov, &send_iov, sizeof(send_iov));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send iov");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_cmsghdr ctrl_rights = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_RIGHTS,
+    };
+    struct test_socket_msghdr send_msg = {
+        .msg_iov = u_send_iov,
+        .msg_iovlen = 1,
+        .msg_control = u_send_ctrl,
+        .msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len),
+    };
+    ret = copy_to_user(u_send_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send ctrl hdr");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send msg");
+    if (ret < 0)
+        goto out;
+
+    int32_t right = txfd;
+    ret = copy_to_user(u_send_rights, &right, sizeof(right));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send right a");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_buf, "MMA1", 4);
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send buf a");
+    if (ret < 0)
+        goto out;
+    int64_t ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream_mmsg sendmsg a");
+    if (ret64 != 4)
+        goto out;
+
+    right = rxfd;
+    ret = copy_to_user(u_send_rights, &right, sizeof(right));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send right b");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_buf, "MMB2", 4);
+    test_check(ret == 0, "sockmsg_stream_mmsg copy send buf b");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream_mmsg sendmsg b");
+    if (ret64 != 4)
+        goto out;
+
+    struct test_socket_iovec recv_iov0 = {
+        .iov_base = u_recv_buf0,
+        .iov_len = 4,
+    };
+    struct test_socket_iovec recv_iov1 = {
+        .iov_base = u_recv_buf1,
+        .iov_len = 4,
+    };
+    ret = copy_to_user(&u_recv_iov[0], &recv_iov0, sizeof(recv_iov0));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy recv iov0");
+    ret = copy_to_user(&u_recv_iov[1], &recv_iov1, sizeof(recv_iov1));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy recv iov1");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_mmsghdr recv_vec[2];
+    memset(recv_vec, 0, sizeof(recv_vec));
+    recv_vec[0].msg_hdr.msg_iov = &u_recv_iov[0];
+    recv_vec[0].msg_hdr.msg_iovlen = 1;
+    recv_vec[0].msg_hdr.msg_control = u_recv_ctrl0;
+    recv_vec[0].msg_hdr.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+    recv_vec[1].msg_hdr.msg_iov = &u_recv_iov[1];
+    recv_vec[1].msg_hdr.msg_iovlen = 1;
+    recv_vec[1].msg_hdr.msg_control = u_recv_ctrl1;
+    recv_vec[1].msg_hdr.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+    ret = copy_to_user(u_recv_vec, recv_vec, sizeof(recv_vec));
+    test_check(ret == 0, "sockmsg_stream_mmsg copy recv vec");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_recvmmsg((uint64_t)rxfd, (uint64_t)u_recv_vec, 2, 0, 0, 0);
+    test_check(ret64 == 2, "sockmsg_stream_mmsg recvmmsg two");
+    if (ret64 == 2) {
+        struct test_socket_mmsghdr got_vec[2];
+        char got0[4] = {0};
+        char got1[4] = {0};
+        struct test_socket_cmsghdr got_ctrl0 = {0};
+        struct test_socket_cmsghdr got_ctrl1 = {0};
+        int32_t got_fd0 = -1;
+        int32_t got_fd1 = -1;
+        struct file *src_tx = fd_get(proc_current(), txfd);
+        struct file *src_rx = fd_get(proc_current(), rxfd);
+        bool fd_ok = true;
+
+        memset(got_vec, 0, sizeof(got_vec));
+        ret = copy_from_user(got_vec, u_recv_vec, sizeof(got_vec));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv vec");
+        ret = copy_from_user(got0, u_recv_buf0, sizeof(got0));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv buf0");
+        ret = copy_from_user(got1, u_recv_buf1, sizeof(got1));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv buf1");
+        ret = copy_from_user(&got_ctrl0, u_recv_ctrl0, sizeof(got_ctrl0));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv ctrl0");
+        ret = copy_from_user(&got_ctrl1, u_recv_ctrl1, sizeof(got_ctrl1));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv ctrl1");
+        ret = copy_from_user(&got_fd0, u_recv_rights0, sizeof(got_fd0));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv fd0");
+        ret = copy_from_user(&got_fd1, u_recv_rights1, sizeof(got_fd1));
+        test_check(ret == 0, "sockmsg_stream_mmsg read recv fd1");
+        if (ret == 0) {
+            test_check(got_vec[0].msg_len == 4 && got_vec[1].msg_len == 4,
+                       "sockmsg_stream_mmsg recv lens");
+            test_check(memcmp(got0, "MMA1", 4) == 0 &&
+                           memcmp(got1, "MMB2", 4) == 0,
+                       "sockmsg_stream_mmsg recv data");
+            test_check(got_ctrl0.cmsg_type == TEST_SCM_RIGHTS &&
+                           got_ctrl1.cmsg_type == TEST_SCM_RIGHTS,
+                       "sockmsg_stream_mmsg recv ctrl type");
+            test_check((got_vec[0].msg_hdr.msg_flags & MSG_CTRUNC) == 0 &&
+                           (got_vec[1].msg_hdr.msg_flags & MSG_CTRUNC) == 0,
+                       "sockmsg_stream_mmsg recv no ctrunc");
+        }
+
+        struct file *gotf0 = (got_fd0 >= 0) ? fd_get(proc_current(), got_fd0) : NULL;
+        struct file *gotf1 = (got_fd1 >= 0) ? fd_get(proc_current(), got_fd1) : NULL;
+        if (!gotf0 || !gotf1)
+            fd_ok = false;
+        if (gotf0 && (!src_tx || gotf0 != src_tx) &&
+            (!src_rx || gotf0 != src_rx))
+            fd_ok = false;
+        if (gotf1 && (!src_tx || gotf1 != src_tx) &&
+            (!src_rx || gotf1 != src_rx))
+            fd_ok = false;
+        test_check(fd_ok, "sockmsg_stream_mmsg recv fd valid");
+
+        if (gotf0)
+            file_put(gotf0);
+        if (gotf1)
+            file_put(gotf1);
+        if (src_tx)
+            file_put(src_tx);
+        if (src_rx)
+            file_put(src_rx);
+        if (got_fd0 >= 0)
+            (void)fd_close(proc_current(), got_fd0);
+        if (got_fd1 >= 0)
+            (void)fd_close(proc_current(), got_fd1);
+    }
+
+out:
+    close_fd_if_open(&txfd);
+    close_fd_if_open(&rxfd);
+    close_socket_if_open(&tx);
+    close_socket_if_open(&rx);
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_socket_syscall_abi_width_edges(void) {
     struct user_map_ctx um = {0};
     bool mapped = false;
@@ -2555,6 +3004,7 @@ static bool run_inet_tcp_backlog_attempt(uint32_t loopback_ip,
     struct sockaddr_in client1_addr;
     struct sockaddr_in client2_addr;
     bool ok = false;
+    bool client2_refused = false;
 
     int ret = sock_create(AF_INET, SOCK_STREAM, 0, &listener);
     if (ret < 0 || !listener)
@@ -2604,11 +3054,15 @@ static bool run_inet_tcp_backlog_attempt(uint32_t loopback_ip,
                                 sizeof(listener_addr), MSG_DONTWAIT);
     if (ret == 0 || ret == -EINPROGRESS) {
         int so_error = 0;
-        if (!wait_inet_connect_so_error(client2, &so_error, 4000))
-            goto out;
-        if (so_error != ECONNREFUSED && so_error != ECONNRESET)
-            goto out;
-    } else if (ret != -ECONNREFUSED && ret != -ECONNRESET) {
+        if (wait_inet_connect_so_error(client2, &so_error, 4000)) {
+            if (so_error == ECONNREFUSED || so_error == ECONNRESET)
+                client2_refused = true;
+            else if (so_error != 0)
+                goto out;
+        }
+    } else if (ret == -ECONNREFUSED || ret == -ECONNRESET) {
+        client2_refused = true;
+    } else {
         goto out;
     }
 
@@ -2617,8 +3071,12 @@ static bool run_inet_tcp_backlog_attempt(uint32_t loopback_ip,
         goto out;
 
     ret = listener->ops->accept(listener, &server2, MSG_DONTWAIT);
-    if (ret != -EAGAIN)
+    if (ret == 0 && server2) {
+        if (client2_refused)
+            goto out;
+    } else if (ret != -EAGAIN) {
         goto out;
+    }
 
     ok = true;
 
@@ -2795,6 +3253,8 @@ int run_socket_tests(void) {
     test_socket_msg_syscall_semantics();
     test_unix_stream_msg_control_basic_semantics();
     test_unix_stream_msg_control_peek_merge_semantics();
+    test_unix_stream_msg_control_merge_trunc_semantics();
+    test_unix_stream_recvmmsg_control_semantics();
     test_unix_stream_msg_control_boundary_drop_semantics();
     test_socket_syscall_abi_width_edges();
     test_socket_nonblock_syscall_semantics();
