@@ -79,9 +79,9 @@ jobs:
             build/riscv64/test.log
             build/riscv64/run.log
 
-  x86_64-smoke:
+  x86_64-gates:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
@@ -110,13 +110,57 @@ jobs:
           set -euo pipefail
           scripts/impl/ci-bootstrap.sh locate-uefi x86_64
 
-      - name: Run x86_64 driver smoke gate
+      - name: Run x86_64 syscall/trap gate
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=240 test-driver
+          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=240 test-syscall-trap
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after x86_64 smoke gate" >&2
+            echo "No isolated run found after x86_64 syscall/trap gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run x86_64 vfs/ipc gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=300 test-vfs-ipc
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after x86_64 vfs/ipc gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run x86_64 driver gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=300 test-driver
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after x86_64 driver gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run x86_64 socket gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=360 test-socket
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after x86_64 socket gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run x86_64 tcc smoke gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=x86_64 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after x86_64 tcc smoke gate" >&2
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
@@ -145,12 +189,14 @@ jobs:
             ${{ steps.latest_run_x86_64.outputs.path }}/result.json
             ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/logs/test.log
             ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/test.log
+            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/tcc-smoke.log
             ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/run.log
             build/runs/*/manifest.json
             build/runs/*/result.json
             build/runs/*/x86_64/logs/*.log
             build/runs/*/x86_64/*.log
             build/x86_64/test.log
+            build/x86_64/tcc-smoke.log
             build/x86_64/run.log
 
   aarch64-smoke:
