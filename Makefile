@@ -92,6 +92,7 @@ else ifeq ($(ARCH),x86_64)
   CLANG_TARGET := x86_64-unknown-elf
   QEMU := qemu-system-x86_64
   QEMU_MACHINE := q35
+  QEMU_ACCEL ?= tcg,thread=multi
   QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
   KERNEL_LOAD := 0xffffffff80000000
 else ifeq ($(ARCH),aarch64)
@@ -100,6 +101,7 @@ else ifeq ($(ARCH),aarch64)
   QEMU := qemu-system-aarch64
   QEMU_MACHINE := virt,gic-version=3
   QEMU_CPU := cortex-a72
+  QEMU_ACCEL ?= tcg,thread=multi
   QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
   INITRAMFS_BUSYBOX := 1
   # Align local default with CI quick gate coverage.
