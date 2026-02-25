@@ -27,6 +27,7 @@ SESSION_LOCK_FILE="${SESSION_LOCK_FILE:-${SESSION_BUILD_DIR}/.locks/qemu.lock}"
 SESSION_LOCK_WAIT="${SESSION_LOCK_WAIT:-0}"
 SESSION_UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-}"
 SESSION_QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}"
+SESSION_TTY_STATE=""
 
 json_quote() {
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
@@ -47,6 +48,36 @@ json_int_or_null() {
     else
         echo "null"
     fi
+}
+
+prepare_interactive_tty() {
+    if ! [[ -t 0 ]]; then
+        return
+    fi
+    if ! command -v stty >/dev/null 2>&1; then
+        return
+    fi
+
+    SESSION_TTY_STATE="$(stty -g 2>/dev/null || true)"
+    if [[ -z "${SESSION_TTY_STATE}" ]]; then
+        return
+    fi
+
+    # Guest binary output can contain XON/XOFF bytes and accidentally pause host tty output.
+    stty -ixon -ixoff 2>/dev/null || true
+}
+
+restore_interactive_tty() {
+    if [[ -z "${SESSION_TTY_STATE}" ]]; then
+        return
+    fi
+    if ! [[ -t 0 ]]; then
+        return
+    fi
+    if ! command -v stty >/dev/null 2>&1; then
+        return
+    fi
+    stty "${SESSION_TTY_STATE}" 2>/dev/null || true
 }
 
 validate_boot_drive_cmd() {
@@ -202,6 +233,7 @@ run_session_main() {
     wrapped_qemu_cmd=""
     printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${SESSION_QEMU_PID_FILE}" "${QEMU_CMD}"
 
+    prepare_interactive_tty
     set +e
     if [[ "${SESSION_TIMEOUT}" -gt 0 ]]; then
         if [[ -n "${SESSION_FILTER_CMD}" ]]; then
@@ -330,7 +362,7 @@ mkdir -p \
     "$(dirname "${SESSION_QEMU_PID_FILE}")" \
     "$(dirname "${SESSION_LOCK_FILE}")"
 
-trap 'rm -f "${SESSION_QEMU_PID_FILE}" || true' EXIT
+trap 'rm -f "${SESSION_QEMU_PID_FILE}" || true; restore_interactive_tty' EXIT
 
 set +e
 KAIROS_LOCK_WAIT="${SESSION_LOCK_WAIT}" kairos_lock_with_file "${SESSION_LOCK_FILE}" run_session_main
