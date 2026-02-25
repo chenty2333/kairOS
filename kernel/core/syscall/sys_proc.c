@@ -60,26 +60,11 @@ static int sysproc_copy_affinity_mask(uint64_t mask_ptr, uint64_t len,
         return -EINVAL;
 
     unsigned long mask = 0;
-    if (copy_from_user(&mask, (const void *)mask_ptr, sizeof(mask)) < 0)
+    size_t read_len = sizeof(mask);
+    if (klen < read_len)
+        read_len = klen;
+    if (copy_from_user(&mask, (const void *)mask_ptr, read_len) < 0)
         return -EFAULT;
-
-    size_t off = sizeof(mask);
-    uint8_t tail[32];
-    while (off < klen) {
-        size_t chunk = klen - off;
-        if (chunk > sizeof(tail))
-            chunk = sizeof(tail);
-        if (mask_ptr > UINT64_MAX - (uint64_t)off)
-            return -EFAULT;
-        if (copy_from_user(tail, (const void *)(mask_ptr + (uint64_t)off),
-                           chunk) < 0)
-            return -EFAULT;
-        for (size_t i = 0; i < chunk; i++) {
-            if (tail[i] != 0)
-                return -EINVAL;
-        }
-        off += chunk;
-    }
 
     *mask_out = mask;
     return 0;

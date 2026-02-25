@@ -851,7 +851,17 @@ static void test_sched_affinity_syscalls_regression(void) {
         if (rc == 0) {
             ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
                                           (uint64_t)u_mask_ext, 0, 0, 0);
-            test_check(ret64 == -EINVAL, "affinity set ext_nonzero_tail_einval");
+            test_check(ret64 == 0, "affinity set ext_nonzero_tail_ignored");
+        }
+
+        ext_mask[0] = 0;
+        ext_mask[1] = 1;
+        rc = copy_to_user(u_mask_ext, ext_mask, sizeof(ext_mask));
+        test_check(rc == 0, "affinity set copy_high_only");
+        if (rc == 0) {
+            ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
+                                          (uint64_t)u_mask_ext, 0, 0, 0);
+            test_check(ret64 == -EINVAL, "affinity set high_only_einval");
         }
 
         rc = copy_to_user(u_mask_edge, &saved_mask, sizeof(saved_mask));
@@ -859,7 +869,7 @@ static void test_sched_affinity_syscalls_regression(void) {
         if (rc == 0) {
             ret64 = sys_sched_setaffinity(0, sizeof(saved_mask) + 1,
                                           (uint64_t)u_mask_edge, 0, 0, 0);
-            test_check(ret64 == -EFAULT, "affinity set ext_tail_efault");
+            test_check(ret64 == 0, "affinity set ext_tail_ignored");
         }
     }
 

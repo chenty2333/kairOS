@@ -69,7 +69,7 @@ SMP support:
 - Default policy: user processes are stealable with full affinity; kernel threads (`kthread_create*`, idle) are marked `PROC_SCHEDF_KTHREAD`, non-stealable, and affinity-pinned to creator CPU
 - Failed steal attempts use per-CPU cooldown to reduce hot-loop lock pressure on empty/imbalanced systems
 - Enqueue placement respects per-process affinity and falls back to the first online allowed CPU if the hinted CPU is not allowed
-- Linux ABI exposes `sched_getaffinity` and `sched_setaffinity` with single-word (`unsigned long`) masks; `sched_setaffinity` accepts masks excluding the current CPU, migrates QUEUED tasks immediately, and actively kicks RUNNING tasks toward migration (self-targeted calls yield to converge promptly). For oversized `cpusetsize`, only the low word is consumed and all trailing bytes must be readable and zero, otherwise the syscall fails (`-EFAULT` or `-EINVAL`).
+- Linux ABI exposes `sched_getaffinity` and `sched_setaffinity` with single-word (`unsigned long`) masks; `sched_setaffinity` accepts masks excluding the current CPU, migrates QUEUED tasks immediately, and actively kicks RUNNING tasks toward migration (self-targeted calls yield to converge promptly). For oversized `cpusetsize`, only the low word is consumed and trailing bytes are ignored; if the resulting low-word mask has no online CPU bit, the syscall fails with `-EINVAL`.
 - sched_trace ring buffer for debugging (per-CPU, records enqueue/dequeue/pick/switch/steal/migrate events)
 
 Core functions:

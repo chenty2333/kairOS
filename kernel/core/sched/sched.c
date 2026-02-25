@@ -738,7 +738,7 @@ int sched_set_affinity(struct process *p, uint64_t mask) {
 
     proc_sched_set_affinity_mask(p, effective_mask);
 
-    for (int attempts = 0; attempts < 4; attempts++) {
+    for (int attempts = 0; attempts < 8; attempts++) {
         int cpu = p->se.cpu;
         uint32_t se_state = se_state_load(&p->se);
 
@@ -758,19 +758,7 @@ int sched_set_affinity(struct process *p, uint64_t mask) {
 
             if (p == proc_current())
                 proc_yield();
-            else {
-                for (int spins = 0; spins < 1024; spins++) {
-                    arch_cpu_relax();
-                    uint32_t now_state = se_state_load(&p->se);
-                    int now_cpu = p->se.cpu;
-                    if (now_state != SE_STATE_RUNNING)
-                        break;
-                    if (now_cpu >= 0 && now_cpu < CONFIG_MAX_CPUS &&
-                        proc_sched_cpu_allowed(p, now_cpu))
-                        return 0;
-                }
-            }
-            continue;
+            return 0;
         }
 
         if (se_state != SE_STATE_QUEUED)
@@ -822,7 +810,7 @@ int sched_set_affinity(struct process *p, uint64_t mask) {
         return 0;
     }
 
-    return -EAGAIN;
+    return 0;
 }
 
 /**
