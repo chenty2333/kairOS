@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/tick.h>
 #include <kairos/types.h>
@@ -12,6 +13,7 @@
 
 static uint64_t timer_freq;
 static uint64_t timer_interval;
+static bool timer_irq_registered;
 
 static inline uint64_t cntfrq(void) {
     uint64_t val;
@@ -25,6 +27,13 @@ static inline uint64_t cntpct(void) {
     return val;
 }
 
+static void aarch64_timer_irq_handler(void *arg,
+                                      const struct trap_core_event *ev) {
+    (void)arg;
+    arch_timer_ack();
+    tick_policy_on_timer_irq(ev);
+}
+
 void arch_timer_init(uint64_t hz) {
     if (!hz)
         hz = CONFIG_HZ;
@@ -34,8 +43,19 @@ void arch_timer_init(uint64_t hz) {
     __asm__ __volatile__("msr cntp_tval_el0, %0" :: "r"(timer_interval));
     __asm__ __volatile__("msr cntp_ctl_el0, %0" :: "r"((uint64_t)1));
 
-    /* Enable the Physical Timer PPI in the GIC */
-    arch_irq_enable_nr(TIMER_PPI_IRQ);
+    bool irq_state = arch_irq_save();
+    bool need_register = !timer_irq_registered;
+    if (need_register)
+        timer_irq_registered = true;
+    arch_irq_restore(irq_state);
+
+    if (need_register) {
+        arch_irq_register_ex(TIMER_PPI_IRQ, aarch64_timer_irq_handler, NULL,
+                             IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_PER_CPU |
+                                 IRQ_FLAG_TIMER);
+    } else {
+        arch_irq_enable_nr(TIMER_PPI_IRQ);
+    }
 
     if (arch_cpu_id() == 0) {
         pr_info("Timer: %lu Hz (interval=%lu ticks)\n",

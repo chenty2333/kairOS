@@ -16,6 +16,7 @@
 #define GICD_CTLR       0x000
 #define GICD_ISENABLER  0x100
 #define GICD_ICENABLER  0x180
+#define GICD_ICFGR      0xC00
 #define GICD_IPRIORITYR 0x400
 
 #define GICD_CTLR_ARE_S     (1U << 4)
@@ -28,6 +29,7 @@
 #define GICR_SGI_BASE   0x10000
 #define GICR_ISENABLER0 (GICR_SGI_BASE + 0x100)
 #define GICR_ICENABLER0 (GICR_SGI_BASE + 0x180)
+#define GICR_ICFGR1     (GICR_SGI_BASE + 0xC04)
 #define GICR_IPRIORITYR (GICR_SGI_BASE + 0x400)
 #define GICR_STRIDE     0x20000
 
@@ -139,6 +141,42 @@ static void gicv3_disable(int irq)
     }
 }
 
+static int gicv3_set_type(int irq, uint32_t type)
+{
+    bool edge = (type & IRQ_FLAG_TRIGGER_EDGE) != 0;
+    bool level = (type & IRQ_FLAG_TRIGGER_LEVEL) != 0;
+
+    if (edge == level)
+        return -EINVAL;
+    if (!gicd || !gicr_base || irq < 0 || irq >= IRQCHIP_MAX_IRQS)
+        return -EINVAL;
+
+    uint32_t uirq = (uint32_t)irq;
+    if (uirq < 16)
+        return -EINVAL;
+
+    if (uirq < 32) {
+        volatile uint8_t *gicr = gicr_local();
+        volatile uint32_t *icfgr1 = (volatile uint32_t *)(gicr + GICR_ICFGR1);
+        uint32_t shift = (uirq % 16U) * 2U;
+        uint32_t val = *icfgr1;
+        val &= ~(3U << shift);
+        if (edge)
+            val |= (2U << shift);
+        *icfgr1 = val;
+        return 0;
+    }
+
+    volatile uint32_t *reg = &gicd[(GICD_ICFGR / 4) + (uirq / 16U)];
+    uint32_t shift = (uirq % 16U) * 2U;
+    uint32_t val = *reg;
+    val &= ~(3U << shift);
+    if (edge)
+        val |= (2U << shift);
+    *reg = val;
+    return 0;
+}
+
 static uint32_t gicv3_ack(void)
 {
     return (uint32_t)gic_read_icc_iar1();
@@ -159,6 +197,7 @@ const struct irqchip_ops gicv3_ops = {
     .init     = gicv3_init,
     .enable   = gicv3_enable,
     .disable  = gicv3_disable,
+    .set_type = gicv3_set_type,
     .ack      = gicv3_ack,
     .eoi      = gicv3_eoi,
     .send_sgi = gic_send_sgi,

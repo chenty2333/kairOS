@@ -20,11 +20,13 @@ static inline void ioapic_write(uint32_t reg, uint32_t val)
     ioapic_base[IOAPIC_WINDOW / 4] = val;
 }
 
-void ioapic_route_irq(int irq, int vector, int cpu, bool masked)
+void ioapic_route_irq(int irq, int vector, int cpu, bool masked, bool level)
 {
     if (!ioapic_base || irq < 0)
         return;
     uint32_t low = (uint32_t)vector & 0xFF;
+    if (level)
+        low |= (1U << 15);
     if (masked)
         low |= 0x10000;
     uint32_t high = (uint32_t)(cpu & 0xFF) << 24;

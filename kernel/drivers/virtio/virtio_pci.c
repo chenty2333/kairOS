@@ -295,7 +295,6 @@ static int virtio_pci_probe(struct pci_device *pdev) {
 
     if (vp->irq > 0) {
         arch_irq_register(vp->irq, virtio_pci_intr, vp);
-        arch_irq_enable_nr(vp->irq);
     }
 
     dev_set_drvdata(&pdev->dev, vp);

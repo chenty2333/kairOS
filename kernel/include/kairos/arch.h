@@ -12,6 +12,7 @@ struct arch_context;
 struct percpu_data;
 struct trap_info;
 struct trap_frame;
+struct trap_core_event;
 
 /* CPU Control */
 void arch_cpu_init(int cpu_id);
@@ -149,6 +150,11 @@ void arch_irq_enable_nr(int irq);
 void arch_irq_disable_nr(int irq);
 void arch_irq_handler(struct trap_frame *tf);
 void arch_irq_register(int irq, void (*handler)(void *), void *arg);
+void arch_irq_register_ex(int irq,
+                          void (*handler)(void *arg,
+                                          const struct trap_core_event *ev),
+                          void *arg, uint32_t flags);
+void arch_irq_set_type(int irq, uint32_t flags);
 
 struct trap_info {
     enum trap_type type;

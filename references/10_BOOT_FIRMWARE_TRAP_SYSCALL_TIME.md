@@ -65,6 +65,10 @@ trap_core.c:trap_core_dispatch() is the architecture-independent dispatch bounda
 
 Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses GIC.
 - aarch64 GICv3 now selects Redistributor frame per CPU (`arch_cpu_id`) for local SGI/PPI enable/disable paths.
+- IRQ core now uses per-IRQ descriptors (`irq_desc`) instead of a single handler slot:
+  - each IRQ keeps an action list (shared IRQ capable), trigger/per-cpu flags, enable refcount, and dispatch counters
+  - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` now apply chip operations with refcount semantics (and per-CPU semantics for PPIs/local timer IRQs)
+  - `irqchip_ops` includes `set_type(int irq, uint32_t type)` so trigger mode is configured from IRQ flags when enabling
 
 ## Syscall
 
@@ -93,7 +97,7 @@ Two-layer structure:
   - riscv64: SBI timer (stimecmp)
   - x86_64: LAPIC timer (PIT-calibrated, configured as periodic mode)
   - aarch64: ARM generic physical timer (CNTP, cntp_tval_el0)
-  - On interrupt, calls tick_policy_on_timer_irq()
+  - timer IRQs are registered into IRQ core and dispatched through the common IRQ action path (`platform_irq_dispatch`), then timer handlers call `tick_policy_on_timer_irq()`
 
 - Core layer:
   - core/time/tick.c — tick_policy_on_timer_irq() handles timer interrupts, drives scheduler time slices (sched_tick), keeps console poll as fallback, handles poll sleep expiry

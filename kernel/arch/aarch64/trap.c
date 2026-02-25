@@ -12,12 +12,9 @@
 #include <kairos/signal.h>
 #include <kairos/syscall.h>
 #include <kairos/trap_core.h>
-#include <kairos/tick.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
-/* WARN: ARM architecture fixed INTIDs, not board-configurable */
-#define TIMER_PPI_IRQ 30
 #define IPI_SGI_IRQ   1
 
 #define AARCH64_SPSR_MODE_MASK 0xf
@@ -125,11 +122,8 @@ static void handle_irq(const struct trap_core_event *ev) {
             while (1)
                 arch_cpu_halt();
         }
-    } else if (irq == TIMER_PPI_IRQ) {
-        arch_timer_ack();
-        tick_policy_on_timer_irq(ev);
     } else if (irq < IRQCHIP_MAX_IRQS) {
-        platform_irq_dispatch_nr(irq);
+        platform_irq_dispatch(irq, ev);
     }
 
     plat->irqchip->eoi(irq);

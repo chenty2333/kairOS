@@ -6,6 +6,7 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/tick.h>
 #include <kairos/types.h>
@@ -19,6 +20,7 @@
 #define LAPIC_TIMER_INIT 0x380
 #define LAPIC_TIMER_CURR 0x390
 #define LAPIC_LVT_TIMER  0x320
+#define X86_TIMER_VIRQ 0
 
 extern uint32_t lapic_read(uint32_t reg);
 extern void lapic_init(void);
@@ -26,6 +28,13 @@ extern void lapic_eoi(void);
 extern void lapic_timer_init(uint32_t hz);
 
 static uint64_t lapic_ticks_per_sec = 0;
+static bool timer_irq_registered;
+
+static void x86_timer_irq_handler(void *arg,
+                                  const struct trap_core_event *ev) {
+    (void)arg;
+    tick_policy_on_timer_irq(ev);
+}
 
 static void pit_sleep_10ms(void) {
     uint16_t count = PIT_FREQ / 100;
@@ -61,6 +70,19 @@ void arch_timer_init(uint64_t hz) {
     *((volatile uint32_t *)((uint8_t *)phys_to_virt(0xFEE00000) + LAPIC_LVT_TIMER)) = 0x20000 | 0x20;
     *((volatile uint32_t *)((uint8_t *)phys_to_virt(0xFEE00000) + LAPIC_TIMER_INIT)) = initial;
 
+    bool irq_state = arch_irq_save();
+    bool need_register = !timer_irq_registered;
+    if (need_register)
+        timer_irq_registered = true;
+    arch_irq_restore(irq_state);
+
+    if (need_register) {
+        arch_irq_register_ex(
+            X86_TIMER_VIRQ, x86_timer_irq_handler, NULL,
+            IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_PER_CPU | IRQ_FLAG_TIMER |
+                IRQ_FLAG_NO_AUTO_ENABLE);
+    }
+
     pr_info("Timer: %lu Hz (lapic=%lu)\n", (unsigned long)hz,
             (unsigned long)lapic_ticks_per_sec);
 }
@@ -70,7 +92,7 @@ uint64_t arch_timer_ticks(void) {
 }
 
 uint64_t arch_timer_freq(void) {
-    return lapic_ticks_per_sec ? lapic_ticks_per_sec : 1000000000ULL;
+    return CONFIG_HZ;
 }
 
 uint64_t arch_timer_ticks_to_ns(uint64_t t) {

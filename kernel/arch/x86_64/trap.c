@@ -13,7 +13,6 @@
 #include <kairos/signal.h>
 #include <kairos/syscall.h>
 #include <kairos/trap_core.h>
-#include <kairos/tick.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
@@ -88,7 +87,7 @@ extern void isr47(void);
 extern void isr128(void);
 extern void isr240(void);
 
-static void handle_irq(struct trap_frame *tf);
+static void handle_irq(struct trap_frame *tf, const struct trap_core_event *ev);
 
 static void idt_set_gate_dpl(int n, void (*handler)(void), uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
@@ -124,7 +123,7 @@ struct trap_frame *get_current_trapframe(void) {
 }
 
 void arch_irq_handler(struct trap_frame *tf) {
-    handle_irq(tf);
+    handle_irq(tf, NULL);
 }
 
 static void handle_exception(struct trap_frame *tf) {
@@ -186,28 +185,14 @@ static void handle_syscall(struct trap_frame *tf) {
                                tf->r8, tf->r9);
 }
 
-static void handle_timer_irq(struct trap_frame *tf) {
-    struct trap_core_event ev = {
-        .type = TRAP_CORE_EVENT_TIMER,
-        .tf = tf,
-        .from_user = (tf->cs & 3) != 0,
-        .code = tf->trapno,
-        .fault_addr = 0,
-    };
-    tick_policy_on_timer_irq(&ev);
-}
-
-static void handle_irq(struct trap_frame *tf) {
+static void handle_irq(struct trap_frame *tf, const struct trap_core_event *ev) {
     const struct platform_desc *plat = platform_get();
     int vec = (int)tf->trapno;
     int irq = vec - IRQ_BASE;
-    if (irq == 0) {
-        handle_timer_irq(tf);
-    } else if (irq > 0 && irq < IRQCHIP_MAX_IRQS) {
-        platform_irq_dispatch_nr((uint32_t)irq);
-    }
+    if (irq >= 0 && irq < IRQCHIP_MAX_IRQS)
+        platform_irq_dispatch((uint32_t)irq, ev);
     if (plat && plat->irqchip)
-        plat->irqchip->eoi(0);
+        plat->irqchip->eoi((irq >= 0) ? (uint32_t)irq : 0);
 }
 
 static enum trap_core_event_type x86_event_type(const struct trap_frame *tf) {
@@ -247,7 +232,7 @@ static int x86_handle_event(const struct trap_core_event *ev) {
     } else if (tf->trapno < IRQ_BASE) {
         handle_exception(tf);
     } else {
-        handle_irq(tf);
+        handle_irq(tf, ev);
     }
     return 0;
 }

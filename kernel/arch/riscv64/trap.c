@@ -26,9 +26,9 @@
 #define IRQ_S_SOFT 1
 #define IRQ_S_TIMER 5
 #define IRQ_S_EXT 9
+#define RISCV_TIMER_VIRQ 0
 
 extern void trap_entry(void);
-void timer_interrupt_handler(const struct trap_core_event *ev);
 
 struct trap_frame *get_current_trapframe(void) {
     struct trap_frame *tf = arch_get_percpu()->current_tf;
@@ -160,13 +160,13 @@ static void handle_interrupt(const struct trap_core_event *ev) {
     struct trap_frame *tf = ev->tf;
     uint64_t cause = tf->scause & ~SCAUSE_INTERRUPT;
     if (cause == IRQ_S_TIMER) {
-        timer_interrupt_handler(ev);
+        platform_irq_dispatch(RISCV_TIMER_VIRQ, ev);
     } else if (cause == IRQ_S_EXT) {
         const struct platform_desc *plat = platform_get();
         if (plat && plat->irqchip) {
             uint32_t irq = plat->irqchip->ack();
             if (irq > 0 && irq < IRQCHIP_MAX_IRQS)
-                platform_irq_dispatch_nr(irq);
+                platform_irq_dispatch(irq, ev);
             plat->irqchip->eoi(irq);
         }
     } else if (cause == IRQ_S_SOFT) {

@@ -56,6 +56,14 @@ static void plic_disable(int irq)
     plic_write(enable_addr, val);
 }
 
+static int plic_set_type(int irq, uint32_t type)
+{
+    (void)irq;
+    if (type & IRQ_FLAG_TRIGGER_EDGE)
+        return -EOPNOTSUPP;
+    return 0;
+}
+
 static uint32_t plic_ack(void)
 {
     int hart = arch_cpu_id();
@@ -72,6 +80,7 @@ const struct irqchip_ops plic_ops = {
     .init    = plic_init,
     .enable  = plic_enable,
     .disable = plic_disable,
+    .set_type = plic_set_type,
     .ack     = plic_ack,
     .eoi     = plic_eoi,
 };

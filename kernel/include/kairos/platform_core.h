@@ -20,13 +20,30 @@ struct early_mmio_region {
 struct platform_desc;
 struct timer_ops;
 struct earlycon_ops;
+struct trap_core_event;
 
 #define IRQCHIP_MAX_IRQS 1024
+
+#define IRQ_FLAG_TRIGGER_NONE   0U
+#define IRQ_FLAG_TRIGGER_LEVEL  (1U << 0)
+#define IRQ_FLAG_TRIGGER_EDGE   (1U << 1)
+#define IRQ_FLAG_TRIGGER_MASK                                           \
+    (IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_TRIGGER_EDGE)
+#define IRQ_FLAG_SHARED        (1U << 2)
+#define IRQ_FLAG_PER_CPU       (1U << 3)
+#define IRQ_FLAG_TIMER         (1U << 4)
+#define IRQ_FLAG_NO_AUTO_ENABLE (1U << 5)
+#define IRQ_FLAG_DEFERRED      (1U << 6)
+
+typedef void (*irq_handler_fn)(void *arg);
+typedef void (*irq_handler_event_fn)(void *arg,
+                                     const struct trap_core_event *ev);
 
 struct irqchip_ops {
     void (*init)(const struct platform_desc *plat);
     void (*enable)(int irq);
     void (*disable)(int irq);
+    int (*set_type)(int irq, uint32_t type);
     uint32_t (*ack)(void);
     void (*eoi)(uint32_t irq);
     void (*send_sgi)(uint32_t cpu, uint32_t intid);
@@ -54,7 +71,11 @@ void platform_select(const char *arch);
 const struct platform_desc *platform_get(void);
 
 /* Unified IRQ handler table */
-void platform_irq_register(int irq, void (*handler)(void *), void *arg);
+int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,
+                             uint32_t flags);
+void platform_irq_register(int irq, irq_handler_fn handler, void *arg);
+void platform_irq_set_type(int irq, uint32_t flags);
+void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev);
 void platform_irq_dispatch_nr(uint32_t irq);
 
 #endif

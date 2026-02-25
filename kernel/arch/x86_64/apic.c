@@ -66,9 +66,11 @@ void lapic_timer_init(uint32_t hz)
 /* --- irqchip_ops --- */
 
 extern void ioapic_init(void);
-extern void ioapic_route_irq(int irq, int vector, int cpu, bool masked);
+extern void ioapic_route_irq(int irq, int vector, int cpu, bool masked,
+                             bool level);
 
 static bool ioapic_inited;
+static uint32_t apic_irq_type[IRQCHIP_MAX_IRQS];
 
 static void apic_init_ops(const struct platform_desc *plat)
 {
@@ -84,12 +86,31 @@ static void apic_init_ops(const struct platform_desc *plat)
 
 static void apic_enable(int irq)
 {
-    ioapic_route_irq(irq, IRQ_BASE + irq, 0, false);
+    if (irq < 0 || irq >= IRQCHIP_MAX_IRQS)
+        return;
+    bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
+    ioapic_route_irq(irq, IRQ_BASE + irq, 0, false, level);
 }
 
 static void apic_disable(int irq)
 {
-    ioapic_route_irq(irq, IRQ_BASE + irq, 0, true);
+    if (irq < 0 || irq >= IRQCHIP_MAX_IRQS)
+        return;
+    bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
+    ioapic_route_irq(irq, IRQ_BASE + irq, 0, true, level);
+}
+
+static int apic_set_type(int irq, uint32_t type)
+{
+    if (irq < 0 || irq >= IRQCHIP_MAX_IRQS)
+        return -EINVAL;
+    type &= IRQ_FLAG_TRIGGER_MASK;
+    if (!type)
+        return 0;
+    if (type == IRQ_FLAG_TRIGGER_MASK)
+        return -EINVAL;
+    apic_irq_type[irq] = type;
+    return 0;
 }
 
 // WARN: x86 has no claim; IRQ number determined by IDT vector
@@ -108,6 +129,7 @@ const struct irqchip_ops apic_ops = {
     .init    = apic_init_ops,
     .enable  = apic_enable,
     .disable = apic_disable,
+    .set_type = apic_set_type,
     .ack     = apic_ack,
     .eoi     = apic_eoi_ops,
 };
