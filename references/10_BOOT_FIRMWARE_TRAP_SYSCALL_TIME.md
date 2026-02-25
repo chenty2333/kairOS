@@ -93,7 +93,8 @@ Two-layer structure:
   - On interrupt, calls tick_policy_on_timer_irq()
 
 - Core layer:
-  - core/time/tick.c — tick_policy_on_timer_irq() handles timer interrupts, drives scheduler time slices (sched_tick), polls console input, handles poll sleep expiry
+  - core/time/tick.c — tick_policy_on_timer_irq() handles timer interrupts, drives scheduler time slices (sched_tick), keeps console poll as fallback, handles poll sleep expiry
+  - Console input wakeup path is IRQ-first: `console_tty_driver_init()` calls `arch_console_input_init()`, UART RX IRQ handlers trigger `console_poll_input()` immediately, and `tty_receive_buf()` wakes sleepers on `tty->read_wait`
   - core/time/time.c — system time management (wall clock, monotonic time, nanosecond-precision timer queue)
   - Linux sleep ABI compatibility:
     - `nanosleep` on `EINTR` now fills remaining time (`rem`) when provided

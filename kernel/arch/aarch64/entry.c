@@ -7,16 +7,24 @@
 #include <kairos/arch.h>
 #include <kairos/mm.h>
 #include <kairos/boot.h>
+#include <kairos/console.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
 #define PL011_BASE 0x09000000UL
 #define PL011_DR   0x00
 #define PL011_FR   0x18
+#define PL011_IMSC 0x38
+#define PL011_ICR  0x44
 #define PL011_FR_TXFF (1 << 5)
 #define PL011_FR_RXFE (1 << 4)
+#define PL011_INT_RX (1U << 4)
+#define PL011_INT_RT (1U << 6)
+// WARN: QEMU virt wires PL011 RX to GIC SPI 33.
+#define PL011_IRQ 33
 
 static bool early_console_ready;
+static bool pl011_rx_irq_inited;
 
 void aarch64_early_console_set_ready(bool ready) {
     early_console_ready = ready;
@@ -47,6 +55,14 @@ static inline int pl011_getc_nb(void) {
     return (int)(uart[PL011_DR / 4] & 0xffU);
 }
 
+static void pl011_rx_irq_handler(void *arg) {
+    (void)arg;
+    console_poll_input();
+    volatile uint32_t *uart = pl011_regs();
+    if (uart)
+        uart[PL011_ICR / 4] = PL011_INT_RX | PL011_INT_RT;
+}
+
 void arch_early_putchar(char c) {
     if (c == '\n')
         pl011_putc('\r');
@@ -62,6 +78,26 @@ int arch_early_getchar(void) {
 
 int arch_early_getchar_nb(void) {
     return pl011_getc_nb();
+}
+
+void arch_console_input_init(void) {
+    volatile uint32_t *uart = pl011_regs();
+    if (!uart)
+        return;
+
+    bool irq_state = arch_irq_save();
+    if (pl011_rx_irq_inited) {
+        arch_irq_restore(irq_state);
+        return;
+    }
+    pl011_rx_irq_inited = true;
+    arch_irq_restore(irq_state);
+
+    uart[PL011_ICR / 4] = 0x7ff;
+    uart[PL011_IMSC / 4] |= PL011_INT_RX | PL011_INT_RT;
+
+    arch_irq_register(PL011_IRQ, pl011_rx_irq_handler, NULL);
+    console_poll_input();
 }
 
 void arch_cpu_halt(void) {

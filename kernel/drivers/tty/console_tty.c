@@ -81,6 +81,7 @@ int console_tty_driver_init(void) {
 
     tty_register_driver(&console_tty_driver);
     tty_open(console_tty);
+    arch_console_input_init();
 
     pr_info("console_tty: initialized\n");
     return 0;

@@ -118,9 +118,15 @@ void arch_early_putchar(char c);
 #ifdef ARCH_HAS_EARLY_GETCHAR
 int arch_early_getchar(void);
 int arch_early_getchar_nb(void);
+#ifdef ARCH_HAS_CONSOLE_INPUT_IRQ
+void arch_console_input_init(void);
+#else
+static inline void arch_console_input_init(void) {}
+#endif
 #else
 static inline int arch_early_getchar(void) { return -1; }
 static inline int arch_early_getchar_nb(void) { return -1; }
+static inline void arch_console_input_init(void) {}
 #endif
 void arch_breakpoint(void);
 void arch_dump_regs(struct arch_context *ctx);

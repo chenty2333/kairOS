@@ -6,6 +6,7 @@
 #include <boot/limine.h>
 #include <kairos/arch.h>
 #include <kairos/boot.h>
+#include <kairos/console.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
@@ -27,8 +28,18 @@
 /* QEMU virt UART0 (16550 compatible) */
 #define UART0_BASE 0x10000000UL
 #define UART_RHR   0x00
+#define UART_IER   0x01
+#define UART_FCR   0x02
 #define UART_LSR   0x05
 #define UART_LSR_DR 0x01
+#define UART_IER_RDI 0x01
+#define UART_FCR_ENABLE_FIFO 0x01
+#define UART_FCR_CLEAR_RX 0x02
+#define UART_FCR_CLEAR_TX 0x04
+// WARN: QEMU virt wires ns16550a RX to PLIC IRQ 10.
+#define UART0_IRQ 10
+
+static bool uart_rx_irq_inited;
 
 static inline long sbi_legacy_call(int ext, unsigned long arg0) {
     register unsigned long a0 __asm__("a0") = arg0;
@@ -42,6 +53,11 @@ static inline int uart_getchar_nb(void) {
     if (uart[UART_LSR] & UART_LSR_DR)
         return (int)uart[UART_RHR];
     return -1;
+}
+
+static void uart_rx_irq_handler(void *arg) {
+    (void)arg;
+    console_poll_input();
 }
 
 void arch_early_putchar(char c) {
@@ -69,6 +85,23 @@ int arch_early_getchar_nb(void) {
     if (ret >= 0)
         return (int)ret;
     return -1;
+}
+
+void arch_console_input_init(void) {
+    bool irq_state = arch_irq_save();
+    if (uart_rx_irq_inited) {
+        arch_irq_restore(irq_state);
+        return;
+    }
+    uart_rx_irq_inited = true;
+    arch_irq_restore(irq_state);
+
+    volatile uint8_t *uart = (volatile uint8_t *)UART0_BASE;
+    uart[UART_FCR] = UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RX | UART_FCR_CLEAR_TX;
+    uart[UART_IER] = (uint8_t)(uart[UART_IER] | UART_IER_RDI);
+
+    arch_irq_register(UART0_IRQ, uart_rx_irq_handler, NULL);
+    console_poll_input();
 }
 
 void arch_cpu_halt(void) {
