@@ -28,17 +28,56 @@ FAIL_CONCLUSIONS = {
 
 PASS_CONCLUSIONS = {"success"}
 
+@dataclass(frozen=True)
+class GateSpec:
+    gate: str
+    job: str
+    step: Optional[str] = None
+
+
 WORKFLOW_GATES = {
     "ci-quick.yml": [
-        "riscv64-test",
-        "x86_64-gates",
-        "aarch64-smoke",
-        "aarch64-smp4-gate",
+        GateSpec(gate="riscv64-test", job="riscv64-test"),
+        GateSpec(gate="x86_64-gates", job="x86_64-gates"),
+        GateSpec(
+            gate="x86_64-syscall-trap",
+            job="x86_64-gates",
+            step="Run x86_64 syscall/trap gate",
+        ),
+        GateSpec(
+            gate="x86_64-vfs-ipc",
+            job="x86_64-gates",
+            step="Run x86_64 vfs/ipc gate",
+        ),
+        GateSpec(gate="x86_64-driver", job="x86_64-gates", step="Run x86_64 driver gate"),
+        GateSpec(gate="x86_64-socket", job="x86_64-gates", step="Run x86_64 socket gate"),
+        GateSpec(
+            gate="x86_64-tcc-smoke",
+            job="x86_64-gates",
+            step="Run x86_64 tcc smoke gate",
+        ),
+        GateSpec(gate="aarch64-smoke", job="aarch64-smoke"),
+        GateSpec(gate="aarch64-smp4-gate", job="aarch64-smp4-gate"),
     ],
     "soak-long.yml": [
-        "riscv64-soak-pr",
-        "x86_64-soak-pr",
-        "aarch64-soak-pr",
+        GateSpec(gate="riscv64-soak-pr", job="riscv64-soak-pr"),
+        GateSpec(gate="x86_64-soak-pr", job="x86_64-soak-pr"),
+        GateSpec(gate="aarch64-soak-pr", job="aarch64-soak-pr"),
+        GateSpec(
+            gate="aarch64-vfs-ipc-loop",
+            job="aarch64-soak-pr",
+            step="Run aarch64 directed vfs/ipc loop profile",
+        ),
+        GateSpec(
+            gate="aarch64-socket-loop",
+            job="aarch64-soak-pr",
+            step="Run aarch64 directed socket loop profile",
+        ),
+        GateSpec(
+            gate="aarch64-soak-pr-step",
+            job="aarch64-soak-pr",
+            step="Run aarch64 soak-pr profile",
+        ),
     ],
 }
 
@@ -47,6 +86,8 @@ WORKFLOW_GATES = {
 class GateStats:
     workflow: str
     gate: str
+    source_job: str
+    source_step: Optional[str]
     window_runs: int
     evaluated: int
     pass_count: int
@@ -159,9 +200,23 @@ def pick_job_by_name(jobs: List[dict], name: str) -> Optional[dict]:
     return sorted(matches, key=key)[-1]
 
 
+def pick_step_by_name(job: dict, name: str) -> Optional[dict]:
+    steps = job.get("steps") or []
+    matches = [step for step in steps if step.get("name") == name]
+    if not matches:
+        return None
+
+    def key(step: dict) -> Tuple[int, str]:
+        number = int(step.get("number") or 0)
+        completed_at = step.get("completed_at") or ""
+        return (number, completed_at)
+
+    return sorted(matches, key=key)[-1]
+
+
 def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats]:
     out: List[GateStats] = []
-    for workflow_file, gates in WORKFLOW_GATES.items():
+    for workflow_file, gate_specs in WORKFLOW_GATES.items():
         runs = client.list_completed_runs(workflow_file, sample_size)
         window_runs = len(runs)
         run_jobs: Dict[int, List[dict]] = {}
@@ -169,7 +224,7 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
             run_id = int(run["id"])
             run_jobs[run_id] = client.list_jobs_for_run(run_id)
 
-        for gate in gates:
+        for gate_spec in gate_specs:
             pass_count = 0
             fail_count = 0
             missing_count = 0
@@ -177,11 +232,20 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
             ignored_by_conclusion: Dict[str, int] = {}
             for run in runs:
                 run_id = int(run["id"])
-                job = pick_job_by_name(run_jobs.get(run_id, []), gate)
+                job = pick_job_by_name(run_jobs.get(run_id, []), gate_spec.job)
                 if job is None:
                     missing_count += 1
                     continue
-                conclusion = (job.get("conclusion") or "unknown").lower()
+
+                if gate_spec.step is None:
+                    conclusion = (job.get("conclusion") or "unknown").lower()
+                else:
+                    step = pick_step_by_name(job, gate_spec.step)
+                    if step is None:
+                        missing_count += 1
+                        continue
+                    conclusion = (step.get("conclusion") or "unknown").lower()
+
                 if conclusion in PASS_CONCLUSIONS:
                     pass_count += 1
                 elif conclusion in FAIL_CONCLUSIONS:
@@ -196,7 +260,9 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
             out.append(
                 GateStats(
                     workflow=workflow_file,
-                    gate=gate,
+                    gate=gate_spec.gate,
+                    source_job=gate_spec.job,
+                    source_step=gate_spec.step,
                     window_runs=window_runs,
                     evaluated=evaluated,
                     pass_count=pass_count,
@@ -222,14 +288,20 @@ def render_markdown(
     lines.append(f"- Window: latest `{sample_size}` completed runs per workflow")
     lines.append(f"- Generated at: `{generated_at}`")
     lines.append("")
-    lines.append("| Workflow | Gate | Evaluated | Pass | Fail | Fail Rate | Missing | Ignored |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
+    lines.append(
+        "| Workflow | Gate | Source | Evaluated | Pass | Fail | Fail Rate | Missing | Ignored |"
+    )
+    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|")
     for row in rows:
+        source = row.source_job
+        if row.source_step:
+            source = f"{row.source_job} / {row.source_step}"
         lines.append(
-            "| {workflow} | {gate} | {evaluated} | {pass_count} | {fail_count} | "
+            "| {workflow} | {gate} | {source} | {evaluated} | {pass_count} | {fail_count} | "
             "{rate:.2f}% | {missing_count} | {ignored_count} |".format(
                 workflow=row.workflow,
                 gate=row.gate,
+                source=source,
                 evaluated=row.evaluated,
                 pass_count=row.pass_count,
                 fail_count=row.fail_count,
@@ -276,6 +348,8 @@ def main() -> int:
             {
                 "workflow": row.workflow,
                 "gate": row.gate,
+                "source_job": row.source_job,
+                "source_step": row.source_step,
                 "window_runs": row.window_runs,
                 "evaluated": row.evaluated,
                 "pass_count": row.pass_count,
