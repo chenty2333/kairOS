@@ -38,6 +38,23 @@ class GateSpec:
 WORKFLOW_GATES = {
     "ci-quick.yml": [
         GateSpec(gate="riscv64-test", job="riscv64-test"),
+        GateSpec(
+            gate="riscv64-syscall-trap",
+            job="riscv64-test",
+            step="Run riscv64 syscall/trap gate",
+        ),
+        GateSpec(
+            gate="riscv64-vfs-ipc",
+            job="riscv64-test",
+            step="Run riscv64 vfs/ipc gate",
+        ),
+        GateSpec(gate="riscv64-driver", job="riscv64-test", step="Run riscv64 driver gate"),
+        GateSpec(gate="riscv64-socket", job="riscv64-test", step="Run riscv64 socket gate"),
+        GateSpec(
+            gate="riscv64-tcc-smoke",
+            job="riscv64-test",
+            step="Run riscv64 tcc smoke gate",
+        ),
         GateSpec(gate="x86_64-gates", job="x86_64-gates"),
         GateSpec(
             gate="x86_64-syscall-trap",
@@ -115,6 +132,18 @@ class GateStats:
         if self.evaluated == 0:
             return 0.0
         return (self.fail_count * 100.0) / self.evaluated
+
+
+@dataclass(frozen=True)
+class GateViolation:
+    workflow: str
+    gate: str
+    source_job: str
+    source_step: Optional[str]
+    evaluated: int
+    fail_count: int
+    fail_rate_percent: float
+    max_fail_rate_percent: float
 
 
 class GitHubClient:
@@ -197,6 +226,21 @@ def parse_args() -> argparse.Namespace:
         "--markdown-out",
         default="ci-flake-report.md",
         help="Path to write Markdown report",
+    )
+    parser.add_argument(
+        "--max-fail-rate-percent",
+        type=float,
+        default=None,
+        help=(
+            "Enforcement threshold: fail if any gate fail-rate is above this "
+            "percentage (disabled when omitted)"
+        ),
+    )
+    parser.add_argument(
+        "--min-evaluated",
+        type=int,
+        default=10,
+        help="Minimum pass+fail samples required before a gate is enforced",
     )
     return parser.parse_args()
 
@@ -289,11 +333,41 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
     return out
 
 
+def evaluate_gate_budget(
+    rows: List[GateStats],
+    max_fail_rate_percent: float,
+    min_evaluated: int,
+) -> List[GateViolation]:
+    violations: List[GateViolation] = []
+    for row in rows:
+        if row.evaluated < min_evaluated:
+            continue
+        rate = row.fail_rate_percent
+        if rate <= max_fail_rate_percent:
+            continue
+        violations.append(
+            GateViolation(
+                workflow=row.workflow,
+                gate=row.gate,
+                source_job=row.source_job,
+                source_step=row.source_step,
+                evaluated=row.evaluated,
+                fail_count=row.fail_count,
+                fail_rate_percent=rate,
+                max_fail_rate_percent=max_fail_rate_percent,
+            )
+        )
+    return violations
+
+
 def render_markdown(
     repo: str,
     sample_size: int,
     generated_at: str,
     rows: List[GateStats],
+    max_fail_rate_percent: Optional[float],
+    min_evaluated: int,
+    violations: List[GateViolation],
 ) -> str:
     lines: List[str] = []
     lines.append("# CI Flake Report")
@@ -333,6 +407,37 @@ def render_markdown(
         parts = [f"{k}={v}" for k, v in sorted(row.ignored_by_conclusion.items())]
         lines.append(f"- `{row.workflow}` / `{row.gate}`: {', '.join(parts)}")
 
+    lines.append("")
+    lines.append("Enforcement policy:")
+    if max_fail_rate_percent is None:
+        lines.append("- Disabled")
+    else:
+        lines.append(
+            "- Enabled: fail when `fail_rate > {rate:.2f}%` with `evaluated >= {min_eval}`".format(
+                rate=max_fail_rate_percent,
+                min_eval=min_evaluated,
+            )
+        )
+        if not violations:
+            lines.append("- Result: pass (no threshold violations)")
+        else:
+            lines.append(f"- Result: fail ({len(violations)} violating gate(s))")
+            for v in violations:
+                source = v.source_job
+                if v.source_step:
+                    source = f"{v.source_job} / {v.source_step}"
+                lines.append(
+                    "- `{wf}` / `{gate}` ({src}): {rate:.2f}% ({fail}/{evald}) > {max_rate:.2f}%".format(
+                        wf=v.workflow,
+                        gate=v.gate,
+                        src=source,
+                        rate=v.fail_rate_percent,
+                        fail=v.fail_count,
+                        evald=v.evaluated,
+                        max_rate=v.max_fail_rate_percent,
+                    )
+                )
+
     return "\n".join(lines) + "\n"
 
 
@@ -348,9 +453,25 @@ def main() -> int:
     if args.sample_size < 1:
         print("ci-flake-report: --sample-size must be >= 1", file=sys.stderr)
         return 2
+    if args.min_evaluated < 1:
+        print("ci-flake-report: --min-evaluated must be >= 1", file=sys.stderr)
+        return 2
+    if args.max_fail_rate_percent is not None and args.max_fail_rate_percent < 0:
+        print(
+            "ci-flake-report: --max-fail-rate-percent must be >= 0",
+            file=sys.stderr,
+        )
+        return 2
 
     client = GitHubClient(repo=args.repo, token=token)
     rows = compute_gate_stats(client, args.sample_size)
+    violations: List[GateViolation] = []
+    if args.max_fail_rate_percent is not None:
+        violations = evaluate_gate_budget(
+            rows,
+            max_fail_rate_percent=args.max_fail_rate_percent,
+            min_evaluated=args.min_evaluated,
+        )
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     json_doc = {
@@ -358,6 +479,24 @@ def main() -> int:
         "repo": args.repo,
         "sample_size": args.sample_size,
         "generated_at_utc": now,
+        "enforcement": {
+            "enabled": args.max_fail_rate_percent is not None,
+            "max_fail_rate_percent": args.max_fail_rate_percent,
+            "min_evaluated": args.min_evaluated,
+            "violations": [
+                {
+                    "workflow": v.workflow,
+                    "gate": v.gate,
+                    "source_job": v.source_job,
+                    "source_step": v.source_step,
+                    "evaluated": v.evaluated,
+                    "fail_count": v.fail_count,
+                    "fail_rate_percent": round(v.fail_rate_percent, 4),
+                    "max_fail_rate_percent": round(v.max_fail_rate_percent, 4),
+                }
+                for v in violations
+            ],
+        },
         "gates": [
             {
                 "workflow": row.workflow,
@@ -381,12 +520,26 @@ def main() -> int:
         json.dump(json_doc, f, indent=2, sort_keys=True)
         f.write("\n")
 
-    markdown = render_markdown(args.repo, args.sample_size, now, rows)
+    markdown = render_markdown(
+        args.repo,
+        args.sample_size,
+        now,
+        rows,
+        args.max_fail_rate_percent,
+        args.min_evaluated,
+        violations,
+    )
     with open(args.markdown_out, "w", encoding="utf-8") as f:
         f.write(markdown)
 
     print(f"ci-flake-report: wrote {args.json_out}")
     print(f"ci-flake-report: wrote {args.markdown_out}")
+    if violations:
+        print(
+            f"ci-flake-report: enforcement failed with {len(violations)} violation(s)",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

@@ -17,7 +17,7 @@ concurrency:
 jobs:
   riscv64-test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
@@ -46,10 +46,60 @@ jobs:
           set -euo pipefail
           scripts/impl/ci-bootstrap.sh locate-uefi riscv64
 
-      - name: Run default regression gates
+      - name: Run riscv64 syscall/trap gate
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=riscv64 test-ci-default
+          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=240 test-syscall-trap
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 syscall/trap gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run riscv64 vfs/ipc gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=300 test-vfs-ipc
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 vfs/ipc gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run riscv64 driver gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=300 test-driver
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 driver gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run riscv64 socket gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=360 test-socket
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 socket gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+
+      - name: Run riscv64 tcc smoke gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 tcc smoke gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
       - name: Capture latest isolated run
         id: latest_run
@@ -75,8 +125,14 @@ jobs:
             ${{ steps.latest_run.outputs.path }}/result.json
             ${{ steps.latest_run.outputs.path }}/riscv64/logs/test.log
             ${{ steps.latest_run.outputs.path }}/riscv64/test.log
+            ${{ steps.latest_run.outputs.path }}/riscv64/tcc-smoke.log
             ${{ steps.latest_run.outputs.path }}/riscv64/run.log
+            build/runs/*/manifest.json
+            build/runs/*/result.json
+            build/runs/*/riscv64/logs/*.log
+            build/runs/*/riscv64/*.log
             build/riscv64/test.log
+            build/riscv64/tcc-smoke.log
             build/riscv64/run.log
 
   x86_64-gates:

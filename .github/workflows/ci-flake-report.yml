@@ -1,6 +1,11 @@
 name: ci-flake-report
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
   schedule:
     - cron: "15 2 * * *"
   workflow_dispatch:
@@ -9,6 +14,14 @@ on:
         description: "Latest completed runs per workflow to inspect"
         required: false
         default: "20"
+      max_fail_rate_percent:
+        description: "Fail if a gate fail-rate exceeds this percentage"
+        required: false
+        default: "10"
+      min_evaluated:
+        description: "Minimum evaluated samples before enforcing a gate"
+        required: false
+        default: "10"
 
 concurrency:
   group: ci-flake-report-${{ github.ref }}
@@ -23,6 +36,8 @@ jobs:
       contents: read
     env:
       SAMPLE_SIZE: ${{ github.event.inputs.sample_size || '20' }}
+      MAX_FAIL_RATE_PERCENT: ${{ github.event.inputs.max_fail_rate_percent || '10' }}
+      MIN_EVALUATED: ${{ github.event.inputs.min_evaluated || '10' }}
 
     steps:
       - name: Checkout
@@ -36,6 +51,8 @@ jobs:
           set -euo pipefail
           python3 scripts/impl/ci-flake-report.py \
             --sample-size "${SAMPLE_SIZE}" \
+            --max-fail-rate-percent "${MAX_FAIL_RATE_PERCENT}" \
+            --min-evaluated "${MIN_EVALUATED}" \
             --json-out ci-flake-report.json \
             --markdown-out ci-flake-report.md
 
