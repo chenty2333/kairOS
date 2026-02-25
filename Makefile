@@ -946,8 +946,44 @@ test-socket:
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x100" test
 
 test-device-virtio:
-	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
-		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200" test
+	$(Q)set -eu; \
+	run_case() { \
+		case_name="$$1"; \
+		extra_flags="$$2"; \
+		required_regex="$$3"; \
+		required_all="$$4"; \
+		forbidden_regex="$$5"; \
+		log_path="$(BUILD_DIR)/test-device-virtio-$$case_name.log"; \
+		echo "test-device-virtio: case=$$case_name log=$$log_path"; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOG="$$log_path" \
+			KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
+			KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL="$$required_all" \
+			KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
+			TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200 $$extra_flags" test; \
+	}; \
+	if [ "$(ARCH)" != "aarch64" ]; then \
+		echo "test-device-virtio: ARCH=$(ARCH) uses module-only coverage (virtio-pci IRQ matrix is aarch64-only today)"; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200" test; \
+	else \
+		run_case "msix2" "" \
+			"VIRTIO_IRQ_MODE:msix:2" \
+			"" \
+			"VIRTIO_IRQ_MODE:(msi|intx):1"; \
+		run_case "msix1" "-DCONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS=1" \
+			"VIRTIO_IRQ_MODE:msix:1" \
+			"" \
+			"VIRTIO_IRQ_MODE:msix:2|VIRTIO_IRQ_MODE:(msi|intx):1"; \
+		run_case "msi" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1" \
+			"VIRTIO_IRQ_MODE:(msi|intx):1" \
+			"VIRTIO_IRQ_MSI_STATE:(enabled|no_cap|unsupported)" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MSI_STATE:disabled|VIRTIO_IRQ_MSI_STATE:skipped_msix"; \
+		run_case "intx" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1 -DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSI=1" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"VIRTIO_IRQ_MSI_STATE:disabled" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|unsupported|no_cap|skipped_msix)"; \
+	fi
 
 test-devmodel: test-device-virtio
 

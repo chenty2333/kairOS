@@ -17,7 +17,7 @@
 - `make test-syscall-trap` / `make test-syscall` — syscall/trap module only
 - `make test-vfs-ipc` — vfs/tmpfs/pipe/epoll module only (includes epoll EPOLLET/EPOLLONESHOT regressions and timerfd-path monotonic clock progress check under `proc_yield`)
 - `make test-socket` — socket module only (AF_UNIX stream/dgram + accept stability, AF_INET TCP/UDP time-bounded attempts)
-- `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module only
+- `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module only; on `aarch64` this target runs a 4-case IRQ-route matrix with explicit log assertions (`MSI-X(2)`, `MSI-X(1)`, `MSI-attempt fallback`, `INTx`) via `VIRTIO_IRQ_MODE:<mode>:<vectors>` plus `VIRTIO_IRQ_MSI_STATE:<state>` markers; other architectures currently keep module-only coverage
 - `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo/isig semantics, blocking read wakeup and EINTR paths, controlling-tty `/dev/tty` attach/detach lifecycle, pty pair EOF + reopen stability)
 - `make test-soak-pr` — PR-level soak module only (default 15 min, low-rate fault injection, deterministic round-based suite scheduling, summary-based pass/fail)
 - `test-soak-pr` log path is controlled by `SOAK_PR_LOG` (default isolated mode: `<TEST_BUILD_ROOT>/<arch>/test.log`; non-isolated mode: `build/<arch>/soak-pr.log`)
@@ -95,6 +95,10 @@ Run retention:
   - `TEST_REQUIRED_MARKERS_ALL`: newline-delimited required regex list (all must match)
   - `TEST_FORBIDDEN_MARKER_REGEX`: forbidden regex (any match fails)
   - `TEST_OPTIONAL_MARKERS_IF_PRESENT`: newline-delimited `<present_regex><TAB><required_regex>` pairs; when `present_regex` appears in log, `required_regex` must also match, otherwise verdict fails as `optional_markers_invalid`
+- `scripts/kairos.sh run test` accepts pass-through overrides that map to the above assertion knobs:
+  - `KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX`
+  - `KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL`
+  - `KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX`
 - CI gate steps validate `result.json` with `scripts/impl/assert-result-pass.py` (`--require-structured`).
 
 ## Verification Baseline

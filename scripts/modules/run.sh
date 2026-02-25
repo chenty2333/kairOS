@@ -82,6 +82,9 @@ kairos_run_test_once() {
     local require_markers="$4"
     local expect_timeout="$5"
     local require_structured="$6"
+    local required_regex_override="${KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX:-}"
+    local required_all_override="${KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL:-}"
+    local forbidden_override="${KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX:-}"
     local required_all=""
 
     local qemu_cmd
@@ -95,7 +98,16 @@ kairos_run_test_once() {
             'boot: limine firmware type=.*\nboot: limine paging mode=.*\nboot: limine mp rev=.*'
     fi
 
-    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" "${require_markers}" "${expect_timeout}" "" "${required_all}" "" "${require_structured}" 1
+    if [[ -n "${required_all_override}" ]]; then
+        if [[ -n "${required_all}" ]]; then
+            required_all+=$'\n'
+        fi
+        required_all+="${required_all_override}"
+    fi
+
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" \
+        "${require_markers}" "${expect_timeout}" "${required_regex_override}" \
+        "${required_all}" "${forbidden_override}" "${require_structured}" 1
 }
 
 kairos_run_test_tcc_smoke_once() {

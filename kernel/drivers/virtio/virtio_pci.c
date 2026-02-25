@@ -34,6 +34,23 @@
 
 #define VIRTIO_PCI_MSIX_REQ_VECTORS 2
 
+#ifndef CONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX
+#define CONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX 0
+#endif
+
+#ifndef CONFIG_VIRTIO_PCI_TEST_DISABLE_MSI
+#define CONFIG_VIRTIO_PCI_TEST_DISABLE_MSI 0
+#endif
+
+#ifndef CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS
+#define CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS VIRTIO_PCI_MSIX_REQ_VECTORS
+#endif
+
+#if CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS < 1 || \
+    CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS > VIRTIO_PCI_MSIX_REQ_VECTORS
+#error "CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS must be in [1, VIRTIO_PCI_MSIX_REQ_VECTORS]"
+#endif
+
 struct virtio_pci_transport {
     struct virtio_device vdev;
     struct pci_device *pdev;
@@ -312,43 +329,59 @@ static int virtio_pci_probe(struct pci_device *pdev) {
         return ret;
     }
 
-    int msix_ret = pci_enable_msix_nvec(pdev, VIRTIO_PCI_MSIX_REQ_VECTORS);
-    if (msix_ret == -ENOSPC)
-        msix_ret = pci_enable_msix_nvec(pdev, 1);
-    if (msix_ret == 0) {
-        vp->msix_nvec = pdev->msix_nvec;
-        for (uint16_t i = 0; i < vp->msix_nvec && i < VIRTIO_PCI_MSIX_REQ_VECTORS; i++) {
-            uint8_t irq = 0;
-            if (pci_msix_vector_irq(pdev, i, &irq) == 0)
-                vp->msix_irq[i] = (int)irq;
-        }
-        if (vp->msix_nvec > 0 && vp->msix_irq[0] > 0)
-            vp->irq = vp->msix_irq[0];
+    const uint16_t requested_msix_nvec =
+        (uint16_t)CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS;
+    int msix_ret = -EOPNOTSUPP;
+    if (!CONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX) {
+        msix_ret = pci_enable_msix_nvec(pdev, requested_msix_nvec);
+        if (msix_ret == -ENOSPC && requested_msix_nvec > 1)
+            msix_ret = pci_enable_msix_nvec(pdev, 1);
+        if (msix_ret == 0) {
+            vp->msix_nvec = pdev->msix_nvec;
+            for (uint16_t i = 0; i < vp->msix_nvec && i < VIRTIO_PCI_MSIX_REQ_VECTORS;
+                 i++) {
+                uint8_t irq = 0;
+                if (pci_msix_vector_irq(pdev, i, &irq) == 0)
+                    vp->msix_irq[i] = (int)irq;
+            }
+            if (vp->msix_nvec > 0 && vp->msix_irq[0] > 0)
+                vp->irq = vp->msix_irq[0];
 
-        writew(0, (uint8_t *)vp->common_cfg + VIRTIO_PCI_COMMON_MSIX_CONFIG);
-        if (readw((uint8_t *)vp->common_cfg + VIRTIO_PCI_COMMON_MSIX_CONFIG) != 0) {
-            pr_warn("virtio-pci: MSI-X config vector bind failed on %02x:%02x.%x, fallback MSI/INTx\n",
-                    pdev->bus, pdev->slot, pdev->func);
-            (void)pci_disable_msix(pdev);
-            vp->msix_nvec = 0;
-            for (uint16_t i = 0; i < VIRTIO_PCI_MSIX_REQ_VECTORS; i++)
-                vp->msix_irq[i] = -1;
-            vp->irq = (int)pdev->irq_line;
+            writew(0, (uint8_t *)vp->common_cfg + VIRTIO_PCI_COMMON_MSIX_CONFIG);
+            if (readw((uint8_t *)vp->common_cfg + VIRTIO_PCI_COMMON_MSIX_CONFIG) !=
+                0) {
+                pr_warn("virtio-pci: MSI-X config vector bind failed on %02x:%02x.%x, fallback MSI/INTx\n",
+                        pdev->bus, pdev->slot, pdev->func);
+                (void)pci_disable_msix(pdev);
+                vp->msix_nvec = 0;
+                for (uint16_t i = 0; i < VIRTIO_PCI_MSIX_REQ_VECTORS; i++)
+                    vp->msix_irq[i] = -1;
+                vp->irq = (int)pdev->irq_line;
+            }
+        } else if (msix_ret != -ENOENT && msix_ret != -EOPNOTSUPP) {
+            pr_warn("virtio-pci: MSI-X setup failed on %02x:%02x.%x (ret=%d), fallback MSI/INTx\n",
+                    pdev->bus, pdev->slot, pdev->func, msix_ret);
         }
-    } else if (msix_ret != -ENOENT && msix_ret != -EOPNOTSUPP) {
-        pr_warn("virtio-pci: MSI-X setup failed on %02x:%02x.%x (ret=%d), fallback MSI/INTx\n",
-                pdev->bus, pdev->slot, pdev->func, msix_ret);
     }
 
     int msi_ret = 0;
-    if (!pdev->msix_enabled) {
+    const char *msi_state = "disabled";
+    if (!pdev->msix_enabled && !CONFIG_VIRTIO_PCI_TEST_DISABLE_MSI) {
         msi_ret = pci_enable_msi(pdev);
         if (msi_ret == 0) {
             vp->irq = (int)pdev->irq_line;
+            msi_state = "enabled";
+        } else if (msi_ret == -ENOENT) {
+            msi_state = "no_cap";
+        } else if (msi_ret == -EOPNOTSUPP) {
+            msi_state = "unsupported";
         } else if (msi_ret != -ENOENT && msi_ret != -EOPNOTSUPP) {
             pr_warn("virtio-pci: MSI setup failed on %02x:%02x.%x (ret=%d), fallback INTx\n",
                     pdev->bus, pdev->slot, pdev->func, msi_ret);
+            msi_state = "failed";
         }
+    } else if (pdev->msix_enabled) {
+        msi_state = "skipped_msix";
     }
 
     vp->vdev.id = virtio_id;
@@ -382,9 +415,14 @@ static int virtio_pci_probe(struct pci_device *pdev) {
 
     const char *irq_mode =
         pdev->msix_enabled ? "msix" : (pdev->msi_enabled ? "msi" : "intx");
-    pr_info("virtio-pci: %02x:%02x.%x device_id=0x%04x virtio_id=%u irq=%d (%s)\n",
+    uint16_t irq_vectors = pdev->msix_enabled ? vp->msix_nvec : 1U;
+    pr_info("virtio-pci: %02x:%02x.%x device_id=0x%04x virtio_id=%u irq=%d mode=%s vectors=%u\n",
             pdev->bus, pdev->slot, pdev->func, pdev->device_id,
-            virtio_id, vp->irq, irq_mode);
+            virtio_id, vp->irq, irq_mode, irq_vectors);
+    pr_info("VIRTIO_IRQ_MODE:%s:%u bdf=%02x:%02x.%x\n", irq_mode, irq_vectors,
+            pdev->bus, pdev->slot, pdev->func);
+    pr_info("VIRTIO_IRQ_MSI_STATE:%s bdf=%02x:%02x.%x\n", msi_state, pdev->bus,
+            pdev->slot, pdev->func);
     return 0;
 }
 
