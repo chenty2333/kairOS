@@ -47,26 +47,70 @@ static inline int sysproc_copy_path_from_user(char *kpath, size_t kpath_len,
 }
 
 static int sysproc_copy_affinity_mask(uint64_t mask_ptr, uint64_t len,
-                                      unsigned long *mask_out) {
-    if (!mask_out)
+                                      unsigned long *mask_out,
+                                      size_t mask_words) {
+    if (!mask_out || mask_words == 0)
         return -EINVAL;
     if (!mask_ptr)
         return -EFAULT;
-    if (len < sizeof(unsigned long))
-        return -EINVAL;
 
     size_t klen = (size_t)len;
     if ((uint64_t)klen != len)
         return -EINVAL;
+    size_t need = mask_words * sizeof(unsigned long);
+    if (klen < need)
+        return -EINVAL;
 
-    unsigned long mask = 0;
-    size_t read_len = sizeof(mask);
-    if (klen < read_len)
-        read_len = klen;
-    if (copy_from_user(&mask, (const void *)mask_ptr, read_len) < 0)
+    for (size_t i = 0; i < mask_words; i++)
+        mask_out[i] = 0;
+
+    for (size_t i = 0; i < mask_words; i++) {
+        if (mask_ptr > UINT64_MAX - (uint64_t)(i * sizeof(unsigned long)))
+            return -EFAULT;
+        if (copy_from_user(&mask_out[i],
+                           (const void *)(mask_ptr +
+                                          (uint64_t)(i * sizeof(unsigned long))),
+                           sizeof(unsigned long)) < 0)
+            return -EFAULT;
+    }
+    return 0;
+}
+
+static void sysproc_online_affinity_mask(unsigned long *mask) {
+    if (!mask)
+        return;
+    proc_sched_affinity_zero(mask);
+    int cpus = sched_cpu_count();
+    if (cpus > CONFIG_MAX_CPUS)
+        cpus = CONFIG_MAX_CPUS;
+    for (int cpu = 0; cpu < cpus; cpu++)
+        (void)proc_sched_affinity_mask_set_cpu(mask, cpu);
+}
+
+static int sysproc_sched_resolve_target(pid_t kpid, bool for_set,
+                                        struct process **target_out) {
+    if (!target_out)
+        return -EINVAL;
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+    struct process *target = (kpid == 0) ? curr : proc_find(kpid);
+    if (!target)
+        return -ESRCH;
+    if (for_set && target != curr && curr->uid != 0)
+        return -EPERM;
+    *target_out = target;
+    return 0;
+}
+
+static int sysproc_copy_sched_param(uint64_t param_ptr,
+                                    struct sched_param *param_out) {
+    if (!param_ptr || !param_out)
         return -EFAULT;
-
-    *mask_out = mask;
+    if (copy_from_user(param_out, (void *)param_ptr, sizeof(*param_out)) < 0)
+        return -EFAULT;
+    if (param_out->sched_priority != 0)
+        return -EINVAL;
     return 0;
 }
 
@@ -364,30 +408,30 @@ int64_t sys_sched_getaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
     pid_t kpid = sysproc_abi_pid(pid);
     if (!mask_ptr)
         return -EFAULT;
-    if (len < sizeof(unsigned long))
+    size_t klen = (size_t)len;
+    if ((uint64_t)klen != len)
         return -EINVAL;
+    size_t need = proc_sched_affinity_bytes();
+    if (klen < need)
+        return -EINVAL;
+
     struct process *target = NULL;
-    if (kpid == 0)
-        target = proc_current();
-    else
-        target = proc_find(kpid);
-    if (!target)
-        return -ESRCH;
+    int rc = sysproc_sched_resolve_target(kpid, false, &target);
+    if (rc < 0)
+        return rc;
 
-    unsigned long online_mask = 0;
-    int cpus = sched_cpu_count();
-    int max_bits = (int)(sizeof(unsigned long) * 8);
-    for (int i = 0; i < cpus && i < max_bits; i++)
-        online_mask |= (1UL << i);
+    unsigned long mask[PROC_SCHED_AFFINITY_WORDS];
+    unsigned long online_mask[PROC_SCHED_AFFINITY_WORDS];
+    proc_sched_get_affinity_mask_words(target, mask, PROC_SCHED_AFFINITY_WORDS);
+    sysproc_online_affinity_mask(online_mask);
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+        mask[i] &= online_mask[i];
+    if (proc_sched_affinity_is_zero(mask))
+        proc_sched_affinity_copy(mask, online_mask);
 
-    unsigned long mask = (unsigned long)proc_sched_get_affinity_mask(target);
-    mask &= online_mask;
-    if (!mask)
-        mask = online_mask;
-
-    if (copy_to_user((void *)mask_ptr, &mask, sizeof(mask)) < 0)
+    if (copy_to_user((void *)mask_ptr, mask, need) < 0)
         return -EFAULT;
-    return (int64_t)sizeof(mask);
+    return (int64_t)need;
 }
 
 int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
@@ -396,28 +440,19 @@ int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
     pid_t kpid = sysproc_abi_pid(pid);
     if (!mask_ptr)
         return -EFAULT;
-    if (len < sizeof(unsigned long))
-        return -EINVAL;
-
-    struct process *curr = proc_current();
-    if (!curr)
-        return -EINVAL;
 
     struct process *target = NULL;
-    if (kpid == 0)
-        target = curr;
-    else
-        target = proc_find(kpid);
-    if (!target)
-        return -ESRCH;
-    if (target != curr && curr->uid != 0)
-        return -EPERM;
+    int rc = sysproc_sched_resolve_target(kpid, true, &target);
+    if (rc < 0)
+        return rc;
 
-    unsigned long requested = 0;
-    int copy_rc = sysproc_copy_affinity_mask(mask_ptr, len, &requested);
+    unsigned long requested[PROC_SCHED_AFFINITY_WORDS];
+    int copy_rc = sysproc_copy_affinity_mask(mask_ptr, len, requested,
+                                             PROC_SCHED_AFFINITY_WORDS);
     if (copy_rc < 0)
         return copy_rc;
-    return (int64_t)sched_set_affinity(target, (uint64_t)requested);
+    return (int64_t)sched_set_affinity(target, requested,
+                                       PROC_SCHED_AFFINITY_WORDS);
 }
 
 int64_t sys_getrlimit(uint64_t resource, uint64_t rlim_ptr, uint64_t a2,
@@ -703,38 +738,46 @@ int64_t sys_sched_setparam(uint64_t pid, uint64_t param_ptr, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     pid_t kpid = sysproc_abi_pid(pid);
-    struct process *p = proc_current();
-    if (!p)
-        return -EINVAL;
-    if (kpid != 0 && kpid != p->pid)
-        return -ESRCH;
-    if (!param_ptr)
-        return -EFAULT;
-    struct sched_param param;
-    if (copy_from_user(&param, (void *)param_ptr, sizeof(param)) < 0)
-        return -EFAULT;
-    if (param.sched_priority != 0)
-        return -EINVAL;
+    struct process *target = NULL;
+    int rc = sysproc_sched_resolve_target(kpid, true, &target);
+    if (rc < 0)
+        return rc;
+    struct sched_param param = {0};
+    rc = sysproc_copy_sched_param(param_ptr, &param);
+    if (rc < 0)
+        return rc;
+    (void)target;
     return 0;
 }
 
 int64_t sys_sched_setscheduler(uint64_t pid, uint64_t policy, uint64_t param_ptr,
                                uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a3; (void)a4; (void)a5;
-    if (sysproc_abi_i32(policy) != SCHED_OTHER)
+    pid_t kpid = sysproc_abi_pid(pid);
+    int32_t kpolicy = sysproc_abi_i32(policy);
+    if (kpolicy != SCHED_OTHER)
         return -EINVAL;
-    return sys_sched_setparam(pid, param_ptr, 0, 0, 0, 0);
+    struct process *target = NULL;
+    int rc = sysproc_sched_resolve_target(kpid, true, &target);
+    if (rc < 0)
+        return rc;
+    struct sched_param param = {0};
+    rc = sysproc_copy_sched_param(param_ptr, &param);
+    if (rc < 0)
+        return rc;
+    (void)target;
+    return SCHED_OTHER;
 }
 
 int64_t sys_sched_getscheduler(uint64_t pid, uint64_t a1, uint64_t a2,
                                uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     pid_t kpid = sysproc_abi_pid(pid);
-    struct process *p = proc_current();
-    if (!p)
-        return -EINVAL;
-    if (kpid != 0 && !proc_find(kpid))
-        return -ESRCH;
+    struct process *target = NULL;
+    int rc = sysproc_sched_resolve_target(kpid, false, &target);
+    if (rc < 0)
+        return rc;
+    (void)target;
     return SCHED_OTHER;
 }
 
@@ -742,11 +785,11 @@ int64_t sys_sched_getparam(uint64_t pid, uint64_t param_ptr, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     pid_t kpid = sysproc_abi_pid(pid);
-    struct process *p = proc_current();
-    if (!p)
-        return -EINVAL;
-    if (kpid != 0 && !proc_find(kpid))
-        return -ESRCH;
+    struct process *target = NULL;
+    int rc = sysproc_sched_resolve_target(kpid, false, &target);
+    if (rc < 0)
+        return rc;
+    (void)target;
     if (!param_ptr)
         return -EFAULT;
     struct sched_param param = {.sched_priority = 0};

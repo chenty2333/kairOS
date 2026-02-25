@@ -770,9 +770,16 @@ static void test_sched_affinity_syscalls_regression(void) {
     if (!p)
         return;
 
+    const size_t affinity_bytes = proc_sched_affinity_bytes();
+
     struct user_map_ctx um = {0};
     bool mapped = false;
-    unsigned long saved_mask = 0;
+    unsigned long saved_mask[PROC_SCHED_AFFINITY_WORDS];
+    unsigned long req_mask[PROC_SCHED_AFFINITY_WORDS];
+    unsigned long ext_mask[PROC_SCHED_AFFINITY_WORDS + 1];
+    memset(saved_mask, 0, sizeof(saved_mask));
+    memset(req_mask, 0, sizeof(req_mask));
+    memset(ext_mask, 0, sizeof(ext_mask));
 
     int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
     test_check(rc == 0, "affinity user_map");
@@ -783,91 +790,93 @@ static void test_sched_affinity_syscalls_regression(void) {
     unsigned long *u_mask = (unsigned long *)user_map_ptr(&um, 0);
     unsigned long *u_mask_ext = (unsigned long *)user_map_ptr(&um, 128);
     unsigned long *u_mask_edge =
-        (unsigned long *)user_map_ptr(&um, CONFIG_PAGE_SIZE - sizeof(unsigned long));
+        (unsigned long *)user_map_ptr(&um, CONFIG_PAGE_SIZE - affinity_bytes);
     test_check(u_mask != NULL, "affinity user_ptr");
     test_check(u_mask_ext != NULL, "affinity user_ptr_ext");
     test_check(u_mask_edge != NULL, "affinity user_ptr_edge");
     if (!u_mask || !u_mask_ext || !u_mask_edge)
         goto out;
 
-    int64_t ret64 = sys_sched_getaffinity(0, sizeof(unsigned long) - 1,
+    int64_t ret64 = sys_sched_getaffinity(0, affinity_bytes - 1,
                                           (uint64_t)u_mask, 0, 0, 0);
     test_check(ret64 == -EINVAL, "affinity get len_einval");
 
-    ret64 = sys_sched_getaffinity(0, sizeof(unsigned long), 0, 0, 0, 0);
+    ret64 = sys_sched_getaffinity(0, affinity_bytes, 0, 0, 0, 0);
     test_check(ret64 == -EFAULT, "affinity get null_efault");
 
-    ret64 = sys_sched_getaffinity(0, sizeof(unsigned long), (uint64_t)u_mask, 0,
+    ret64 = sys_sched_getaffinity(0, affinity_bytes, (uint64_t)u_mask, 0,
                                   0, 0);
-    test_check(ret64 == (int64_t)sizeof(unsigned long), "affinity get ok");
-    if (ret64 == (int64_t)sizeof(unsigned long)) {
-        rc = copy_from_user(&saved_mask, u_mask, sizeof(saved_mask));
+    test_check(ret64 == (int64_t)affinity_bytes, "affinity get ok");
+    if (ret64 == (int64_t)affinity_bytes) {
+        rc = copy_from_user(saved_mask, u_mask, affinity_bytes);
         test_check(rc == 0, "affinity get copy_mask");
         if (rc == 0)
-            test_check(saved_mask != 0, "affinity get nonzero_mask");
+            test_check(!proc_sched_affinity_is_zero(saved_mask),
+                       "affinity get nonzero_mask");
     }
 
-    ret64 = sys_sched_getaffinity(0x7fffffffU, sizeof(unsigned long),
+    ret64 = sys_sched_getaffinity(0x7fffffffU, affinity_bytes,
                                   (uint64_t)u_mask, 0, 0, 0);
     test_check(ret64 == -ESRCH, "affinity get bad_pid_esrch");
 
-    ret64 = sys_sched_setaffinity(0, sizeof(unsigned long) - 1, (uint64_t)u_mask,
+    ret64 = sys_sched_setaffinity(0, affinity_bytes - 1, (uint64_t)u_mask,
                                   0, 0, 0);
     test_check(ret64 == -EINVAL, "affinity set len_einval");
 
-    ret64 = sys_sched_setaffinity(0, sizeof(unsigned long), 0, 0, 0, 0);
+    ret64 = sys_sched_setaffinity(0, affinity_bytes, 0, 0, 0, 0);
     test_check(ret64 == -EFAULT, "affinity set null_efault");
 
-    unsigned long req_mask = 0;
-    rc = copy_to_user(u_mask, &req_mask, sizeof(req_mask));
+    proc_sched_affinity_zero(req_mask);
+    rc = copy_to_user(u_mask, req_mask, affinity_bytes);
     test_check(rc == 0, "affinity set copy_zero");
     if (rc == 0) {
-        ret64 = sys_sched_setaffinity(0, sizeof(unsigned long), (uint64_t)u_mask,
+        ret64 = sys_sched_setaffinity(0, affinity_bytes, (uint64_t)u_mask,
                                       0, 0, 0);
         test_check(ret64 == -EINVAL, "affinity set zero_einval");
     }
 
-    if (saved_mask) {
-        rc = copy_to_user(u_mask, &saved_mask, sizeof(saved_mask));
+    if (!proc_sched_affinity_is_zero(saved_mask)) {
+        rc = copy_to_user(u_mask, saved_mask, affinity_bytes);
         test_check(rc == 0, "affinity set copy_saved");
         if (rc == 0) {
-            ret64 = sys_sched_setaffinity(0, sizeof(unsigned long),
+            ret64 = sys_sched_setaffinity(0, affinity_bytes,
                                           (uint64_t)u_mask, 0, 0, 0);
             test_check(ret64 == 0, "affinity set restore_ok");
         }
 
-        unsigned long ext_mask[2] = {saved_mask, 0};
-        rc = copy_to_user(u_mask_ext, ext_mask, sizeof(ext_mask));
+        proc_sched_affinity_copy(ext_mask, saved_mask);
+        ext_mask[PROC_SCHED_AFFINITY_WORDS] = 0;
+        rc = copy_to_user(u_mask_ext, ext_mask, affinity_bytes + sizeof(unsigned long));
         test_check(rc == 0, "affinity set copy_ext_zero_tail");
         if (rc == 0) {
-            ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
+            ret64 = sys_sched_setaffinity(0, affinity_bytes + sizeof(unsigned long),
                                           (uint64_t)u_mask_ext, 0, 0, 0);
             test_check(ret64 == 0, "affinity set ext_zero_tail_ok");
         }
 
-        ext_mask[1] = 1;
-        rc = copy_to_user(u_mask_ext, ext_mask, sizeof(ext_mask));
+        ext_mask[PROC_SCHED_AFFINITY_WORDS] = 1;
+        rc = copy_to_user(u_mask_ext, ext_mask, affinity_bytes + sizeof(unsigned long));
         test_check(rc == 0, "affinity set copy_ext_nonzero_tail");
         if (rc == 0) {
-            ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
+            ret64 = sys_sched_setaffinity(0, affinity_bytes + sizeof(unsigned long),
                                           (uint64_t)u_mask_ext, 0, 0, 0);
             test_check(ret64 == 0, "affinity set ext_nonzero_tail_ignored");
         }
 
-        ext_mask[0] = 0;
-        ext_mask[1] = 1;
-        rc = copy_to_user(u_mask_ext, ext_mask, sizeof(ext_mask));
+        proc_sched_affinity_zero(ext_mask);
+        ext_mask[PROC_SCHED_AFFINITY_WORDS] = 1;
+        rc = copy_to_user(u_mask_ext, ext_mask, affinity_bytes + sizeof(unsigned long));
         test_check(rc == 0, "affinity set copy_high_only");
         if (rc == 0) {
-            ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
+            ret64 = sys_sched_setaffinity(0, affinity_bytes + sizeof(unsigned long),
                                           (uint64_t)u_mask_ext, 0, 0, 0);
             test_check(ret64 == -EINVAL, "affinity set high_only_einval");
         }
 
-        rc = copy_to_user(u_mask_edge, &saved_mask, sizeof(saved_mask));
+        rc = copy_to_user(u_mask_edge, saved_mask, affinity_bytes);
         test_check(rc == 0, "affinity set copy_edge");
         if (rc == 0) {
-            ret64 = sys_sched_setaffinity(0, sizeof(saved_mask) + 1,
+            ret64 = sys_sched_setaffinity(0, affinity_bytes + 1,
                                           (uint64_t)u_mask_edge, 0, 0, 0);
             test_check(ret64 == 0, "affinity set ext_tail_ignored");
         }
@@ -876,13 +885,15 @@ static void test_sched_affinity_syscalls_regression(void) {
     int cpus = sched_cpu_count();
     int bits = (int)(sizeof(unsigned long) * 8);
     int current_cpu = p->se.cpu;
-    if (saved_mask && cpus > 1 && current_cpu >= 0 && current_cpu < bits) {
-        unsigned long alt_mask = saved_mask & ~(1UL << current_cpu);
+    if (saved_mask[0] && cpus > 1 && current_cpu >= 0 && current_cpu < bits) {
+        unsigned long alt_mask = saved_mask[0] & ~(1UL << current_cpu);
         if (alt_mask != 0) {
-            rc = copy_to_user(u_mask, &alt_mask, sizeof(alt_mask));
+            proc_sched_affinity_copy(req_mask, saved_mask);
+            req_mask[0] = alt_mask;
+            rc = copy_to_user(u_mask, req_mask, affinity_bytes);
             test_check(rc == 0, "affinity set copy_alt");
             if (rc == 0) {
-                ret64 = sys_sched_setaffinity(0, sizeof(unsigned long),
+                ret64 = sys_sched_setaffinity(0, affinity_bytes,
                                               (uint64_t)u_mask, 0, 0, 0);
                 test_check(ret64 == 0, "affinity set running_exclude_ok");
                 if (ret64 == 0) {
@@ -895,12 +906,104 @@ static void test_sched_affinity_syscalls_regression(void) {
                     test_check(allowed, "affinity set migrated_to_allowed_cpu");
                 }
             }
-            rc = copy_to_user(u_mask, &saved_mask, sizeof(saved_mask));
+            rc = copy_to_user(u_mask, saved_mask, affinity_bytes);
             if (rc == 0)
-                (void)sys_sched_setaffinity(0, sizeof(unsigned long),
+                (void)sys_sched_setaffinity(0, affinity_bytes,
                                             (uint64_t)u_mask, 0, 0, 0);
         }
     }
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_sched_policy_syscalls_regression(void) {
+    struct process *p = proc_current();
+    test_check(p != NULL, "sched_policy proc_current");
+    if (!p)
+        return;
+
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "sched_policy user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    struct sched_param *u_param = (struct sched_param *)user_map_ptr(&um, 0);
+    test_check(u_param != NULL, "sched_policy user_ptr");
+    if (!u_param)
+        goto out;
+
+    int64_t ret64 = sys_sched_getscheduler(0, 0, 0, 0, 0, 0);
+    test_check(ret64 == SCHED_OTHER, "sched_policy getscheduler_self_other");
+
+    ret64 = sys_sched_getscheduler(0x7fffffffU, 0, 0, 0, 0, 0);
+    test_check(ret64 == -ESRCH, "sched_policy getscheduler_badpid_esrch");
+
+    ret64 = sys_sched_getparam(0, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "sched_policy getparam_null_efault");
+
+    struct sched_param param = {.sched_priority = 0};
+    ret64 = sys_sched_getparam(0, (uint64_t)u_param, 0, 0, 0, 0);
+    test_check(ret64 == 0, "sched_policy getparam_ok");
+    if (ret64 == 0) {
+        rc = copy_from_user(&param, u_param, sizeof(param));
+        test_check(rc == 0, "sched_policy getparam_readback");
+        if (rc == 0) {
+            test_check(param.sched_priority == 0,
+                       "sched_policy getparam_priority_zero");
+        }
+    }
+
+    ret64 = sys_sched_setparam(0, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "sched_policy setparam_null_efault");
+
+    param.sched_priority = 1;
+    rc = copy_to_user(u_param, &param, sizeof(param));
+    test_check(rc == 0, "sched_policy setparam_copy_bad");
+    if (rc == 0) {
+        ret64 = sys_sched_setparam(0, (uint64_t)u_param, 0, 0, 0, 0);
+        test_check(ret64 == -EINVAL, "sched_policy setparam_prio_einval");
+    }
+
+    param.sched_priority = 0;
+    rc = copy_to_user(u_param, &param, sizeof(param));
+    test_check(rc == 0, "sched_policy setparam_copy_zero");
+    if (rc == 0) {
+        ret64 = sys_sched_setparam(0, (uint64_t)u_param, 0, 0, 0, 0);
+        test_check(ret64 == 0, "sched_policy setparam_ok");
+    }
+
+    ret64 = sys_sched_setscheduler(0, SCHED_FIFO, (uint64_t)u_param, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "sched_policy setscheduler_fifo_einval");
+
+    ret64 = sys_sched_setscheduler(0, SCHED_OTHER, 0, 0, 0, 0);
+    test_check(ret64 == -EFAULT, "sched_policy setscheduler_null_efault");
+
+    param.sched_priority = 1;
+    rc = copy_to_user(u_param, &param, sizeof(param));
+    test_check(rc == 0, "sched_policy setscheduler_copy_bad");
+    if (rc == 0) {
+        ret64 = sys_sched_setscheduler(0, SCHED_OTHER, (uint64_t)u_param,
+                                       0, 0, 0);
+        test_check(ret64 == -EINVAL, "sched_policy setscheduler_prio_einval");
+    }
+
+    param.sched_priority = 0;
+    rc = copy_to_user(u_param, &param, sizeof(param));
+    test_check(rc == 0, "sched_policy setscheduler_copy_zero");
+    if (rc == 0) {
+        ret64 = sys_sched_setscheduler(0, SCHED_OTHER, (uint64_t)u_param,
+                                       0, 0, 0);
+        test_check(ret64 == SCHED_OTHER, "sched_policy setscheduler_prev_policy");
+    }
+
+    ret64 = sys_sched_setscheduler(0, (1ULL << 32) | (uint64_t)SCHED_OTHER,
+                                   (uint64_t)u_param, 0, 0, 0);
+    test_check(ret64 == SCHED_OTHER, "sched_policy setscheduler_policy_width");
 
 out:
     if (mapped)
@@ -1487,6 +1590,7 @@ int run_syscall_trap_tests(void) {
     test_strncpy_from_user_nul_before_unmapped_tail_regression();
     test_uaccess_arg_validation_regression();
     test_sched_affinity_syscalls_regression();
+    test_sched_policy_syscalls_regression();
     test_mount_umount_flag_semantics();
     test_mount_propagation_recursive_semantics();
     test_acct_syscall_semantics();
