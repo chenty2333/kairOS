@@ -84,3 +84,13 @@ int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg)
     }
     return -EOPNOTSUPP;
 }
+
+int arch_pci_msi_affinity_msg(const struct pci_device *pdev, uint8_t irq,
+                              uint32_t cpu_mask, struct pci_msi_msg *msg)
+{
+    (void)pdev;
+    (void)irq;
+    (void)cpu_mask;
+    (void)msg;
+    return -EOPNOTSUPP;
+}

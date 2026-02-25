@@ -196,5 +196,7 @@ void pci_set_master(struct pci_host *host, struct pci_device *pdev);
 /* Arch hook */
 int arch_pci_host_init(struct pci_host *host);
 int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg);
+int arch_pci_msi_affinity_msg(const struct pci_device *pdev, uint8_t irq,
+                              uint32_t cpu_mask, struct pci_msi_msg *msg);
 
 #endif

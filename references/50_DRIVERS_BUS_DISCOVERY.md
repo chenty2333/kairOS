@@ -32,6 +32,7 @@ PCI bus (bus/pci.c):
   - `pci_enable_msix()` / `pci_enable_msix_nvec()` / `pci_disable_msix()`
   - MSI-X helpers: `pci_msix_vector_irq()`, `pci_msix_set_vector_mask()`, `pci_msix_vector_pending()`, `pci_msix_set_affinity()`
   - Message routing uses arch hook `arch_pci_msi_setup()`
+  - MSI-X affinity reprogram path uses arch hook `arch_pci_msi_affinity_msg()`; when supported, `pci_msix_set_affinity()` rewrites MSI-X table entry `{addr,data}` and then updates irq-domain affinity
 - Match strategy: by vendor_id/device_id (supports PCI_ANY_ID wildcard)
 - pci_enumerate(): calls arch_pci_host_init() (weak symbol, arch-overridable) to get ECAM base, then scans bus
 - pci_set_master(): enables bus-master and memory-space
@@ -115,7 +116,9 @@ lwIP integration:
 
 - ACPI platform-device discovery is still scaffolding (does not register fw descriptors); currently only PCI ECAM discovery via MCFG is wired for aarch64
 - MSI routing backends:
+  - x86_64: LAPIC MSI route (`0xFEE...`) with CPU-targeted message composition for affinity updates (`arch_pci_msi_affinity_msg`)
   - aarch64: baseline MSI/MSI-X route via GICD `SETSPI_NSR` doorbell path (QEMU virt)
+    - MSI-X affinity updates are supported by reprogramming message while keeping SPI identity
   - riscv64: current PLIC path remains INTx-only (`arch_pci_msi_setup()` returns `-EOPNOTSUPP` until AIA/IMSIC support is added)
 
 Related references:

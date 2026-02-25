@@ -31,6 +31,18 @@ __attribute__((weak)) int arch_pci_msi_setup(const struct pci_device *pdev,
     return -EOPNOTSUPP;
 }
 
+__attribute__((weak)) int arch_pci_msi_affinity_msg(const struct pci_device *pdev,
+                                                    uint8_t irq,
+                                                    uint32_t cpu_mask,
+                                                    struct pci_msi_msg *msg)
+{
+    (void)pdev;
+    (void)irq;
+    (void)cpu_mask;
+    (void)msg;
+    return -EOPNOTSUPP;
+}
+
 /* ------------------------------------------------------------------ */
 /*  ECAM config-space accessors                                       */
 /* ------------------------------------------------------------------ */
@@ -495,6 +507,40 @@ int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
         return ret;
     if (!cpu_mask)
         return -EINVAL;
+
+    struct pci_msi_msg msg = {0};
+    ret = arch_pci_msi_affinity_msg(pdev, irq, cpu_mask, &msg);
+    if (ret == -EOPNOTSUPP || ret == -ENOENT) {
+        arch_irq_set_affinity((int)irq, cpu_mask);
+        return 0;
+    }
+    if (ret < 0)
+        return ret;
+    if (msg.irq != irq)
+        return -EOPNOTSUPP;
+    if (pdev->msix_table_bir >= PCI_MAX_BAR)
+        return -EINVAL;
+
+    uint64_t bar_base = pdev->bar[pdev->msix_table_bir];
+    uint64_t bar_size = pdev->bar_size[pdev->msix_table_bir];
+    uint64_t entry_off =
+        (uint64_t)pdev->msix_table_off + ((uint64_t)index * PCI_MSIX_ENTRY_SIZE);
+    if (!bar_base || !bar_size || (entry_off + PCI_MSIX_ENTRY_SIZE) > bar_size)
+        return -EINVAL;
+
+    volatile uint8_t *entry = (volatile uint8_t *)ioremap(
+        (paddr_t)(bar_base + entry_off), PCI_MSIX_ENTRY_SIZE);
+    if (!entry)
+        return -ENOMEM;
+
+    uint32_t ctrl = readl((void *)(entry + 12));
+    writel(ctrl | PCI_MSIX_CTRL_MASKBIT, (void *)(entry + 12));
+    uint64_t addr = ((uint64_t)msg.address_hi << 32) | msg.address_lo;
+    writeq(addr, (void *)(entry + 0));
+    writel((uint32_t)msg.data, (void *)(entry + 8));
+    writel(ctrl, (void *)(entry + 12));
+    iounmap((void *)entry);
+
     arch_irq_set_affinity((int)irq, cpu_mask);
     return 0;
 }

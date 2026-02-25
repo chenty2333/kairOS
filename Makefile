@@ -967,22 +967,22 @@ test-device-virtio:
 		$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
 			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200" test; \
 	else \
-		run_case "msix2" "" \
+		run_case "msix2" "-DCONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK=0x2" \
 			"VIRTIO_IRQ_MODE:msix:2" \
-			"" \
-			"VIRTIO_IRQ_MODE:(msi|intx):1"; \
-		run_case "msix1" "-DCONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS=1" \
+			"VIRTIO_IRQ_AFFINITY:ok:1:0x2" \
+			"VIRTIO_IRQ_MODE:(msi|intx):1|VIRTIO_IRQ_AFFINITY:fail"; \
+		run_case "msix1" "-DCONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS=1 -DCONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK=0x2" \
 			"VIRTIO_IRQ_MODE:msix:1" \
-			"" \
-			"VIRTIO_IRQ_MODE:msix:2|VIRTIO_IRQ_MODE:(msi|intx):1"; \
+			"VIRTIO_IRQ_AFFINITY:ok:0:0x2" \
+			"VIRTIO_IRQ_MODE:msix:2|VIRTIO_IRQ_MODE:(msi|intx):1|VIRTIO_IRQ_AFFINITY:fail"; \
 		run_case "msi" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1" \
 			"VIRTIO_IRQ_MODE:(msi|intx):1" \
 			"VIRTIO_IRQ_MSI_STATE:(enabled|no_cap|unsupported)" \
-			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MSI_STATE:disabled|VIRTIO_IRQ_MSI_STATE:skipped_msix"; \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MSI_STATE:disabled|VIRTIO_IRQ_MSI_STATE:skipped_msix|VIRTIO_IRQ_AFFINITY:(ok|fail)"; \
 		run_case "intx" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1 -DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSI=1" \
 			"VIRTIO_IRQ_MODE:intx:1" \
 			"VIRTIO_IRQ_MSI_STATE:disabled" \
-			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|unsupported|no_cap|skipped_msix)"; \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|unsupported|no_cap|skipped_msix)|VIRTIO_IRQ_AFFINITY:(ok|fail)"; \
 	fi
 
 test-devmodel: test-device-virtio

@@ -6,6 +6,7 @@
 #include <kairos/io.h>
 #include <kairos/mm.h>
 #include <kairos/pci.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/virtio.h>
@@ -44,6 +45,10 @@
 
 #ifndef CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS
 #define CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS VIRTIO_PCI_MSIX_REQ_VECTORS
+#endif
+
+#ifndef CONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK
+#define CONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK 0
 #endif
 
 #if CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS < 1 || \
@@ -299,6 +304,12 @@ static void virtio_pci_intr(void *arg) {
         vp->vdev.handler(&vp->vdev);
 }
 
+static void virtio_pci_intr_ev(void *arg, const struct trap_core_event *ev)
+{
+    (void)ev;
+    virtio_pci_intr(arg);
+}
+
 static int virtio_pci_probe(struct pci_device *pdev) {
     if (!pdev || pdev->vendor_id != VIRTIO_PCI_VENDOR_ID)
         return -ENODEV;
@@ -395,14 +406,36 @@ static int virtio_pci_probe(struct pci_device *pdev) {
             int irq = vp->msix_irq[i];
             if (irq <= 0 || virtio_pci_irq_seen(vp->msix_irq, regd, irq))
                 continue;
-            arch_irq_register(irq, virtio_pci_intr, vp);
+            arch_irq_register_ex(irq, virtio_pci_intr_ev, vp,
+                                 IRQ_FLAG_TRIGGER_EDGE);
             vp->msix_irq[regd++] = irq;
         }
         vp->msix_nvec = regd;
         if (vp->msix_nvec > 0)
             vp->irq = vp->msix_irq[0];
+
+        if (CONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK != 0) {
+            uint32_t mask = (uint32_t)CONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK;
+            for (uint16_t i = 0; i < vp->msix_nvec; i++) {
+                int aff_ret = pci_msix_set_affinity(pdev, i, mask);
+                if (aff_ret < 0) {
+                    pr_warn("virtio-pci: MSI-X affinity set failed on %02x:%02x.%x vec=%u mask=0x%x ret=%d\n",
+                            pdev->bus, pdev->slot, pdev->func, i, mask, aff_ret);
+                    pr_info("VIRTIO_IRQ_AFFINITY:fail:%u:0x%x bdf=%02x:%02x.%x\n",
+                            i, mask, pdev->bus, pdev->slot, pdev->func);
+                } else {
+                    pr_info("VIRTIO_IRQ_AFFINITY:ok:%u:0x%x bdf=%02x:%02x.%x\n",
+                            i, mask, pdev->bus, pdev->slot, pdev->func);
+                }
+            }
+        }
     } else if (vp->irq > 0) {
+        if (pdev->msi_enabled) {
+            arch_irq_register_ex(vp->irq, virtio_pci_intr_ev, vp,
+                                 IRQ_FLAG_TRIGGER_EDGE);
+        } else {
         arch_irq_register(vp->irq, virtio_pci_intr, vp);
+        }
     }
 
     dev_set_drvdata(&pdev->dev, vp);

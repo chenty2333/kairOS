@@ -55,6 +55,16 @@ struct acpi_mcfg_entry {
 
 static uint32_t aarch64_msi_next_spi = AARCH64_MSI_SPI_BASE;
 
+static uint32_t aarch64_msi_sanitize_mask(uint32_t cpu_mask)
+{
+#if CONFIG_MAX_CPUS >= 32
+    uint32_t valid_mask = UINT32_MAX;
+#else
+    uint32_t valid_mask = (1U << CONFIG_MAX_CPUS) - 1U;
+#endif
+    return cpu_mask & valid_mask;
+}
+
 static bool acpi_checksum_ok(const void *data, size_t len) {
     const uint8_t *p = data;
     uint8_t sum = 0;
@@ -204,19 +214,34 @@ int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg)
     if (!pdev || !msg)
         return -EINVAL;
 
-    const struct platform_desc *plat = platform_get();
-    if (!plat || plat->num_early_mmio < 1 || !plat->early_mmio[0].base)
-        return -EOPNOTSUPP;
-
     /* WARN: QEMU virt baseline MSI route uses GICD_SETSPI doorbell writes. */
     uint32_t spi = __atomic_fetch_add(&aarch64_msi_next_spi, 1, __ATOMIC_RELAXED);
     if (spi >= AARCH64_MSI_SPI_LIMIT)
         return -ENOSPC;
 
+    return arch_pci_msi_affinity_msg(pdev, (uint8_t)spi, 1U, msg);
+}
+
+int arch_pci_msi_affinity_msg(const struct pci_device *pdev, uint8_t irq,
+                              uint32_t cpu_mask, struct pci_msi_msg *msg)
+{
+    if (!pdev || !msg)
+        return -EINVAL;
+    if (irq < AARCH64_MSI_SPI_BASE || irq >= AARCH64_MSI_SPI_LIMIT)
+        return -EINVAL;
+
+    cpu_mask = aarch64_msi_sanitize_mask(cpu_mask);
+    if (!cpu_mask)
+        return -EINVAL;
+
+    const struct platform_desc *plat = platform_get();
+    if (!plat || plat->num_early_mmio < 1 || !plat->early_mmio[0].base)
+        return -EOPNOTSUPP;
+
     uint64_t doorbell = (uint64_t)plat->early_mmio[0].base + AARCH64_GICD_SETSPI_NSR;
     msg->address_lo = (uint32_t)doorbell;
     msg->address_hi = (uint32_t)(doorbell >> 32);
-    msg->data = (uint16_t)spi;
-    msg->irq = (uint8_t)spi;
+    msg->data = irq;
+    msg->irq = irq;
     return 0;
 }
