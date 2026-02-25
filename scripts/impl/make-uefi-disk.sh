@@ -21,6 +21,7 @@ INITRAMFS="$BUILD_DIR/initramfs.cpio"
 LIMINE_CFG="$ROOT_DIR/limine.cfg"
 UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-dir}" # dir|img|both
 QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}" # optional dir|img
+QEMU_MEM="${QEMU_MEM:-384M}"
 
 BOOT_EFI="$(kairos_arch_to_boot_efi "$ARCH")" || {
     echo "Error: Unsupported ARCH for UEFI boot image: $ARCH"
@@ -104,7 +105,7 @@ if [ "$ARCH" = "aarch64" ]; then
     if [ ! -f "$AARCH64_DTB" ] && command -v qemu-system-aarch64 >/dev/null 2>&1; then
         qemu-system-aarch64 \
             -machine virt,gic-version=3,dumpdtb="$AARCH64_DTB" \
-            -cpu cortex-a72 -m 256M -smp "${QEMU_SMP:-2}" \
+            -cpu cortex-a72 -m "$QEMU_MEM" -smp "${QEMU_SMP:-2}" \
             -display none -serial none -nodefaults >/dev/null 2>&1 || true
     fi
     if [ -f "$AARCH64_DTB" ]; then

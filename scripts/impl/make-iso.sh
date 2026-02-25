@@ -21,6 +21,7 @@ ISO_FILE="$BUILD_DIR/kairos.iso"
 LIMINE_DIR="$ROOT_DIR/third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
 LIMINE_CFG_SRC="$ROOT_DIR/limine.cfg"
+QEMU_MEM="${QEMU_MEM:-384M}"
 
 if [ "$ARCH" = "x86_64" ]; then
     LIMINE_CFG_SRC="$BUILD_DIR/limine.x86_64.cfg"
@@ -112,10 +113,10 @@ echo ""
 echo "=== ISO created: $ISO_FILE ==="
 echo ""
 echo "To test:"
-echo "  QEMU (BIOS):  qemu-system-$ARCH -cdrom $ISO_FILE -m 256M"
+echo "  QEMU (BIOS):  qemu-system-$ARCH -cdrom $ISO_FILE -m $QEMU_MEM"
 if [ "$ARCH" = "riscv64" ]; then
     echo "  QEMU (UEFI):  make ARCH=riscv64 run"
 else
-    echo "  QEMU (UEFI):  qemu-system-$ARCH -cdrom $ISO_FILE -m 256M -bios /usr/share/ovmf/OVMF.fd"
+    echo "  QEMU (UEFI):  qemu-system-$ARCH -cdrom $ISO_FILE -m $QEMU_MEM -bios /usr/share/ovmf/OVMF.fd"
 fi
 echo "  Real hardware: Write to USB with 'dd if=$ISO_FILE of=/dev/sdX bs=4M'"

@@ -70,6 +70,7 @@ TOOLCHAIN_MODE ?= auto
 WITH_TCC ?= 1
 INITRAMFS_BUSYBOX ?= 0
 QEMU_SMP ?= 4
+QEMU_MEM ?= 384M
 
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
@@ -407,7 +408,7 @@ $(BUILD_DIR)/%.o: %.S $(CFLAGS_STAMP) | _reset_count
 # ============================================================
 
 # Common QEMU flags
-QEMU_FLAGS := -machine $(QEMU_MACHINE) -m 256M -smp $(QEMU_SMP)
+QEMU_FLAGS := -machine $(QEMU_MACHINE) -m $(QEMU_MEM) -smp $(QEMU_SMP)
 ifneq ($(QEMU_ACCEL),)
 QEMU_FLAGS += -accel $(QEMU_ACCEL)
 endif
@@ -579,7 +580,7 @@ run:
 
 run-direct: $(RUN_DEPS) scripts/run-qemu-session.sh
 	@$(MAKE) --no-print-directory check-disk
-	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP)"
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), $(QEMU_MEM), $(QEMU_SMP) SMP)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
 ifneq ($(strip $(QEMU_STDIN)),)
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
@@ -622,7 +623,7 @@ run-e1000:
 
 run-e1000-direct: $(RUN_DEPS) scripts/run-qemu-session.sh
 	@$(MAKE) --no-print-directory check-disk
-	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP, e1000)"
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), $(QEMU_MEM), $(QEMU_SMP) SMP, e1000)"
 ifeq ($(QEMU_FILTER_UEFI_NOISE),1)
 ifneq ($(strip $(QEMU_STDIN)),)
 	$(Q)RUN_ID="$(RUN_ID)" SESSION_KIND=run SESSION_TIMEOUT="$(RUN_TIMEOUT)" \
@@ -659,10 +660,10 @@ iso: $(KERNEL) initramfs
 # Run from ISO
 run-iso: iso
 	@echo "  QEMU    $(ARCH) (ISO boot)"
-	$(Q)$(QEMU) -cdrom $(ISO) -m 256M $(QEMU_EXTRA)
+	$(Q)$(QEMU) -cdrom $(ISO) -m $(QEMU_MEM) $(QEMU_EXTRA)
 
 debug: $(RUN_DEPS)
-	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), 256M, $(QEMU_SMP) SMP, GDB :1234)"
+	@echo "  QEMU    $(ARCH) ($(QEMU_MACHINE), $(QEMU_MEM), $(QEMU_SMP) SMP, GDB :1234)"
 	@echo "  In another terminal: gdb $(KERNEL) -ex 'target remote localhost:1234'"
 	$(Q)$(QEMU) $(QEMU_RUN_FLAGS) -s -S $(QEMU_STDIN)
 
@@ -687,7 +688,7 @@ distclean: clean-all
 
 # Prepare UEFI firmware + Limine boot image
 uefi: $(KERNEL) initramfs
-	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) QEMU_SMP=$(QEMU_SMP) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) \
+	$(Q)UEFI_CODE_SRC=$(UEFI_CODE_SRC) UEFI_VARS_SRC=$(UEFI_VARS_SRC) QEMU_SMP=$(QEMU_SMP) QEMU_MEM=$(QEMU_MEM) UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) \
 		QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) $(KAIROS_CMD) image uefi
 
 # Create a disk image with ext2 filesystem
