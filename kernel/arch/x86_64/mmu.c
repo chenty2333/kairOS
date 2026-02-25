@@ -109,8 +109,8 @@ void arch_mmu_init(const struct boot_info *bi) {
             continue;
         if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + e->base, e->base,
                        e->length, PTE_READ | PTE_WRITE | PTE_GLOBAL) < 0) {
-            pr_warn("MMU: HHDM map failed (base=%p len=%p)\n",
-                    (void *)e->base, (void *)e->length);
+            panic("mmu: HHDM map failed (base=%p len=%p)",
+                  (void *)e->base, (void *)e->length);
         }
     }
 
@@ -126,9 +126,12 @@ void arch_mmu_init(const struct boot_info *bi) {
         for (int i = 0; i < plat->num_early_mmio; i++) {
             paddr_t base = plat->early_mmio[i].base;
             size_t  size = plat->early_mmio[i].size;
-            mmu_map_region(kernel_pgdir, bi->hhdm_offset + base,
-                           base, size,
-                           PTE_READ | PTE_WRITE | PTE_GLOBAL);
+            if (mmu_map_region(kernel_pgdir, bi->hhdm_offset + base,
+                               base, size,
+                               PTE_READ | PTE_WRITE | PTE_GLOBAL) < 0) {
+                panic("mmu: MMIO map failed (base=%p len=%zu)",
+                      (void *)base, size);
+            }
         }
     }
 

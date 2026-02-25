@@ -1192,6 +1192,13 @@ void pmm_init_from_memmap(const struct boot_info *bi) {
         }
     }
 
+    if (mem_start == 0 && total_pages > 0) {
+        page_array[0].flags |= PG_RESERVED;
+#if CONFIG_PMM_DEBUG
+        page_array[0].dbg_state = PMM_DBG_RESERVED;
+#endif
+    }
+
     num_free_pages = 0;
     size_t run_start = (size_t)-1;
     for (size_t pfn = 0; pfn <= total_pages; pfn++) {

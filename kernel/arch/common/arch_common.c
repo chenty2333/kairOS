@@ -40,13 +40,17 @@ int arch_start_cpu(int cpu, unsigned long start_addr, unsigned long opaque) {
     }
 
     struct limine_mp_info *info = (struct limine_mp_info *)bi->cpus[cpu].mp_info;
+#if defined(ARCH_aarch64)
+    (void)info;
+    return arch_start_cpu_fallback(cpu, start_addr, opaque, bi);
+#else
     if (!info) {
         return arch_start_cpu_fallback(cpu, start_addr, opaque, bi);
     }
-
     info->extra_argument = opaque;
     info->goto_address = (limine_goto_address)start_addr;
     return 0;
+#endif
 }
 
 __attribute__((weak))

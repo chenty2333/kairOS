@@ -21,6 +21,8 @@ static inline int arch_cpu_id(void) {
     return (int)id;
 }
 
+void aarch64_early_console_set_ready(bool ready);
+
 struct trap_frame {
     uint64_t regs[31];
     uint64_t sp;

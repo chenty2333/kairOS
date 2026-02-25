@@ -2,7 +2,9 @@
  * kernel/arch/x86_64/apic.c - Local APIC + apic_ops
  */
 
+#include <kairos/arch.h>
 #include <kairos/mm.h>
+#include <kairos/boot.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/types.h>
@@ -66,10 +68,17 @@ void lapic_timer_init(uint32_t hz)
 extern void ioapic_init(void);
 extern void ioapic_route_irq(int irq, int vector, int cpu, bool masked);
 
+static bool ioapic_inited;
+
 static void apic_init_ops(const struct platform_desc *plat)
 {
     (void)plat;
-    ioapic_init();
+    const struct boot_info *bi = boot_info_get();
+    int bsp = bi ? (int)bi->bsp_cpu_id : 0;
+    if (!ioapic_inited && arch_cpu_id() == bsp) {
+        ioapic_init();
+        ioapic_inited = true;
+    }
     lapic_init();
 }
 

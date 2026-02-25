@@ -16,15 +16,32 @@
 #define PL011_FR_TXFF (1 << 5)
 #define PL011_FR_RXFE (1 << 4)
 
+static bool early_console_ready;
+
+void aarch64_early_console_set_ready(bool ready) {
+    early_console_ready = ready;
+}
+
+static inline volatile uint32_t *pl011_regs(void) {
+    const struct boot_info *bi = boot_info_get();
+    if (!early_console_ready || !bi || !bi->hhdm_offset)
+        return NULL;
+    return (volatile uint32_t *)(uintptr_t)(bi->hhdm_offset + PL011_BASE);
+}
+
 static inline void pl011_putc(char c) {
-    volatile uint32_t *uart = (volatile uint32_t *)phys_to_virt(PL011_BASE);
+    volatile uint32_t *uart = pl011_regs();
+    if (!uart)
+        return;
     while (uart[PL011_FR / 4] & PL011_FR_TXFF)
         ;
     uart[PL011_DR / 4] = (uint32_t)c;
 }
 
 static inline int pl011_getc_nb(void) {
-    volatile uint32_t *uart = (volatile uint32_t *)phys_to_virt(PL011_BASE);
+    volatile uint32_t *uart = pl011_regs();
+    if (!uart)
+        return -1;
     if (uart[PL011_FR / 4] & PL011_FR_RXFE)
         return -1;
     return (int)(uart[PL011_DR / 4] & 0xffU);

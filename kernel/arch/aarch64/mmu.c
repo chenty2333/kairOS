@@ -300,6 +300,7 @@ void arch_mmu_init(const struct boot_info *bi) {
         :: "r"(mair), "r"(tcr), "r"(kernel_pgdir)
         : "memory");
 
+    aarch64_early_console_set_ready(true);
     pr_info("MMU: AArch64 paging enabled (HHDM=%p)\n",
             (void *)bi->hhdm_offset);
 }

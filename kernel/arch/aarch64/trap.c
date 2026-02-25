@@ -39,6 +39,7 @@ static void handle_exception(struct trap_frame *tf) {
     uint64_t esr = tf->esr;
     uint64_t ec = (esr >> 26) & 0x3f;
     bool from_user = aarch64_from_user(tf);
+    bool user_fault = false;
 
     /* SVC (syscall) */
     if (ec == 0x15) {
@@ -56,7 +57,8 @@ static void handle_exception(struct trap_frame *tf) {
     /* Data/Instruction abort */
     if (ec == 0x20 || ec == 0x21 || ec == 0x24 || ec == 0x25) {
         struct process *cur = proc_current();
-        if (from_user && cur && cur->mm) {
+        if (cur && cur->mm && tf->far >= USER_SPACE_START &&
+            tf->far < USER_SPACE_END) {
             uint32_t f = 0;
             if (ec == 0x24 || ec == 0x25) {
                 /* Data abort: WnR (bit 6) distinguishes write vs read */
@@ -66,6 +68,7 @@ static void handle_exception(struct trap_frame *tf) {
             }
             if (mm_handle_fault(cur->mm, tf->far, f) == 0)
                 return;
+            user_fault = true;
         }
 
         /* Check exception table for kernel faults */
@@ -76,12 +79,17 @@ static void handle_exception(struct trap_frame *tf) {
                 return;
             }
         }
+
     }
 
-    if (from_user) {
-        signal_send(proc_current()->pid, SIGSEGV);
-        signal_deliver_pending();
-        return;
+    if (from_user || user_fault) {
+        struct process *curr = proc_current();
+        if (curr) {
+            signal_send(curr->pid, SIGSEGV);
+            signal_deliver_pending();
+            return;
+        }
+        panic("AArch64 user fault without current process");
     }
 
     uint64_t tpidr_el1 = 0, spsel = 0;

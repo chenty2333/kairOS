@@ -165,7 +165,14 @@ int arch_start_cpu_fallback(int cpu, unsigned long start_addr,
         }
         psci_rc = alt_rc;
     }
-    int norm_rc = psci_request_accepted(psci_rc) ? 0 : (int)psci_rc;
+    int norm_rc;
+    if (psci_rc == PSCI_RET_SUCCESS || psci_rc == PSCI_RET_ON_PENDING) {
+        norm_rc = 0;
+    } else if (psci_rc == PSCI_RET_ALREADY_ON) {
+        norm_rc = -EALREADY;
+    } else {
+        norm_rc = (int)psci_rc;
+    }
 
     if (!psci_fallback_logged) {
         psci_fallback_logged = true;

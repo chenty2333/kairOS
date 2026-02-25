@@ -34,6 +34,10 @@ void secondary_cpu_main(unsigned long cpu_id) {
     paddr_t kernel_pgdir = arch_mmu_get_kernel_pgdir();
     if (kernel_pgdir && arch_mmu_current() != kernel_pgdir)
         arch_mmu_switch(kernel_pgdir);
+#elif defined(ARCH_x86_64)
+    paddr_t kernel_pgdir = arch_mmu_get_kernel_pgdir();
+    if (kernel_pgdir && arch_mmu_current() != kernel_pgdir)
+        arch_mmu_switch(kernel_pgdir);
 #endif
     sched_init_cpu((int)cpu_id);
     sched_cpu_online((int)cpu_id);
