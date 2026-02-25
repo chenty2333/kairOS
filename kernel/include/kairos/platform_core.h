@@ -99,15 +99,34 @@ int platform_irq_domain_alloc_linear(const char *name,
                                      const struct irqchip_ops *chip,
                                      uint32_t hwirq_base, uint32_t nr_irqs,
                                      uint32_t *virq_base_out);
+int platform_irq_domain_setup_cascade(const char *name,
+                                      const struct irqchip_ops *chip,
+                                      uint32_t hwirq_base,
+                                      uint32_t nr_irqs, int parent_irq,
+                                      irq_handler_event_fn handler, void *arg,
+                                      uint32_t flags,
+                                      uint32_t *virq_base_out);
 int platform_irq_domain_alloc_linear_fwnode(const char *name,
                                             const struct irqchip_ops *chip,
                                             uint32_t fwnode,
                                             uint32_t hwirq_base,
                                             uint32_t nr_irqs,
                                             uint32_t *virq_base_out);
+int platform_irq_domain_setup_cascade_fwnode(const char *name,
+                                             const struct irqchip_ops *chip,
+                                             uint32_t fwnode,
+                                             uint32_t hwirq_base,
+                                             uint32_t nr_irqs,
+                                             int parent_irq,
+                                             irq_handler_event_fn handler,
+                                             void *arg, uint32_t flags,
+                                             uint32_t *virq_base_out);
 int platform_irq_domain_bind_fwnode(const struct irqchip_ops *chip,
                                     uint32_t hwirq_base, uint32_t nr_irqs,
                                     uint32_t fwnode);
+int platform_irq_domain_set_cascade(uint32_t child_virq, int parent_irq,
+                                    irq_handler_event_fn handler, void *arg,
+                                    uint32_t flags);
 int platform_irq_domain_set_cascade_fwnode(uint32_t fwnode, int parent_irq,
                                            irq_handler_event_fn handler,
                                            void *arg, uint32_t flags);

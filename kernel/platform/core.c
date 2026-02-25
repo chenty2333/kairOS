@@ -371,6 +371,50 @@ static struct irq_domain *irq_domain_find_locked_by_virq(uint32_t virq)
     return NULL;
 }
 
+static int irq_domain_set_cascade_locked(struct irq_domain *dom, int parent_irq,
+                                         irq_handler_event_fn handler,
+                                         void *arg)
+{
+    if (!dom || !handler)
+        return -EINVAL;
+    if (parent_irq < 0 || parent_irq >= IRQCHIP_MAX_IRQS)
+        return -EINVAL;
+
+    if (dom->parent_irq >= 0) {
+        bool same = dom->parent_irq == parent_irq &&
+                    dom->cascade_handler == handler &&
+                    dom->cascade_arg == arg;
+        return same ? 0 : -EEXIST;
+    }
+
+    uint64_t virq_end = (uint64_t)dom->virq_base + dom->nr_irqs;
+    if ((uint64_t)parent_irq >= dom->virq_base &&
+        (uint64_t)parent_irq < virq_end)
+        return -EINVAL;
+
+    dom->parent_irq = parent_irq;
+    dom->cascade_enable_count = 0;
+    dom->cascade_handler = handler;
+    dom->cascade_arg = arg;
+    return 0;
+}
+
+static void irq_domain_clear_cascade_locked(struct irq_domain *dom,
+                                            int parent_irq,
+                                            irq_handler_event_fn handler,
+                                            void *arg)
+{
+    if (!dom)
+        return;
+    if (dom->parent_irq != parent_irq || dom->cascade_handler != handler ||
+        dom->cascade_arg != arg)
+        return;
+    dom->parent_irq = -1;
+    dom->cascade_enable_count = 0;
+    dom->cascade_handler = NULL;
+    dom->cascade_arg = NULL;
+}
+
 static int irq_domain_cascade_ref_update(uint32_t virq, bool enable,
                                          int *parent_irq_out)
 {
@@ -536,6 +580,41 @@ int platform_irq_domain_alloc_linear_fwnode(const char *name,
     return 0;
 }
 
+int platform_irq_domain_setup_cascade(const char *name,
+                                      const struct irqchip_ops *chip,
+                                      uint32_t hwirq_base,
+                                      uint32_t nr_irqs, int parent_irq,
+                                      irq_handler_event_fn handler, void *arg,
+                                      uint32_t flags,
+                                      uint32_t *virq_base_out)
+{
+    int ret = platform_irq_domain_alloc_linear(name, chip, hwirq_base, nr_irqs,
+                                               virq_base_out);
+    if (ret < 0)
+        return ret;
+    return platform_irq_domain_set_cascade(*virq_base_out, parent_irq, handler,
+                                           arg, flags);
+}
+
+int platform_irq_domain_setup_cascade_fwnode(const char *name,
+                                             const struct irqchip_ops *chip,
+                                             uint32_t fwnode,
+                                             uint32_t hwirq_base,
+                                             uint32_t nr_irqs,
+                                             int parent_irq,
+                                             irq_handler_event_fn handler,
+                                             void *arg, uint32_t flags,
+                                             uint32_t *virq_base_out)
+{
+    int ret = platform_irq_domain_alloc_linear_fwnode(name, chip, fwnode,
+                                                      hwirq_base, nr_irqs,
+                                                      virq_base_out);
+    if (ret < 0)
+        return ret;
+    return platform_irq_domain_set_cascade(*virq_base_out, parent_irq, handler,
+                                           arg, flags);
+}
+
 int platform_irq_domain_bind_fwnode(const struct irqchip_ops *chip,
                                     uint32_t hwirq_base, uint32_t nr_irqs,
                                     uint32_t fwnode)
@@ -600,7 +679,7 @@ int platform_irq_domain_set_cascade_fwnode(uint32_t fwnode, int parent_irq,
                                            irq_handler_event_fn handler,
                                            void *arg, uint32_t flags)
 {
-    if (!fwnode || !handler || parent_irq < 0 || parent_irq >= IRQCHIP_MAX_IRQS)
+    if (!fwnode)
         return -EINVAL;
 
     platform_irq_table_init();
@@ -612,41 +691,44 @@ int platform_irq_domain_set_cascade_fwnode(uint32_t fwnode, int parent_irq,
         spin_unlock_irqrestore(&irq_domain_lock, irq_state);
         return -ENOENT;
     }
+    uint32_t child_virq = dom->virq_base;
+    spin_unlock_irqrestore(&irq_domain_lock, irq_state);
 
-    if (dom->parent_irq >= 0) {
-        bool same = dom->parent_irq == parent_irq &&
-                    dom->cascade_handler == handler &&
-                    dom->cascade_arg == arg;
-        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
-        return same ? 0 : -EEXIST;
-    }
-    uint64_t virq_end = (uint64_t)dom->virq_base + dom->nr_irqs;
-    if ((uint64_t)parent_irq >= dom->virq_base &&
-        (uint64_t)parent_irq < virq_end) {
-        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+    return platform_irq_domain_set_cascade(child_virq, parent_irq, handler,
+                                           arg, flags);
+}
+
+int platform_irq_domain_set_cascade(uint32_t child_virq, int parent_irq,
+                                    irq_handler_event_fn handler, void *arg,
+                                    uint32_t flags)
+{
+    if (!handler || parent_irq < 0 || parent_irq >= IRQCHIP_MAX_IRQS)
         return -EINVAL;
-    }
 
-    dom->parent_irq = parent_irq;
-    dom->cascade_enable_count = 0;
-    dom->cascade_handler = handler;
-    dom->cascade_arg = arg;
+    platform_irq_table_init();
+
+    bool irq_state;
+    spin_lock_irqsave(&irq_domain_lock, &irq_state);
+    struct irq_domain *dom = irq_domain_find_locked_by_virq(child_virq);
+    if (!dom) {
+        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+        return -ENOENT;
+    }
+    int ret = irq_domain_set_cascade_locked(dom, parent_irq, handler, arg);
+    if (ret < 0) {
+        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+        return ret;
+    }
     spin_unlock_irqrestore(&irq_domain_lock, irq_state);
 
     uint32_t action_flags = IRQ_FLAG_SHARED | IRQ_FLAG_NO_AUTO_ENABLE;
     action_flags |= (flags & (IRQ_FLAG_TRIGGER_MASK | IRQ_FLAG_DEFERRED));
-    int ret = platform_irq_register_action(parent_irq, NULL,
-                                           irq_domain_cascade_action, dom,
-                                           action_flags);
+    ret = platform_irq_register_action(parent_irq, NULL,
+                                       irq_domain_cascade_action, dom,
+                                       action_flags);
     if (ret < 0) {
         spin_lock_irqsave(&irq_domain_lock, &irq_state);
-        if (dom->parent_irq == parent_irq &&
-            dom->cascade_handler == handler && dom->cascade_arg == arg) {
-            dom->parent_irq = -1;
-            dom->cascade_enable_count = 0;
-            dom->cascade_handler = NULL;
-            dom->cascade_arg = NULL;
-        }
+        irq_domain_clear_cascade_locked(dom, parent_irq, handler, arg);
         spin_unlock_irqrestore(&irq_domain_lock, irq_state);
         return ret;
     }
