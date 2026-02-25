@@ -10,7 +10,6 @@
 #define PLATFORM_MAX_EARLY_MMIO 8
 #define PLATFORM_COMPAT_MAX     64
 #define PLATFORM_NAME_MAX       32
-#define IRQ_DOMAIN_MAX          8
 #define IRQ_DOMAIN_AUTO_VIRQ    UINT32_MAX
 
 struct early_mmio_region {
@@ -82,7 +81,9 @@ const struct platform_desc *platform_get(void);
 /* Unified IRQ handler table */
 int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,
                              uint32_t flags);
+int platform_irq_unregister_ex(int irq, irq_handler_event_fn handler, void *arg);
 void platform_irq_register(int irq, irq_handler_fn handler, void *arg);
+int platform_irq_unregister(int irq, irq_handler_fn handler, void *arg);
 void platform_irq_set_type(int irq, uint32_t flags);
 void platform_irq_set_affinity(int irq, uint32_t cpu_mask);
 int platform_irq_domain_add_linear(const char *name,
@@ -130,6 +131,10 @@ int platform_irq_domain_set_cascade(uint32_t child_virq, int parent_irq,
 int platform_irq_domain_set_cascade_fwnode(uint32_t fwnode, int parent_irq,
                                            irq_handler_event_fn handler,
                                            void *arg, uint32_t flags);
+int platform_irq_domain_unset_cascade(uint32_t child_virq);
+int platform_irq_domain_unset_cascade_fwnode(uint32_t fwnode);
+int platform_irq_domain_remove(uint32_t child_virq);
+int platform_irq_domain_remove_fwnode(uint32_t fwnode);
 int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq);
 int platform_irq_domain_map_fwnode(uint32_t fwnode, uint32_t hwirq);
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,

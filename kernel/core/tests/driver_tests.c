@@ -442,6 +442,42 @@ static void test_irq_shared_actions(void) {
     arch_irq_disable_nr(irq);
 }
 
+static void test_irq_unregister_actions(void) {
+    const int irq = 903;
+    irq_shared_hits_a = 0;
+    irq_shared_hits_b = 0;
+
+    arch_irq_register_ex(irq, test_irq_shared_handler_a, NULL,
+                         IRQ_FLAG_SHARED | IRQ_FLAG_TRIGGER_LEVEL |
+                             IRQ_FLAG_NO_AUTO_ENABLE | IRQ_FLAG_NO_CHIP);
+    arch_irq_register_ex(irq, test_irq_shared_handler_b, NULL,
+                         IRQ_FLAG_SHARED | IRQ_FLAG_TRIGGER_LEVEL |
+                             IRQ_FLAG_NO_AUTO_ENABLE | IRQ_FLAG_NO_CHIP);
+    arch_irq_enable_nr(irq);
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) == 1 &&
+                   __atomic_load_n(&irq_shared_hits_b, __ATOMIC_RELAXED) == 1,
+               "irq unregister initial dispatch");
+
+    int ret = platform_irq_unregister_ex(irq, test_irq_shared_handler_a, NULL);
+    test_check(ret == 0, "irq unregister first handler");
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) == 1 &&
+                   __atomic_load_n(&irq_shared_hits_b, __ATOMIC_RELAXED) == 2,
+               "irq unregister keeps remaining handler");
+
+    ret = platform_irq_unregister_ex(irq, test_irq_shared_handler_a, NULL);
+    test_check(ret == -ENOENT, "irq unregister missing handler");
+
+    ret = platform_irq_unregister_ex(irq, test_irq_shared_handler_b, NULL);
+    test_check(ret == 0, "irq unregister second handler");
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_shared_hits_b, __ATOMIC_RELAXED) == 2,
+               "irq unregister all handlers removed");
+    arch_irq_disable_nr(irq);
+}
+
 static void test_irq_enable_disable_gate(void) {
     const int irq = 902;
     irq_gate_hits = 0;
@@ -823,6 +859,116 @@ static void test_irq_domain_cascade_generic(void) {
                "irq cascade generic parent disabled on last child");
 }
 
+static void test_irq_domain_lifecycle(void) {
+    memset(&irq_parent_mock_state, 0, sizeof(irq_parent_mock_state));
+    memset(&irq_child_mock_state, 0, sizeof(irq_child_mock_state));
+    irq_parent_mock_state.last_enable_irq = -1;
+    irq_parent_mock_state.last_disable_irq = -1;
+    irq_parent_mock_state.last_type_irq = -1;
+    irq_parent_mock_state.last_affinity_irq = -1;
+    irq_child_mock_state.last_enable_irq = -1;
+    irq_child_mock_state.last_disable_irq = -1;
+    irq_child_mock_state.last_type_irq = -1;
+    irq_child_mock_state.last_affinity_irq = -1;
+
+    uint32_t parent_virq_base = 0;
+    uint32_t child_virq_base = 0;
+    int ret = platform_irq_domain_alloc_linear("test-lifecycle-parent",
+                                               &test_irq_parent_mock_ops, 500,
+                                               8, &parent_virq_base);
+    test_check(ret == 0, "irq lifecycle parent domain alloc");
+    if (ret < 0)
+        return;
+
+    int parent_irq = platform_irq_domain_map(&test_irq_parent_mock_ops, 503);
+    test_check(parent_irq >= 0, "irq lifecycle parent virq");
+    if (parent_irq < 0)
+        return;
+
+    struct test_irq_cascade_ctx ctx = {
+        .fwnode = 0,
+        .chip = &test_irq_child_mock_ops,
+        .hwirq = 703,
+    };
+    ret = platform_irq_domain_setup_cascade("test-lifecycle-child",
+                                            &test_irq_child_mock_ops, 700, 8,
+                                            parent_irq,
+                                            test_irq_cascade_parent_handler,
+                                            &ctx, IRQ_FLAG_TRIGGER_LEVEL,
+                                            &child_virq_base);
+    test_check(ret == 0, "irq lifecycle child domain setup");
+    if (ret < 0)
+        return;
+
+    int child_irq = platform_irq_domain_map(&test_irq_child_mock_ops, 703);
+    test_check(child_irq >= 0, "irq lifecycle child virq");
+    if (child_irq < 0)
+        return;
+
+    arch_irq_register_ex(child_irq, test_irq_cascade_handler, NULL,
+                         IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_enable_nr(child_irq);
+    test_check(irq_parent_mock_state.enable_hits == 1 &&
+                   irq_parent_mock_state.last_enable_irq == 503,
+               "irq lifecycle parent enabled");
+    arch_irq_disable_nr(child_irq);
+    test_check(irq_parent_mock_state.disable_hits == 1 &&
+                   irq_parent_mock_state.last_disable_irq == 503,
+               "irq lifecycle parent disabled");
+
+    ret = platform_irq_domain_unset_cascade(child_virq_base);
+    test_check(ret == 0, "irq lifecycle unset cascade");
+    if (ret < 0)
+        return;
+
+    arch_irq_enable_nr(child_irq);
+    test_check(irq_child_mock_state.enable_hits >= 2 &&
+                   irq_parent_mock_state.enable_hits == 1,
+               "irq lifecycle child enable without parent");
+    arch_irq_disable_nr(child_irq);
+    test_check(irq_child_mock_state.disable_hits >= 2 &&
+                   irq_parent_mock_state.disable_hits == 1,
+               "irq lifecycle child disable without parent");
+
+    ret = platform_irq_domain_remove(child_virq_base);
+    test_check(ret == -EBUSY, "irq lifecycle remove busy with handler");
+
+    ret = platform_irq_unregister_ex(child_irq, test_irq_cascade_handler, NULL);
+    test_check(ret == 0, "irq lifecycle unregister child handler");
+    ret = platform_irq_domain_remove(child_virq_base);
+    test_check(ret == 0, "irq lifecycle remove child domain");
+    test_check(platform_irq_domain_map(&test_irq_child_mock_ops, 703) == -ENOENT,
+               "irq lifecycle child mapping removed");
+
+    ret = platform_irq_domain_remove(parent_virq_base);
+    test_check(ret == 0, "irq lifecycle remove parent domain");
+    test_check(platform_irq_domain_map(&test_irq_parent_mock_ops, 503) == -ENOENT,
+               "irq lifecycle parent mapping removed");
+}
+
+static void test_irq_domain_dynamic_capacity(void) {
+    enum { TEST_DYNAMIC_DOMAINS = 12 };
+    uint32_t virq_bases[TEST_DYNAMIC_DOMAINS] = { 0 };
+
+    for (int i = 0; i < TEST_DYNAMIC_DOMAINS; i++) {
+        uint32_t hwirq_base = 820 + (uint32_t)(i * 2);
+        int ret = platform_irq_domain_alloc_linear("test-dynamic-domain",
+                                                   &test_irq_mock_ops,
+                                                   hwirq_base, 1,
+                                                   &virq_bases[i]);
+        test_check(ret == 0, "irq dynamic domain alloc");
+        if (ret < 0)
+            return;
+        int mapped = platform_irq_domain_map(&test_irq_mock_ops, hwirq_base);
+        test_check(mapped == (int)virq_bases[i], "irq dynamic domain map");
+    }
+
+    for (int i = TEST_DYNAMIC_DOMAINS - 1; i >= 0; i--) {
+        int ret = platform_irq_domain_remove(virq_bases[i]);
+        test_check(ret == 0, "irq dynamic domain remove");
+    }
+}
+
 #if CONFIG_KERNEL_TESTS
 static void test_virtio_net_rx_to_lwip_bridge(void) {
     if (!lwip_netif_is_ready()) {
@@ -888,10 +1034,13 @@ int run_driver_tests(void) {
     test_dma_coherent_alloc_free();
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
+    test_irq_unregister_actions();
     test_irq_enable_disable_gate();
     test_irq_domain_programming();
     test_irq_domain_cascade();
     test_irq_domain_cascade_generic();
+    test_irq_domain_lifecycle();
+    test_irq_domain_dynamic_capacity();
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();
 #endif
