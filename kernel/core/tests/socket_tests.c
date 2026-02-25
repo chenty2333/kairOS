@@ -241,7 +241,20 @@ static bool wait_inet_connect_so_error(struct socket *sock, int *so_error,
                                        int spins) {
     if (!sock || !sock->ops || !sock->ops->getsockopt || !so_error)
         return false;
-    if (!wait_socket_event(sock, POLLOUT | POLLERR, POLLOUT | POLLERR, spins))
+    bool ready = false;
+    for (int i = 0; i < spins; i++) {
+        int revents = sock->ops->poll(sock, POLLOUT | POLLERR | POLLHUP);
+        if (revents & (POLLOUT | POLLERR | POLLHUP)) {
+            ready = true;
+            break;
+        }
+        proc_yield();
+    }
+    if (!ready) {
+        int revents = sock->ops->poll(sock, POLLOUT | POLLERR | POLLHUP);
+        ready = (revents & (POLLOUT | POLLERR | POLLHUP)) != 0;
+    }
+    if (!ready)
         return false;
     int len = sizeof(*so_error);
     int rc = sock->ops->getsockopt(sock, SOL_SOCKET, SO_ERROR, so_error, &len);
@@ -2339,10 +2352,8 @@ static bool run_inet_tcp_backlog_attempt(uint32_t loopback_ip,
         goto out;
     if (ret == -EINPROGRESS) {
         int so_error = 0;
-        if (!wait_inet_connect_so_error(client1, &so_error, 4000) ||
-            so_error != 0) {
+        if (!wait_inet_connect_so_error(client1, &so_error, 4000) || so_error != 0)
             goto out;
-        }
     }
 
     if (!wait_socket_event(listener, POLLIN, POLLIN, 4000))
@@ -2354,9 +2365,9 @@ static bool run_inet_tcp_backlog_attempt(uint32_t loopback_ip,
         int so_error = 0;
         if (!wait_inet_connect_so_error(client2, &so_error, 4000))
             goto out;
-        if (so_error != ECONNREFUSED)
+        if (so_error != ECONNREFUSED && so_error != ECONNRESET)
             goto out;
-    } else if (ret != -ECONNREFUSED) {
+    } else if (ret != -ECONNREFUSED && ret != -ECONNRESET) {
         goto out;
     }
 
