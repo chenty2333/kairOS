@@ -19,6 +19,7 @@ All three architectures share the same path:
    - aarch64 PSCI fallback retries once with alternate conduit (`smc`/`hvc`) when initial `CPU_ON` returns `NOT_SUPPORTED`
    - aarch64 treats PSCI `ALREADY_ON` / `ON_PENDING` as accepted start request (normalized to success for SMP bring-up flow)
    - aarch64 keeps a low-VA identity alias for kernel image so PSCI-started AP can safely enable MMU while executing from PA
+   - aarch64 Limine MP path now synchronizes AP early EL1 register context (`MAIR_EL1/TCR_EL1/TTBR0_EL1/TTBR1_EL1/SCTLR_EL1`) from BSP snapshot before entering C, preventing AP-side register drift during bring-up
    - failed AP bring-up is logged explicitly as `SMP: cpuX start failed rc=<errno>`
    - when an AP start request succeeds but CPU never reaches `secondary_cpu_main()`, kernel logs `SMP: cpuX did not reach online state` plus arch debug marker
    - SMP summary now reports discovered topology total (`SMP: online/total CPUs active`) and emits `online shortfall` when APs fail to come online

@@ -15,6 +15,12 @@
 .extern aarch64_mp_info_raw_ptrs
 .extern aarch64_mp_info_virt_ptrs
 .extern aarch64_mp_info_ptr_count
+.extern aarch64_secondary_tcr_el1
+.extern aarch64_secondary_mair_el1
+.extern aarch64_secondary_ttbr0_el1
+.extern aarch64_secondary_ttbr1_el1
+.extern aarch64_secondary_sctlr_el1
+.extern aarch64_secondary_boot_ready
 
 #define PSCI_CTX_CPU_ID   8
 #define PSCI_CTX_TCR      16
@@ -63,6 +69,13 @@
     mov x0, #1
     msr spsel, x0
 
+    msr daifset, #0xf
+
+    mrs x0, sctlr_el1
+    bic x0, x0, #(1 << 1)
+    msr sctlr_el1, x0
+    isb
+
     /* CPACR_EL1: FPEN=0b11 — no FP/SIMD traps */
     mov x0, #(3 << 20)
     msr cpacr_el1, x0
@@ -103,6 +116,37 @@ _secondary_start:
     mov x19, x0
     DROP_TO_EL1
     INIT_SYSREGS
+
+    adrp x2, aarch64_secondary_boot_ready
+    add  x2, x2, :lo12:aarch64_secondary_boot_ready
+    ldr  w3, [x2]
+    cbz  w3, 7f
+
+    adrp x2, aarch64_secondary_mair_el1
+    add  x2, x2, :lo12:aarch64_secondary_mair_el1
+    ldr  x3, [x2]
+    adrp x4, aarch64_secondary_tcr_el1
+    add  x4, x4, :lo12:aarch64_secondary_tcr_el1
+    ldr  x4, [x4]
+    adrp x5, aarch64_secondary_ttbr0_el1
+    add  x5, x5, :lo12:aarch64_secondary_ttbr0_el1
+    ldr  x5, [x5]
+    adrp x6, aarch64_secondary_ttbr1_el1
+    add  x6, x6, :lo12:aarch64_secondary_ttbr1_el1
+    ldr  x6, [x6]
+    adrp x7, aarch64_secondary_sctlr_el1
+    add  x7, x7, :lo12:aarch64_secondary_sctlr_el1
+    ldr  x7, [x7]
+
+    msr mair_el1, x3
+    msr tcr_el1, x4
+    msr ttbr0_el1, x5
+    msr ttbr1_el1, x6
+    msr sctlr_el1, x7
+    tlbi vmalle1
+    dsb ish
+    isb
+7:
 
     /* Small x0 values are treated as direct cpu_id context. */
     mov x1, x19

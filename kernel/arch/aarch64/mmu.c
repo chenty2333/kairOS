@@ -8,6 +8,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/boot.h>
+#include <kairos/io.h>
 #include <kairos/mm.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
@@ -47,6 +48,12 @@
 #define MT_NORMAL_WB     4
 
 static paddr_t kernel_pgdir;
+volatile uint64_t aarch64_secondary_tcr_el1;
+volatile uint64_t aarch64_secondary_mair_el1;
+volatile uint64_t aarch64_secondary_ttbr0_el1;
+volatile uint64_t aarch64_secondary_ttbr1_el1;
+volatile uint64_t aarch64_secondary_sctlr_el1;
+volatile uint32_t aarch64_secondary_boot_ready;
 extern char _kernel_start[], _kernel_end[];
 
 /* --- mmu_ops callbacks for common walker --- */
@@ -299,6 +306,19 @@ void arch_mmu_init(const struct boot_info *bi) {
         "isb\n"
         :: "r"(mair), "r"(tcr), "r"(kernel_pgdir)
         : "memory");
+
+    uint64_t sctlr = 0;
+    __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr &= ~(1ULL << 1);
+    __asm__ __volatile__("msr sctlr_el1, %0\nisb\n" :: "r"(sctlr) : "memory");
+
+    aarch64_secondary_tcr_el1 = tcr;
+    aarch64_secondary_mair_el1 = mair;
+    aarch64_secondary_ttbr0_el1 = kernel_pgdir;
+    aarch64_secondary_ttbr1_el1 = kernel_pgdir;
+    aarch64_secondary_sctlr_el1 = sctlr;
+    wmb();
+    aarch64_secondary_boot_ready = 1;
 
     aarch64_early_console_set_ready(true);
     pr_info("MMU: AArch64 paging enabled (HHDM=%p)\n",
