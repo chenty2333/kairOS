@@ -371,6 +371,7 @@ static volatile uint32_t irq_shared_hits_a;
 static volatile uint32_t irq_shared_hits_b;
 static volatile uint32_t irq_gate_hits;
 static volatile uint32_t irq_mock_dispatch_hits;
+static volatile uint32_t irq_cascade_hits;
 
 struct irq_mock_state {
     uint32_t enable_hits;
@@ -386,6 +387,8 @@ struct irq_mock_state {
 };
 
 static struct irq_mock_state irq_mock_state;
+static struct irq_mock_state irq_parent_mock_state;
+static struct irq_mock_state irq_child_mock_state;
 
 static void test_irq_shared_handler_a(void *arg __unused,
                                       const struct trap_core_event *ev __unused) {
@@ -405,6 +408,11 @@ static void test_irq_gate_handler(void *arg __unused,
 static void test_irq_mock_handler(void *arg __unused,
                                   const struct trap_core_event *ev __unused) {
     __atomic_add_fetch(&irq_mock_dispatch_hits, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_cascade_handler(void *arg __unused,
+                                     const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_cascade_hits, 1, __ATOMIC_RELAXED);
 }
 
 static void test_irq_shared_actions(void) {
@@ -481,12 +489,87 @@ static int irq_mock_set_affinity(int irq, uint32_t cpu_mask) {
     return 0;
 }
 
+static void irq_parent_mock_enable(int irq) {
+    irq_parent_mock_state.enable_hits++;
+    irq_parent_mock_state.last_enable_irq = irq;
+}
+
+static void irq_parent_mock_disable(int irq) {
+    irq_parent_mock_state.disable_hits++;
+    irq_parent_mock_state.last_disable_irq = irq;
+}
+
+static int irq_parent_mock_set_type(int irq, uint32_t type) {
+    irq_parent_mock_state.set_type_hits++;
+    irq_parent_mock_state.last_type_irq = irq;
+    irq_parent_mock_state.last_type = type;
+    return 0;
+}
+
+static int irq_parent_mock_set_affinity(int irq, uint32_t cpu_mask) {
+    irq_parent_mock_state.set_affinity_hits++;
+    irq_parent_mock_state.last_affinity_irq = irq;
+    irq_parent_mock_state.last_affinity_mask = cpu_mask;
+    return 0;
+}
+
+static void irq_child_mock_enable(int irq) {
+    irq_child_mock_state.enable_hits++;
+    irq_child_mock_state.last_enable_irq = irq;
+}
+
+static void irq_child_mock_disable(int irq) {
+    irq_child_mock_state.disable_hits++;
+    irq_child_mock_state.last_disable_irq = irq;
+}
+
+static int irq_child_mock_set_type(int irq, uint32_t type) {
+    irq_child_mock_state.set_type_hits++;
+    irq_child_mock_state.last_type_irq = irq;
+    irq_child_mock_state.last_type = type;
+    return 0;
+}
+
+static int irq_child_mock_set_affinity(int irq, uint32_t cpu_mask) {
+    irq_child_mock_state.set_affinity_hits++;
+    irq_child_mock_state.last_affinity_irq = irq;
+    irq_child_mock_state.last_affinity_mask = cpu_mask;
+    return 0;
+}
+
 static const struct irqchip_ops test_irq_mock_ops = {
     .enable = irq_mock_enable,
     .disable = irq_mock_disable,
     .set_type = irq_mock_set_type,
     .set_affinity = irq_mock_set_affinity,
 };
+
+static const struct irqchip_ops test_irq_parent_mock_ops = {
+    .enable = irq_parent_mock_enable,
+    .disable = irq_parent_mock_disable,
+    .set_type = irq_parent_mock_set_type,
+    .set_affinity = irq_parent_mock_set_affinity,
+};
+
+static const struct irqchip_ops test_irq_child_mock_ops = {
+    .enable = irq_child_mock_enable,
+    .disable = irq_child_mock_disable,
+    .set_type = irq_child_mock_set_type,
+    .set_affinity = irq_child_mock_set_affinity,
+};
+
+struct test_irq_cascade_ctx {
+    uint32_t fwnode;
+    uint32_t hwirq;
+};
+
+static void test_irq_cascade_parent_handler(void *arg,
+                                            const struct trap_core_event *ev) {
+    struct test_irq_cascade_ctx *ctx = (struct test_irq_cascade_ctx *)arg;
+    if (!ctx)
+        return;
+    platform_irq_dispatch_fwnode_hwirq(ctx->fwnode, ctx->hwirq, ev);
+}
 
 static void test_irq_domain_programming(void) {
     memset(&irq_mock_state, 0, sizeof(irq_mock_state));
@@ -545,6 +628,104 @@ static void test_irq_domain_programming(void) {
     test_check(irq_mock_state.disable_hits == 1 &&
                    irq_mock_state.last_disable_irq == 33,
                "irq chip disable uses hwirq");
+}
+
+static void test_irq_domain_cascade(void) {
+    memset(&irq_parent_mock_state, 0, sizeof(irq_parent_mock_state));
+    memset(&irq_child_mock_state, 0, sizeof(irq_child_mock_state));
+    irq_parent_mock_state.last_enable_irq = -1;
+    irq_parent_mock_state.last_disable_irq = -1;
+    irq_parent_mock_state.last_type_irq = -1;
+    irq_parent_mock_state.last_affinity_irq = -1;
+    irq_child_mock_state.last_enable_irq = -1;
+    irq_child_mock_state.last_disable_irq = -1;
+    irq_child_mock_state.last_type_irq = -1;
+    irq_child_mock_state.last_affinity_irq = -1;
+    irq_cascade_hits = 0;
+
+    const uint32_t parent_fwnode = 0xD00D0020U;
+    const uint32_t child_fwnode = 0xD00D0021U;
+    uint32_t parent_virq_base = 0;
+    uint32_t child_virq_base = 0;
+
+    int ret = platform_irq_domain_alloc_linear_fwnode("test-parent-domain",
+                                                      &test_irq_parent_mock_ops,
+                                                      parent_fwnode, 200, 16,
+                                                      &parent_virq_base);
+    test_check(ret == 0, "irq cascade parent domain alloc");
+    if (ret < 0)
+        return;
+
+    ret = platform_irq_domain_alloc_linear_fwnode("test-child-domain",
+                                                  &test_irq_child_mock_ops,
+                                                  child_fwnode, 0, 16,
+                                                  &child_virq_base);
+    test_check(ret == 0, "irq cascade child domain alloc");
+    if (ret < 0)
+        return;
+
+    int parent_irq = platform_irq_domain_map_fwnode(parent_fwnode, 205);
+    int child_irq0 = platform_irq_domain_map_fwnode(child_fwnode, 3);
+    int child_irq1 = platform_irq_domain_map_fwnode(child_fwnode, 4);
+    test_check(parent_irq >= 0 && child_irq0 >= 0 && child_irq1 >= 0,
+               "irq cascade domain maps");
+    test_check(parent_irq == (int)(parent_virq_base + 5),
+               "irq cascade parent linear map");
+    test_check(child_irq0 == (int)(child_virq_base + 3) &&
+                   child_irq1 == (int)(child_virq_base + 4),
+               "irq cascade child linear map");
+    if (parent_irq < 0 || child_irq0 < 0 || child_irq1 < 0)
+        return;
+
+    struct test_irq_cascade_ctx ctx = {
+        .fwnode = child_fwnode,
+        .hwirq = 3,
+    };
+    ret = platform_irq_domain_set_cascade_fwnode(
+        child_fwnode, parent_irq, test_irq_cascade_parent_handler, &ctx,
+        IRQ_FLAG_TRIGGER_LEVEL);
+    test_check(ret == 0, "irq cascade bind parent irq");
+    if (ret < 0)
+        return;
+
+    arch_irq_register_ex(child_irq0, test_irq_cascade_handler, NULL,
+                         IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_register_ex(child_irq1, test_irq_mock_handler, NULL,
+                         IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_AUTO_ENABLE);
+
+    arch_irq_enable_nr(child_irq0);
+    test_check(irq_child_mock_state.enable_hits == 1 &&
+                   irq_child_mock_state.last_enable_irq == 3,
+               "irq cascade child enable uses child hwirq");
+    test_check(irq_parent_mock_state.enable_hits == 1 &&
+                   irq_parent_mock_state.last_enable_irq == 205,
+               "irq cascade parent enabled on first child");
+
+    platform_irq_dispatch_nr((uint32_t)parent_irq);
+    test_check(__atomic_load_n(&irq_cascade_hits, __ATOMIC_RELAXED) == 1,
+               "irq cascade parent dispatches child");
+
+    arch_irq_enable_nr(child_irq1);
+    test_check(irq_child_mock_state.enable_hits == 2 &&
+                   irq_child_mock_state.last_enable_irq == 4,
+               "irq cascade second child enable");
+    test_check(irq_parent_mock_state.enable_hits == 1,
+               "irq cascade parent enable refcount");
+
+    arch_irq_disable_nr(child_irq0);
+    test_check(irq_child_mock_state.disable_hits == 1 &&
+                   irq_child_mock_state.last_disable_irq == 3,
+               "irq cascade first child disable");
+    test_check(irq_parent_mock_state.disable_hits == 0,
+               "irq cascade parent stays enabled");
+
+    arch_irq_disable_nr(child_irq1);
+    test_check(irq_child_mock_state.disable_hits == 2 &&
+                   irq_child_mock_state.last_disable_irq == 4,
+               "irq cascade second child disable");
+    test_check(irq_parent_mock_state.disable_hits == 1 &&
+                   irq_parent_mock_state.last_disable_irq == 205,
+               "irq cascade parent disabled on last child");
 }
 
 #if CONFIG_KERNEL_TESTS
@@ -614,6 +795,7 @@ int run_driver_tests(void) {
     test_irq_shared_actions();
     test_irq_enable_disable_gate();
     test_irq_domain_programming();
+    test_irq_domain_cascade();
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();
 #endif

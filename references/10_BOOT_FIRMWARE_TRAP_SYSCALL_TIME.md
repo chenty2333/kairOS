@@ -75,6 +75,7 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
   - `irq_domain` now supports auto-allocated virq ranges (`platform_irq_domain_alloc_linear` / `IRQ_DOMAIN_AUTO_VIRQ`) for child/cascaded controllers
   - `irq_domain` now supports firmware-node (`phandle`) bindings and mapping/dispatch (`platform_irq_domain_*_fwnode`) so cascaded controllers can resolve IRQs in per-controller namespaces
+  - cascaded child domains can be chained to a parent virq via `platform_irq_domain_set_cascade_fwnode(...)`; IRQ core wires a shared parent action and tracks child-active refcount to auto-enable/disable the parent line
   - root domain coverage is now board-configurable (`platform_desc.irqchip_root_irqs`) so root mappings no longer have to occupy the full global virq space
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
   - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions

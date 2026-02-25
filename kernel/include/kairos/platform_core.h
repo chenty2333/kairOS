@@ -108,6 +108,9 @@ int platform_irq_domain_alloc_linear_fwnode(const char *name,
 int platform_irq_domain_bind_fwnode(const struct irqchip_ops *chip,
                                     uint32_t hwirq_base, uint32_t nr_irqs,
                                     uint32_t fwnode);
+int platform_irq_domain_set_cascade_fwnode(uint32_t fwnode, int parent_irq,
+                                           irq_handler_event_fn handler,
+                                           void *arg, uint32_t flags);
 int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq);
 int platform_irq_domain_map_fwnode(uint32_t fwnode, uint32_t hwirq);
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
