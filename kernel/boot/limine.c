@@ -48,6 +48,12 @@ struct efi_system_table {
 
 static struct boot_info boot_info;
 
+#if defined(ARCH_aarch64)
+extern volatile uintptr_t aarch64_mp_info_raw_ptrs[CONFIG_MAX_CPUS];
+extern volatile uintptr_t aarch64_mp_info_virt_ptrs[CONFIG_MAX_CPUS];
+extern volatile uint32_t aarch64_mp_info_ptr_count;
+#endif
+
 static uintptr_t limine_ptr_to_virt(const volatile void *ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     if (!addr)
@@ -297,6 +303,11 @@ static uint32_t limine_memmap_type_to_boot(uint32_t type) {
 
 static void boot_init_limine(void) {
     memset(&boot_info, 0, sizeof(boot_info));
+#if defined(ARCH_aarch64)
+    memset((void *)aarch64_mp_info_raw_ptrs, 0, sizeof(aarch64_mp_info_raw_ptrs));
+    memset((void *)aarch64_mp_info_virt_ptrs, 0, sizeof(aarch64_mp_info_virt_ptrs));
+    aarch64_mp_info_ptr_count = 0;
+#endif
 
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
         panic("Limine base revision unsupported");
@@ -487,6 +498,7 @@ static void boot_init_limine(void) {
         boot_info.cpu_count = (uint32_t)count;
 #if defined(ARCH_aarch64)
         limine_cpu_count = (uint32_t)count;
+        aarch64_mp_info_ptr_count = (uint32_t)count;
 #endif
         boot_info.bsp_cpu_id = 0;
         for (uint64_t i = 0; i < count; i++) {
@@ -500,6 +512,8 @@ static void boot_init_limine(void) {
                 boot_info.bsp_cpu_id = (uint32_t)i;
 #elif defined(ARCH_aarch64)
             boot_info.cpus[i].hw_id = info->mpidr;
+            aarch64_mp_info_raw_ptrs[i] = (uintptr_t)cpus[i];
+            aarch64_mp_info_virt_ptrs[i] = (uintptr_t)info;
             if (info->mpidr == mp_resp->bsp_mpidr)
                 boot_info.bsp_cpu_id = (uint32_t)i;
 #elif defined(ARCH_riscv64)

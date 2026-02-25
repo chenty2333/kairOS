@@ -12,6 +12,9 @@
 .global _secondary_start
 .global _secondary_start_psci
 .global _secondary_start_psci_end
+.extern aarch64_mp_info_raw_ptrs
+.extern aarch64_mp_info_virt_ptrs
+.extern aarch64_mp_info_ptr_count
 
 #define PSCI_CTX_CPU_ID   8
 #define PSCI_CTX_TCR      16
@@ -105,9 +108,34 @@ _secondary_start:
     mov x1, x19
     cmp x19, #CONFIG_MAX_CPUS
     b.lo 1f
+    adrp x2, aarch64_mp_info_ptr_count
+    add  x2, x2, :lo12:aarch64_mp_info_ptr_count
+    ldr  w3, [x2]
+    mov  w4, #0
+    adrp x5, aarch64_mp_info_raw_ptrs
+    add  x5, x5, :lo12:aarch64_mp_info_raw_ptrs
+    adrp x6, aarch64_mp_info_virt_ptrs
+    add  x6, x6, :lo12:aarch64_mp_info_virt_ptrs
+8:
+    cmp  w4, w3
+    b.hs 9f
+    ldr  x7, [x5, x4, lsl #3]
+    cmp  x7, x19
+    b.eq 10f
+    ldr  x7, [x6, x4, lsl #3]
+    cmp  x7, x19
+    b.eq 10f
+    add  w4, w4, #1
+    b    8b
+10:
+    uxtw x1, w4
+    b    1f
+9:
     ldr x1, [x19, #40] /* extra_argument in aarch64 limine_mp_info */
 1:
     mov x18, x1
+    cmp x1, #CONFIG_MAX_CPUS
+    b.hs 5f
 
     ldr x2, =_percpu_stacks
     mov x3, #CONFIG_KERNEL_STACK_SIZE
@@ -125,6 +153,10 @@ _secondary_start:
 
     mov x0, x1
     bl secondary_cpu_main
+
+5:
+    wfi
+    b 5b
 
 4:
     wfi

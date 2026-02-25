@@ -37,8 +37,10 @@ void arch_timer_init(uint64_t hz) {
     /* Enable the Physical Timer PPI in the GIC */
     arch_irq_enable_nr(TIMER_PPI_IRQ);
 
-    pr_info("Timer: %lu Hz (interval=%lu ticks)\n",
-            (unsigned long)hz, (unsigned long)timer_interval);
+    if (arch_cpu_id() == 0) {
+        pr_info("Timer: %lu Hz (interval=%lu ticks)\n",
+                (unsigned long)hz, (unsigned long)timer_interval);
+    }
 }
 
 uint64_t arch_timer_ticks(void) { return cntpct(); }

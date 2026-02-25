@@ -29,12 +29,12 @@ extern void _secondary_start(void);
 
 void secondary_cpu_main(unsigned long cpu_id) {
     arch_cpu_init((int)cpu_id);
-#if defined(ARCH_riscv64)
-    /* APs may still enter with Limine's temporary page tables. */
+#if defined(ARCH_aarch64)
     paddr_t kernel_pgdir = arch_mmu_get_kernel_pgdir();
-    if (kernel_pgdir && arch_mmu_current() != kernel_pgdir)
+    if (kernel_pgdir)
         arch_mmu_switch(kernel_pgdir);
-#elif defined(ARCH_x86_64)
+#elif defined(ARCH_riscv64) || defined(ARCH_x86_64)
+    /* APs may still enter with Limine's temporary page tables. */
     paddr_t kernel_pgdir = arch_mmu_get_kernel_pgdir();
     if (kernel_pgdir && arch_mmu_current() != kernel_pgdir)
         arch_mmu_switch(kernel_pgdir);
@@ -47,7 +47,9 @@ void secondary_cpu_main(unsigned long cpu_id) {
     if ((int)cpu_id >= 0 && (int)cpu_id < CONFIG_MAX_CPUS)
         secondary_cpu_online_map[cpu_id] = 1;
     __sync_fetch_and_add(&secondary_cpus_online, 1);
+#if !defined(ARCH_aarch64)
     pr_info("CPU %lu: online and ready\n", cpu_id);
+#endif
     arch_irq_enable();
     while (1) {
         schedule();
@@ -109,9 +111,17 @@ static void smp_init(void) {
     if (wait_ticks == 0)
         wait_ticks = CONFIG_HZ;
     uint64_t deadline = arch_timer_ticks() + wait_ticks;
+    uint64_t spins = 0;
+    const uint64_t spin_limit = 300000000ULL;
+    bool wait_stalled = false;
 
-    while (secondary_cpus_online < started &&
-           arch_timer_ticks() < deadline) {
+    while (secondary_cpus_online < started) {
+        if (arch_timer_ticks() >= deadline)
+            break;
+        if (++spins >= spin_limit) {
+            wait_stalled = true;
+            break;
+        }
         arch_cpu_relax();
     }
 
@@ -122,6 +132,8 @@ static void smp_init(void) {
     if (expected < 1)
         expected = 1;
     if (secondary_cpus_online < started) {
+        if (wait_stalled)
+            pr_warn("SMP: startup wait stalled (clock source did not advance)\n");
         for (int cpu = 0; cpu < cpu_count; cpu++) {
             if (cpu == bsp_cpu)
                 continue;

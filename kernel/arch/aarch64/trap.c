@@ -182,7 +182,8 @@ void arch_trap_init(void) {
     extern void vector_table(void);
     __asm__ __volatile__("msr vbar_el1, %0" :: "r"(&vector_table));
     arch_irq_init();
-    pr_info("Trap: initialized\n");
+    if (arch_cpu_id() == 0)
+        pr_info("Trap: initialized\n");
 }
 
 void arch_irq_handler(struct trap_frame *tf) { (void)tf; }

@@ -38,6 +38,9 @@ extern void _secondary_start_psci_end(void);
 
 static struct aarch64_psci_boot_ctx psci_ctx[CONFIG_MAX_CPUS];
 volatile uint64_t aarch64_secondary_entry_stage[CONFIG_MAX_CPUS];
+volatile uintptr_t aarch64_mp_info_raw_ptrs[CONFIG_MAX_CPUS];
+volatile uintptr_t aarch64_mp_info_virt_ptrs[CONFIG_MAX_CPUS];
+volatile uint32_t aarch64_mp_info_ptr_count;
 static int psci_conduit_cached = -1;
 static bool psci_trampoline_ready;
 static bool psci_fallback_logged;

@@ -377,6 +377,9 @@ int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte) {
 
 void arch_mmu_switch(paddr_t table) {
     __asm__ __volatile__("msr ttbr0_el1, %0\n" :: "r"(table) : "memory");
+    if (kernel_pgdir)
+        __asm__ __volatile__("msr ttbr1_el1, %0\n" :: "r"(kernel_pgdir)
+                             : "memory");
     __asm__ __volatile__("tlbi vmalle1; dsb ish; isb");
 }
 
