@@ -26,6 +26,8 @@ Platform bus (bus/platform.c):
 PCI bus (bus/pci.c):
 - ECAM config space access (pci_read/write_config_8/16/32)
 - BAR decoding: supports 32-bit and 64-bit Memory BARs, I/O BARs
+- Common PCI capability traversal APIs: `pci_find_capability()` / `pci_find_next_capability()`
+- MSI baseline APIs: `pci_enable_msi()` / `pci_disable_msi()` with arch hook `arch_pci_msi_setup()`; unsupported arches cleanly fall back to INTx
 - Match strategy: by vendor_id/device_id (supports PCI_ANY_ID wildcard)
 - pci_enumerate(): calls arch_pci_host_init() (weak symbol, arch-overridable) to get ECAM base, then scans bus
 - pci_set_master(): enables bus-master and memory-space
@@ -34,6 +36,7 @@ VirtIO bus:
 - Registered as a separate bus_type (virtio_bus_type)
 - virtio_mmio.c: VirtIO MMIO transport layer, probed as a platform driver, discovers VirtIO devices and registers them on the virtio bus
 - virtio_pci.c: VirtIO PCI transport layer, probed as a PCI driver, parses VirtIO vendor capabilities (common/notify/isr/device config) and registers child virtio devices on the virtio bus
+  - probe path now attempts MSI first via PCI core API and falls back to INTx automatically when MSI is unavailable
 - virtio_mmio probe stores transport state in `dev->driver_data`; remove path unregisters the child virtio device and frees transport resources
 
 ## Device Discovery Flow (core/init/devices.c)
@@ -106,7 +109,7 @@ lwIP integration:
 ## Current Limitations
 
 - ACPI platform-device discovery is still scaffolding (does not register fw descriptors); currently only PCI ECAM discovery via MCFG is wired for aarch64
-- virtio-pci currently uses common INTx path; MSI-X and advanced PCI features are not wired yet
+- MSI-X and architecture-specific MSI routing backends are not wired yet; current MSI path is a baseline core interface with INTx fallback
 
 Related references:
 - references/00_REPO_MAP.md

@@ -71,14 +71,16 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `read`/`write`/`close`/`lseek`/`pread64`/`pwrite64`/`readv`/`writev`/`preadv`/`pwritev`/`copy_file_range`/`fsync`/`fdatasync` decode `fd` via Linux ABI `int` width (32-bit); `lseek` decodes `whence` as 32-bit `int`
   - `preadv2`/`pwritev2` with offset `-1` follow non-positional `readv`/`writev` fallback
   - `copy_file_range` is wired through vnode read/write paths; `flags` (32-bit ABI width) must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
+- `vfs_fsync()` now falls back to buffer-cache flush when filesystem-specific `fsync` op is absent; `sys_sync` is wired through `vfs_sync()` to the same flush path
 
 ## Block I/O Layer (fs/bio/bio.c)
 
-- Buffer cache: 128 static buf structs (NBUF=128), 4KB each
-- 32-bucket hash table indexed by (dev, blockno)
-- LRU eviction: released buffers move to LRU head, allocation takes unused non-dirty buffers from LRU tail
-- bread(): read block, returns from cache on hit, reads from device via blkdev_read() on miss
-- bwrite(): writes block back to device
+- Buffer cache: 128 static buf structs (NBUF=128), each with one-page backing storage (`CONFIG_PAGE_SIZE`)
+- 32-bucket hash table indexed by `(dev, blockno, block_bytes)`
+- LRU eviction: released buffers move to LRU head, allocation takes unused clean buffers from LRU tail; if only dirty victims exist, one is flushed and allocation retries
+- Supports variable block-size I/O through `breadn(dev, blockno, block_bytes)`; legacy `bread()` remains as page-sized wrapper
+- bwrite(): marks buffer dirty (delayed write)
+- Dirty list: pending dirty buffers are tracked globally and flushed via `bsync_dev()` / `bsync_all()`
 - brelse(): release buffer (unlock + decrement refcount + update LRU)
 - Buffers protected by mutex for concurrent access
 - blkdev registration now probes partition tables and registers partition child block devices (`vda1`, `nvme0n1p1` style naming); protective MBR triggers GPT-first scan, otherwise valid MBR entries are used
@@ -87,6 +89,8 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 
 Disk filesystems:
 - ext2 (fs/ext2/): full implementation, includes super, inode, block, dir, vnode modules
+  - mount feature gate rejects unsupported/journal/ext4-style feature combinations to avoid unsafe writes to incompatible filesystems
+  - vnode `fsync` is implemented and flushes ext2 device dirty buffers
 - fat32 (fs/fat32/): currently a stub (mount returns -ENOSYS)
 
 Pseudo filesystems:
