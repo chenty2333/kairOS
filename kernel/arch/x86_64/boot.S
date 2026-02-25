@@ -9,6 +9,8 @@
 .global _secondary_start
 
 _start:
+    cli
+
     /* Set up a temporary stack */
     lea _boot_stack_top(%rip), %rsp
 
@@ -34,6 +36,8 @@ _halt:
  * rdi = struct limine_mp_info *
  */
 _secondary_start:
+    cli
+
     /* Load logical CPU id from extra_argument (offset 24) */
     mov 24(%rdi), %rax
     mov %rax, %rdi

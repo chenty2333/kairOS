@@ -69,7 +69,8 @@ Variables:
 - `make run-iso` — boot from ISO (x86_64 only; not a primary verification path for other architectures)
 
 QEMU configuration:
-- 256MB RAM, SMP default 4 cores (`aarch64` run/debug default is `QEMU_SMP=2`, aligned with the DTB+PSCI fallback CI gate)
+- 384MB RAM, SMP default 4 cores (`aarch64` run/debug default is `QEMU_SMP=2`, aligned with the DTB+PSCI fallback CI gate)
+- `riscv64` default accelerator is `QEMU_ACCEL=tcg,thread=multi` for responsive interactive shell workloads; override to `QEMU_ACCEL=tcg,thread=single` when deterministic boot-hart ordering is required
 - Network: virtio-net + user mode; `HOSTFWD_PORT=8080` forwards host port to guest :80
 - Graphics: `QEMU_GUI=1` enables GTK display
 - Disk: virtio-blk; riscv64 uses virtio-mmio, x86_64/aarch64 use virtio-pci
@@ -88,6 +89,7 @@ QEMU configuration:
 - `make test-exec-elf-smoke` — run interactive exec/ELF smoke regression (static/dynamic/PIE compile+run, PT_INTERP checks, bad-ELF rejection, fail on SIGSEGV/`no vma` markers)
 - `make test-tcc-smoke` — compatibility alias of the exec/ELF smoke path
 - `make test-busybox-applets-smoke` — run interactive BusyBox applet smoke regression (assert applet symlink/execution path for the enabled A-set and require `APPLET_SMOKE_OK:40`, `APPLET_BAD_COUNT:0`, `__BB_APPLET_SMOKE_DONE__`)
+- `make test-errno-smoke` runs `/usr/bin/errno_smoke` inside guest; if `__ERRNO_SMOKE_DONE__` is not observed within `ERRNO_SMOKE_DONE_WAIT_SEC` (default 30s), host-side runner appends fallback structured markers (`SMOKE_FAIL:errno_smoke_done_missing` + `TEST_SUMMARY` + `TEST_RESULT_JSON`) so verdicting does not hang on timeout-only outcomes
 - `make test-isolated` — isolated test alias
 - `make test-driver` — driver module only
 - `make test-mm` — memory module only
@@ -117,7 +119,7 @@ QEMU configuration:
 - TCC source for `deps fetch tcc` is configurable: `TCC_GIT_URL` / `TCC_GIT_REF` / `TCC_GIT_COMMIT` (default URL currently `https://github.com/chenty2333/tinycc.git`, ref `mob`).
 - Test module selection uses `CONFIG_KERNEL_TEST_MASK` via `TEST_EXTRA_CFLAGS` (default mask `0x7FF`)
 - Kernel test module bits: `0x01 driver`, `0x02 mm`, `0x04 sync`, `0x08 vfork`, `0x10 sched`, `0x20 crash`, `0x40 syscall/trap`, `0x80 vfs/ipc`, `0x100 socket`, `0x200 device/virtio`, `0x400 tty`, `0x800 soak-pr`
-- `test-syscall-trap` includes a kernel-launched user-mode syscall regression (riscv64 `ecall`, x86_64 `int 0x80`, aarch64 `svc #0`) covering bad user pointer (`-EFAULT`) and positive syscall path; it also covers `uaccess` cross-page/large-range copy behavior plus `strncpy_from_user` semantics (returned length excludes terminating `NUL`, unmapped tail returns `-EFAULT`)
+- `test-syscall-trap` includes a kernel-launched user-mode syscall regression (riscv64 `ecall`, x86_64 `int 0x80`, aarch64 `svc #0`) covering bad user pointer (`-EFAULT`) and positive syscall path; it also covers `uaccess` cross-page/large-range copy behavior plus `strncpy_from_user` semantics (returned length excludes terminating `NUL`; unmapped tail without `NUL` returns `-EFAULT`; if `NUL` appears before the unmapped page, copy succeeds even when `count` spans that page), and trapframe fallback semantics (`current_tf` + process `active_tf`) for trap/syscall paths that can schedule
 - Example (only syscall/trap): `make ARCH=riscv64 test TEST_EXTRA_CFLAGS='-DCONFIG_KERNEL_TESTS=1 -DCONFIG_KERNEL_TEST_MASK=0x40'`
 - `test-soak-pr` tunables (via `SOAK_PR_EXTRA_CFLAGS`): `CONFIG_KERNEL_FAULT_INJECT`, `CONFIG_KERNEL_SOAK_PR_DURATION_SEC`, `CONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE`, `CONFIG_KERNEL_SOAK_PR_SUITE_MASK`, `CONFIG_KERNEL_SOAK_PR_MAX_ITERS`, `CONFIG_KERNEL_SOAK_PR_SCHED_EVERY`, `CONFIG_KERNEL_SOAK_PR_FAULT_EVERY`, `CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE`, `CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC`
 - Fault injection probe points in PR soak: `kmalloc`, `copy_from_user`, `copy_to_user`; each probe logs hit/failure counters.
@@ -160,6 +162,8 @@ Result decision policy:
 - Structured verdict requires both `TEST_RESULT_JSON` and `TEST_SUMMARY` and checks `failed` consistency.
 - When structured result is complete and passed, `qemu_rc=0/124/2` are accepted (`2` covers firmware-reset style exits seen on some runs).
 - If structured output is missing/invalid/inconsistent, verdict is non-pass (`infra_fail`).
+- In structured mode, pre-QEMU/structured integrity checks run before optional required-marker assertions; this keeps build failures classified as `build_fail_*` instead of `required_markers_missing`.
+- Required-marker assertions are enforced on the structured-pass path; when structured `failed > 0`, smoke failure reasons (`SMOKE_FAIL:*`) are preserved as primary verdict reasons.
 - `run-qemu-session.sh` / `run-qemu-test.sh` emit signal telemetry in `result.json` under `signals`:
   `qemu_exit_signal`, `qemu_term_signal`, `qemu_term_sender_pid` (nullable when unavailable)
 - When no kernel failure markers are present and the runner exits by signal (`qemu_rc` in 128+N, non-timeout),
@@ -168,6 +172,7 @@ Result decision policy:
   - `TEST_REQUIRED_MARKER_REGEX`: at least one required regex
   - `TEST_REQUIRED_MARKERS_ALL`: newline-delimited required regex list (all must match)
   - `TEST_FORBIDDEN_MARKER_REGEX`: forbidden regex (any match fails)
+  - `TEST_OPTIONAL_MARKERS_IF_PRESENT`: newline-delimited `<present_regex><TAB><required_regex>` pairs; when `present_regex` appears in log, `required_regex` must also match, otherwise verdict fails as `optional_markers_invalid`
 - CI gate steps validate `result.json` with `scripts/impl/assert-result-pass.py` (`--require-structured`).
 
 Primary verification architecture is ARCH=riscv64 (run, test, test-soak, uefi).

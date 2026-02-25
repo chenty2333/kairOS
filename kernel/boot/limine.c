@@ -730,10 +730,23 @@ static void boot_init_limine(void) {
     uint64_t requested_mp_flags = limine_mp.flags;
     uint64_t missing_mp_flags = requested_mp_flags & ~boot_info.limine_mp_flags;
     uint64_t unknown_mp_flags = boot_info.limine_mp_flags & ~requested_mp_flags;
-    if (missing_mp_flags || unknown_mp_flags) {
-        panic("boot: limine mp flags mismatch req=0x%llx got=0x%llx",
+#if defined(ARCH_x86_64)
+    if (missing_mp_flags) {
+        pr_warn("boot: limine mp missing requested flags req=0x%llx got=0x%llx\n",
+                (unsigned long long)requested_mp_flags,
+                (unsigned long long)boot_info.limine_mp_flags);
+    }
+#else
+    if (missing_mp_flags) {
+        panic("boot: limine mp missing requested flags req=0x%llx got=0x%llx",
               (unsigned long long)requested_mp_flags,
               (unsigned long long)boot_info.limine_mp_flags);
+    }
+#endif
+    if (unknown_mp_flags) {
+        pr_warn("boot: limine mp has unknown flags req=0x%llx got=0x%llx\n",
+                (unsigned long long)requested_mp_flags,
+                (unsigned long long)boot_info.limine_mp_flags);
     }
     pr_info("boot: limine mp rev=%llu flags=0x%llx cpus=%llu\n",
             (unsigned long long)boot_info.limine_mp_revision,

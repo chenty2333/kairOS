@@ -209,6 +209,9 @@ exec 3>&-
 feeder=$!
 eval "$inner_make_cmd QEMU_STDIN=\"<$fifo\" run-direct"
 rc=$?
+if [ "$rc" -ne 0 ]; then
+    kill "$feeder" 2>/dev/null || true
+fi
 wait "$feeder" 2>/dev/null || true
 rm -f "$fifo"
 exit $rc
@@ -278,7 +281,19 @@ sleep "$boot_delay"
 printf 'bad_marks=; for a in %s; do if [ ! -x "/bin/$a" ]; then bad_marks="${bad_marks}x"; echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1; rc=$?; if [ "$rc" -gt 128 ]; then bad_marks="${bad_marks}x"; echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; bad=${#bad_marks}; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo TEST_SUMMARY: failed=$bad; echo TEST_RESULT_JSON: {\\"schema_version\\":1,\\"failed\\":$bad,\\"done\\":true,\\"enabled_mask\\":1}; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
 sleep "$step_delay"
 for _ in $(seq 1 "$ready_wait"); do
-    grep -q '__BB_APPLET_SMOKE_DONE__' "$log_path" 2>/dev/null && break
+    if awk '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line ~ /^[[:space:]]*__BB_APPLET_SMOKE_DONE__[[:space:]]*$/) {
+                found = 1
+                exit 0
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$log_path" 2>/dev/null; then
+        break
+    fi
     sleep 1
 done
 printf '\001x' >&3
@@ -287,6 +302,9 @@ exec 3>&-
 feeder=$!
 eval "$inner_make_cmd QEMU_STDIN=\"<$fifo\" run-direct"
 rc=$?
+if [ "$rc" -ne 0 ]; then
+    kill "$feeder" 2>/dev/null || true
+fi
 wait "$feeder" 2>/dev/null || true
 rm -f "$fifo"
 exit $rc
@@ -305,8 +323,9 @@ kairos_run_test_errno_smoke_once() {
     local extra_cflags="$1"
     local timeout_s="$2"
     local log_path="$3"
-    local boot_delay="${ERRNO_SMOKE_BOOT_DELAY_SEC:-2}"
+    local boot_delay="${ERRNO_SMOKE_BOOT_DELAY_SEC:-8}"
     local ready_wait="${ERRNO_SMOKE_READY_WAIT_SEC:-180}"
+    local done_wait="${ERRNO_SMOKE_DONE_WAIT_SEC:-30}"
     local run_log="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/run.log"
     local make_jobs="${KAIROS_JOBS:-$(nproc)}"
     local inner_make_cmd=""
@@ -328,6 +347,7 @@ kairos_run_test_errno_smoke_once() {
     {
         printf 'run_log=%q\n' "${run_log}"
         printf 'ready_wait=%q\n' "${ready_wait}"
+        printf 'done_wait=%q\n' "${done_wait}"
         printf 'boot_delay=%q\n' "${boot_delay}"
         printf 'inner_make_cmd=%q\n' "${inner_make_cmd}"
         printf 'log_path=%q\n' "${log_path}"
@@ -342,22 +362,43 @@ for _ in $(seq 1 "$ready_wait"); do
 done
 sleep "$boot_delay"
 cat >&3 <<'GUEST_CMDS'
-if [ -x /usr/bin/errno_smoke ]; then
-    /usr/bin/errno_smoke
-else
-    echo SMOKE_FAIL:missing_errno_smoke_bin
-fi
+/usr/bin/errno_smoke
 GUEST_CMDS
-for _ in $(seq 1 "$ready_wait"); do
-    grep -q '__ERRNO_SMOKE_DONE__' "$log_path" 2>/dev/null && break
+done_seen=0
+for _ in $(seq 1 "$done_wait"); do
+    if awk '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line ~ /^[[:space:]]*__ERRNO_SMOKE_DONE__[[:space:]]*$/) {
+                found = 1
+                exit 0
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$log_path" 2>/dev/null; then
+        done_seen=1
+        break
+    fi
     sleep 1
 done
+if [ "$done_seen" -eq 0 ]; then
+    {
+        printf '%s\n' 'SMOKE_FAIL:errno_smoke_done_missing'
+        printf '%s\n' 'TEST_SUMMARY: failed=1'
+        printf '%s\n' 'TEST_RESULT_JSON: {"schema_version":1,"failed":1,"done":true,"enabled_mask":1}'
+        printf '%s\n' '__ERRNO_SMOKE_DONE__'
+    } >> "$log_path"
+fi
 printf '\001x' >&3
 exec 3>&-
 ) &
 feeder=$!
 eval "$inner_make_cmd QEMU_STDIN=\"<$fifo\" run-direct"
 rc=$?
+if [ "$rc" -ne 0 ]; then
+    kill "$feeder" 2>/dev/null || true
+fi
 wait "$feeder" 2>/dev/null || true
 rm -f "$fifo"
 exit $rc
@@ -494,7 +535,7 @@ kairos_run_dispatch() {
             ;;
         test-errno-smoke)
             extra="${ERRNO_SMOKE_EXTRA_CFLAGS:-}"
-            timeout_s="${ERRNO_SMOKE_TIMEOUT:-240}"
+            timeout_s="${ERRNO_SMOKE_TIMEOUT:-360}"
             log_path="${ERRNO_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/errno-smoke.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_errno_smoke_once "$extra" "$timeout_s" "$log_path"

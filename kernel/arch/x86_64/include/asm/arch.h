@@ -6,14 +6,25 @@
  */
 
 #ifndef __ASSEMBLER__
+#include <kairos/config.h>
 #include <kairos/types.h>
 #endif
 
 #define ARCH_HAS_CPU_ID 1
+#define ARCH_HAS_CPU_ID_STABLE 1
 #define ARCH_HAS_CONTEXT_SET_USER_SP 1
 #define ARCH_HAS_TSS 1
 
 #ifndef __ASSEMBLER__
+
+extern uint64_t x86_cpu_id_slots[CONFIG_MAX_CPUS];
+
+static inline uint64_t x86_read_gs_base(void) {
+    uint32_t lo;
+    uint32_t hi;
+    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000101));
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -32,10 +43,20 @@ static inline uint32_t inl(uint16_t port) {
     return ret;
 }
 
+static inline int arch_cpu_id_stable(void) {
+    uint64_t base = x86_read_gs_base();
+    uint64_t start = (uint64_t)&x86_cpu_id_slots[0];
+    uint64_t end = (uint64_t)&x86_cpu_id_slots[CONFIG_MAX_CPUS];
+    if (base >= start && base < end) {
+        uint64_t delta = base - start;
+        if ((delta & (sizeof(uint64_t) - 1)) == 0)
+            return (int)(delta / sizeof(uint64_t));
+    }
+    return 0;
+}
+
 static inline int arch_cpu_id(void) {
-    uint64_t id;
-    __asm__ __volatile__("mov %%gs:0, %0" : "=r"(id));
-    return (int)id;
+    return arch_cpu_id_stable();
 }
 
 struct trap_frame {

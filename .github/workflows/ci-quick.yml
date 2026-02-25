@@ -82,6 +82,20 @@ jobs:
               exit 2
             fi
           done
+          required=(
+            third_party/lwip/src/include/lwip/tcp.h
+            third_party/limine/Makefile
+            third_party/musl/include/stdio.h
+            third_party/busybox/Makefile
+            third_party/tinycc/tcc.c
+            third_party/doomgeneric/doomgeneric/doomgeneric.h
+          )
+          for path in "${required[@]}"; do
+            if [[ ! -e "${path}" ]]; then
+              echo "Dependency verification failed: missing ${path}" >&2
+              exit 2
+            fi
+          done
 
       - name: Locate riscv64 UEFI firmware
         run: |
@@ -213,6 +227,20 @@ jobs:
             done
             if [[ "${ok}" -ne 1 ]]; then
               echo "Failed to fetch dependency: ${dep}" >&2
+              exit 2
+            fi
+          done
+          required=(
+            third_party/lwip/src/include/lwip/tcp.h
+            third_party/limine/Makefile
+            third_party/musl/include/stdio.h
+            third_party/busybox/Makefile
+            third_party/tinycc/tcc.c
+            third_party/doomgeneric/doomgeneric/doomgeneric.h
+          )
+          for path in "${required[@]}"; do
+            if [[ ! -e "${path}" ]]; then
+              echo "Dependency verification failed: missing ${path}" >&2
               exit 2
             fi
           done
@@ -358,6 +386,20 @@ jobs:
             done
             if [[ "${ok}" -ne 1 ]]; then
               echo "Failed to fetch dependency: ${dep}" >&2
+              exit 2
+            fi
+          done
+          required=(
+            third_party/lwip/src/include/lwip/tcp.h
+            third_party/limine/Makefile
+            third_party/musl/include/stdio.h
+            third_party/busybox/Makefile
+            third_party/tinycc/tcc.c
+            third_party/doomgeneric/doomgeneric/doomgeneric.h
+          )
+          for path in "${required[@]}"; do
+            if [[ ! -e "${path}" ]]; then
+              echo "Dependency verification failed: missing ${path}" >&2
               exit 2
             fi
           done

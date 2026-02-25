@@ -152,7 +152,7 @@ static inline void wrmsr(uint32_t msr, uint64_t val) {
     __asm__ __volatile__("wrmsr" :: "c"(msr), "a"(lo), "d"(hi));
 }
 
-static uint64_t cpu_id_slots[CONFIG_MAX_CPUS];
+uint64_t x86_cpu_id_slots[CONFIG_MAX_CPUS];
 
 static void gdt_set_entry(struct gdt_entry *e, uint32_t base, uint32_t limit,
                           uint8_t access, uint8_t gran) {
@@ -242,8 +242,8 @@ void arch_cpu_init(int cpu_id) {
     serial_init();
     serial_inited = true;
     if (cpu_id < CONFIG_MAX_CPUS) {
-        cpu_id_slots[cpu_id] = (uint64_t)cpu_id;
-        wrmsr(0xC0000101, (uint64_t)&cpu_id_slots[cpu_id]); /* IA32_GS_BASE */
+        x86_cpu_id_slots[cpu_id] = (uint64_t)cpu_id;
+        wrmsr(0xC0000101, (uint64_t)&x86_cpu_id_slots[cpu_id]); /* IA32_GS_BASE */
     }
     uint64_t rsp;
     __asm__ __volatile__("mov %%rsp, %0" : "=r"(rsp));
