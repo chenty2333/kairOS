@@ -342,13 +342,13 @@ static int virtio_pci_probe(struct pci_device *pdev) {
 
     const uint16_t requested_msix_nvec =
         (uint16_t)CONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS;
+    uint16_t granted_msix_nvec = 0;
     int msix_ret = -EOPNOTSUPP;
     if (!CONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX) {
-        msix_ret = pci_enable_msix_nvec(pdev, requested_msix_nvec);
-        if (msix_ret == -ENOSPC && requested_msix_nvec > 1)
-            msix_ret = pci_enable_msix_nvec(pdev, 1);
+        msix_ret = pci_enable_msix_range(pdev, 1, requested_msix_nvec,
+                                         &granted_msix_nvec);
         if (msix_ret == 0) {
-            vp->msix_nvec = pdev->msix_nvec;
+            vp->msix_nvec = granted_msix_nvec;
             for (uint16_t i = 0; i < vp->msix_nvec && i < VIRTIO_PCI_MSIX_REQ_VECTORS;
                  i++) {
                 uint8_t irq = 0;

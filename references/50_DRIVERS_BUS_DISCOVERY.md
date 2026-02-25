@@ -29,8 +29,8 @@ PCI bus (bus/pci.c):
 - Common PCI capability traversal APIs: `pci_find_capability()` / `pci_find_next_capability()`
 - MSI/MSI-X APIs:
   - `pci_enable_msi()` / `pci_disable_msi()`
-  - `pci_enable_msix()` / `pci_enable_msix_nvec()` / `pci_disable_msix()`
-  - MSI-X helpers: `pci_msix_vector_irq()`, `pci_msix_set_vector_mask()`, `pci_msix_vector_pending()`, `pci_msix_set_affinity()`
+  - `pci_enable_msix()` / `pci_enable_msix_nvec()` / `pci_enable_msix_range()` / `pci_disable_msix()`
+  - MSI-X helpers: `pci_msix_vector_irq()`, `pci_msix_set_vector_mask()`, `pci_msix_vector_pending()`, `pci_msix_pending_bitmap()`, `pci_msix_set_affinity()`, `pci_msix_set_affinity_spread()`
   - Message routing uses arch hook `arch_pci_msi_setup()`
   - MSI-X affinity reprogram path uses arch hook `arch_pci_msi_affinity_msg()`; when supported, `pci_msix_set_affinity()` rewrites MSI-X table entry `{addr,data}` and then updates irq-domain affinity
 - Match strategy: by vendor_id/device_id (supports PCI_ANY_ID wildcard)
@@ -41,7 +41,7 @@ VirtIO bus:
 - Registered as a separate bus_type (virtio_bus_type)
 - virtio_mmio.c: VirtIO MMIO transport layer, probed as a platform driver, discovers VirtIO devices and registers them on the virtio bus
 - virtio_pci.c: VirtIO PCI transport layer, probed as a PCI driver, parses VirtIO vendor capabilities (common/notify/isr/device config) and registers child virtio devices on the virtio bus
-  - probe path attempts MSI-X first (`2 -> 1` vectors), then MSI, then falls back to INTx
+  - probe path attempts MSI-X first (`min=1, max=requested`), then MSI, then falls back to INTx
   - when MSI-X is active, common config and queue vector bindings are explicitly programmed
 - virtio_mmio probe stores transport state in `dev->driver_data`; remove path unregisters the child virtio device and frees transport resources
 
@@ -119,7 +119,10 @@ lwIP integration:
   - x86_64: LAPIC MSI route (`0xFEE...`) with CPU-targeted message composition for affinity updates (`arch_pci_msi_affinity_msg`)
   - aarch64: baseline MSI/MSI-X route via GICD `SETSPI_NSR` doorbell path (QEMU virt)
     - MSI-X affinity updates are supported by reprogramming message while keeping SPI identity
-  - riscv64: current PLIC path remains INTx-only (`arch_pci_msi_setup()` returns `-EOPNOTSUPP` until AIA/IMSIC support is added)
+  - riscv64:
+    - default build remains PLIC/INTx-first
+    - when built with `RISCV_AIA=1`, IRQ root backend switches to IMSIC and PCI MSI/MSI-X message composition is enabled (`arch_pci_msi_setup()` + `arch_pci_msi_affinity_msg()`)
+    - current IMSIC backend still treats cross-hart MSI affinity migration as unsupported and returns `-EOPNOTSUPP` for remote-target reprogram attempts
 
 Related references:
 - references/00_REPO_MAP.md

@@ -71,6 +71,7 @@ WITH_TCC ?= 1
 INITRAMFS_BUSYBOX ?= 0
 QEMU_SMP ?= 4
 QEMU_MEM ?= 384M
+RISCV_AIA ?= 0
 
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
@@ -79,7 +80,11 @@ ifeq ($(ARCH),riscv64)
   CROSS_COMPILE ?= riscv64-unknown-elf-
   CLANG_TARGET := riscv64-unknown-elf
   QEMU := qemu-system-riscv64
+ifeq ($(RISCV_AIA),1)
+  QEMU_MACHINE := virt,aia=aplic-imsic
+else
   QEMU_MACHINE := virt
+endif
   QEMU_CPU ?= max
   # Multi-threaded TCG keeps interactive rv64 shell workloads responsive.
   # If deterministic boot-hart ordering is required, override to:
@@ -150,6 +155,7 @@ LDFLAGS := -nostdlib -static
 
 ifeq ($(ARCH),riscv64)
   CFLAGS += -march=rv64gc -mabi=lp64d -mcmodel=medany
+  CFLAGS += -DCONFIG_RISCV_AIA=$(RISCV_AIA)
 else ifeq ($(ARCH),x86_64)
   CFLAGS += -m64 -mno-red-zone -mno-sse -mno-sse2
   CFLAGS += -mcmodel=kernel

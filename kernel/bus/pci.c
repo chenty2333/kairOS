@@ -426,6 +426,36 @@ int pci_enable_msix(struct pci_device *pdev)
     return pci_enable_msix_nvec(pdev, 1);
 }
 
+int pci_enable_msix_range(struct pci_device *pdev, uint16_t min_vec,
+                          uint16_t max_vec, uint16_t *granted_vec)
+{
+    if (!pdev || !min_vec || !max_vec || min_vec > max_vec)
+        return -EINVAL;
+
+    if (pdev->msix_enabled) {
+        if (pdev->msix_nvec < min_vec)
+            return -EBUSY;
+        if (granted_vec)
+            *granted_vec = pdev->msix_nvec;
+        return 0;
+    }
+
+    for (uint16_t req = max_vec;; req--) {
+        int ret = pci_enable_msix_nvec(pdev, req);
+        if (ret == 0) {
+            if (granted_vec)
+                *granted_vec = pdev->msix_nvec;
+            return 0;
+        }
+        if (ret != -ENOSPC)
+            return ret;
+        if (req == min_vec)
+            break;
+    }
+
+    return -ENOSPC;
+}
+
 int pci_msix_vector_irq(const struct pci_device *pdev, uint16_t index,
                         uint8_t *irq)
 {
@@ -498,6 +528,45 @@ int pci_msix_vector_pending(const struct pci_device *pdev, uint16_t index,
     return 0;
 }
 
+int pci_msix_pending_bitmap(const struct pci_device *pdev, uint64_t *bitmap_words,
+                            size_t word_count)
+{
+    if (!pdev || !bitmap_words)
+        return -EINVAL;
+    if (!pdev->msix_enabled)
+        return -EINVAL;
+    if (pdev->msix_pba_bir >= PCI_MAX_BAR)
+        return -EINVAL;
+
+    size_t need_words = (size_t)((pdev->msix_table_size + 63U) / 64U);
+    if (word_count < need_words)
+        return -ENOSPC;
+    if (need_words == 0)
+        return 0;
+
+    uint64_t bar_base = pdev->bar[pdev->msix_pba_bir];
+    uint64_t bar_size = pdev->bar_size[pdev->msix_pba_bir];
+    uint64_t pba_bytes = (uint64_t)need_words * sizeof(uint64_t);
+    if (!bar_base || !bar_size || ((uint64_t)pdev->msix_pba_off + pba_bytes) > bar_size)
+        return -EINVAL;
+
+    volatile uint64_t *pba = (volatile uint64_t *)ioremap(
+        (paddr_t)(bar_base + pdev->msix_pba_off), (size_t)pba_bytes);
+    if (!pba)
+        return -ENOMEM;
+
+    for (size_t i = 0; i < need_words; i++)
+        bitmap_words[i] = readq((void *)&pba[i]);
+    iounmap((void *)pba);
+
+    uint32_t tail = pdev->msix_table_size % 64U;
+    if (tail != 0) {
+        uint64_t mask = (1ULL << tail) - 1ULL;
+        bitmap_words[need_words - 1] &= mask;
+    }
+    return 0;
+}
+
 int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
                           uint32_t cpu_mask)
 {
@@ -543,6 +612,32 @@ int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
 
     arch_irq_set_affinity((int)irq, cpu_mask);
     return 0;
+}
+
+int pci_msix_set_affinity_spread(struct pci_device *pdev, uint32_t cpu_mask)
+{
+    if (!pdev || !pdev->msix_enabled || !pdev->msix_irq)
+        return -EINVAL;
+    if (!cpu_mask)
+        return -EINVAL;
+
+    uint32_t cpus[32];
+    uint32_t cpu_count = 0;
+    for (uint32_t cpu = 0; cpu < 32U; cpu++) {
+        if ((cpu_mask & (1U << cpu)) != 0)
+            cpus[cpu_count++] = cpu;
+    }
+    if (!cpu_count)
+        return -EINVAL;
+
+    int first_err = 0;
+    for (uint16_t i = 0; i < pdev->msix_nvec; i++) {
+        uint32_t cpu = cpus[i % cpu_count];
+        int ret = pci_msix_set_affinity(pdev, i, 1U << cpu);
+        if (ret < 0 && first_err == 0)
+            first_err = ret;
+    }
+    return first_err;
 }
 
 int pci_disable_msix(struct pci_device *pdev)

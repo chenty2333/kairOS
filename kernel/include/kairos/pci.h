@@ -165,6 +165,8 @@ int pci_enable_msi(struct pci_device *pdev);
 int pci_disable_msi(struct pci_device *pdev);
 int pci_enable_msix(struct pci_device *pdev);
 int pci_enable_msix_nvec(struct pci_device *pdev, uint16_t nvec);
+int pci_enable_msix_range(struct pci_device *pdev, uint16_t min_vec,
+                          uint16_t max_vec, uint16_t *granted_vec);
 int pci_disable_msix(struct pci_device *pdev);
 int pci_msix_vector_irq(const struct pci_device *pdev, uint16_t index,
                         uint8_t *irq);
@@ -172,8 +174,11 @@ int pci_msix_set_vector_mask(struct pci_device *pdev, uint16_t index,
                              bool masked);
 int pci_msix_vector_pending(const struct pci_device *pdev, uint16_t index,
                             bool *pending);
+int pci_msix_pending_bitmap(const struct pci_device *pdev, uint64_t *bitmap_words,
+                            size_t word_count);
 int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
                           uint32_t cpu_mask);
+int pci_msix_set_affinity_spread(struct pci_device *pdev, uint32_t cpu_mask);
 
 /* Config space access */
 uint8_t  pci_read_config_8(struct pci_host *host, uint8_t bus,

@@ -138,6 +138,14 @@ static void handle_exception(struct trap_frame *tf) {
         }
     }
 
+    if (cause == EXC_ILLEGAL_INST && !from_user) {
+        unsigned long fix = search_exception_table(tf->sepc);
+        if (fix) {
+            tf->sepc = fix;
+            return;
+        }
+    }
+
     if (cause == EXC_ILLEGAL_INST && from_user) {
         signal_send(proc_current()->pid, SIGILL);
         signal_deliver_pending(); /* Deliver immediately, should not return */

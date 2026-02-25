@@ -15,6 +15,7 @@
 .global __arch_copy_from_user
 .global __arch_copy_to_user
 .global __arch_strncpy_from_user
+.global __arch_imsic_csr_probe
 
 __arch_copy_from_user:
     li t0, SSTATUS_SUM; csrs sstatus, t0
@@ -52,3 +53,19 @@ __arch_strncpy_from_user:
 2:  mv a0, t5; csrc sstatus, t0; ret
 .L_ns_fix: csrc sstatus, t0; li a0, -14; ret
     EX_TABLE_ENTRY .L_ns, .L_ns_fix
+
+__arch_imsic_csr_probe:
+    li a0, 0
+.L_imsic_probe_sel:
+    csrw siselect, zero
+.L_imsic_probe_reg:
+    csrw sireg, zero
+.L_imsic_probe_top:
+    csrr t0, stopei
+    ret
+.L_imsic_probe_fix:
+    li a0, -1
+    ret
+    EX_TABLE_ENTRY .L_imsic_probe_sel, .L_imsic_probe_fix
+    EX_TABLE_ENTRY .L_imsic_probe_reg, .L_imsic_probe_fix
+    EX_TABLE_ENTRY .L_imsic_probe_top, .L_imsic_probe_fix

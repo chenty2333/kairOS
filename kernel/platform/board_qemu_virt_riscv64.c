@@ -4,7 +4,7 @@
 
 #include <kairos/platform_core.h>
 
-extern const struct irqchip_ops __attribute__((weak)) plic_ops;
+extern const struct irqchip_ops __attribute__((weak)) riscv_irqchip_ops;
 extern const struct timer_ops __attribute__((weak)) riscv_timer_ops;
 
 static const struct platform_desc qemu_virt_riscv64 = {
@@ -17,7 +17,7 @@ static const struct platform_desc qemu_virt_riscv64 = {
         { .base = 0x0c000000, .size = 0x400000 },  /* PLIC + CLINT */
         { .base = 0x10000000, .size = 0x100000 },  /* VirtIO */
     },
-    .irqchip = &plic_ops,
+    .irqchip = &riscv_irqchip_ops,
     .timer = &riscv_timer_ops,
 };
 

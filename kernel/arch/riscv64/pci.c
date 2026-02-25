@@ -15,6 +15,12 @@
 
 static bool riscv64_msi_warned;
 
+int riscv_irqchip_pci_msi_setup(const struct pci_device *pdev,
+                                struct pci_msi_msg *msg);
+int riscv_irqchip_pci_msi_affinity_msg(const struct pci_device *pdev, uint8_t irq,
+                                       uint32_t cpu_mask,
+                                       struct pci_msi_msg *msg);
+
 struct pci_host_match {
     struct pci_host *host;
     bool found;
@@ -75,22 +81,16 @@ int arch_pci_host_init(struct pci_host *host)
 
 int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg)
 {
-    (void)pdev;
-    (void)msg;
-
-    if (!riscv64_msi_warned) {
-        pr_warn("pci: riscv64 MSI backend requires AIA/IMSIC; current PLIC path remains INTx-only\n");
+    int ret = riscv_irqchip_pci_msi_setup(pdev, msg);
+    if (ret == -EOPNOTSUPP && !riscv64_msi_warned) {
+        pr_warn("pci: riscv64 MSI backend requires AIA/IMSIC; current path remains INTx-only\n");
         riscv64_msi_warned = true;
     }
-    return -EOPNOTSUPP;
+    return ret;
 }
 
 int arch_pci_msi_affinity_msg(const struct pci_device *pdev, uint8_t irq,
                               uint32_t cpu_mask, struct pci_msi_msg *msg)
 {
-    (void)pdev;
-    (void)irq;
-    (void)cpu_mask;
-    (void)msg;
-    return -EOPNOTSUPP;
+    return riscv_irqchip_pci_msi_affinity_msg(pdev, irq, cpu_mask, msg);
 }

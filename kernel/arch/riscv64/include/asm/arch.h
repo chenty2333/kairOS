@@ -104,6 +104,8 @@ static inline uint64_t rdtime(void) {
     return val;
 }
 
+int __arch_imsic_csr_probe(void);
+
 #endif /* __ASSEMBLER__ */
 
 #endif /* _ASM_RISCV64_ARCH_H */
