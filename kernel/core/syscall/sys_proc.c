@@ -46,6 +46,45 @@ static inline int sysproc_copy_path_from_user(char *kpath, size_t kpath_len,
     return 0;
 }
 
+static int sysproc_copy_affinity_mask(uint64_t mask_ptr, uint64_t len,
+                                      unsigned long *mask_out) {
+    if (!mask_out)
+        return -EINVAL;
+    if (!mask_ptr)
+        return -EFAULT;
+    if (len < sizeof(unsigned long))
+        return -EINVAL;
+
+    size_t klen = (size_t)len;
+    if ((uint64_t)klen != len)
+        return -EINVAL;
+
+    unsigned long mask = 0;
+    if (copy_from_user(&mask, (const void *)mask_ptr, sizeof(mask)) < 0)
+        return -EFAULT;
+
+    size_t off = sizeof(mask);
+    uint8_t tail[32];
+    while (off < klen) {
+        size_t chunk = klen - off;
+        if (chunk > sizeof(tail))
+            chunk = sizeof(tail);
+        if (mask_ptr > UINT64_MAX - (uint64_t)off)
+            return -EFAULT;
+        if (copy_from_user(tail, (const void *)(mask_ptr + (uint64_t)off),
+                           chunk) < 0)
+            return -EFAULT;
+        for (size_t i = 0; i < chunk; i++) {
+            if (tail[i] != 0)
+                return -EINVAL;
+        }
+        off += chunk;
+    }
+
+    *mask_out = mask;
+    return 0;
+}
+
 int64_t sys_prlimit64(uint64_t pid, uint64_t resource, uint64_t new_ptr,
                       uint64_t old_ptr, uint64_t a4, uint64_t a5);
 
@@ -390,8 +429,9 @@ int64_t sys_sched_setaffinity(uint64_t pid, uint64_t len, uint64_t mask_ptr,
         return -EPERM;
 
     unsigned long requested = 0;
-    if (copy_from_user(&requested, (const void *)mask_ptr, sizeof(requested)) < 0)
-        return -EFAULT;
+    int copy_rc = sysproc_copy_affinity_mask(mask_ptr, len, &requested);
+    if (copy_rc < 0)
+        return copy_rc;
     return (int64_t)sched_set_affinity(target, (uint64_t)requested);
 }
 
