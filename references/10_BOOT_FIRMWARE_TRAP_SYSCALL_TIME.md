@@ -117,7 +117,7 @@ Two-layer structure:
     - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
-BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU, and tick policy can hand over timekeeper duty when the original CPU stops receiving timer IRQs for an extended interval.
+BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU; if that CPU never observes timer IRQs, the first active timer-IRQ CPU takes over immediately, and later stalls trigger handover after a short IRQ-gap window.
 
 Related references:
 - references/00_REPO_MAP.md
