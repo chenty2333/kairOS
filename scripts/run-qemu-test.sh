@@ -31,6 +31,10 @@ TEST_LOCK_FILE="${TEST_LOCK_FILE:-${TEST_BUILD_DIR}/.locks/qemu.lock}"
 TEST_LOCK_WAIT="${TEST_LOCK_WAIT:-0}"
 TEST_UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-}"
 TEST_QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}"
+TEST_INFRA_SIGNAL_RETRIES="${TEST_INFRA_SIGNAL_RETRIES:-1}"
+
+RUN_TEST_LAST_STATUS=""
+RUN_TEST_LAST_REASON=""
 
 if [[ "${TEST_REQUIRE_STRUCTURED}" == "auto" ]]; then
     if [[ "${TEST_REQUIRE_MARKERS}" == "1" ]]; then
@@ -331,6 +335,7 @@ run_test_main() {
     local has_required_markers has_forbidden_markers has_optional_markers
     local optional_marker_failed_rule
     local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
+    local effective_qemu_signal
     local structured_status structured_schema structured_failed structured_done structured_enabled_mask
     local summary_status summary_failed
     local smoke_fail_reason
@@ -356,6 +361,8 @@ run_test_main() {
             end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             duration_ms="$((end_ms - start_ms))"
             write_result "${end_time_utc}" "${duration_ms}" "error" "existing_qemu_pid" 2 2 "infra" 0 0 0 "missing" -1 -1 0 -1 "missing" -1 1 0 -1 -1 -1
+            RUN_TEST_LAST_STATUS="error"
+            RUN_TEST_LAST_REASON="existing_qemu_pid"
             echo "test: existing qemu pid is still running (${old_pid})" >&2
             return 2
         fi
@@ -435,6 +442,12 @@ run_test_main() {
         qemu_exit_signal="$((qemu_rc - 128))"
     fi
     read -r qemu_term_signal qemu_term_sender_pid < <(extract_qemu_signal_meta "${TEST_LOG}")
+    effective_qemu_signal="${qemu_exit_signal}"
+    if [[ ${effective_qemu_signal} -le 0 ]] &&
+        [[ ${qemu_term_signal} -gt 0 ]] &&
+        [[ ${qemu_rc} -ne 124 ]]; then
+        effective_qemu_signal="${qemu_term_signal}"
+    fi
 
     structured_status="missing"
     structured_schema=-1
@@ -557,13 +570,13 @@ run_test_main() {
     fi
     if [[ ${allow_signal_override} -eq 1 ]] &&
         [[ "${status}" != "pass" ]] &&
-        [[ ${qemu_exit_signal} -gt 0 ]] &&
+        [[ ${effective_qemu_signal} -gt 0 ]] &&
         [[ ${qemu_rc} -ne 124 ]]; then
         status="infra_fail"
         verdict_source="infra"
-        if [[ ${qemu_exit_signal} -eq 15 ]]; then
+        if [[ ${effective_qemu_signal} -eq 15 ]]; then
             reason="external_sigterm"
-        elif [[ ${qemu_exit_signal} -eq 9 ]]; then
+        elif [[ ${effective_qemu_signal} -eq 9 ]]; then
             reason="external_sigkill"
         else
             reason="external_signal"
@@ -582,6 +595,8 @@ run_test_main() {
     end_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     duration_ms="$((end_ms - start_ms))"
     write_result "${end_time_utc}" "${duration_ms}" "${status}" "${reason}" "${exit_code}" "${qemu_rc}" "${verdict_source}" "${has_boot_marker}" "${has_fatal_markers}" "${has_failure_markers}" "${structured_status}" "${structured_schema}" "${structured_failed}" "${structured_done}" "${structured_enabled_mask}" "${summary_status}" "${summary_failed}" "${has_required_markers}" "${has_forbidden_markers}" "${qemu_exit_signal}" "${qemu_term_signal}" "${qemu_term_sender_pid}"
+    RUN_TEST_LAST_STATUS="${status}"
+    RUN_TEST_LAST_REASON="${reason}"
 
     if [[ "${status}" == "pass" ]]; then
         echo "test: PASS (${reason}, qemu_rc=${qemu_rc})"
@@ -617,8 +632,13 @@ if ! [[ "${TEST_TIMEOUT}" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 
-if ! [[ "${TEST_REQUIRE_STRUCTURED}" =~ ^[01]$ ]]; then
+if ! [[ "${TEST_REQUIRE_STRUCTURED}" =~ ^(0|1|auto)$ ]]; then
     echo "test: TEST_REQUIRE_STRUCTURED must be 0, 1 or auto" >&2
+    exit 2
+fi
+
+if ! [[ "${TEST_INFRA_SIGNAL_RETRIES}" =~ ^[0-9]+$ ]]; then
+    echo "test: TEST_INFRA_SIGNAL_RETRIES must be a non-negative integer" >&2
     exit 2
 fi
 
@@ -631,14 +651,35 @@ mkdir -p \
 
 trap 'rm -f "${TEST_QEMU_PID_FILE}" || true' EXIT
 
-set +e
-KAIROS_LOCK_WAIT="${TEST_LOCK_WAIT}" kairos_lock_with_file "${TEST_LOCK_FILE}" run_test_main
-rc=$?
-set -e
+attempt=0
+while true; do
+    set +e
+    KAIROS_LOCK_WAIT="${TEST_LOCK_WAIT}" kairos_lock_with_file "${TEST_LOCK_FILE}" run_test_main
+    rc=$?
+    set -e
 
-if [[ "${rc}" -eq 0 ]]; then
-    exit 0
-fi
+    if [[ "${rc}" -eq 0 ]]; then
+        exit 0
+    fi
+    if kairos_lock_is_busy_rc "${rc}"; then
+        break
+    fi
+    if [[ "${attempt}" -ge "${TEST_INFRA_SIGNAL_RETRIES}" ]]; then
+        break
+    fi
+    if [[ "${RUN_TEST_LAST_STATUS}" != "infra_fail" ]]; then
+        break
+    fi
+    case "${RUN_TEST_LAST_REASON}" in
+    external_sigterm | external_sigkill | external_signal)
+        attempt="$((attempt + 1))"
+        echo "test: retrying after ${RUN_TEST_LAST_REASON} (${attempt}/${TEST_INFRA_SIGNAL_RETRIES})" >&2
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
 
 if kairos_lock_is_busy_rc "${rc}"; then
     start_time_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
