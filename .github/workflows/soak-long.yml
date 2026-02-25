@@ -64,34 +64,7 @@ jobs:
       - name: Install host dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update
-          pkgs=(
-            clang
-            lld
-            llvm
-            make
-            python3
-            git
-            cmake
-            ninja-build
-            rsync
-            curl
-            unzip
-            ca-certificates
-            e2fsprogs
-            dosfstools
-            mtools
-            qemu-system-misc
-            qemu-utils
-            ovmf
-          )
-          if apt-cache show qemu-efi-riscv64 >/dev/null 2>&1; then
-            pkgs+=(qemu-efi-riscv64)
-          fi
-          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
-            pkgs+=(edk2-ovmf)
-          fi
-          sudo apt-get install -y "${pkgs[@]}"
+          scripts/impl/ci-bootstrap.sh install-host-deps riscv64
 
       - name: Restore third-party source cache
         uses: actions/cache@v4
@@ -104,72 +77,12 @@ jobs:
       - name: Fetch required third-party sources
         run: |
           set -euo pipefail
-          deps=(lwip limine musl busybox tcc doomgeneric)
-          for dep in "${deps[@]}"; do
-            ok=0
-            for attempt in 1 2 3; do
-              echo "Fetching ${dep} (attempt ${attempt}/3)"
-              if scripts/kairos.sh deps fetch "${dep}"; then
-                ok=1
-                break
-              fi
-              sleep $((attempt * 5))
-            done
-            if [[ "${ok}" -ne 1 ]]; then
-              echo "Failed to fetch dependency: ${dep}" >&2
-              exit 2
-            fi
-          done
-          required=(
-            third_party/lwip/src/include/lwip/tcp.h
-            third_party/limine/Makefile
-            third_party/musl/include/stdio.h
-            third_party/busybox/Makefile
-            third_party/tinycc/tcc.c
-            third_party/doomgeneric/doomgeneric/doomgeneric.h
-          )
-          for path in "${required[@]}"; do
-            if [[ ! -e "${path}" ]]; then
-              echo "Dependency verification failed: missing ${path}" >&2
-              exit 2
-            fi
-          done
+          scripts/impl/ci-bootstrap.sh fetch-required-third-party
 
       - name: Locate riscv64 UEFI firmware
         run: |
           set -euo pipefail
-          code_candidates=(
-            /usr/share/edk2/riscv/RISCV_VIRT_CODE.fd
-            /usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd
-            /usr/share/qemu/RISCV_VIRT_CODE.fd
-          )
-          vars_candidates=(
-            /usr/share/edk2/riscv/RISCV_VIRT_VARS.fd
-            /usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd
-            /usr/share/qemu/RISCV_VIRT_VARS.fd
-          )
-          code_src=""
-          vars_src=""
-          for p in "${code_candidates[@]}"; do
-            if [[ -f "${p}" ]]; then
-              code_src="${p}"
-              break
-            fi
-          done
-          for p in "${vars_candidates[@]}"; do
-            if [[ -f "${p}" ]]; then
-              vars_src="${p}"
-              break
-            fi
-          done
-          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
-            echo "Unable to locate riscv64 UEFI firmware on runner" >&2
-            exit 2
-          fi
-          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
-          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
-          echo "Using UEFI_CODE_SRC=${code_src}"
-          echo "Using UEFI_VARS_SRC=${vars_src}"
+          scripts/impl/ci-bootstrap.sh locate-uefi riscv64
 
       - name: Validate soak params
         run: |
@@ -258,31 +171,7 @@ jobs:
       - name: Install host dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update
-          pkgs=(
-            clang
-            lld
-            llvm
-            make
-            python3
-            git
-            cmake
-            ninja-build
-            rsync
-            curl
-            unzip
-            ca-certificates
-            e2fsprogs
-            dosfstools
-            mtools
-            qemu-system-x86
-            qemu-utils
-            ovmf
-          )
-          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
-            pkgs+=(edk2-ovmf)
-          fi
-          sudo apt-get install -y "${pkgs[@]}"
+          scripts/impl/ci-bootstrap.sh install-host-deps x86_64
 
       - name: Restore third-party source cache
         uses: actions/cache@v4
@@ -295,66 +184,12 @@ jobs:
       - name: Fetch required third-party sources
         run: |
           set -euo pipefail
-          deps=(lwip limine musl busybox tcc doomgeneric)
-          for dep in "${deps[@]}"; do
-            ok=0
-            for attempt in 1 2 3; do
-              echo "Fetching ${dep} (attempt ${attempt}/3)"
-              if scripts/kairos.sh deps fetch "${dep}"; then
-                ok=1
-                break
-              fi
-              sleep $((attempt * 5))
-            done
-            if [[ "${ok}" -ne 1 ]]; then
-              echo "Failed to fetch dependency: ${dep}" >&2
-              exit 2
-            fi
-          done
-          required=(
-            third_party/lwip/src/include/lwip/tcp.h
-            third_party/limine/Makefile
-            third_party/musl/include/stdio.h
-            third_party/busybox/Makefile
-            third_party/tinycc/tcc.c
-            third_party/doomgeneric/doomgeneric/doomgeneric.h
-          )
-          for path in "${required[@]}"; do
-            if [[ ! -e "${path}" ]]; then
-              echo "Dependency verification failed: missing ${path}" >&2
-              exit 2
-            fi
-          done
+          scripts/impl/ci-bootstrap.sh fetch-required-third-party
 
       - name: Locate x86_64 UEFI firmware
         run: |
           set -euo pipefail
-          pairs=(
-            "/usr/share/edk2/ovmf/OVMF_CODE.fd|/usr/share/edk2/ovmf/OVMF_VARS.fd"
-            "/usr/share/edk2/ovmf/OVMF_CODE_4M.fd|/usr/share/edk2/ovmf/OVMF_VARS_4M.fd"
-            "/usr/share/OVMF/OVMF_CODE.fd|/usr/share/OVMF/OVMF_VARS.fd"
-            "/usr/share/OVMF/OVMF_CODE_4M.fd|/usr/share/OVMF/OVMF_VARS_4M.fd"
-            "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd|/usr/share/edk2-ovmf/x64/OVMF_VARS.fd"
-            "/usr/share/edk2-ovmf/x64/OVMF_CODE_4M.fd|/usr/share/edk2-ovmf/x64/OVMF_VARS_4M.fd"
-          )
-          code_src=""
-          vars_src=""
-          for pair in "${pairs[@]}"; do
-            IFS='|' read -r code vars <<< "${pair}"
-            if [[ -f "${code}" && -f "${vars}" ]]; then
-              code_src="${code}"
-              vars_src="${vars}"
-              break
-            fi
-          done
-          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
-            echo "Unable to locate x86_64 UEFI firmware on runner" >&2
-            exit 2
-          fi
-          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
-          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
-          echo "Using UEFI_CODE_SRC=${code_src}"
-          echo "Using UEFI_VARS_SRC=${vars_src}"
+          scripts/impl/ci-bootstrap.sh locate-uefi x86_64
 
       - name: Validate soak params
         run: |
@@ -445,38 +280,7 @@ jobs:
       - name: Install host dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update
-          pkgs=(
-            clang
-            lld
-            llvm
-            make
-            python3
-            git
-            cmake
-            ninja-build
-            rsync
-            curl
-            unzip
-            ca-certificates
-            e2fsprogs
-            dosfstools
-            mtools
-            qemu-system-arm
-            qemu-system-misc
-            qemu-utils
-            ovmf
-          )
-          if apt-cache show qemu-efi-aarch64 >/dev/null 2>&1; then
-            pkgs+=(qemu-efi-aarch64)
-          fi
-          if apt-cache show qemu-efi-arm >/dev/null 2>&1; then
-            pkgs+=(qemu-efi-arm)
-          fi
-          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
-            pkgs+=(edk2-ovmf)
-          fi
-          sudo apt-get install -y "${pkgs[@]}"
+          scripts/impl/ci-bootstrap.sh install-host-deps aarch64
 
       - name: Restore third-party source cache
         uses: actions/cache@v4
@@ -489,75 +293,12 @@ jobs:
       - name: Fetch required third-party sources
         run: |
           set -euo pipefail
-          deps=(lwip limine musl busybox tcc doomgeneric)
-          for dep in "${deps[@]}"; do
-            ok=0
-            for attempt in 1 2 3; do
-              echo "Fetching ${dep} (attempt ${attempt}/3)"
-              if scripts/kairos.sh deps fetch "${dep}"; then
-                ok=1
-                break
-              fi
-              sleep $((attempt * 5))
-            done
-            if [[ "${ok}" -ne 1 ]]; then
-              echo "Failed to fetch dependency: ${dep}" >&2
-              exit 2
-            fi
-          done
-          required=(
-            third_party/lwip/src/include/lwip/tcp.h
-            third_party/limine/Makefile
-            third_party/musl/include/stdio.h
-            third_party/busybox/Makefile
-            third_party/tinycc/tcc.c
-            third_party/doomgeneric/doomgeneric/doomgeneric.h
-          )
-          for path in "${required[@]}"; do
-            if [[ ! -e "${path}" ]]; then
-              echo "Dependency verification failed: missing ${path}" >&2
-              exit 2
-            fi
-          done
+          scripts/impl/ci-bootstrap.sh fetch-required-third-party
 
       - name: Locate aarch64 UEFI firmware
         run: |
           set -euo pipefail
-          code_candidates=(
-            /usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw
-            /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
-            /usr/share/AAVMF/AAVMF_CODE.fd
-            /usr/share/AAVMF/AAVMF_CODE.ms.fd
-            /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
-          )
-          vars_candidates=(
-            /usr/share/edk2/aarch64/vars-template-pflash.raw
-            /usr/share/AAVMF/AAVMF_VARS.fd
-            /usr/share/AAVMF/AAVMF_VARS.ms.fd
-            /usr/share/qemu-efi-aarch64/QEMU_VARS.fd
-          )
-          code_src=""
-          vars_src=""
-          for p in "${code_candidates[@]}"; do
-            if [[ -f "${p}" ]]; then
-              code_src="${p}"
-              break
-            fi
-          done
-          for p in "${vars_candidates[@]}"; do
-            if [[ -f "${p}" ]]; then
-              vars_src="${p}"
-              break
-            fi
-          done
-          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
-            echo "Unable to locate aarch64 UEFI firmware on runner" >&2
-            exit 2
-          fi
-          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
-          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
-          echo "Using UEFI_CODE_SRC=${code_src}"
-          echo "Using UEFI_VARS_SRC=${vars_src}"
+          scripts/impl/ci-bootstrap.sh locate-uefi aarch64
 
       - name: Validate soak params
         run: |
