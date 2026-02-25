@@ -131,7 +131,7 @@ Two-layer structure:
     - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
-BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU, and tick policy can hand over timekeeper duty when the original CPU stops receiving timer IRQs for an extended interval. Timekeeper handover uses atomic single-winner CAS so only one CPU commits each migration; stalled-handover WARN logs are rate-limited (tick-based window).
+BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU, and tick policy can hand over timekeeper duty when the original CPU stops receiving timer IRQs for an extended interval. Timekeeper ownership is tracked as `owner+epoch` and migrated via atomic single-winner CAS so only one CPU commits each handover; heartbeat/epoch-start markers are epoch-tagged to separate old/new owner state cleanly. Migration requires stalled-owner + lease expiry + minimum residency windows (all normalized by online CPU count against global IRQ sequence) to reduce short-term oscillation. Migration WARN logging is gated until all CPUs are online and a post-online warmup has elapsed, then rate-limited and focused on frequent repeated handovers to suppress startup noise.
 
 Related references:
 - references/00_REPO_MAP.md
