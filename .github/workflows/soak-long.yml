@@ -39,6 +39,14 @@ on:
         description: "Directed aarch64 test-vfs-ipc TEST_TIMEOUT"
         required: false
         default: "360"
+      aarch64_socket_loop_rounds:
+        description: "Directed aarch64 test-socket loop rounds"
+        required: false
+        default: "4"
+      aarch64_socket_loop_timeout_sec:
+        description: "Directed aarch64 test-socket TEST_TIMEOUT"
+        required: false
+        default: "360"
 
 concurrency:
   group: soak-long-${{ github.ref }}
@@ -272,6 +280,8 @@ jobs:
       SOAK_TEST_TIMEOUT_SEC: ${{ github.event.inputs.soak_test_timeout_sec || '4500' }}
       AARCH64_VFS_IPC_LOOP_ROUNDS: ${{ github.event.inputs.aarch64_vfs_ipc_loop_rounds || '6' }}
       AARCH64_VFS_IPC_LOOP_TIMEOUT_SEC: ${{ github.event.inputs.aarch64_vfs_ipc_loop_timeout_sec || '360' }}
+      AARCH64_SOCKET_LOOP_ROUNDS: ${{ github.event.inputs.aarch64_socket_loop_rounds || '4' }}
+      AARCH64_SOCKET_LOOP_TIMEOUT_SEC: ${{ github.event.inputs.aarch64_socket_loop_timeout_sec || '360' }}
 
     steps:
       - name: Checkout
@@ -312,6 +322,8 @@ jobs:
           [[ "${SOAK_TEST_TIMEOUT_SEC}" =~ ${re_uint} ]]
           [[ "${AARCH64_VFS_IPC_LOOP_ROUNDS}" =~ ${re_uint} ]]
           [[ "${AARCH64_VFS_IPC_LOOP_TIMEOUT_SEC}" =~ ${re_uint} ]]
+          [[ "${AARCH64_SOCKET_LOOP_ROUNDS}" =~ ${re_uint} ]]
+          [[ "${AARCH64_SOCKET_LOOP_TIMEOUT_SEC}" =~ ${re_uint} ]]
           [[ "${SOAK_SUITE_MASK}" =~ ${re_mask} ]]
           if (( SOAK_FAULT_PERMILLE < 0 || SOAK_FAULT_PERMILLE > 1000 )); then
             echo "SOAK_FAULT_PERMILLE must be in [0, 1000]" >&2
@@ -319,6 +331,10 @@ jobs:
           fi
           if (( AARCH64_VFS_IPC_LOOP_ROUNDS < 1 )); then
             echo "AARCH64_VFS_IPC_LOOP_ROUNDS must be >= 1" >&2
+            exit 2
+          fi
+          if (( AARCH64_SOCKET_LOOP_ROUNDS < 1 )); then
+            echo "AARCH64_SOCKET_LOOP_ROUNDS must be >= 1" >&2
             exit 2
           fi
 
@@ -329,7 +345,7 @@ jobs:
           timeout_sec="${AARCH64_VFS_IPC_LOOP_TIMEOUT_SEC}"
           for i in $(seq 1 "${rounds}"); do
             echo "aarch64 vfs/ipc loop: round ${i}/${rounds}"
-            make --no-print-directory ARCH="${ARCH}" QEMU_SMP=2 \
+            make --no-print-directory ARCH="${ARCH}" QEMU_SMP=4 \
               TEST_TIMEOUT="${timeout_sec}" \
               test-vfs-ipc
             latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
@@ -341,7 +357,29 @@ jobs:
             python3 scripts/impl/assert-aarch64-smp.py \
               --run-dir "${latest}" \
               --arch aarch64 \
-              --expected-online 2
+              --expected-online 4
+          done
+
+      - name: Run aarch64 directed socket loop profile
+        run: |
+          set -euo pipefail
+          rounds="${AARCH64_SOCKET_LOOP_ROUNDS}"
+          timeout_sec="${AARCH64_SOCKET_LOOP_TIMEOUT_SEC}"
+          for i in $(seq 1 "${rounds}"); do
+            echo "aarch64 socket loop: round ${i}/${rounds}"
+            make --no-print-directory ARCH="${ARCH}" QEMU_SMP=4 \
+              TEST_TIMEOUT="${timeout_sec}" \
+              test-socket
+            latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+            if [[ -z "${latest}" ]]; then
+              echo "No isolated run found after aarch64 directed socket round ${i}" >&2
+              exit 2
+            fi
+            python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+            python3 scripts/impl/assert-aarch64-smp.py \
+              --run-dir "${latest}" \
+              --arch aarch64 \
+              --expected-online 4
           done
 
       - name: Run aarch64 soak-pr profile
@@ -356,7 +394,7 @@ jobs:
             "-DCONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC=${SOAK_SUITE_TIMEOUT_SEC}"
           )
           printf 'soak cflags: %s\n' "${extra_cflags[*]}"
-          make --no-print-directory ARCH="${ARCH}" QEMU_SMP=2 \
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP=4 \
             SOAK_PR_TIMEOUT="${SOAK_TEST_TIMEOUT_SEC}" \
             SOAK_PR_EXTRA_CFLAGS="${extra_cflags[*]}" \
             test-soak-pr
@@ -369,7 +407,7 @@ jobs:
           python3 scripts/impl/assert-aarch64-smp.py \
             --run-dir "${latest}" \
             --arch aarch64 \
-            --expected-online 2
+            --expected-online 4
 
       - name: Capture latest isolated run
         id: latest_run_aarch64
