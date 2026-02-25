@@ -105,7 +105,7 @@ struct process *proc_alloc(void) {
     p->syscall_abi = SYSCALL_ABI_LINUX;
     p->name[0] = '\0';
     p->sched_flags = PROC_SCHEDF_STEALABLE;
-    p->sched_affinity = proc_sched_all_cpus_mask();
+    proc_sched_set_affinity_all(p);
     p->mm = NULL;
     p->parent = NULL;
     p->kstack_top = 0;
@@ -354,9 +354,11 @@ struct process *kthread_create(int (*fn)(void *), void *arg, const char *name) {
     int cpu = arch_cpu_id();
     if (cpu >= 0 && cpu < CONFIG_MAX_CPUS) {
         p->se.cpu = cpu;
-        uint64_t cpu_mask = proc_sched_cpu_mask(cpu);
-        if (cpu_mask)
-            proc_sched_set_affinity_mask(p, cpu_mask);
+        unsigned long affinity[PROC_SCHED_AFFINITY_WORDS];
+        proc_sched_affinity_zero(affinity);
+        if (proc_sched_affinity_mask_set_cpu(affinity, cpu))
+            proc_sched_set_affinity_mask_words(p, affinity,
+                                               PROC_SCHED_AFFINITY_WORDS);
     }
     proc_set_name(p, name);
     arch_context_init(p->context, (vaddr_t)fn, (vaddr_t)arg, true);

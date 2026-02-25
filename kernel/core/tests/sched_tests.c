@@ -274,7 +274,7 @@ static void test_sched_kthread_steal_policy(void) {
             break;
         }
         proc_sched_set_stealable(p, true);
-        proc_sched_set_affinity_mask(p, proc_sched_all_cpus_mask());
+        proc_sched_set_affinity_all(p);
         sched_enqueue(p);
         created++;
     }

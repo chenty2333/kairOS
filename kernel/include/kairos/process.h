@@ -75,10 +75,18 @@ enum proc_sched_flags {
     PROC_SCHEDF_KTHREAD   = (1U << 1),
 };
 
-#if CONFIG_MAX_CPUS >= 64
-#define PROC_SCHED_AFFINITY_ALL UINT64_MAX
+#define PROC_SCHED_AFFINITY_WORD_BITS 64U
+#define PROC_SCHED_AFFINITY_WORDS \
+    ((CONFIG_MAX_CPUS + PROC_SCHED_AFFINITY_WORD_BITS - 1U) / \
+     PROC_SCHED_AFFINITY_WORD_BITS)
+#define PROC_SCHED_AFFINITY_BYTES \
+    (PROC_SCHED_AFFINITY_WORDS * sizeof(unsigned long))
+
+#if (CONFIG_MAX_CPUS % PROC_SCHED_AFFINITY_WORD_BITS) == 0
+#define PROC_SCHED_AFFINITY_LAST_WORD_MASK (~0UL)
 #else
-#define PROC_SCHED_AFFINITY_ALL ((1ULL << CONFIG_MAX_CPUS) - 1ULL)
+#define PROC_SCHED_AFFINITY_LAST_WORD_MASK \
+    ((1UL << (CONFIG_MAX_CPUS % PROC_SCHED_AFFINITY_WORD_BITS)) - 1UL)
 #endif
 
 struct process {
@@ -92,7 +100,7 @@ struct process {
     enum syscall_abi syscall_abi;
     enum proc_state state;
     uint32_t sched_flags;
-    uint64_t sched_affinity;
+    unsigned long sched_affinity[PROC_SCHED_AFFINITY_WORDS];
     int exit_code;
     spinlock_t lock;
     bool irq_flags;         /* saved IRQ state for proc_lock/proc_unlock */
@@ -136,6 +144,9 @@ struct process {
     uint64_t utime, stime, start_time;
 };
 
+_Static_assert(sizeof(unsigned long) == 8,
+               "proc affinity helpers assume 64-bit unsigned long");
+
 static inline sigset_t proc_pending_unblocked_signals(const struct process *p) {
     if (!p)
         return 0;
@@ -162,48 +173,167 @@ static inline bool proc_sched_is_stealable(const struct process *p) {
             PROC_SCHEDF_STEALABLE) != 0;
 }
 
+static inline size_t proc_sched_affinity_word_count(void) {
+    return (size_t)PROC_SCHED_AFFINITY_WORDS;
+}
+
+static inline size_t proc_sched_affinity_bytes(void) {
+    return (size_t)PROC_SCHED_AFFINITY_BYTES;
+}
+
+static inline void proc_sched_affinity_zero(unsigned long *mask) {
+    if (!mask)
+        return;
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+        mask[i] = 0;
+}
+
+static inline void proc_sched_affinity_fill_all(unsigned long *mask) {
+    if (!mask)
+        return;
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+        mask[i] = ~0UL;
+    mask[PROC_SCHED_AFFINITY_WORDS - 1] &= PROC_SCHED_AFFINITY_LAST_WORD_MASK;
+}
+
+static inline bool proc_sched_affinity_is_zero(const unsigned long *mask) {
+    if (!mask)
+        return true;
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++) {
+        if (mask[i] != 0)
+            return false;
+    }
+    return true;
+}
+
+static inline void proc_sched_affinity_sanitize(unsigned long *mask) {
+    if (!mask)
+        return;
+    mask[PROC_SCHED_AFFINITY_WORDS - 1] &= PROC_SCHED_AFFINITY_LAST_WORD_MASK;
+    if (proc_sched_affinity_is_zero(mask))
+        proc_sched_affinity_fill_all(mask);
+}
+
+static inline void proc_sched_affinity_copy(unsigned long *dst,
+                                            const unsigned long *src) {
+    if (!dst || !src)
+        return;
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+        dst[i] = src[i];
+}
+
+static inline bool proc_sched_affinity_mask_test_cpu(const unsigned long *mask,
+                                                     int cpu) {
+    if (!mask || cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        return false;
+    size_t word = (size_t)cpu / PROC_SCHED_AFFINITY_WORD_BITS;
+    unsigned int bit = (unsigned int)cpu % PROC_SCHED_AFFINITY_WORD_BITS;
+    return (mask[word] & (1UL << bit)) != 0;
+}
+
+static inline bool proc_sched_affinity_mask_set_cpu(unsigned long *mask, int cpu) {
+    if (!mask || cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        return false;
+    size_t word = (size_t)cpu / PROC_SCHED_AFFINITY_WORD_BITS;
+    unsigned int bit = (unsigned int)cpu % PROC_SCHED_AFFINITY_WORD_BITS;
+    mask[word] |= (1UL << bit);
+    return true;
+}
+
 static inline uint64_t proc_sched_all_cpus_mask(void) {
-    return PROC_SCHED_AFFINITY_ALL;
+    unsigned long word0 = ~0UL;
+    if (PROC_SCHED_AFFINITY_WORDS == 1)
+        word0 &= PROC_SCHED_AFFINITY_LAST_WORD_MASK;
+    return (uint64_t)word0;
 }
 
 static inline uint64_t proc_sched_cpu_mask(int cpu) {
-    if (cpu < 0 || cpu >= 64)
+    if (cpu < 0 || cpu >= (int)PROC_SCHED_AFFINITY_WORD_BITS)
         return 0;
     return (1ULL << cpu);
 }
 
 static inline uint64_t proc_sched_sanitize_affinity_mask(uint64_t mask) {
-    mask &= PROC_SCHED_AFFINITY_ALL;
-    if (!mask)
-        mask = PROC_SCHED_AFFINITY_ALL;
+    unsigned long word0 = (unsigned long)mask;
+    if (PROC_SCHED_AFFINITY_WORDS == 1)
+        word0 &= PROC_SCHED_AFFINITY_LAST_WORD_MASK;
+    if (word0 == 0) {
+        word0 = ~0UL;
+        if (PROC_SCHED_AFFINITY_WORDS == 1)
+            word0 &= PROC_SCHED_AFFINITY_LAST_WORD_MASK;
+    }
+    mask = (uint64_t)word0;
     return mask;
 }
 
-static inline uint64_t proc_sched_get_affinity_mask(const struct process *p) {
+static inline void proc_sched_set_affinity_all(struct process *p) {
     if (!p)
-        return 0;
-    uint64_t mask = __atomic_load_n(&p->sched_affinity, __ATOMIC_ACQUIRE);
-    mask &= PROC_SCHED_AFFINITY_ALL;
-    if (!mask)
-        mask = PROC_SCHED_AFFINITY_ALL;
-    return mask;
+        return;
+    unsigned long mask[PROC_SCHED_AFFINITY_WORDS];
+    proc_sched_affinity_fill_all(mask);
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+        __atomic_store_n(&p->sched_affinity[i], mask[i], __ATOMIC_RELEASE);
+}
+
+static inline void proc_sched_set_affinity_mask_words(struct process *p,
+                                                      const unsigned long *mask,
+                                                      size_t words) {
+    if (!p || !mask || words == 0)
+        return;
+    unsigned long sanitized[PROC_SCHED_AFFINITY_WORDS];
+    proc_sched_affinity_zero(sanitized);
+    size_t n = words;
+    if (n > PROC_SCHED_AFFINITY_WORDS)
+        n = PROC_SCHED_AFFINITY_WORDS;
+    for (size_t i = 0; i < n; i++)
+        sanitized[i] = mask[i];
+    proc_sched_affinity_sanitize(sanitized);
+    for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+        __atomic_store_n(&p->sched_affinity[i], sanitized[i], __ATOMIC_RELEASE);
+}
+
+static inline void proc_sched_get_affinity_mask_words(const struct process *p,
+                                                      unsigned long *mask,
+                                                      size_t words) {
+    if (!mask || words == 0)
+        return;
+    unsigned long current[PROC_SCHED_AFFINITY_WORDS];
+    if (!p) {
+        proc_sched_affinity_fill_all(current);
+    } else {
+        for (size_t i = 0; i < PROC_SCHED_AFFINITY_WORDS; i++)
+            current[i] = __atomic_load_n(&p->sched_affinity[i], __ATOMIC_ACQUIRE);
+        proc_sched_affinity_sanitize(current);
+    }
+    size_t n = words;
+    if (n > PROC_SCHED_AFFINITY_WORDS)
+        n = PROC_SCHED_AFFINITY_WORDS;
+    for (size_t i = 0; i < n; i++)
+        mask[i] = current[i];
+    for (size_t i = n; i < words; i++)
+        mask[i] = 0;
+}
+
+static inline uint64_t proc_sched_get_affinity_mask(const struct process *p) {
+    unsigned long mask[PROC_SCHED_AFFINITY_WORDS];
+    proc_sched_get_affinity_mask_words(p, mask, PROC_SCHED_AFFINITY_WORDS);
+    return (uint64_t)mask[0];
 }
 
 static inline void proc_sched_set_affinity_mask(struct process *p,
                                                 uint64_t mask) {
-    if (!p)
-        return;
-    __atomic_store_n(&p->sched_affinity,
-                     proc_sched_sanitize_affinity_mask(mask),
-                     __ATOMIC_RELEASE);
+    unsigned long words[PROC_SCHED_AFFINITY_WORDS];
+    proc_sched_affinity_zero(words);
+    words[0] = (unsigned long)proc_sched_sanitize_affinity_mask(mask);
+    proc_sched_set_affinity_mask_words(p, words, PROC_SCHED_AFFINITY_WORDS);
 }
 
 static inline bool proc_sched_cpu_allowed(const struct process *p, int cpu) {
     if (!p || cpu < 0 || cpu >= CONFIG_MAX_CPUS)
         return false;
-    if (cpu >= 64)
-        return proc_sched_get_affinity_mask(p) == UINT64_MAX;
-    return (proc_sched_get_affinity_mask(p) & (1ULL << cpu)) != 0;
+    unsigned long mask[PROC_SCHED_AFFINITY_WORDS];
+    proc_sched_get_affinity_mask_words(p, mask, PROC_SCHED_AFFINITY_WORDS);
+    return proc_sched_affinity_mask_test_cpu(mask, cpu);
 }
 
 static inline void proc_sched_set_stealable(struct process *p, bool enabled) {

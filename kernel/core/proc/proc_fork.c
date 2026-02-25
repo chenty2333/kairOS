@@ -35,7 +35,8 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
     child->itimer_real = parent->itimer_real;
     child->sigaltstack = parent->sigaltstack;
     child->sched_flags = parent->sched_flags;
-    child->sched_affinity = parent->sched_affinity;
+    proc_sched_set_affinity_mask_words(child, parent->sched_affinity,
+                                       PROC_SCHED_AFFINITY_WORDS);
     memcpy(child->rlimits, parent->rlimits, sizeof(child->rlimits));
     child->parent = parent;
     child->ppid = parent->pid;

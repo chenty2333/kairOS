@@ -104,13 +104,15 @@ static inline int sched_online_cpu_count(void) {
     return online;
 }
 
-static inline uint64_t sched_online_cpu_mask_u64(void) {
-    uint64_t mask = 0;
+static inline void sched_online_cpu_mask(unsigned long *mask) {
+    if (!mask)
+        return;
+    proc_sched_affinity_zero(mask);
     int online = sched_online_cpu_count();
-    int bits = online < 64 ? online : 64;
-    for (int cpu = 0; cpu < bits; cpu++)
-        mask |= (1ULL << cpu);
-    return mask;
+    if (online > CONFIG_MAX_CPUS)
+        online = CONFIG_MAX_CPUS;
+    for (int cpu = 0; cpu < online; cpu++)
+        (void)proc_sched_affinity_mask_set_cpu(mask, cpu);
 }
 
 static int sched_select_target_cpu(const struct process *p, int hint_cpu) {
@@ -727,16 +729,29 @@ void sched_dequeue(struct process *p) {
     arch_irq_restore(state);
 }
 
-int sched_set_affinity(struct process *p, uint64_t mask) {
+int sched_set_affinity(struct process *p, const unsigned long *mask,
+                       size_t mask_words) {
     if (!p)
         return -EINVAL;
-
-    uint64_t online_mask = sched_online_cpu_mask_u64();
-    uint64_t effective_mask = mask & online_mask;
-    if (!effective_mask)
+    if (!mask || mask_words == 0)
         return -EINVAL;
 
-    proc_sched_set_affinity_mask(p, effective_mask);
+    unsigned long online_mask[PROC_SCHED_AFFINITY_WORDS];
+    unsigned long effective_mask[PROC_SCHED_AFFINITY_WORDS];
+    sched_online_cpu_mask(online_mask);
+    proc_sched_affinity_zero(effective_mask);
+
+    size_t words = mask_words;
+    if (words > PROC_SCHED_AFFINITY_WORDS)
+        words = PROC_SCHED_AFFINITY_WORDS;
+    for (size_t i = 0; i < words; i++)
+        effective_mask[i] = mask[i] & online_mask[i];
+
+    if (proc_sched_affinity_is_zero(effective_mask))
+        return -EINVAL;
+
+    proc_sched_set_affinity_mask_words(p, effective_mask,
+                                       PROC_SCHED_AFFINITY_WORDS);
 
     for (int attempts = 0; attempts < 8; attempts++) {
         int cpu = p->se.cpu;
