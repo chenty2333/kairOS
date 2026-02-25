@@ -1,0 +1,59 @@
+name: ci-flake-report
+
+on:
+  schedule:
+    - cron: "15 2 * * *"
+  workflow_dispatch:
+    inputs:
+      sample_size:
+        description: "Latest completed runs per workflow to inspect"
+        required: false
+        default: "20"
+
+concurrency:
+  group: ci-flake-report-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake-report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    env:
+      SAMPLE_SIZE: ${{ github.event.inputs.sample_size || '20' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate rolling gate failure-rate report
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/impl/ci-flake-report.py \
+            --sample-size "${SAMPLE_SIZE}" \
+            --json-out ci-flake-report.json \
+            --markdown-out ci-flake-report.md
+
+      - name: Publish report to workflow summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -f ci-flake-report.md ]]; then
+            cat ci-flake-report.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload flake report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-flake-report-${{ github.run_id }}
+          retention-days: 21
+          if-no-files-found: error
+          path: |
+            ci-flake-report.json
+            ci-flake-report.md
