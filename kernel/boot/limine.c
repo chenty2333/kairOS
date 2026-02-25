@@ -568,38 +568,56 @@ static void boot_init_limine(void) {
 
     struct limine_memmap_response *memmap_resp =
         (struct limine_memmap_response *)limine_ptr_to_virt(limine_memmap.response);
-    if (memmap_resp) {
-        uint64_t min = UINT64_MAX;
-        uint64_t max = 0;
-        uint64_t count = memmap_resp->entry_count;
-        if (count > BOOT_MEMMAP_MAX) {
-            count = BOOT_MEMMAP_MAX;
+    if (!memmap_resp) {
+        panic("boot: limine memmap response missing");
+    }
+    if (memmap_resp->entry_count == 0) {
+        panic("boot: limine memmap empty");
+    }
+
+    uint64_t min = UINT64_MAX;
+    uint64_t max = 0;
+    uint64_t count = memmap_resp->entry_count;
+    if (count > BOOT_MEMMAP_MAX) {
+        count = BOOT_MEMMAP_MAX;
+    }
+
+    struct limine_memmap_entry **entries =
+        (struct limine_memmap_entry **)limine_ptr_to_virt(memmap_resp->entries);
+    if (!entries) {
+        panic("boot: limine memmap entries missing");
+    }
+
+    for (uint64_t i = 0; i < count; i++) {
+        struct limine_memmap_entry *entry =
+            (struct limine_memmap_entry *)limine_ptr_to_virt(entries[i]);
+        if (!entry) {
+            panic("boot: limine memmap entry[%llu] missing",
+                  (unsigned long long)i);
+        }
+        if (entry->length && entry->base > UINT64_MAX - entry->length) {
+            panic("boot: limine memmap entry[%llu] overflow base=0x%llx len=0x%llx",
+                  (unsigned long long)i,
+                  (unsigned long long)entry->base,
+                  (unsigned long long)entry->length);
         }
 
-        struct limine_memmap_entry **entries =
-            (struct limine_memmap_entry **)limine_ptr_to_virt(memmap_resp->entries);
-        if (!entries) {
-            count = 0;
+        boot_info.memmap[i].base = entry->base;
+        boot_info.memmap[i].length = entry->length;
+        boot_info.memmap[i].type = limine_memmap_type_to_boot(entry->type);
+        if (boot_mem_is_ram(boot_info.memmap[i].type)) {
+            if (entry->base < min)
+                min = entry->base;
+            if (entry->base + entry->length > max)
+                max = entry->base + entry->length;
         }
-
-        for (uint64_t i = 0; i < count; i++) {
-            struct limine_memmap_entry *entry =
-                (struct limine_memmap_entry *)limine_ptr_to_virt(entries[i]);
-            boot_info.memmap[i].base = entry->base;
-            boot_info.memmap[i].length = entry->length;
-            boot_info.memmap[i].type = limine_memmap_type_to_boot(entry->type);
-            if (boot_mem_is_ram(boot_info.memmap[i].type)) {
-                if (entry->base < min)
-                    min = entry->base;
-                if (entry->base + entry->length > max)
-                    max = entry->base + entry->length;
-            }
-        }
-        boot_info.memmap_count = (uint32_t)count;
-        if (min != UINT64_MAX) {
-            boot_info.phys_mem_min = min;
-            boot_info.phys_mem_max = max;
-        }
+    }
+    boot_info.memmap_count = (uint32_t)count;
+    if (min != UINT64_MAX) {
+        boot_info.phys_mem_min = min;
+        boot_info.phys_mem_max = max;
+    } else {
+        panic("boot: limine memmap has no RAM ranges");
     }
 
     struct limine_framebuffer_response *fb_resp =
@@ -674,7 +692,7 @@ static void boot_init_limine(void) {
         struct limine_mp_info **cpus =
             (struct limine_mp_info **)limine_ptr_to_virt(mp_resp->cpus);
         if (!cpus) {
-            count = 0;
+            panic("boot: limine mp cpu array missing");
         }
 
         boot_info.cpu_count = (uint32_t)count;
@@ -686,6 +704,10 @@ static void boot_init_limine(void) {
         for (uint64_t i = 0; i < count; i++) {
             struct limine_mp_info *info =
                 (struct limine_mp_info *)limine_ptr_to_virt(cpus[i]);
+            if (!info) {
+                panic("boot: limine mp cpu[%llu] missing",
+                      (unsigned long long)i);
+            }
             boot_info.cpus[i].cpu_id = (uint32_t)i;
             boot_info.cpus[i].mp_info = info;
 #if defined(ARCH_x86_64)

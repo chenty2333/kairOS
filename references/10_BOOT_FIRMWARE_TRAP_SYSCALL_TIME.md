@@ -13,6 +13,7 @@ All three architectures share the same path:
    - Limine memmap type `LIMINE_MEMMAP_RESERVED_MAPPED` is treated as `BOOT_MEM_RESERVED` (legacy `LIMINE_MEMMAP_ACPI_TABLES` remains compatibility-mapped to `BOOT_MEM_ACPI_RECLAIM` when present)
    - aarch64 fallback: when Limine MP reports only BSP, `boot_init_limine()` reads DTB `/cpus` to populate CPU topology metadata (`boot_info.cpu_count` / `cpus[].hw_id`)
    - boot path now validates and logs Limine `firmware_type`, `paging_mode`, and MP `revision/flags`; mismatch vs requested constraints triggers early panic (fail-fast)
+   - boot path now fail-fasts on malformed critical descriptors (missing/empty memmap, null memmap entries, memmap range overflow, missing MP CPU array/entries)
    - Limine `date_at_boot` and `bootloader_performance` are recorded into `boot_info` when available
    - Limine `executable_file` metadata (`path/string/media_type/partition_index`) is recorded into `boot_info` for boot-media diagnostics
 3. `arch_cpu_init()` — BSP CPU initialization
