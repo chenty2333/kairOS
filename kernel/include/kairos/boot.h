@@ -69,7 +69,15 @@ struct boot_info {
     uint64_t limine_executable_revision;
     void *dtb;
     void *rsdp;
+    void *smbios_entry_32;
+    void *smbios_entry_64;
+    uint64_t smbios_revision;
     void *efi_system_table;
+    void *efi_memmap;
+    uint64_t efi_memmap_size;
+    uint64_t efi_memmap_desc_size;
+    uint64_t efi_memmap_desc_version;
+    uint64_t efi_memmap_revision;
 
     uint64_t limine_firmware_type;
     uint64_t limine_firmware_type_revision;
@@ -79,6 +87,9 @@ struct boot_info {
     uint64_t limine_paging_mode_revision;
     uint64_t limine_mp_revision;
     uint64_t limine_mp_flags;
+    uint64_t limine_riscv_bsp_hartid;
+    uint64_t limine_riscv_bsp_hartid_revision;
+    uint64_t limine_riscv_bsp_hartid_valid;
 
     int64_t boot_timestamp;
     uint64_t boot_timestamp_revision;

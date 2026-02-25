@@ -16,6 +16,8 @@ All three architectures share the same path:
    - boot path now fail-fasts on malformed critical descriptors (missing/empty memmap, null memmap entries, memmap range overflow, missing MP CPU array/entries)
    - Limine `date_at_boot` and `bootloader_performance` are recorded into `boot_info` when available
    - Limine `executable_file` metadata (`path/string/media_type/partition_index`) is recorded into `boot_info` for boot-media diagnostics
+   - Limine `smbios` and `efi_memmap` descriptors are recorded into `boot_info` when available; malformed EFI memmap descriptors (non-zero size with null memmap pointer, or zero descriptor size) trigger early panic
+   - riscv64 additionally records Limine `riscv_bsp_hartid`; mismatch vs MP-reported BSP hartid triggers early panic
 3. `arch_cpu_init()` — BSP CPU initialization
 4. `core/main.c:kernel_main()` — main initialization sequence:
    - init_boot → init_mm → syscall_init → arch_trap_init → tick_policy_init → arch_timer_init(100) → sched_init → proc_init → futex_init → proc_idle_init → init_devices → init_net → init_fs → smp_init → init_user

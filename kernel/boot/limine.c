@@ -184,8 +184,22 @@ static volatile struct limine_rsdp_request limine_rsdp = {
 };
 
 __attribute__((used, section(".limine_requests")))
+static volatile struct limine_smbios_request limine_smbios = {
+    .id = LIMINE_SMBIOS_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
 static volatile struct limine_efi_system_table_request limine_efi = {
     .id = LIMINE_EFI_SYSTEM_TABLE_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_efi_memmap_request limine_efi_memmap = {
+    .id = LIMINE_EFI_MEMMAP_REQUEST_ID,
     .revision = 0,
     .response = NULL,
 };
@@ -207,6 +221,13 @@ static volatile struct limine_date_at_boot_request limine_date_at_boot = {
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_bootloader_performance_request limine_boot_perf = {
     .id = LIMINE_BOOTLOADER_PERFORMANCE_REQUEST_ID,
+    .revision = 0,
+    .response = NULL,
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_riscv_bsp_hartid_request limine_riscv_bsp_hartid = {
+    .id = LIMINE_RISCV_BSP_HARTID_REQUEST_ID,
     .revision = 0,
     .response = NULL,
 };
@@ -486,12 +507,37 @@ static void boot_init_limine(void) {
         boot_info.rsdp = (void *)limine_ptr_to_virt(rsdp_resp->address);
     }
 
+    struct limine_smbios_response *smbios_resp =
+        (struct limine_smbios_response *)limine_ptr_to_virt(limine_smbios.response);
+    if (smbios_resp) {
+        boot_info.smbios_revision = smbios_resp->revision;
+        boot_info.smbios_entry_32 = (void *)limine_ptr_to_virt(smbios_resp->entry_32);
+        boot_info.smbios_entry_64 = (void *)limine_ptr_to_virt(smbios_resp->entry_64);
+    }
+
     struct limine_efi_system_table_response *efi_resp =
         (struct limine_efi_system_table_response *)
             limine_ptr_to_virt(limine_efi.response);
     if (efi_resp) {
         boot_info.efi_system_table =
             (void *)limine_ptr_to_virt(efi_resp->address);
+    }
+
+    struct limine_efi_memmap_response *efi_memmap_resp =
+        (struct limine_efi_memmap_response *)
+            limine_ptr_to_virt(limine_efi_memmap.response);
+    if (efi_memmap_resp) {
+        boot_info.efi_memmap_revision = efi_memmap_resp->revision;
+        boot_info.efi_memmap = (void *)limine_ptr_to_virt(efi_memmap_resp->memmap);
+        boot_info.efi_memmap_size = efi_memmap_resp->memmap_size;
+        boot_info.efi_memmap_desc_size = efi_memmap_resp->desc_size;
+        boot_info.efi_memmap_desc_version = efi_memmap_resp->desc_version;
+        if (boot_info.efi_memmap_size && !boot_info.efi_memmap) {
+            panic("boot: limine efi memmap pointer missing");
+        }
+        if (boot_info.efi_memmap_size && boot_info.efi_memmap_desc_size == 0) {
+            panic("boot: limine efi memmap desc_size is zero");
+        }
     }
 
     struct limine_executable_address_response *exec_addr_resp =
@@ -526,6 +572,15 @@ static void boot_init_limine(void) {
                 (unsigned long long)boot_info.bootloader_init_usec,
                 (unsigned long long)boot_info.bootloader_exec_usec,
                 (unsigned long long)boot_info.bootloader_perf_revision);
+    }
+
+    struct limine_riscv_bsp_hartid_response *riscv_bsp_hartid_resp =
+        (struct limine_riscv_bsp_hartid_response *)
+            limine_ptr_to_virt(limine_riscv_bsp_hartid.response);
+    if (riscv_bsp_hartid_resp) {
+        boot_info.limine_riscv_bsp_hartid_valid = 1;
+        boot_info.limine_riscv_bsp_hartid_revision = riscv_bsp_hartid_resp->revision;
+        boot_info.limine_riscv_bsp_hartid = riscv_bsp_hartid_resp->bsp_hartid;
     }
 
     if (!boot_info.dtb) {
@@ -684,6 +739,14 @@ static void boot_init_limine(void) {
             (unsigned long long)boot_info.limine_mp_revision,
             (unsigned long long)boot_info.limine_mp_flags,
             (unsigned long long)mp_resp->cpu_count);
+#if defined(ARCH_riscv64)
+    if (boot_info.limine_riscv_bsp_hartid_valid &&
+        boot_info.limine_riscv_bsp_hartid != mp_resp->bsp_hartid) {
+        panic("boot: limine riscv bsp hartid mismatch req=%llu mp=%llu",
+              (unsigned long long)boot_info.limine_riscv_bsp_hartid,
+              (unsigned long long)mp_resp->bsp_hartid);
+    }
+#endif
     if (mp_resp->cpu_count) {
         uint64_t count = mp_resp->cpu_count;
         if (count > CONFIG_MAX_CPUS)
@@ -731,6 +794,12 @@ static void boot_init_limine(void) {
     } else {
         boot_info.cpu_count = 1;
         boot_info.bsp_cpu_id = 0;
+#if defined(ARCH_riscv64)
+        if (boot_info.limine_riscv_bsp_hartid_valid) {
+            boot_info.cpus[0].cpu_id = 0;
+            boot_info.cpus[0].hw_id = boot_info.limine_riscv_bsp_hartid;
+        }
+#endif
     }
 
 #if defined(ARCH_aarch64)

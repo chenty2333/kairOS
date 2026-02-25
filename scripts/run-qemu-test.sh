@@ -19,6 +19,7 @@ TEST_FAILURE_MARKER="${TEST_FAILURE_MARKER:-driver tests: [1-9][0-9]* failures|m
 TEST_REQUIRED_MARKER_REGEX="${TEST_REQUIRED_MARKER_REGEX:-}"
 TEST_REQUIRED_MARKERS_ALL="${TEST_REQUIRED_MARKERS_ALL:-}"
 TEST_FORBIDDEN_MARKER_REGEX="${TEST_FORBIDDEN_MARKER_REGEX:-}"
+TEST_OPTIONAL_MARKERS_IF_PRESENT="${TEST_OPTIONAL_MARKERS_IF_PRESENT:-}"
 TEST_BUILD_ROOT="${TEST_BUILD_ROOT:-$(dirname "$TEST_LOG")}"
 TEST_ARCH="${TEST_ARCH:-unknown}"
 TEST_RUN_ID="${TEST_RUN_ID:-$(basename "$TEST_BUILD_ROOT")}"
@@ -37,6 +38,10 @@ if [[ "${TEST_REQUIRE_STRUCTURED}" == "auto" ]]; then
     else
         TEST_REQUIRE_STRUCTURED=0
     fi
+fi
+
+if [[ "${TEST_REQUIRE_MARKERS}" == "1" ]] && [[ -z "${TEST_OPTIONAL_MARKERS_IF_PRESENT}" ]]; then
+    TEST_OPTIONAL_MARKERS_IF_PRESENT=$'boot: limine loaded base revision=.*\tboot: limine loaded base revision=[0-9]+\nboot: limine executable .*\tboot: limine executable media=[0-9]+ part=[0-9]+ path=.* string=.* rev=[0-9]+\nboot: limine date_at_boot=.*\tboot: limine date_at_boot=-?[0-9]+ rev=[0-9]+\nboot: limine perf .*\tboot: limine perf reset=[0-9]+us init=[0-9]+us exec=[0-9]+us rev=[0-9]+\nboot: limine smbios .*\tboot: limine smbios rev=[0-9]+ entry32=.* entry64=.*\nboot: limine efi memmap .*\tboot: limine efi memmap rev=[0-9]+ size=[0-9]+ desc_size=[0-9]+ desc_ver=[0-9]+\nboot: limine riscv bsp hartid=.*\tboot: limine riscv bsp hartid=[0-9]+ rev=[0-9]+'
 fi
 
 json_quote() {
@@ -323,7 +328,8 @@ run_test_main() {
     local start_ms start_time_utc end_ms end_time_utc duration_ms
     local old_pid wrapped_qemu_cmd qemu_rc
     local has_boot_marker has_fatal_markers has_failure_markers
-    local has_required_markers has_forbidden_markers
+    local has_required_markers has_forbidden_markers has_optional_markers
+    local optional_marker_failed_rule
     local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
     local structured_status structured_schema structured_failed structured_done structured_enabled_mask
     local summary_status summary_failed
@@ -377,6 +383,8 @@ run_test_main() {
     has_failure_markers=0
     has_required_markers=1
     has_forbidden_markers=0
+    has_optional_markers=1
+    optional_marker_failed_rule=""
 
     if grep -Eiq "${TEST_BOOT_MARKER}" "${TEST_LOG}"; then
         has_boot_marker=1
@@ -403,6 +411,19 @@ run_test_main() {
                 break
             fi
         done <<< "${TEST_REQUIRED_MARKERS_ALL}"
+    fi
+    if [[ ${has_required_markers} -eq 1 && -n "${TEST_OPTIONAL_MARKERS_IF_PRESENT}" ]]; then
+        while IFS=$'\t' read -r present required; do
+            if [[ -z "${present}" || -z "${required}" ]]; then
+                continue
+            fi
+            if grep -Eiq "${present}" "${TEST_LOG}" &&
+                ! grep -Eiq "${required}" "${TEST_LOG}"; then
+                has_optional_markers=0
+                optional_marker_failed_rule="${required}"
+                break
+            fi
+        done <<< "${TEST_OPTIONAL_MARKERS_IF_PRESENT}"
     fi
     if [[ -n "${TEST_FORBIDDEN_MARKER_REGEX}" ]] &&
         grep -Eiq "${TEST_FORBIDDEN_MARKER_REGEX}" "${TEST_LOG}"; then
@@ -435,9 +456,6 @@ run_test_main() {
     if [[ ${has_forbidden_markers} -eq 1 ]]; then
         status="fail"
         reason="forbidden_markers_detected"
-    elif [[ ${has_required_markers} -eq 0 ]]; then
-        status="fail"
-        reason="required_markers_missing"
     elif [[ "${TEST_REQUIRE_STRUCTURED}" -eq 1 ]]; then
         verdict_source="structured"
         if [[ "${structured_status}" == "missing" ]]; then
@@ -472,6 +490,12 @@ run_test_main() {
             else
                 reason="structured_failed"
             fi
+        elif [[ ${has_required_markers} -eq 0 ]]; then
+            status="fail"
+            reason="required_markers_missing"
+        elif [[ ${has_optional_markers} -eq 0 ]]; then
+            status="fail"
+            reason="optional_markers_invalid"
         elif [[ ${qemu_rc} -eq 0 ]]; then
             status="pass"
             reason="structured_passed"
@@ -485,6 +509,12 @@ run_test_main() {
             status="fail"
             reason="unexpected_exit_after_structured"
         fi
+    elif [[ ${has_required_markers} -eq 0 ]]; then
+        status="fail"
+        reason="required_markers_missing"
+    elif [[ ${has_optional_markers} -eq 0 ]]; then
+        status="fail"
+        reason="optional_markers_invalid"
     else
         verdict_source="unstructured"
         if [[ ${has_fatal_markers} -eq 1 ]]; then
@@ -559,6 +589,10 @@ run_test_main() {
     fi
 
     echo "test: ${status} (${reason}, qemu_rc=${qemu_rc})" >&2
+    if [[ "${reason}" == "optional_markers_invalid" ]] &&
+        [[ -n "${optional_marker_failed_rule}" ]]; then
+        echo "test: optional marker rule failed: ${optional_marker_failed_rule}" >&2
+    fi
     tail -n 120 "${TEST_LOG}" >&2 || true
     return "${exit_code}"
 }

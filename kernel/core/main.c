@@ -184,6 +184,36 @@ static void log_limine_boot_markers(void) {
                 exec_path, exec_string,
                 (unsigned long long)bi->limine_executable_revision);
     }
+    if (bi->boot_timestamp_revision) {
+        pr_info("boot: limine date_at_boot=%lld rev=%llu\n",
+                (long long)bi->boot_timestamp,
+                (unsigned long long)bi->boot_timestamp_revision);
+    }
+    if (bi->bootloader_perf_revision) {
+        pr_info("boot: limine perf reset=%lluus init=%lluus exec=%lluus rev=%llu\n",
+                (unsigned long long)bi->bootloader_reset_usec,
+                (unsigned long long)bi->bootloader_init_usec,
+                (unsigned long long)bi->bootloader_exec_usec,
+                (unsigned long long)bi->bootloader_perf_revision);
+    }
+    if (bi->smbios_revision || bi->smbios_entry_32 || bi->smbios_entry_64) {
+        pr_info("boot: limine smbios rev=%llu entry32=%p entry64=%p\n",
+                (unsigned long long)bi->smbios_revision,
+                bi->smbios_entry_32,
+                bi->smbios_entry_64);
+    }
+    if (bi->efi_memmap_revision || bi->efi_memmap || bi->efi_memmap_size) {
+        pr_info("boot: limine efi memmap rev=%llu size=%llu desc_size=%llu desc_ver=%llu\n",
+                (unsigned long long)bi->efi_memmap_revision,
+                (unsigned long long)bi->efi_memmap_size,
+                (unsigned long long)bi->efi_memmap_desc_size,
+                (unsigned long long)bi->efi_memmap_desc_version);
+    }
+    if (bi->limine_riscv_bsp_hartid_valid) {
+        pr_info("boot: limine riscv bsp hartid=%llu rev=%llu\n",
+                (unsigned long long)bi->limine_riscv_bsp_hartid,
+                (unsigned long long)bi->limine_riscv_bsp_hartid_revision);
+    }
 }
 
 /**
