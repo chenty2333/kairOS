@@ -104,8 +104,8 @@ else ifeq ($(ARCH),aarch64)
   QEMU_ACCEL ?= tcg,thread=multi
   QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
   INITRAMFS_BUSYBOX := 1
-  # Align local default with CI quick gate coverage.
-  QEMU_SMP := 2
+  # Default to 4 cores; CI keeps explicit smp=2 stability gates and smp=4 shadow.
+  QEMU_SMP := 4
   KERNEL_LOAD := 0x40000000
 else
   $(error Unsupported architecture: $(ARCH))

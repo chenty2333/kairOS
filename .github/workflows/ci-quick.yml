@@ -473,6 +473,36 @@ jobs:
             --arch aarch64 \
             --expected-online 2
 
+      - name: Run aarch64 driver gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=300 test-driver
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 driver gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
+
+      - name: Run aarch64 socket gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=360 test-socket
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 socket gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
+
       - name: Run aarch64 tcc smoke gate
         run: |
           set -euo pipefail
@@ -514,6 +544,241 @@ jobs:
             ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/test.log
             ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/tcc-smoke.log
             ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/run.log
+            build/runs/*/manifest.json
+            build/runs/*/result.json
+            build/runs/*/aarch64/logs/*.log
+            build/runs/*/aarch64/*.log
+            build/aarch64/test.log
+            build/aarch64/tcc-smoke.log
+            build/aarch64/run.log
+
+  aarch64-smp4-shadow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(
+            clang
+            lld
+            llvm
+            make
+            python3
+            git
+            cmake
+            ninja-build
+            rsync
+            curl
+            unzip
+            ca-certificates
+            e2fsprogs
+            dosfstools
+            mtools
+            qemu-system-arm
+            qemu-system-misc
+            qemu-utils
+            ovmf
+          )
+          if apt-cache show qemu-efi-aarch64 >/dev/null 2>&1; then
+            pkgs+=(qemu-efi-aarch64)
+          fi
+          if apt-cache show qemu-efi-arm >/dev/null 2>&1; then
+            pkgs+=(qemu-efi-arm)
+          fi
+          if apt-cache show edk2-ovmf >/dev/null 2>&1; then
+            pkgs+=(edk2-ovmf)
+          fi
+          sudo apt-get install -y "${pkgs[@]}"
+
+      - name: Restore third-party source cache
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+          restore-keys: |
+            third-party-${{ runner.os }}-
+
+      - name: Fetch required third-party sources
+        run: |
+          set -euo pipefail
+          deps=(lwip limine musl busybox tcc doomgeneric)
+          for dep in "${deps[@]}"; do
+            ok=0
+            for attempt in 1 2 3; do
+              echo "Fetching ${dep} (attempt ${attempt}/3)"
+              if scripts/kairos.sh deps fetch "${dep}"; then
+                ok=1
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            if [[ "${ok}" -ne 1 ]]; then
+              echo "Failed to fetch dependency: ${dep}" >&2
+              exit 2
+            fi
+          done
+          required=(
+            third_party/lwip/src/include/lwip/tcp.h
+            third_party/limine/Makefile
+            third_party/musl/include/stdio.h
+            third_party/busybox/Makefile
+            third_party/tinycc/tcc.c
+            third_party/doomgeneric/doomgeneric/doomgeneric.h
+          )
+          for path in "${required[@]}"; do
+            if [[ ! -e "${path}" ]]; then
+              echo "Dependency verification failed: missing ${path}" >&2
+              exit 2
+            fi
+          done
+
+      - name: Locate aarch64 UEFI firmware
+        run: |
+          set -euo pipefail
+          code_candidates=(
+            /usr/share/edk2/aarch64/QEMU_EFI-silent-pflash.raw
+            /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw
+            /usr/share/AAVMF/AAVMF_CODE.fd
+            /usr/share/AAVMF/AAVMF_CODE.ms.fd
+            /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+          )
+          vars_candidates=(
+            /usr/share/edk2/aarch64/vars-template-pflash.raw
+            /usr/share/AAVMF/AAVMF_VARS.fd
+            /usr/share/AAVMF/AAVMF_VARS.ms.fd
+            /usr/share/qemu-efi-aarch64/QEMU_VARS.fd
+          )
+          code_src=""
+          vars_src=""
+          for p in "${code_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              code_src="${p}"
+              break
+            fi
+          done
+          for p in "${vars_candidates[@]}"; do
+            if [[ -f "${p}" ]]; then
+              vars_src="${p}"
+              break
+            fi
+          done
+          if [[ -z "${code_src}" || -z "${vars_src}" ]]; then
+            echo "Unable to locate aarch64 UEFI firmware on runner" >&2
+            exit 2
+          fi
+          echo "UEFI_CODE_SRC=${code_src}" >> "${GITHUB_ENV}"
+          echo "UEFI_VARS_SRC=${vars_src}" >> "${GITHUB_ENV}"
+          echo "Using UEFI_CODE_SRC=${code_src}"
+          echo "Using UEFI_VARS_SRC=${vars_src}"
+
+      - name: Run aarch64 smp4 syscall/trap shadow
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=240 test-syscall-trap
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 syscall/trap shadow" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
+      - name: Run aarch64 smp4 vfs/ipc shadow
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-vfs-ipc
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 vfs/ipc shadow" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
+      - name: Run aarch64 smp4 driver shadow
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-driver
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 driver shadow" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
+      - name: Run aarch64 smp4 socket shadow
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=360 test-socket
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 socket shadow" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
+      - name: Run aarch64 smp4 tcc smoke shadow
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 tcc smoke shadow" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
+      - name: Capture latest isolated run
+        id: latest_run_aarch64_smp4_shadow
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload aarch64 smp4 shadow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-aarch64-smp4-shadow-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/manifest.json
+            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/result.json
+            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/logs/test.log
+            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/test.log
+            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/tcc-smoke.log
+            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/run.log
             build/runs/*/manifest.json
             build/runs/*/result.json
             build/runs/*/aarch64/logs/*.log

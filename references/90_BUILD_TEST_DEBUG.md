@@ -74,7 +74,7 @@ Variables:
 - `make run-iso` — boot from ISO (x86_64 only; not a primary verification path for other architectures)
 
 QEMU configuration:
-- 384MB RAM, SMP default 4 cores (`aarch64` run/debug default is `QEMU_SMP=2`, aligned with the DTB+PSCI fallback CI gate)
+- 384MB RAM, SMP default 4 cores (`aarch64` run/debug default is `QEMU_SMP=4`; CI still keeps explicit `QEMU_SMP=2` stability gates plus `SMP=4` shadow coverage)
 - Default accelerator is `QEMU_ACCEL=tcg,thread=multi`; for deterministic boot-hart ordering in specific `riscv64` scenarios, override with `QEMU_ACCEL=tcg,thread=single`
 - Network: virtio-net + user mode; `HOSTFWD_PORT=8080` forwards host port to guest :80
 - Graphics: `QEMU_GUI=1` enables GTK display
