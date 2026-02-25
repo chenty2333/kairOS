@@ -3,8 +3,10 @@
  */
 
 #include <kairos/pci.h>
+#include <kairos/arch.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 
@@ -145,10 +147,80 @@ int pci_find_capability(const struct pci_device *pdev, uint8_t cap_id,
     return pci_find_next_capability(pdev, 0, cap_id, cap_ptr);
 }
 
+static int pci_msix_read_layout(const struct pci_device *pdev, uint8_t cap,
+                                uint16_t *table_size, uint8_t *table_bir,
+                                uint32_t *table_off, uint8_t *pba_bir,
+                                uint32_t *pba_off)
+{
+    if (!pdev || !table_size || !table_bir || !table_off || !pba_bir || !pba_off)
+        return -EINVAL;
+
+    uint16_t ctrl = 0;
+    int ret = pci_dev_read_config_16(pdev, (uint16_t)(cap + PCI_MSIX_FLAGS), &ctrl);
+    if (ret < 0)
+        return ret;
+
+    uint16_t size = (uint16_t)((ctrl & PCI_MSIX_FLAGS_QSIZE) + 1U);
+    if (!size)
+        return -EINVAL;
+
+    uint32_t table_info = 0;
+    ret = pci_dev_read_config_32(pdev, (uint16_t)(cap + PCI_MSIX_TABLE), &table_info);
+    if (ret < 0)
+        return ret;
+    uint8_t t_bir = (uint8_t)(table_info & 0x7U);
+    uint32_t t_off = table_info & ~0x7U;
+
+    uint32_t pba_info = 0;
+    ret = pci_dev_read_config_32(pdev, (uint16_t)(cap + PCI_MSIX_PBA), &pba_info);
+    if (ret < 0)
+        return ret;
+    uint8_t p_bir = (uint8_t)(pba_info & 0x7U);
+    uint32_t p_off = pba_info & ~0x7U;
+
+    if (t_bir >= PCI_MAX_BAR || p_bir >= PCI_MAX_BAR)
+        return -EINVAL;
+    if (!pdev->bar[t_bir] || !pdev->bar_size[t_bir])
+        return -EINVAL;
+    if (!pdev->bar[p_bir] || !pdev->bar_size[p_bir])
+        return -EINVAL;
+
+    uint64_t table_need = (uint64_t)t_off + ((uint64_t)size * PCI_MSIX_ENTRY_SIZE);
+    if (table_need > pdev->bar_size[t_bir])
+        return -EINVAL;
+
+    uint64_t pba_bytes = (uint64_t)((size + 63U) / 64U) * 8U;
+    if (((uint64_t)p_off + pba_bytes) > pdev->bar_size[p_bir])
+        return -EINVAL;
+
+    *table_size = size;
+    *table_bir = t_bir;
+    *table_off = t_off;
+    *pba_bir = p_bir;
+    *pba_off = p_off;
+    return 0;
+}
+
+static void pci_toggle_intx(struct pci_device *pdev, bool disable)
+{
+    if (!pdev)
+        return;
+    uint16_t cmd = 0;
+    if (pci_dev_read_config_16(pdev, PCI_COMMAND, &cmd) < 0)
+        return;
+    if (disable)
+        cmd |= PCI_COMMAND_INTX_DISABLE;
+    else
+        cmd &= ~PCI_COMMAND_INTX_DISABLE;
+    (void)pci_dev_write_config_16(pdev, PCI_COMMAND, cmd);
+}
+
 int pci_enable_msi(struct pci_device *pdev)
 {
     if (!pdev)
         return -EINVAL;
+    if (pdev->msix_enabled)
+        return -EBUSY;
     if (pdev->msi_enabled)
         return 0;
 
@@ -188,11 +260,8 @@ int pci_enable_msi(struct pci_device *pdev)
     if (ret < 0)
         return ret;
 
-    uint16_t cmd = 0;
-    if (pci_dev_read_config_16(pdev, PCI_COMMAND, &cmd) == 0) {
-        cmd |= PCI_COMMAND_INTX_DISABLE;
-        (void)pci_dev_write_config_16(pdev, PCI_COMMAND, cmd);
-    }
+    arch_irq_set_type((int)msg.irq, IRQ_FLAG_TRIGGER_EDGE);
+    pci_toggle_intx(pdev, true);
 
     pdev->msi_cap = cap;
     pdev->irq_line = msg.irq;
@@ -219,14 +288,246 @@ int pci_disable_msi(struct pci_device *pdev)
     if (ret < 0)
         return ret;
 
-    uint16_t cmd = 0;
-    if (pci_dev_read_config_16(pdev, PCI_COMMAND, &cmd) == 0) {
-        cmd &= ~PCI_COMMAND_INTX_DISABLE;
-        (void)pci_dev_write_config_16(pdev, PCI_COMMAND, cmd);
-    }
+    if (!pdev->msix_enabled)
+        pci_toggle_intx(pdev, false);
 
     pdev->irq_line = pdev->intx_irq_line;
     pdev->msi_enabled = false;
+    return 0;
+}
+
+int pci_enable_msix_nvec(struct pci_device *pdev, uint16_t nvec)
+{
+    if (!pdev)
+        return -EINVAL;
+    if (pdev->msi_enabled)
+        return -EBUSY;
+    if (!nvec)
+        return -EINVAL;
+    if (pdev->msix_enabled) {
+        if (pdev->msix_nvec >= nvec)
+            return 0;
+        return -EBUSY;
+    }
+
+    uint8_t cap = 0;
+    int ret = pci_find_capability(pdev, PCI_CAP_ID_MSIX, &cap);
+    if (ret < 0)
+        return ret;
+
+    uint16_t table_size = 0;
+    uint8_t table_bir = 0;
+    uint32_t table_off = 0;
+    uint8_t pba_bir = 0;
+    uint32_t pba_off = 0;
+    ret = pci_msix_read_layout(pdev, cap, &table_size, &table_bir, &table_off,
+                               &pba_bir, &pba_off);
+    if (ret < 0)
+        return ret;
+    if (nvec > table_size)
+        return -ENOSPC;
+
+    uint8_t *irqs = kzalloc(nvec);
+    if (!irqs)
+        return -ENOMEM;
+
+    size_t map_len = (size_t)nvec * PCI_MSIX_ENTRY_SIZE;
+    volatile uint8_t *table = (volatile uint8_t *)ioremap(
+        (paddr_t)(pdev->bar[table_bir] + table_off), map_len);
+    if (!table) {
+        kfree(irqs);
+        return -ENOMEM;
+    }
+
+    uint16_t ctrl = 0;
+    ret = pci_dev_read_config_16(pdev, (uint16_t)(cap + PCI_MSIX_FLAGS), &ctrl);
+    if (ret < 0) {
+        iounmap((void *)table);
+        kfree(irqs);
+        return ret;
+    }
+
+    uint16_t masked_ctrl = (uint16_t)(ctrl | PCI_MSIX_FLAGS_MASKALL);
+    ret = pci_dev_write_config_16(pdev, (uint16_t)(cap + PCI_MSIX_FLAGS),
+                                  masked_ctrl);
+    if (ret < 0) {
+        iounmap((void *)table);
+        kfree(irqs);
+        return ret;
+    }
+
+    for (uint16_t i = 0; i < nvec; i++) {
+        struct pci_msi_msg msg = {0};
+        ret = arch_pci_msi_setup(pdev, &msg);
+        if (ret < 0 || !msg.irq) {
+            ret = (ret < 0) ? ret : -EINVAL;
+            goto msix_fail;
+        }
+        irqs[i] = msg.irq;
+        arch_irq_set_type((int)msg.irq, IRQ_FLAG_TRIGGER_EDGE);
+
+        volatile uint8_t *entry = table + ((size_t)i * PCI_MSIX_ENTRY_SIZE);
+        uint64_t addr = ((uint64_t)msg.address_hi << 32) | msg.address_lo;
+
+        writel(PCI_MSIX_CTRL_MASKBIT, (void *)(entry + 12));
+        writeq(addr, (void *)(entry + 0));
+        writel((uint32_t)msg.data, (void *)(entry + 8));
+        writel(0, (void *)(entry + 12));
+    }
+
+    {
+        uint16_t enable_ctrl =
+            (uint16_t)((ctrl | PCI_MSIX_FLAGS_ENABLE) & ~PCI_MSIX_FLAGS_MASKALL);
+        ret = pci_dev_write_config_16(pdev, (uint16_t)(cap + PCI_MSIX_FLAGS),
+                                      enable_ctrl);
+    }
+    iounmap((void *)table);
+    if (ret < 0) {
+        kfree(irqs);
+        return ret;
+    }
+
+    pci_toggle_intx(pdev, true);
+    pdev->irq_line = irqs[0];
+    pdev->msix_cap = cap;
+    pdev->msix_enabled = true;
+    pdev->msix_table_size = table_size;
+    pdev->msix_nvec = nvec;
+    pdev->msix_table_bir = table_bir;
+    pdev->msix_table_off = table_off;
+    pdev->msix_pba_bir = pba_bir;
+    pdev->msix_pba_off = pba_off;
+    pdev->msix_irq = irqs;
+    return 0;
+
+msix_fail:
+    (void)pci_dev_write_config_16(pdev, (uint16_t)(cap + PCI_MSIX_FLAGS),
+                                  (uint16_t)((ctrl & ~PCI_MSIX_FLAGS_ENABLE) |
+                                             PCI_MSIX_FLAGS_MASKALL));
+    iounmap((void *)table);
+    kfree(irqs);
+    return ret;
+}
+
+int pci_enable_msix(struct pci_device *pdev)
+{
+    return pci_enable_msix_nvec(pdev, 1);
+}
+
+int pci_msix_vector_irq(const struct pci_device *pdev, uint16_t index,
+                        uint8_t *irq)
+{
+    if (!pdev || !irq)
+        return -EINVAL;
+    if (!pdev->msix_enabled || !pdev->msix_irq)
+        return -EINVAL;
+    if (index >= pdev->msix_nvec)
+        return -EINVAL;
+
+    *irq = pdev->msix_irq[index];
+    return 0;
+}
+
+int pci_msix_set_vector_mask(struct pci_device *pdev, uint16_t index,
+                             bool masked)
+{
+    if (!pdev || !pdev->msix_enabled || !pdev->msix_irq)
+        return -EINVAL;
+    if (index >= pdev->msix_nvec)
+        return -EINVAL;
+    if (pdev->msix_table_bir >= PCI_MAX_BAR)
+        return -EINVAL;
+
+    uint64_t bar_base = pdev->bar[pdev->msix_table_bir];
+    uint64_t bar_size = pdev->bar_size[pdev->msix_table_bir];
+    uint64_t ctrl_off = (uint64_t)pdev->msix_table_off +
+                        ((uint64_t)index * PCI_MSIX_ENTRY_SIZE) + 12U;
+    if (!bar_base || !bar_size || (ctrl_off + 4U) > bar_size)
+        return -EINVAL;
+
+    volatile uint32_t *ctrl_reg = (volatile uint32_t *)ioremap(
+        (paddr_t)(bar_base + ctrl_off), sizeof(uint32_t));
+    if (!ctrl_reg)
+        return -ENOMEM;
+    uint32_t ctrl = readl((void *)ctrl_reg);
+    if (masked)
+        ctrl |= PCI_MSIX_CTRL_MASKBIT;
+    else
+        ctrl &= ~PCI_MSIX_CTRL_MASKBIT;
+    writel(ctrl, (void *)ctrl_reg);
+    iounmap((void *)ctrl_reg);
+    return 0;
+}
+
+int pci_msix_vector_pending(const struct pci_device *pdev, uint16_t index,
+                            bool *pending)
+{
+    if (!pdev || !pending)
+        return -EINVAL;
+    if (!pdev->msix_enabled)
+        return -EINVAL;
+    if (index >= pdev->msix_table_size || pdev->msix_pba_bir >= PCI_MAX_BAR)
+        return -EINVAL;
+
+    uint64_t bar_base = pdev->bar[pdev->msix_pba_bir];
+    uint64_t bar_size = pdev->bar_size[pdev->msix_pba_bir];
+    uint64_t word_off = (uint64_t)pdev->msix_pba_off + (((uint64_t)index / 64U) * 8U);
+    if (!bar_base || !bar_size || (word_off + 8U) > bar_size)
+        return -EINVAL;
+
+    volatile uint64_t *pba_word = (volatile uint64_t *)ioremap(
+        (paddr_t)(bar_base + word_off), sizeof(uint64_t));
+    if (!pba_word)
+        return -ENOMEM;
+    uint64_t bits = readq((void *)pba_word);
+    iounmap((void *)pba_word);
+
+    *pending = (bits & (1ULL << (index % 64U))) != 0;
+    return 0;
+}
+
+int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
+                          uint32_t cpu_mask)
+{
+    uint8_t irq = 0;
+    int ret = pci_msix_vector_irq(pdev, index, &irq);
+    if (ret < 0)
+        return ret;
+    if (!cpu_mask)
+        return -EINVAL;
+    arch_irq_set_affinity((int)irq, cpu_mask);
+    return 0;
+}
+
+int pci_disable_msix(struct pci_device *pdev)
+{
+    if (!pdev)
+        return -EINVAL;
+    if (!pdev->msix_enabled || pdev->msix_cap < 0x40)
+        return 0;
+
+    uint16_t ctrl = 0;
+    int ret = pci_dev_read_config_16(
+        pdev, (uint16_t)(pdev->msix_cap + PCI_MSIX_FLAGS), &ctrl);
+    if (ret < 0)
+        return ret;
+
+    ctrl &= ~PCI_MSIX_FLAGS_ENABLE;
+    ctrl |= PCI_MSIX_FLAGS_MASKALL;
+    ret = pci_dev_write_config_16(pdev,
+                                  (uint16_t)(pdev->msix_cap + PCI_MSIX_FLAGS),
+                                  ctrl);
+    if (ret < 0)
+        return ret;
+
+    if (!pdev->msi_enabled)
+        pci_toggle_intx(pdev, false);
+
+    kfree(pdev->msix_irq);
+    pdev->msix_irq = NULL;
+    pdev->msix_nvec = 0;
+    pdev->irq_line = pdev->intx_irq_line;
+    pdev->msix_enabled = false;
     return 0;
 }
 
@@ -374,14 +675,41 @@ int pci_scan_bus(struct pci_host *host)
                                      ((s + irq_pin - 1) % 4));
                 pdev->intx_irq_line = pdev->irq_line;
                 pdev->msi_cap = 0;
+                pdev->msix_cap = 0;
                 pdev->msi_enabled = false;
-                uint8_t msi_cap = 0;
-                if (pci_find_capability(pdev, PCI_CAP_ID_MSI, &msi_cap) == 0)
-                    pdev->msi_cap = msi_cap;
+                pdev->msix_enabled = false;
+                pdev->msix_table_size = 0;
+                pdev->msix_nvec = 0;
+                pdev->msix_table_bir = 0;
+                pdev->msix_pba_bir = 0;
+                pdev->msix_table_off = 0;
+                pdev->msix_pba_off = 0;
+                pdev->msix_irq = NULL;
 
                 /* Decode BARs (type 0 header only) */
                 if ((hdr_type & PCI_HEADER_TYPE_MASK) == 0x00)
                     pci_decode_bars(host, pdev, PCI_MAX_BAR);
+
+                uint8_t msi_cap = 0;
+                if (pci_find_capability(pdev, PCI_CAP_ID_MSI, &msi_cap) == 0)
+                    pdev->msi_cap = msi_cap;
+                uint8_t msix_cap = 0;
+                if (pci_find_capability(pdev, PCI_CAP_ID_MSIX, &msix_cap) == 0) {
+                    uint16_t table_size = 0;
+                    uint8_t table_bir = 0;
+                    uint32_t table_off = 0;
+                    uint8_t pba_bir = 0;
+                    uint32_t pba_off = 0;
+                    if (pci_msix_read_layout(pdev, msix_cap, &table_size, &table_bir,
+                                             &table_off, &pba_bir, &pba_off) == 0) {
+                        pdev->msix_cap = msix_cap;
+                        pdev->msix_table_size = table_size;
+                        pdev->msix_table_bir = table_bir;
+                        pdev->msix_table_off = table_off;
+                        pdev->msix_pba_bir = pba_bir;
+                        pdev->msix_pba_off = pba_off;
+                    }
+                }
 
                 /* Register with device model */
                 snprintf(pdev->dev.name, sizeof(pdev->dev.name),

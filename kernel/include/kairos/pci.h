@@ -56,6 +56,15 @@
 #define PCI_MSI_FLAGS_64BIT  0x0080
 #define PCI_MSI_FLAGS_QMASK  0x0070
 
+#define PCI_MSIX_FLAGS         0x02
+#define PCI_MSIX_FLAGS_QSIZE   0x07ff
+#define PCI_MSIX_FLAGS_MASKALL 0x4000
+#define PCI_MSIX_FLAGS_ENABLE  0x8000
+#define PCI_MSIX_TABLE         0x04
+#define PCI_MSIX_PBA           0x08
+#define PCI_MSIX_ENTRY_SIZE    16U
+#define PCI_MSIX_CTRL_MASKBIT  0x00000001U
+
 struct pci_host_ops {
     uint32_t (*read_config)(uint8_t bus, uint8_t slot, uint8_t func,
                             uint16_t offset, uint8_t size);
@@ -84,7 +93,16 @@ struct pci_device {
     uint8_t irq_line;
     uint8_t intx_irq_line;
     uint8_t msi_cap;
+    uint8_t msix_cap;
     bool msi_enabled;
+    bool msix_enabled;
+    uint16_t msix_table_size;
+    uint16_t msix_nvec;
+    uint8_t msix_table_bir;
+    uint8_t msix_pba_bir;
+    uint32_t msix_table_off;
+    uint32_t msix_pba_off;
+    uint8_t *msix_irq;
     uint64_t bar[PCI_MAX_BAR];
     uint64_t bar_size[PCI_MAX_BAR];
 };
@@ -145,6 +163,17 @@ int pci_find_next_capability(const struct pci_device *pdev, uint8_t start_ptr,
                              uint8_t cap_id, uint8_t *cap_ptr);
 int pci_enable_msi(struct pci_device *pdev);
 int pci_disable_msi(struct pci_device *pdev);
+int pci_enable_msix(struct pci_device *pdev);
+int pci_enable_msix_nvec(struct pci_device *pdev, uint16_t nvec);
+int pci_disable_msix(struct pci_device *pdev);
+int pci_msix_vector_irq(const struct pci_device *pdev, uint16_t index,
+                        uint8_t *irq);
+int pci_msix_set_vector_mask(struct pci_device *pdev, uint16_t index,
+                             bool masked);
+int pci_msix_vector_pending(const struct pci_device *pdev, uint16_t index,
+                            bool *pending);
+int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
+                          uint32_t cpu_mask);
 
 /* Config space access */
 uint8_t  pci_read_config_8(struct pci_host *host, uint8_t bus,
