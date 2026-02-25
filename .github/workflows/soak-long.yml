@@ -47,6 +47,14 @@ on:
         description: "Directed aarch64 test-socket TEST_TIMEOUT"
         required: false
         default: "360"
+      aarch64_driver_loop_rounds:
+        description: "Directed aarch64 test-driver loop rounds"
+        required: false
+        default: "4"
+      aarch64_driver_loop_timeout_sec:
+        description: "Directed aarch64 test-driver TEST_TIMEOUT"
+        required: false
+        default: "300"
 
 concurrency:
   group: soak-long-${{ github.ref }}
@@ -282,6 +290,8 @@ jobs:
       AARCH64_VFS_IPC_LOOP_TIMEOUT_SEC: ${{ github.event.inputs.aarch64_vfs_ipc_loop_timeout_sec || '360' }}
       AARCH64_SOCKET_LOOP_ROUNDS: ${{ github.event.inputs.aarch64_socket_loop_rounds || '4' }}
       AARCH64_SOCKET_LOOP_TIMEOUT_SEC: ${{ github.event.inputs.aarch64_socket_loop_timeout_sec || '360' }}
+      AARCH64_DRIVER_LOOP_ROUNDS: ${{ github.event.inputs.aarch64_driver_loop_rounds || '4' }}
+      AARCH64_DRIVER_LOOP_TIMEOUT_SEC: ${{ github.event.inputs.aarch64_driver_loop_timeout_sec || '300' }}
 
     steps:
       - name: Checkout
@@ -324,6 +334,8 @@ jobs:
           [[ "${AARCH64_VFS_IPC_LOOP_TIMEOUT_SEC}" =~ ${re_uint} ]]
           [[ "${AARCH64_SOCKET_LOOP_ROUNDS}" =~ ${re_uint} ]]
           [[ "${AARCH64_SOCKET_LOOP_TIMEOUT_SEC}" =~ ${re_uint} ]]
+          [[ "${AARCH64_DRIVER_LOOP_ROUNDS}" =~ ${re_uint} ]]
+          [[ "${AARCH64_DRIVER_LOOP_TIMEOUT_SEC}" =~ ${re_uint} ]]
           [[ "${SOAK_SUITE_MASK}" =~ ${re_mask} ]]
           if (( SOAK_FAULT_PERMILLE < 0 || SOAK_FAULT_PERMILLE > 1000 )); then
             echo "SOAK_FAULT_PERMILLE must be in [0, 1000]" >&2
@@ -335,6 +347,10 @@ jobs:
           fi
           if (( AARCH64_SOCKET_LOOP_ROUNDS < 1 )); then
             echo "AARCH64_SOCKET_LOOP_ROUNDS must be >= 1" >&2
+            exit 2
+          fi
+          if (( AARCH64_DRIVER_LOOP_ROUNDS < 1 )); then
+            echo "AARCH64_DRIVER_LOOP_ROUNDS must be >= 1" >&2
             exit 2
           fi
 
@@ -373,6 +389,28 @@ jobs:
             latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
             if [[ -z "${latest}" ]]; then
               echo "No isolated run found after aarch64 directed socket round ${i}" >&2
+              exit 2
+            fi
+            python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+            python3 scripts/impl/assert-aarch64-smp.py \
+              --run-dir "${latest}" \
+              --arch aarch64 \
+              --expected-online 4
+          done
+
+      - name: Run aarch64 directed driver loop profile
+        run: |
+          set -euo pipefail
+          rounds="${AARCH64_DRIVER_LOOP_ROUNDS}"
+          timeout_sec="${AARCH64_DRIVER_LOOP_TIMEOUT_SEC}"
+          for i in $(seq 1 "${rounds}"); do
+            echo "aarch64 driver loop: round ${i}/${rounds}"
+            make --no-print-directory ARCH="${ARCH}" QEMU_SMP=4 \
+              TEST_TIMEOUT="${timeout_sec}" \
+              test-driver
+            latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+            if [[ -z "${latest}" ]]; then
+              echo "No isolated run found after aarch64 directed driver round ${i}" >&2
               exit 2
             fi
             python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured

@@ -74,6 +74,11 @@ WORKFLOW_GATES = {
             step="Run aarch64 directed socket loop profile",
         ),
         GateSpec(
+            gate="aarch64-driver-loop",
+            job="aarch64-soak-pr",
+            step="Run aarch64 directed driver loop profile",
+        ),
+        GateSpec(
             gate="aarch64-soak-pr-step",
             job="aarch64-soak-pr",
             step="Run aarch64 soak-pr profile",
