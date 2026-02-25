@@ -42,6 +42,7 @@
 #define TEST_STATX_BASIC_STATS 0x000007ffU
 #define TEST_STATX__RESERVED 0x80000000U
 #define TEST_AT_STATX_SYNC_AS_STAT 0x0000
+#define TEST_MONO_PROGRESS_MAX_SPINS 200000U
 
 static int tests_failed;
 
@@ -355,6 +356,20 @@ static bool inotify_wait_event(int ifd, int wd, uint32_t mask, const char *name,
             return true;
     }
     return false;
+}
+
+static void test_monotonic_progress_under_yield(void) {
+    uint64_t start = time_now_ns();
+    bool progressed = false;
+    for (uint32_t i = 0; i < TEST_MONO_PROGRESS_MAX_SPINS; i++) {
+        uint64_t now = time_now_ns();
+        if (now > start) {
+            progressed = true;
+            break;
+        }
+        proc_yield();
+    }
+    test_check(progressed, "clock monotonic progresses under yield");
 }
 
 static int prepare_tmpfs_mount(void) {
@@ -3128,6 +3143,7 @@ int run_vfs_ipc_tests(void) {
     test_eventfd_syscall_semantics();
     test_copy_file_range_syscall_semantics();
     test_timerfd_syscall_semantics();
+    test_monotonic_progress_under_yield();
     test_timerfd_syscall_functional();
     test_timerfd_cancel_on_set_functional();
     test_clock_tai_settime_functional();

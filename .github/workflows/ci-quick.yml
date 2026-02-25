@@ -458,6 +458,21 @@ jobs:
             --arch aarch64 \
             --expected-online 2
 
+      - name: Run aarch64 vfs/ipc gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=300 test-vfs-ipc
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 vfs/ipc gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
+
       - name: Run aarch64 tcc smoke gate
         run: |
           set -euo pipefail

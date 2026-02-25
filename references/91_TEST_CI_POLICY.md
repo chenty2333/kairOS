@@ -15,7 +15,7 @@
 - `make test-sched` — scheduler module only
 - `make test-crash` — crash module only
 - `make test-syscall-trap` / `make test-syscall` — syscall/trap module only
-- `make test-vfs-ipc` — vfs/tmpfs/pipe/epoll module only (includes epoll EPOLLET/EPOLLONESHOT regressions)
+- `make test-vfs-ipc` — vfs/tmpfs/pipe/epoll module only (includes epoll EPOLLET/EPOLLONESHOT regressions and timerfd-path monotonic clock progress check under `proc_yield`)
 - `make test-socket` — socket module only (AF_UNIX stream/dgram + accept stability, AF_INET TCP/UDP time-bounded attempts)
 - `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module only
 - `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo/isig semantics, blocking read wakeup and EINTR paths, controlling-tty `/dev/tty` attach/detach lifecycle, pty pair EOF + reopen stability)
@@ -24,7 +24,7 @@
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
 - `make test-matrix` — SMP × DEBUG test matrix
-- GitHub Actions `ci-quick` runs on PRs, pushes to `main`/`master`, and `quick-*` tags; it runs `riscv64` default regression gate (`make test-ci-default`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/tcc gates (`make QEMU_SMP=2 test-syscall-trap` + `make QEMU_SMP=2 test-tcc-smoke`); on `riscv64`, `test-ci-default` uses `TEST_TIMEOUT=420` for quick regression and skips interactive smoke subtargets; both `aarch64` gates validate SMP stability via `scripts/impl/assert-aarch64-smp.py` (require `SMP: 2/2 CPUs active`, reject shortfall/stall diagnostics)
+- GitHub Actions `ci-quick` runs on PRs, pushes to `main`/`master`, and `quick-*` tags; it runs `riscv64` default regression gate (`make test-ci-default`), `x86_64` minimal smoke (`make test-driver`), and `aarch64` syscall/vfs-ipc/tcc gates (`make QEMU_SMP=2 test-syscall-trap` + `make QEMU_SMP=2 test-vfs-ipc` + `make QEMU_SMP=2 test-tcc-smoke`); on `riscv64`, `test-ci-default` uses `TEST_TIMEOUT=420` for quick regression and skips interactive smoke subtargets; all `aarch64` gates validate SMP stability via `scripts/impl/assert-aarch64-smp.py` (require `SMP: 2/2 CPUs active`, reject shortfall/stall diagnostics)
 - GitHub Actions `soak-long` runs `riscv64` long soak-pr profile plus `x86_64` and `aarch64` bootstrap soak-pr profiles (shorter default duration and timeout for CI cost control); `aarch64` bootstrap soak runs with `QEMU_SMP=2` and applies the same SMP stability assertion (`scripts/impl/assert-aarch64-smp.py`)
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`, `doomgeneric`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
 - `scripts/impl/fetch-deps.sh` validates each cached dependency by sentinel files; when a directory exists but is incomplete/corrupted, it is removed and refetched instead of being blindly skipped.
