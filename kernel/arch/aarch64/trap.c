@@ -123,7 +123,7 @@ static void handle_irq(const struct trap_core_event *ev) {
                 arch_cpu_halt();
         }
     } else if (irq < IRQCHIP_MAX_IRQS) {
-        platform_irq_dispatch(irq, ev);
+        platform_irq_dispatch_hwirq(plat->irqchip, irq, ev);
     }
 
     plat->irqchip->eoi(irq);

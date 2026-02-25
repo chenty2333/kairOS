@@ -29,11 +29,21 @@ extern void lapic_timer_init(uint32_t hz);
 
 static uint64_t lapic_ticks_per_sec = 0;
 static bool timer_irq_registered;
+static int timer_virq = X86_TIMER_VIRQ;
 
 static void x86_timer_irq_handler(void *arg,
                                   const struct trap_core_event *ev) {
     (void)arg;
     tick_policy_on_timer_irq(ev);
+}
+
+static int x86_timer_irq_virq(void)
+{
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip)
+        return X86_TIMER_VIRQ;
+    int virq = platform_irq_domain_map(plat->irqchip, X86_TIMER_VIRQ);
+    return (virq >= 0) ? virq : X86_TIMER_VIRQ;
 }
 
 static void pit_sleep_10ms(void) {
@@ -75,10 +85,11 @@ void arch_timer_init(uint64_t hz) {
     if (need_register)
         timer_irq_registered = true;
     arch_irq_restore(irq_state);
+    timer_virq = x86_timer_irq_virq();
 
     if (need_register) {
         arch_irq_register_ex(
-            X86_TIMER_VIRQ, x86_timer_irq_handler, NULL,
+            timer_virq, x86_timer_irq_handler, NULL,
             IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_PER_CPU | IRQ_FLAG_TIMER |
                 IRQ_FLAG_NO_AUTO_ENABLE);
     }

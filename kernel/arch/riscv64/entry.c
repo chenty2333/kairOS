@@ -9,6 +9,7 @@
 #include <kairos/console.h>
 #include <kairos/fdt.h>
 #include <kairos/init.h>
+#include <kairos/platform_core.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
@@ -46,6 +47,17 @@ static bool uart_cfg_inited;
 static uintptr_t uart_base = UART0_BASE_FALLBACK;
 static int uart_irq = UART0_IRQ_FALLBACK;
 static bool uart_irq_available = true;
+
+static int uart_irq_to_virq(int irq)
+{
+    if (irq <= 0)
+        return irq;
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip)
+        return irq;
+    int virq = platform_irq_domain_map(plat->irqchip, (uint32_t)irq);
+    return (virq >= 0) ? virq : irq;
+}
 
 static inline long sbi_legacy_call(int ext, unsigned long arg0) {
     register unsigned long a0 __asm__("a0") = arg0;
@@ -140,7 +152,7 @@ void arch_console_input_init(void) {
     uart[UART_FCR] = UART_FCR_ENABLE_FIFO | UART_FCR_CLEAR_RX | UART_FCR_CLEAR_TX;
     if (uart_irq_available) {
         uart[UART_IER] = (uint8_t)(uart[UART_IER] | UART_IER_RDI);
-        arch_irq_register(uart_irq, uart_rx_irq_handler, NULL);
+        arch_irq_register(uart_irq_to_virq(uart_irq), uart_rx_irq_handler, NULL);
     } else {
         uart[UART_IER] = (uint8_t)(uart[UART_IER] & (uint8_t)(~UART_IER_RDI));
     }

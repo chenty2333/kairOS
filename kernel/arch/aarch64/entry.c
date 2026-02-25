@@ -10,6 +10,7 @@
 #include <kairos/console.h>
 #include <kairos/fdt.h>
 #include <kairos/init.h>
+#include <kairos/platform_core.h>
 #include <kairos/sched.h>
 #include <kairos/types.h>
 
@@ -31,6 +32,17 @@ static bool pl011_cfg_inited;
 static uintptr_t pl011_base = PL011_BASE_FALLBACK;
 static int pl011_irq = PL011_IRQ_FALLBACK;
 static bool pl011_irq_available = true;
+
+static int pl011_irq_to_virq(int irq)
+{
+    if (irq <= 0)
+        return irq;
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip)
+        return irq;
+    int virq = platform_irq_domain_map(plat->irqchip, (uint32_t)irq);
+    return (virq >= 0) ? virq : irq;
+}
 
 void aarch64_early_console_set_ready(bool ready) {
     early_console_ready = ready;
@@ -135,7 +147,8 @@ void arch_console_input_init(void) {
     uart[PL011_ICR / 4] = 0x7ff;
     if (pl011_irq_available) {
         uart[PL011_IMSC / 4] |= PL011_INT_RX | PL011_INT_RT;
-        arch_irq_register(pl011_irq, pl011_rx_irq_handler, NULL);
+        arch_irq_register(pl011_irq_to_virq(pl011_irq),
+                          pl011_rx_irq_handler, NULL);
     } else {
         uart[PL011_IMSC / 4] &= ~(PL011_INT_RX | PL011_INT_RT);
     }

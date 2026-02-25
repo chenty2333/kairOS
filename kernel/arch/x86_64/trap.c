@@ -188,11 +188,11 @@ static void handle_syscall(struct trap_frame *tf) {
 static void handle_irq(struct trap_frame *tf, const struct trap_core_event *ev) {
     const struct platform_desc *plat = platform_get();
     int vec = (int)tf->trapno;
-    int irq = vec - IRQ_BASE;
-    if (irq >= 0 && irq < IRQCHIP_MAX_IRQS)
-        platform_irq_dispatch((uint32_t)irq, ev);
+    int hwirq = vec - IRQ_BASE;
+    if (hwirq >= 0 && hwirq < IRQCHIP_MAX_IRQS && plat && plat->irqchip)
+        platform_irq_dispatch_hwirq(plat->irqchip, (uint32_t)hwirq, ev);
     if (plat && plat->irqchip)
-        plat->irqchip->eoi((irq >= 0) ? (uint32_t)irq : 0);
+        plat->irqchip->eoi((hwirq >= 0) ? (uint32_t)hwirq : 0);
 }
 
 static enum trap_core_event_type x86_event_type(const struct trap_frame *tf) {

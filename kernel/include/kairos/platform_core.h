@@ -10,6 +10,7 @@
 #define PLATFORM_MAX_EARLY_MMIO 8
 #define PLATFORM_COMPAT_MAX     64
 #define PLATFORM_NAME_MAX       32
+#define IRQ_DOMAIN_MAX          8
 
 struct early_mmio_region {
     paddr_t base;
@@ -77,6 +78,14 @@ int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,
 void platform_irq_register(int irq, irq_handler_fn handler, void *arg);
 void platform_irq_set_type(int irq, uint32_t flags);
 void platform_irq_set_affinity(int irq, uint32_t cpu_mask);
+int platform_irq_domain_add_linear(const char *name,
+                                   const struct irqchip_ops *chip,
+                                   uint32_t hwirq_base, uint32_t virq_base,
+                                   uint32_t nr_irqs);
+int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq);
+void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
+                                 uint32_t hwirq,
+                                 const struct trap_core_event *ev);
 void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev);
 void platform_irq_dispatch_nr(uint32_t irq);
 

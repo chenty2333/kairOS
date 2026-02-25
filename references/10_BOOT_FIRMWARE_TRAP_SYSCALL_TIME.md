@@ -71,6 +71,12 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` now apply chip operations with refcount semantics (and per-CPU semantics for PPIs/local timer IRQs)
   - `irqchip_ops` includes `set_type(int irq, uint32_t type)` so trigger mode is configured from IRQ flags when enabling
   - `irqchip_ops` now includes `set_affinity(int irq, uint32_t cpu_mask)` and IRQ core stores per-IRQ CPU mask (default CPU0) for route programming hooks
+  - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
+  - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
+- affinity routing details:
+  - riscv64 PLIC now supports `set_affinity`: it updates per-hart enable bits for each IRQ and reroutes already-enabled IRQs
+  - aarch64 GICv3 routes SPIs using CPU `hw_id` (MPIDR affinity bits) in `GICD_IROUTER`
+  - x86 IOAPIC destination uses APIC IDs derived from boot CPU `hw_id`
 
 ## Syscall
 
@@ -117,7 +123,7 @@ Two-layer structure:
     - `clock_nanosleep(TIMER_ABSTIME)` re-checks current time by `clockid` after wakeups, so absolute `CLOCK_REALTIME` sleeps track runtime realtime adjustments
     - zero-duration sleep (`tv_sec=0,tv_nsec=0`) returns immediately instead of sleeping one tick
 
-BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU; if that CPU never observes timer IRQs, the first active timer-IRQ CPU takes over immediately, and later stalls trigger handover after a short IRQ-gap window.
+BSP timer frequency is hardcoded to 100Hz (arch_timer_init(100)); secondary CPUs use CONFIG_HZ. `tick_policy_init()` designates the initial timekeeper CPU, and tick policy can hand over timekeeper duty when the original CPU stops receiving timer IRQs for an extended interval.
 
 Related references:
 - references/00_REPO_MAP.md

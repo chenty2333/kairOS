@@ -8,6 +8,7 @@
 #include <kairos/device.h>
 #include <kairos/firmware.h>
 #include <kairos/platform.h>
+#include <kairos/platform_core.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 
@@ -775,6 +776,19 @@ static int fdt_parse_irq_spec(const uint32_t *spec, uint32_t cells) {
     return (int)c0;
 }
 
+static int fdt_irq_to_virq(int irq)
+{
+    if (irq <= 0)
+        return irq;
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip)
+        return irq;
+    int virq = platform_irq_domain_map(plat->irqchip, (uint32_t)irq);
+    if (virq < 0)
+        return irq;
+    return virq;
+}
+
 static int fdt_parse_uart_irq(
     const uint32_t *interrupts, uint32_t interrupts_len,
     const uint32_t *interrupts_extended, uint32_t interrupts_extended_len,
@@ -791,7 +805,7 @@ static int fdt_parse_uart_irq(
                 break;
             int irq = fdt_parse_irq_spec(interrupts_extended + idx, spec_cells);
             if (irq > 0)
-                return irq;
+                return fdt_irq_to_virq(irq);
             idx += spec_cells;
         }
     }
@@ -808,7 +822,7 @@ static int fdt_parse_uart_irq(
             spec_cells = available;
         int irq = fdt_parse_irq_spec(interrupts, spec_cells);
         if (irq > 0)
-            return irq;
+            return fdt_irq_to_virq(irq);
     }
 
     return 0;
@@ -1153,7 +1167,7 @@ static void fdt_handle_virtio_mmio(const struct fdt_node_ctx *ctx) {
                      ctx->size_cells, &base, &size))
         return;
 
-    int irq = ctx->irq ? (int)fdt_be32(*ctx->irq) : 0;
+    int irq = ctx->irq ? fdt_irq_to_virq((int)fdt_be32(*ctx->irq)) : 0;
 
     struct fw_device_desc *desc = kzalloc(sizeof(*desc));
     struct platform_device_info *info = kzalloc(sizeof(*info));
@@ -1210,6 +1224,9 @@ static void fdt_handle_pci_ecam(const struct fdt_node_ctx *ctx) {
 
     /* Default INTx IRQ base for QEMU virt: PLIC IRQ 32 */
     uint32_t irq_base = ctx->irq ? fdt_be32(*ctx->irq) : 32;
+    int virq_base = fdt_irq_to_virq((int)irq_base);
+    if (virq_base > 0)
+        irq_base = (uint32_t)virq_base;
 
     struct fw_device_desc *desc = kzalloc(sizeof(*desc));
     struct resource *res = kzalloc(2 * sizeof(*res));

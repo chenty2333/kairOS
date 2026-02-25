@@ -87,6 +87,19 @@ struct irq_desc {
 static struct irq_desc irq_table[IRQCHIP_MAX_IRQS];
 static bool irq_table_ready;
 
+struct irq_domain {
+    const char *name;
+    const struct irqchip_ops *chip;
+    uint32_t hwirq_base;
+    uint32_t virq_base;
+    uint32_t nr_irqs;
+};
+
+static struct irq_domain irq_domains[IRQ_DOMAIN_MAX];
+static size_t irq_domain_count;
+static spinlock_t irq_domain_lock;
+static bool irq_domain_warned;
+
 struct irq_deferred_ctx {
     struct list_head pending_actions;
     struct wait_queue wait;
@@ -227,6 +240,9 @@ static void platform_irq_table_init(void)
             irq_table[i].overflow_warned = false;
             spin_init(&irq_table[i].lock);
         }
+        spin_init(&irq_domain_lock);
+        irq_domain_count = 0;
+        irq_domain_warned = false;
         irq_deferred_init();
         irq_table_ready = true;
     }
@@ -252,6 +268,98 @@ static uint32_t irq_sanitize_affinity_mask(uint32_t cpu_mask)
     if (!cpu_mask)
         cpu_mask = 1U;
     return cpu_mask;
+}
+
+static bool irq_ranges_overlap(uint32_t base_a, uint32_t count_a,
+                               uint32_t base_b, uint32_t count_b)
+{
+    uint64_t end_a = (uint64_t)base_a + count_a;
+    uint64_t end_b = (uint64_t)base_b + count_b;
+    return ((uint64_t)base_a < end_b) && ((uint64_t)base_b < end_a);
+}
+
+int platform_irq_domain_add_linear(const char *name,
+                                   const struct irqchip_ops *chip,
+                                   uint32_t hwirq_base, uint32_t virq_base,
+                                   uint32_t nr_irqs)
+{
+    if (!chip || !nr_irqs)
+        return -EINVAL;
+    if (virq_base >= IRQCHIP_MAX_IRQS ||
+        ((uint64_t)virq_base + nr_irqs) > IRQCHIP_MAX_IRQS)
+        return -ERANGE;
+
+    platform_irq_table_init();
+
+    bool irq_state;
+    spin_lock_irqsave(&irq_domain_lock, &irq_state);
+
+    for (size_t i = 0; i < irq_domain_count; i++) {
+        const struct irq_domain *dom = &irq_domains[i];
+        if (dom->chip == chip && dom->hwirq_base == hwirq_base &&
+            dom->virq_base == virq_base && dom->nr_irqs == nr_irqs) {
+            spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+            return 0;
+        }
+        if (irq_ranges_overlap(dom->virq_base, dom->nr_irqs,
+                               virq_base, nr_irqs)) {
+            spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+            return -EEXIST;
+        }
+    }
+
+    if (irq_domain_count >= IRQ_DOMAIN_MAX) {
+        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+        return -ENOSPC;
+    }
+
+    struct irq_domain *domain = &irq_domains[irq_domain_count++];
+    domain->name = name;
+    domain->chip = chip;
+    domain->hwirq_base = hwirq_base;
+    domain->virq_base = virq_base;
+    domain->nr_irqs = nr_irqs;
+
+    spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+
+    for (uint32_t i = 0; i < nr_irqs; i++) {
+        struct irq_desc *desc = &irq_table[virq_base + i];
+        bool desc_irq_state;
+        spin_lock_irqsave(&desc->lock, &desc_irq_state);
+        desc->chip = chip;
+        desc->hwirq = hwirq_base + i;
+        spin_unlock_irqrestore(&desc->lock, desc_irq_state);
+    }
+
+    pr_info("irq: domain '%s' hwirq[%u..%u] -> virq[%u..%u]\n",
+            name ? name : "unnamed", hwirq_base, hwirq_base + nr_irqs - 1,
+            virq_base, virq_base + nr_irqs - 1);
+    return 0;
+}
+
+int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq)
+{
+    if (!chip)
+        return -EINVAL;
+
+    platform_irq_table_init();
+
+    bool irq_state;
+    spin_lock_irqsave(&irq_domain_lock, &irq_state);
+    for (size_t i = 0; i < irq_domain_count; i++) {
+        const struct irq_domain *dom = &irq_domains[i];
+        uint64_t hwirq_end = (uint64_t)dom->hwirq_base + dom->nr_irqs;
+        if (dom->chip != chip)
+            continue;
+        if ((uint64_t)hwirq < dom->hwirq_base ||
+            (uint64_t)hwirq >= hwirq_end)
+            continue;
+        int virq = (int)(dom->virq_base + (hwirq - dom->hwirq_base));
+        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+        return virq;
+    }
+    spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+    return -ENOENT;
 }
 
 static int platform_irq_register_action(int irq, irq_handler_fn handler,
@@ -336,11 +444,12 @@ void platform_irq_set_type(int irq, uint32_t flags)
     spin_lock_irqsave(&desc->lock, &irq_state);
     desc->flags = (desc->flags & ~IRQ_FLAG_TRIGGER_MASK) | type;
     const struct irqchip_ops *chip = desc->chip;
+    uint32_t hwirq = desc->hwirq;
     int enable_count = desc->enable_count;
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
     if (chip && chip->set_type && enable_count > 0)
-        (void)chip->set_type(irq, type);
+        (void)chip->set_type((int)hwirq, type);
 }
 
 void platform_irq_set_affinity(int irq, uint32_t cpu_mask)
@@ -354,11 +463,27 @@ void platform_irq_set_affinity(int irq, uint32_t cpu_mask)
     spin_lock_irqsave(&desc->lock, &irq_state);
     desc->affinity_mask = mask;
     const struct irqchip_ops *chip = desc->chip;
+    uint32_t hwirq = desc->hwirq;
     int enable_count = desc->enable_count;
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
     if (chip && chip->set_affinity && enable_count > 0)
-        (void)chip->set_affinity(irq, mask);
+        (void)chip->set_affinity((int)hwirq, mask);
+}
+
+void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
+                                 uint32_t hwirq,
+                                 const struct trap_core_event *ev)
+{
+    int virq = platform_irq_domain_map(chip, hwirq);
+    if (virq < 0) {
+        if (!irq_domain_warned) {
+            irq_domain_warned = true;
+            pr_warn("irq: unmapped hwirq %u from chip %p\n", hwirq, chip);
+        }
+        return;
+    }
+    platform_irq_dispatch((uint32_t)virq, ev);
 }
 
 void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev)
@@ -415,10 +540,9 @@ void arch_irq_init(void)
 {
     platform_irq_table_init();
     const struct platform_desc *plat = platform_get();
-    if (plat && plat->irqchip) {
-        for (int i = 0; i < IRQCHIP_MAX_IRQS; i++)
-            irq_table[i].chip = plat->irqchip;
-    }
+    if (plat && plat->irqchip)
+        (void)platform_irq_domain_add_linear("root", plat->irqchip, 0, 0,
+                                             IRQCHIP_MAX_IRQS);
     if (plat && plat->irqchip && plat->irqchip->init)
         plat->irqchip->init(plat);
 }
@@ -433,6 +557,7 @@ void arch_irq_enable_nr(int irq)
     spin_lock_irqsave(&desc->lock, &irq_state);
 
     const struct irqchip_ops *chip = desc->chip;
+    uint32_t hwirq = desc->hwirq;
     bool is_per_cpu = (desc->flags & IRQ_FLAG_PER_CPU) != 0;
     uint32_t type = desc->flags & IRQ_FLAG_TRIGGER_MASK;
     uint32_t affinity_mask = desc->affinity_mask;
@@ -452,11 +577,11 @@ void arch_irq_enable_nr(int irq)
     if (!do_enable || !chip)
         return;
     if (chip->set_type && type)
-        (void)chip->set_type(irq, type);
+        (void)chip->set_type((int)hwirq, type);
     if (chip->set_affinity)
-        (void)chip->set_affinity(irq, affinity_mask);
+        (void)chip->set_affinity((int)hwirq, affinity_mask);
     if (chip->enable)
-        chip->enable(irq);
+        chip->enable((int)hwirq);
 }
 
 void arch_irq_disable_nr(int irq)
@@ -469,6 +594,7 @@ void arch_irq_disable_nr(int irq)
     spin_lock_irqsave(&desc->lock, &irq_state);
 
     const struct irqchip_ops *chip = desc->chip;
+    uint32_t hwirq = desc->hwirq;
     bool is_per_cpu = (desc->flags & IRQ_FLAG_PER_CPU) != 0;
     bool do_disable = false;
 
@@ -484,7 +610,7 @@ void arch_irq_disable_nr(int irq)
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
     if (do_disable && chip && chip->disable)
-        chip->disable(irq);
+        chip->disable((int)hwirq);
 }
 
 void arch_irq_register_ex(int irq,

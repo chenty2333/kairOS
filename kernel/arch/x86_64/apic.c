@@ -92,6 +92,16 @@ static int apic_pick_cpu(uint32_t cpu_mask)
     return (int)__builtin_ctz(cpu_mask);
 }
 
+static int apic_dest_id(int cpu)
+{
+    if (cpu < 0)
+        return 0;
+    const struct boot_info *bi = boot_info_get();
+    if (bi && cpu < (int)bi->cpu_count)
+        return (int)((uint32_t)bi->cpus[cpu].hw_id & 0xffU);
+    return cpu & 0xff;
+}
+
 static void apic_init_ops(const struct platform_desc *plat)
 {
     (void)plat;
@@ -110,7 +120,7 @@ static void apic_enable(int irq)
         return;
     bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
     int cpu = apic_pick_cpu(apic_irq_affinity[irq]);
-    ioapic_route_irq(irq, IRQ_BASE + irq, cpu, false, level);
+    ioapic_route_irq(irq, IRQ_BASE + irq, apic_dest_id(cpu), false, level);
 }
 
 static void apic_disable(int irq)
@@ -119,7 +129,7 @@ static void apic_disable(int irq)
         return;
     bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
     int cpu = apic_pick_cpu(apic_irq_affinity[irq]);
-    ioapic_route_irq(irq, IRQ_BASE + irq, cpu, true, level);
+    ioapic_route_irq(irq, IRQ_BASE + irq, apic_dest_id(cpu), true, level);
 }
 
 static int apic_set_type(int irq, uint32_t type)
@@ -145,7 +155,7 @@ static int apic_set_affinity(int irq, uint32_t cpu_mask)
     apic_irq_affinity[irq] = cpu_mask;
     bool level = (apic_irq_type[irq] & IRQ_FLAG_TRIGGER_LEVEL) != 0;
     int cpu = apic_pick_cpu(cpu_mask);
-    ioapic_route_irq(irq, IRQ_BASE + irq, cpu, false, level);
+    ioapic_route_irq(irq, IRQ_BASE + irq, apic_dest_id(cpu), false, level);
     return 0;
 }
 

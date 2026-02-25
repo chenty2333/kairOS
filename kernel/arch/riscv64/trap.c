@@ -166,7 +166,7 @@ static void handle_interrupt(const struct trap_core_event *ev) {
         if (plat && plat->irqchip) {
             uint32_t irq = plat->irqchip->ack();
             if (irq > 0 && irq < IRQCHIP_MAX_IRQS)
-                platform_irq_dispatch(irq, ev);
+                platform_irq_dispatch_hwirq(plat->irqchip, irq, ev);
             plat->irqchip->eoi(irq);
         }
     } else if (cause == IRQ_S_SOFT) {

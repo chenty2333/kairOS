@@ -14,6 +14,7 @@
 static uint64_t timer_freq;
 static uint64_t timer_interval;
 static bool timer_irq_registered;
+static int timer_virq = TIMER_PPI_IRQ;
 
 static inline uint64_t cntfrq(void) {
     uint64_t val;
@@ -34,6 +35,15 @@ static void aarch64_timer_irq_handler(void *arg,
     tick_policy_on_timer_irq(ev);
 }
 
+static int aarch64_timer_irq_virq(void)
+{
+    const struct platform_desc *plat = platform_get();
+    if (!plat || !plat->irqchip)
+        return TIMER_PPI_IRQ;
+    int virq = platform_irq_domain_map(plat->irqchip, TIMER_PPI_IRQ);
+    return (virq >= 0) ? virq : TIMER_PPI_IRQ;
+}
+
 void arch_timer_init(uint64_t hz) {
     if (!hz)
         hz = CONFIG_HZ;
@@ -48,13 +58,14 @@ void arch_timer_init(uint64_t hz) {
     if (need_register)
         timer_irq_registered = true;
     arch_irq_restore(irq_state);
+    timer_virq = aarch64_timer_irq_virq();
 
     if (need_register) {
-        arch_irq_register_ex(TIMER_PPI_IRQ, aarch64_timer_irq_handler, NULL,
+        arch_irq_register_ex(timer_virq, aarch64_timer_irq_handler, NULL,
                              IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_PER_CPU |
                                  IRQ_FLAG_TIMER);
     } else {
-        arch_irq_enable_nr(TIMER_PPI_IRQ);
+        arch_irq_enable_nr(timer_virq);
     }
 
     if (arch_cpu_id() == 0) {

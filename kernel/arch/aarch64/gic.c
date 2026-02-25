@@ -7,6 +7,7 @@
 
 #include <kairos/mm.h>
 #include <kairos/arch.h>
+#include <kairos/boot.h>
 #include <kairos/config.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
@@ -193,10 +194,15 @@ static int gicv3_set_affinity(int irq, uint32_t cpu_mask)
         return -EINVAL;
 
     uint32_t target_cpu = (uint32_t)__builtin_ctz(cpu_mask);
+    const struct boot_info *bi = boot_info_get();
+    uint64_t target_aff = (uint64_t)target_cpu;
+    if (bi && target_cpu < bi->cpu_count)
+        target_aff = bi->cpus[target_cpu].hw_id;
+    target_aff &= 0xFF00FFFFFFULL;
     volatile uint64_t *router =
         (volatile uint64_t *)((volatile uint8_t *)gicd + GICD_IROUTER +
                               ((size_t)(uint32_t)irq * sizeof(uint64_t)));
-    *router = (uint64_t)target_cpu;
+    *router = target_aff;
     return 0;
 }
 
