@@ -121,7 +121,8 @@ lwIP integration:
     - MSI-X affinity updates are supported by reprogramming message while keeping SPI identity
   - riscv64:
     - default build remains PLIC/INTx-first
-    - when built with `RISCV_AIA=1`, IRQ root backend switches to IMSIC and PCI MSI/MSI-X message composition is enabled (`arch_pci_msi_setup()` + `arch_pci_msi_affinity_msg()`)
+    - when built with `RISCV_AIA=1`, IRQ root backend attempts IMSIC and PCI MSI/MSI-X message composition (`arch_pci_msi_setup()` + `arch_pci_msi_affinity_msg()`)
+    - if IMSIC CSR access is unavailable at runtime, backend falls back to a no-op external IRQ mode (no unsafe PLIC MMIO access on AIA machine)
     - current IMSIC backend still treats cross-hart MSI affinity migration as unsupported and returns `-EOPNOTSUPP` for remote-target reprogram attempts
 
 Related references:

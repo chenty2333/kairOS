@@ -59,7 +59,7 @@ Boot image:
 Variables:
 - `V=1` — verbose output
 - `BUILD_ROOT=...` — override build root (default `build`)
-- `RISCV_AIA=1` — on `ARCH=riscv64`, switch QEMU machine to `virt,aia=aplic-imsic` and compile AIA/IMSIC backend (`CONFIG_RISCV_AIA=1`)
+- `RISCV_AIA=1` — on `ARCH=riscv64`, switch QEMU machine to `virt,aia=aplic-imsic`, set default CPU to `max,ssaia=true,smaia=true`, and compile AIA/IMSIC backend (`CONFIG_RISCV_AIA=1`)
 - Recommended day-to-day knobs: `ARCH`, `TEST_TIMEOUT`, `LOCK_WAIT`, `RUN_ID`
 - Top-level userspace sub-make passes absolute `BUILD_ROOT` to avoid relative-path drift under `make -C user`
 - `EMBEDDED_INIT=1` — embedded init (riscv64 only)

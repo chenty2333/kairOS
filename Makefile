@@ -82,10 +82,11 @@ ifeq ($(ARCH),riscv64)
   QEMU := qemu-system-riscv64
 ifeq ($(RISCV_AIA),1)
   QEMU_MACHINE := virt,aia=aplic-imsic
+  QEMU_CPU ?= max,ssaia=true,smaia=true
 else
   QEMU_MACHINE := virt
-endif
   QEMU_CPU ?= max
+endif
   # Multi-threaded TCG keeps interactive rv64 shell workloads responsive.
   # If deterministic boot-hart ordering is required, override to:
   #   QEMU_ACCEL=tcg,thread=single

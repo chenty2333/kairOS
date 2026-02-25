@@ -30,14 +30,16 @@ extern const struct irqchip_ops plic_ops;
 #define RISCV_TOPEI_ID_MASK           0x7FFU
 
 enum riscv_irq_backend {
-    RISCV_IRQ_BACKEND_PLIC = 0,
-    RISCV_IRQ_BACKEND_IMSIC = 1,
+    RISCV_IRQ_BACKEND_NONE = 0,
+    RISCV_IRQ_BACKEND_PLIC = 1,
+    RISCV_IRQ_BACKEND_IMSIC = 2,
 };
 
 static volatile enum riscv_irq_backend riscv_irq_backend_active =
     RISCV_IRQ_BACKEND_PLIC;
 #if CONFIG_RISCV_AIA
 static volatile int riscv_irq_backend_ready;
+static bool riscv_irq_backend_none_warned;
 #endif
 
 static spinlock_t imsic_lock = SPINLOCK_INIT;
@@ -254,9 +256,9 @@ static void riscv_irqchip_init(const struct platform_desc *plat)
         if (__arch_imsic_csr_probe() == 0) {
             riscv_irq_backend_active = RISCV_IRQ_BACKEND_IMSIC;
         } else {
-            riscv_irq_backend_active = RISCV_IRQ_BACKEND_PLIC;
+            riscv_irq_backend_active = RISCV_IRQ_BACKEND_NONE;
             if (arch_cpu_id() == 0) {
-                pr_warn("irqchip: IMSIC CSR access unavailable; fallback to PLIC backend\n");
+                pr_warn("irqchip: IMSIC CSR access unavailable; fallback to no-op backend\n");
             }
         }
         __sync_synchronize();
@@ -269,6 +271,8 @@ static void riscv_irqchip_init(const struct platform_desc *plat)
         imsic_init(plat);
         return;
     }
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+        return;
 #else
     riscv_irq_backend_active = RISCV_IRQ_BACKEND_PLIC;
 #endif
@@ -283,6 +287,8 @@ static void riscv_irqchip_enable(int irq)
         imsic_enable(irq);
         return;
     }
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+        return;
     if (plic_ops.enable)
         plic_ops.enable(irq);
 }
@@ -293,6 +299,8 @@ static void riscv_irqchip_disable(int irq)
         imsic_disable(irq);
         return;
     }
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+        return;
     if (plic_ops.disable)
         plic_ops.disable(irq);
 }
@@ -301,6 +309,8 @@ static int riscv_irqchip_set_type(int irq, uint32_t type)
 {
     if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_IMSIC)
         return imsic_set_type(irq, type);
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+        return -EOPNOTSUPP;
     if (plic_ops.set_type)
         return plic_ops.set_type(irq, type);
     return 0;
@@ -310,6 +320,8 @@ static int riscv_irqchip_set_affinity(int irq, uint32_t cpu_mask)
 {
     if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_IMSIC)
         return imsic_set_affinity(irq, cpu_mask);
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+        return -EOPNOTSUPP;
     if (plic_ops.set_affinity)
         return plic_ops.set_affinity(irq, cpu_mask);
     return -EOPNOTSUPP;
@@ -319,6 +331,8 @@ static uint32_t riscv_irqchip_ack(void)
 {
     if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_IMSIC)
         return imsic_ack();
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+        return 0;
     if (plic_ops.ack)
         return plic_ops.ack();
     return 0;
@@ -328,6 +342,15 @@ static void riscv_irqchip_eoi(uint32_t irq)
 {
     if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_IMSIC) {
         imsic_eoi(irq);
+        return;
+    }
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE) {
+#if CONFIG_RISCV_AIA
+        if (!riscv_irq_backend_none_warned && arch_cpu_id() == 0) {
+            pr_warn("irqchip: no external IRQ backend active; MSI/MSI-X routing disabled\n");
+            riscv_irq_backend_none_warned = true;
+        }
+#endif
         return;
     }
     if (plic_ops.eoi)
