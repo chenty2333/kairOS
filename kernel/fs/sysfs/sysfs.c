@@ -18,6 +18,7 @@
 
 #define SYSFS_SUPER_MAGIC 0x62656572
 #define SYSFS_BUF_SIZE    4096
+#define SYSFS_STACK_BUF_SIZE 256
 
 /* ------------------------------------------------------------------ */
 /*  Data structures                                                    */
@@ -189,26 +190,46 @@ static ssize_t sysfs_file_read(struct vnode *vn, void *buf, size_t len,
     if (!sn || sn->type != SYSFS_FILE || !sn->attr || !sn->attr->show)
         return -EINVAL;
 
-    /* TODO: consider stack buffer or per-node cache to avoid kmalloc per read */
-    char *kbuf = kmalloc(SYSFS_BUF_SIZE);
-    if (!kbuf)
-        return -ENOMEM;
+    char stack_buf[SYSFS_STACK_BUF_SIZE];
+    char *kbuf = stack_buf;
+    size_t kbuf_size = sizeof(stack_buf);
+    bool heap_buf = false;
 
-    ssize_t total = sn->attr->show(sn->attr->priv, kbuf, SYSFS_BUF_SIZE);
-    if (total < 0) {
-        kfree(kbuf);
+    ssize_t total = sn->attr->show(sn->attr->priv, kbuf, kbuf_size);
+    if (total < 0)
         return total;
+
+    /*
+     * Most sysfs attributes are short. Keep reads allocation-free by default,
+     * and fall back to full-size buffer only when output may be truncated.
+     */
+    if ((size_t)total >= kbuf_size) {
+        kbuf = kmalloc(SYSFS_BUF_SIZE);
+        if (!kbuf)
+            return -ENOMEM;
+        heap_buf = true;
+        kbuf_size = SYSFS_BUF_SIZE;
+        total = sn->attr->show(sn->attr->priv, kbuf, kbuf_size);
+        if (total < 0) {
+            kfree(kbuf);
+            return total;
+        }
     }
 
+    if ((size_t)total > kbuf_size)
+        total = (ssize_t)kbuf_size;
+
     if (off >= total) {
-        kfree(kbuf);
+        if (heap_buf)
+            kfree(kbuf);
         return 0;
     }
     size_t avail = (size_t)(total - off);
     if (len > avail)
         len = avail;
     memcpy(buf, kbuf + off, len);
-    kfree(kbuf);
+    if (heap_buf)
+        kfree(kbuf);
     return (ssize_t)len;
 }
 
