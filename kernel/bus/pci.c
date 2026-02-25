@@ -21,6 +21,14 @@ __attribute__((weak)) int arch_pci_host_init(struct pci_host *host)
     return -ENODEV;
 }
 
+__attribute__((weak)) int arch_pci_msi_setup(const struct pci_device *pdev,
+                                             struct pci_msi_msg *msg)
+{
+    (void)pdev;
+    (void)msg;
+    return -EOPNOTSUPP;
+}
+
 /* ------------------------------------------------------------------ */
 /*  ECAM config-space accessors                                       */
 /* ------------------------------------------------------------------ */
@@ -72,6 +80,154 @@ void pci_set_master(struct pci_host *host, struct pci_device *pdev)
     cmd |= PCI_COMMAND_MASTER | PCI_COMMAND_MEMORY;
     pci_write_config_16(host, pdev->bus, pdev->slot, pdev->func,
                          PCI_COMMAND, cmd);
+}
+
+static int pci_read_cap_status_ptr(const struct pci_device *pdev, uint8_t *ptr)
+{
+    if (!pdev || !ptr)
+        return -EINVAL;
+
+    uint16_t status = 0;
+    int ret = pci_dev_read_config_16(pdev, PCI_STATUS, &status);
+    if (ret < 0)
+        return ret;
+    if (!(status & PCI_STATUS_CAP_LIST))
+        return -ENOENT;
+
+    ret = pci_dev_read_config_8(pdev, PCI_CAP_PTR, ptr);
+    if (ret < 0)
+        return ret;
+    *ptr &= 0xfcU;
+    return (*ptr >= 0x40) ? 0 : -ENOENT;
+}
+
+int pci_find_next_capability(const struct pci_device *pdev, uint8_t start_ptr,
+                             uint8_t cap_id, uint8_t *cap_ptr)
+{
+    if (!pdev || !cap_ptr)
+        return -EINVAL;
+
+    uint8_t ptr = start_ptr;
+    int guard = 0;
+    if (ptr == 0) {
+        int ret = pci_read_cap_status_ptr(pdev, &ptr);
+        if (ret < 0)
+            return ret;
+    } else {
+        ptr &= 0xfcU;
+    }
+
+    while (ptr >= 0x40 && guard++ < 64) {
+        uint8_t id = 0;
+        uint8_t next = 0;
+        int ret = pci_dev_read_config_8(pdev, ptr, &id);
+        if (ret < 0)
+            return ret;
+        ret = pci_dev_read_config_8(pdev, (uint16_t)(ptr + 1), &next);
+        if (ret < 0)
+            return ret;
+        next &= 0xfcU;
+
+        if (id == cap_id) {
+            *cap_ptr = ptr;
+            return 0;
+        }
+        if (!next || next == ptr)
+            break;
+        ptr = next;
+    }
+    return -ENOENT;
+}
+
+int pci_find_capability(const struct pci_device *pdev, uint8_t cap_id,
+                        uint8_t *cap_ptr)
+{
+    return pci_find_next_capability(pdev, 0, cap_id, cap_ptr);
+}
+
+int pci_enable_msi(struct pci_device *pdev)
+{
+    if (!pdev)
+        return -EINVAL;
+    if (pdev->msi_enabled)
+        return 0;
+
+    uint8_t cap = 0;
+    int ret = pci_find_capability(pdev, PCI_CAP_ID_MSI, &cap);
+    if (ret < 0)
+        return ret;
+
+    uint16_t ctrl = 0;
+    ret = pci_dev_read_config_16(pdev, (uint16_t)(cap + PCI_MSI_FLAGS), &ctrl);
+    if (ret < 0)
+        return ret;
+
+    struct pci_msi_msg msg = {0};
+    ret = arch_pci_msi_setup(pdev, &msg);
+    if (ret < 0)
+        return ret;
+    if (!msg.irq)
+        return -EINVAL;
+
+    ret = pci_dev_write_config_32(pdev, (uint16_t)(cap + 4), msg.address_lo);
+    if (ret < 0)
+        return ret;
+    uint16_t data_off = (ctrl & PCI_MSI_FLAGS_64BIT) ? 12 : 8;
+    if (ctrl & PCI_MSI_FLAGS_64BIT) {
+        ret = pci_dev_write_config_32(pdev, (uint16_t)(cap + 8), msg.address_hi);
+        if (ret < 0)
+            return ret;
+    }
+    ret = pci_dev_write_config_16(pdev, (uint16_t)(cap + data_off), msg.data);
+    if (ret < 0)
+        return ret;
+
+    ctrl &= ~PCI_MSI_FLAGS_QMASK;
+    ctrl |= PCI_MSI_FLAGS_ENABLE;
+    ret = pci_dev_write_config_16(pdev, (uint16_t)(cap + PCI_MSI_FLAGS), ctrl);
+    if (ret < 0)
+        return ret;
+
+    uint16_t cmd = 0;
+    if (pci_dev_read_config_16(pdev, PCI_COMMAND, &cmd) == 0) {
+        cmd |= PCI_COMMAND_INTX_DISABLE;
+        (void)pci_dev_write_config_16(pdev, PCI_COMMAND, cmd);
+    }
+
+    pdev->msi_cap = cap;
+    pdev->irq_line = msg.irq;
+    pdev->msi_enabled = true;
+    return 0;
+}
+
+int pci_disable_msi(struct pci_device *pdev)
+{
+    if (!pdev)
+        return -EINVAL;
+    if (!pdev->msi_enabled || pdev->msi_cap < 0x40)
+        return 0;
+
+    uint16_t ctrl = 0;
+    int ret = pci_dev_read_config_16(
+        pdev, (uint16_t)(pdev->msi_cap + PCI_MSI_FLAGS), &ctrl);
+    if (ret < 0)
+        return ret;
+    ctrl &= ~PCI_MSI_FLAGS_ENABLE;
+    ret = pci_dev_write_config_16(pdev,
+                                  (uint16_t)(pdev->msi_cap + PCI_MSI_FLAGS),
+                                  ctrl);
+    if (ret < 0)
+        return ret;
+
+    uint16_t cmd = 0;
+    if (pci_dev_read_config_16(pdev, PCI_COMMAND, &cmd) == 0) {
+        cmd &= ~PCI_COMMAND_INTX_DISABLE;
+        (void)pci_dev_write_config_16(pdev, PCI_COMMAND, cmd);
+    }
+
+    pdev->irq_line = pdev->intx_irq_line;
+    pdev->msi_enabled = false;
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -216,6 +372,12 @@ int pci_scan_bus(struct pci_host *host)
                 if (irq_pin > 0)
                     pdev->irq_line = (uint8_t)(host->irq_base +
                                      ((s + irq_pin - 1) % 4));
+                pdev->intx_irq_line = pdev->irq_line;
+                pdev->msi_cap = 0;
+                pdev->msi_enabled = false;
+                uint8_t msi_cap = 0;
+                if (pci_find_capability(pdev, PCI_CAP_ID_MSI, &msi_cap) == 0)
+                    pdev->msi_cap = msi_cap;
 
                 /* Decode BARs (type 0 header only) */
                 if ((hdr_type & PCI_HEADER_TYPE_MASK) == 0x00)

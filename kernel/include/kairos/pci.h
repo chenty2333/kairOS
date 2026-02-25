@@ -48,6 +48,13 @@
 
 #define PCI_MAX_BAR 6
 #define PCI_CAP_ID_VNDR 0x09
+#define PCI_CAP_ID_MSI  0x05
+#define PCI_CAP_ID_MSIX 0x11
+
+#define PCI_MSI_FLAGS        0x02
+#define PCI_MSI_FLAGS_ENABLE 0x0001
+#define PCI_MSI_FLAGS_64BIT  0x0080
+#define PCI_MSI_FLAGS_QMASK  0x0070
 
 struct pci_host_ops {
     uint32_t (*read_config)(uint8_t bus, uint8_t slot, uint8_t func,
@@ -75,8 +82,18 @@ struct pci_device {
     uint32_t class_code;
     uint8_t irq_pin;
     uint8_t irq_line;
+    uint8_t intx_irq_line;
+    uint8_t msi_cap;
+    bool msi_enabled;
     uint64_t bar[PCI_MAX_BAR];
     uint64_t bar_size[PCI_MAX_BAR];
+};
+
+struct pci_msi_msg {
+    uint32_t address_lo;
+    uint32_t address_hi;
+    uint16_t data;
+    uint8_t irq;
 };
 
 #define to_pci_device(d) container_of(d, struct pci_device, dev)
@@ -122,6 +139,12 @@ int pci_dev_write_config_16(const struct pci_device *pdev, uint16_t off,
 int pci_dev_write_config_32(const struct pci_device *pdev, uint16_t off,
                             uint32_t val);
 int pci_dev_enable_bus_master(struct pci_device *pdev);
+int pci_find_capability(const struct pci_device *pdev, uint8_t cap_id,
+                        uint8_t *cap_ptr);
+int pci_find_next_capability(const struct pci_device *pdev, uint8_t start_ptr,
+                             uint8_t cap_id, uint8_t *cap_ptr);
+int pci_enable_msi(struct pci_device *pdev);
+int pci_disable_msi(struct pci_device *pdev);
 
 /* Config space access */
 uint8_t  pci_read_config_8(struct pci_host *host, uint8_t bus,
@@ -143,5 +166,6 @@ void pci_set_master(struct pci_host *host, struct pci_device *pdev);
 
 /* Arch hook */
 int arch_pci_host_init(struct pci_host *host);
+int arch_pci_msi_setup(const struct pci_device *pdev, struct pci_msi_msg *msg);
 
 #endif

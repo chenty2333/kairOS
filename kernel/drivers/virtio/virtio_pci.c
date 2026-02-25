@@ -288,6 +288,14 @@ static int virtio_pci_probe(struct pci_device *pdev) {
         return ret;
     }
 
+    int msi_ret = pci_enable_msi(pdev);
+    if (msi_ret == 0) {
+        vp->irq = (int)pdev->irq_line;
+    } else if (msi_ret != -ENOENT && msi_ret != -EOPNOTSUPP) {
+        pr_warn("virtio-pci: MSI setup failed on %02x:%02x.%x (ret=%d), fallback INTx\n",
+                pdev->bus, pdev->slot, pdev->func, msi_ret);
+    }
+
     vp->vdev.id = virtio_id;
     vp->vdev.ops = &virtio_pci_ops;
     snprintf(vp->vdev.dev.name, sizeof(vp->vdev.dev.name), "virtio-pci-%02x:%02x.%x",
@@ -305,9 +313,9 @@ static int virtio_pci_probe(struct pci_device *pdev) {
         return ret;
     }
 
-    pr_info("virtio-pci: %02x:%02x.%x device_id=0x%04x virtio_id=%u irq=%d\n",
+    pr_info("virtio-pci: %02x:%02x.%x device_id=0x%04x virtio_id=%u irq=%d (%s)\n",
             pdev->bus, pdev->slot, pdev->func, pdev->device_id,
-            virtio_id, vp->irq);
+            virtio_id, vp->irq, pdev->msi_enabled ? "msi" : "intx");
     return 0;
 }
 
@@ -319,6 +327,8 @@ static void virtio_pci_remove(struct pci_device *pdev) {
         return;
     if (vp->irq > 0)
         arch_irq_disable_nr(vp->irq);
+    if (pdev->msi_enabled)
+        (void)pci_disable_msi(pdev);
     device_unregister(&vp->vdev.dev);
     dev_set_drvdata(&pdev->dev, NULL);
     kfree(vp);
