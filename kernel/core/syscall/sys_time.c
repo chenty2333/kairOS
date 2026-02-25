@@ -115,6 +115,49 @@ static int64_t clock_tai_total_offset_ns(uint64_t realtime_ns) {
     return saturating_add_i64(base, user);
 }
 
+static uint64_t time_quantum_ns_from_hz(uint64_t hz) {
+    if (hz == 0)
+        return 1;
+    uint64_t q = (NS_PER_SEC + hz - 1) / hz;
+    return q ? q : 1;
+}
+
+static uint64_t monotonic_raw_now_ns(void) {
+    return arch_timer_ticks_to_ns(arch_timer_ticks());
+}
+
+static uint64_t monotonic_now_ns(void) {
+    return time_now_ns();
+}
+
+static uint64_t realtime_now_ns(void) {
+    return time_realtime_ns();
+}
+
+static uint64_t coarse_quantum_ns(void) {
+    return time_quantum_ns_from_hz(CONFIG_HZ);
+}
+
+static uint64_t monotonic_coarse_now_ns(void) {
+    uint64_t quantum = coarse_quantum_ns();
+    uint64_t now = monotonic_now_ns();
+    return (now / quantum) * quantum;
+}
+
+static uint64_t realtime_coarse_now_ns(void) {
+    uint64_t quantum = coarse_quantum_ns();
+    uint64_t now = realtime_now_ns();
+    return (now / quantum) * quantum;
+}
+
+static uint64_t highres_quantum_ns(void) {
+    return time_quantum_ns_from_hz(arch_timer_freq());
+}
+
+static uint64_t cpu_clock_quantum_ns(void) {
+    return time_quantum_ns_from_hz(CONFIG_HZ);
+}
+
 static uint64_t ns_to_sched_ticks(uint64_t ns) {
     if (ns == 0)
         return 0;
@@ -218,19 +261,55 @@ static int clockid_now_ns(int32_t clockid, uint64_t *out_ns) {
         return 0;
     }
     case CLOCK_MONOTONIC:
+        *out_ns = monotonic_now_ns();
+        return 0;
     case CLOCK_MONOTONIC_RAW:
-    case CLOCK_MONOTONIC_COARSE:
+        *out_ns = monotonic_raw_now_ns();
+        return 0;
     case CLOCK_BOOTTIME:
     case CLOCK_BOOTTIME_ALARM:
-        *out_ns = time_now_ns();
+        *out_ns = monotonic_now_ns();
+        return 0;
+    case CLOCK_MONOTONIC_COARSE:
+        *out_ns = monotonic_coarse_now_ns();
         return 0;
     case CLOCK_REALTIME:
-    case CLOCK_REALTIME_COARSE:
     case CLOCK_REALTIME_ALARM:
-        *out_ns = time_realtime_ns();
+        *out_ns = realtime_now_ns();
+        return 0;
+    case CLOCK_REALTIME_COARSE:
+        *out_ns = realtime_coarse_now_ns();
         return 0;
     case CLOCK_TAI:
-        *out_ns = realtime_to_tai_ns(time_realtime_ns());
+        *out_ns = realtime_to_tai_ns(realtime_now_ns());
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int clockid_resolution_ns(int32_t clockid, uint64_t *out_res_ns) {
+    if (!out_res_ns)
+        return -EINVAL;
+    switch (clockid) {
+    case CLOCK_PROCESS_CPUTIME_ID:
+    case CLOCK_THREAD_CPUTIME_ID:
+        *out_res_ns = cpu_clock_quantum_ns();
+        return 0;
+    case CLOCK_MONOTONIC_RAW:
+        *out_res_ns = highres_quantum_ns();
+        return 0;
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_REALTIME_COARSE:
+        *out_res_ns = coarse_quantum_ns();
+        return 0;
+    case CLOCK_MONOTONIC:
+    case CLOCK_BOOTTIME:
+    case CLOCK_BOOTTIME_ALARM:
+    case CLOCK_REALTIME:
+    case CLOCK_REALTIME_ALARM:
+    case CLOCK_TAI:
+        *out_res_ns = highres_quantum_ns();
         return 0;
     default:
         return -EINVAL;
@@ -352,16 +431,12 @@ int64_t sys_clock_getres(uint64_t clockid, uint64_t tp_ptr, uint64_t a2,
     if (!tp_ptr)
         return -EFAULT;
     int32_t kclockid = systime_abi_i32(clockid);
-    uint64_t probe_ns = 0;
-    if (clockid_now_ns(kclockid, &probe_ns) < 0)
+    uint64_t res_ns = 0;
+    if (clockid_resolution_ns(kclockid, &res_ns) < 0)
         return -EINVAL;
-
-    uint64_t res_ns = (NS_PER_SEC + CONFIG_HZ - 1) / CONFIG_HZ;
-    if (res_ns == 0)
-        res_ns = 1;
     struct timespec ts = {
-        .tv_sec = 0,
-        .tv_nsec = (int64_t)res_ns,
+        .tv_sec = (time_t)(res_ns / NS_PER_SEC),
+        .tv_nsec = (int64_t)(res_ns % NS_PER_SEC),
     };
     if (copy_to_user((void *)tp_ptr, &ts, sizeof(ts)) < 0)
         return -EFAULT;

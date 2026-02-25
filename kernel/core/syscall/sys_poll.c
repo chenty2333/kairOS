@@ -34,9 +34,10 @@ static int poll_sigmask_apply(const sigset_t *new_mask,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
+    sigset_t sanitized = poll_sanitize_sigmask(*new_mask);
     ctx->proc = p;
-    ctx->old_mask = p->sig_blocked;
-    p->sig_blocked = poll_sanitize_sigmask(*new_mask);
+    ctx->old_mask =
+        __atomic_exchange_n(&p->sig_blocked, sanitized, __ATOMIC_ACQ_REL);
     ctx->active = true;
     return 0;
 }
@@ -44,7 +45,8 @@ static int poll_sigmask_apply(const sigset_t *new_mask,
 static void poll_sigmask_restore(struct poll_sigmask_ctx *ctx) {
     if (!ctx || !ctx->active || !ctx->proc)
         return;
-    ctx->proc->sig_blocked = ctx->old_mask;
+    __atomic_store_n(&ctx->proc->sig_blocked, ctx->old_mask,
+                     __ATOMIC_RELEASE);
     ctx->active = false;
 }
 

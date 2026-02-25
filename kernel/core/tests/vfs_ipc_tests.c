@@ -95,6 +95,19 @@ static uint64_t apply_signed_offset(uint64_t base, int64_t off) {
     return (base > neg) ? (base - neg) : 0;
 }
 
+static uint64_t timespec_to_ns_u64(const struct timespec *ts) {
+    if (!ts || ts->tv_sec < 0 || ts->tv_nsec < 0)
+        return 0;
+    uint64_t sec = (uint64_t)ts->tv_sec;
+    if (sec > UINT64_MAX / TEST_NS_PER_SEC)
+        return UINT64_MAX;
+    uint64_t ns = sec * TEST_NS_PER_SEC;
+    uint64_t nsec = (uint64_t)ts->tv_nsec;
+    if (UINT64_MAX - ns < nsec)
+        return UINT64_MAX;
+    return ns + nsec;
+}
+
 static ssize_t fd_read_once(int fd, void *buf, size_t len) {
     struct file *f = fd_get(proc_current(), fd);
     if (!f)
@@ -1211,6 +1224,10 @@ static void test_ppoll_pselect6_syscall_semantics(void) {
     int wfd = -1;
     bool mapped = false;
     struct user_map_ctx um = {0};
+    struct process *p = proc_current();
+    test_check(p != NULL, "pollsel proc current");
+    if (!p)
+        return;
 
     int ret = pipe_create(&rf, &wf);
     test_check(ret == 0, "pollsel create pipe");
@@ -1390,6 +1407,53 @@ static void test_ppoll_pselect6_syscall_semantics(void) {
             }
         }
     }
+
+    sigset_t usr1_mask = (1ULL << (SIGUSR1 - 1));
+    sigset_t saved_blocked = __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+    sigset_t saved_pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+    bool had_usr1_pending = (saved_pending & usr1_mask) != 0;
+    __atomic_fetch_or(&p->sig_pending, usr1_mask, __ATOMIC_RELEASE);
+
+    struct timespec wait_ts = {
+        .tv_sec = 1,
+        .tv_nsec = 0,
+    };
+    sigset_t temp_unblock = saved_blocked & ~usr1_mask;
+    rc = copy_to_user(u_sigmask, &temp_unblock, sizeof(temp_unblock));
+    test_check(rc == 0, "pollsel copy temp unblock mask");
+    rc = copy_to_user(u_ppoll_ts, &wait_ts, sizeof(wait_ts));
+    test_check(rc == 0, "pollsel copy ppoll intr timeout");
+    if (rc == 0) {
+        int64_t ret64 =
+            sys_ppoll(0, 0, (uint64_t)u_ppoll_ts, (uint64_t)u_sigmask,
+                      sizeof(sigset_t), 0);
+        test_check(ret64 == -EINTR, "pollsel ppoll pending intr");
+        sigset_t blocked_after =
+            __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+        test_check(blocked_after == saved_blocked,
+                   "pollsel ppoll restores blocked mask");
+    }
+
+    struct test_pselect_sigset pss_intr = {
+        .sigmask = (uint64_t)u_sigmask,
+        .sigsetsize = sizeof(sigset_t),
+    };
+    rc = copy_to_user(u_pss, &pss_intr, sizeof(pss_intr));
+    test_check(rc == 0, "pollsel copy pselect intr sigset");
+    rc = copy_to_user(u_pselect_ts, &wait_ts, sizeof(wait_ts));
+    test_check(rc == 0, "pollsel copy pselect intr timeout");
+    if (rc == 0) {
+        int64_t ret64 =
+            sys_pselect6(0, 0, 0, 0, (uint64_t)u_pselect_ts, (uint64_t)u_pss);
+        test_check(ret64 == -EINTR, "pollsel pselect pending intr");
+        sigset_t blocked_after =
+            __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+        test_check(blocked_after == saved_blocked,
+                   "pollsel pselect restores blocked mask");
+    }
+
+    if (!had_usr1_pending)
+        __atomic_fetch_and(&p->sig_pending, ~usr1_mask, __ATOMIC_RELEASE);
 
 out:
     close_fd_if_open(&rfd);
@@ -2790,6 +2854,140 @@ out:
         user_map_end(&um);
 }
 
+static void test_clock_raw_coarse_semantics(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "clock raw/coarse user map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    uint8_t *u_base = (uint8_t *)user_map_ptr(&um, 0);
+    test_check(u_base != NULL, "clock raw/coarse user ptr");
+    if (!u_base)
+        goto out;
+
+    struct timespec *u_mono = (struct timespec *)u_base;
+    struct timespec *u_raw = (struct timespec *)(u_base + 64);
+    struct timespec *u_mono_coarse = (struct timespec *)(u_base + 128);
+    struct timespec *u_rt = (struct timespec *)(u_base + 192);
+    struct timespec *u_rt_coarse = (struct timespec *)(u_base + 256);
+    struct timespec *u_res_mono = (struct timespec *)(u_base + 320);
+    struct timespec *u_res_raw = (struct timespec *)(u_base + 384);
+    struct timespec *u_res_mono_coarse = (struct timespec *)(u_base + 448);
+    struct timespec *u_res_rt_coarse = (struct timespec *)(u_base + 512);
+
+    int64_t ret64 = sys_clock_gettime(CLOCK_MONOTONIC, (uint64_t)u_mono,
+                                      0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse get mono");
+    ret64 = sys_clock_gettime(CLOCK_MONOTONIC_RAW, (uint64_t)u_raw,
+                              0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse get raw");
+    ret64 = sys_clock_gettime(CLOCK_MONOTONIC_COARSE, (uint64_t)u_mono_coarse,
+                              0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse get mono coarse");
+    ret64 = sys_clock_gettime(CLOCK_REALTIME, (uint64_t)u_rt, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse get realtime");
+    ret64 = sys_clock_gettime(CLOCK_REALTIME_COARSE, (uint64_t)u_rt_coarse,
+                              0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse get realtime coarse");
+    ret64 = sys_clock_getres(CLOCK_MONOTONIC, (uint64_t)u_res_mono, 0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse getres mono");
+    ret64 = sys_clock_getres(CLOCK_MONOTONIC_RAW, (uint64_t)u_res_raw,
+                             0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse getres raw");
+    ret64 = sys_clock_getres(CLOCK_MONOTONIC_COARSE, (uint64_t)u_res_mono_coarse,
+                             0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse getres mono coarse");
+    ret64 = sys_clock_getres(CLOCK_REALTIME_COARSE, (uint64_t)u_res_rt_coarse,
+                             0, 0, 0, 0);
+    test_check(ret64 == 0, "clock raw/coarse getres realtime coarse");
+    if (ret64 < 0)
+        goto out;
+
+    struct timespec ts_mono = {0};
+    struct timespec ts_raw = {0};
+    struct timespec ts_mono_coarse = {0};
+    struct timespec ts_rt = {0};
+    struct timespec ts_rt_coarse = {0};
+    struct timespec ts_res_mono = {0};
+    struct timespec ts_res_raw = {0};
+    struct timespec ts_res_mono_coarse = {0};
+    struct timespec ts_res_rt_coarse = {0};
+    rc = copy_from_user(&ts_mono, u_mono, sizeof(ts_mono));
+    test_check(rc == 0, "clock raw/coarse copy mono");
+    rc = copy_from_user(&ts_raw, u_raw, sizeof(ts_raw));
+    test_check(rc == 0, "clock raw/coarse copy raw");
+    rc = copy_from_user(&ts_mono_coarse, u_mono_coarse, sizeof(ts_mono_coarse));
+    test_check(rc == 0, "clock raw/coarse copy mono coarse");
+    rc = copy_from_user(&ts_rt, u_rt, sizeof(ts_rt));
+    test_check(rc == 0, "clock raw/coarse copy realtime");
+    rc = copy_from_user(&ts_rt_coarse, u_rt_coarse, sizeof(ts_rt_coarse));
+    test_check(rc == 0, "clock raw/coarse copy realtime coarse");
+    rc = copy_from_user(&ts_res_mono, u_res_mono, sizeof(ts_res_mono));
+    test_check(rc == 0, "clock raw/coarse copyres mono");
+    rc = copy_from_user(&ts_res_raw, u_res_raw, sizeof(ts_res_raw));
+    test_check(rc == 0, "clock raw/coarse copyres raw");
+    rc = copy_from_user(&ts_res_mono_coarse, u_res_mono_coarse,
+                        sizeof(ts_res_mono_coarse));
+    test_check(rc == 0, "clock raw/coarse copyres mono coarse");
+    rc = copy_from_user(&ts_res_rt_coarse, u_res_rt_coarse,
+                        sizeof(ts_res_rt_coarse));
+    test_check(rc == 0, "clock raw/coarse copyres realtime coarse");
+
+    uint64_t mono_ns = timespec_to_ns_u64(&ts_mono);
+    uint64_t raw_ns = timespec_to_ns_u64(&ts_raw);
+    uint64_t mono_coarse_ns = timespec_to_ns_u64(&ts_mono_coarse);
+    uint64_t rt_ns = timespec_to_ns_u64(&ts_rt);
+    uint64_t rt_coarse_ns = timespec_to_ns_u64(&ts_rt_coarse);
+    uint64_t res_mono_ns = timespec_to_ns_u64(&ts_res_mono);
+    uint64_t res_raw_ns = timespec_to_ns_u64(&ts_res_raw);
+    uint64_t res_mono_coarse_ns = timespec_to_ns_u64(&ts_res_mono_coarse);
+    uint64_t res_rt_coarse_ns = timespec_to_ns_u64(&ts_res_rt_coarse);
+
+    test_check(res_mono_ns > 0, "clock raw/coarse mono res positive");
+    test_check(res_raw_ns > 0, "clock raw/coarse raw res positive");
+    test_check(res_mono_coarse_ns > 0,
+               "clock raw/coarse mono coarse res positive");
+    test_check(res_rt_coarse_ns > 0,
+               "clock raw/coarse realtime coarse res positive");
+    test_check(res_mono_coarse_ns >= res_mono_ns,
+               "clock raw/coarse mono coarse res no finer");
+    test_check(res_rt_coarse_ns >= res_mono_ns,
+               "clock raw/coarse realtime coarse res no finer");
+
+    uint64_t mono_coarse_diff = (mono_ns >= mono_coarse_ns)
+                                    ? (mono_ns - mono_coarse_ns)
+                                    : (mono_coarse_ns - mono_ns);
+    uint64_t rt_coarse_diff = (rt_ns >= rt_coarse_ns)
+                                  ? (rt_ns - rt_coarse_ns)
+                                  : (rt_coarse_ns - rt_ns);
+    test_check(mono_coarse_ns <= mono_ns, "clock raw/coarse mono coarse <= mono");
+    test_check(rt_coarse_ns <= rt_ns, "clock raw/coarse realtime coarse <= rt");
+    test_check(mono_coarse_diff <= res_mono_coarse_ns + res_mono_ns,
+               "clock raw/coarse mono coarse bounded drift");
+    test_check(rt_coarse_diff <= res_rt_coarse_ns + res_mono_ns,
+               "clock raw/coarse realtime coarse bounded drift");
+
+    test_check(raw_ns >= mono_coarse_ns, "clock raw/coarse raw sane lower bound");
+    uint64_t raw_with_slack = raw_ns;
+    if (UINT64_MAX - raw_with_slack < res_raw_ns)
+        raw_with_slack = UINT64_MAX;
+    else
+        raw_with_slack += res_raw_ns;
+    if (UINT64_MAX - raw_with_slack < res_mono_ns)
+        raw_with_slack = UINT64_MAX;
+    else
+        raw_with_slack += res_mono_ns;
+    test_check(raw_with_slack >= mono_ns, "clock raw/coarse raw close to mono");
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_signalfd_syscall_functional(void) {
     int sfd = -1;
     struct user_map_ctx um = {0};
@@ -3148,6 +3346,7 @@ int run_vfs_ipc_tests(void) {
     test_timerfd_cancel_on_set_functional();
     test_clock_tai_settime_functional();
     test_clock_tai_leap_offset_auto_update();
+    test_clock_raw_coarse_semantics();
     test_signalfd_syscall_semantics();
     test_signalfd_syscall_functional();
     test_signalfd_syscall_rebind();

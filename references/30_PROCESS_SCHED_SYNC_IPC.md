@@ -108,6 +108,7 @@ futex.c:
 pollwait.c:
 - poll_wait_head: unified poll wait infrastructure, supports waiters (process waiting) and watches (callback notification)
 - poll_sleep: global timed sleep queue, tick interrupt drives expiry wakeups
+- `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 
 lockdep.c (when CONFIG_LOCKDEP enabled):
 - Lightweight lock dependency checker, bit matrix records lock acquisition order, detects potential deadlocks
