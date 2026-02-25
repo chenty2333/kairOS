@@ -57,7 +57,16 @@ WORKFLOW_GATES = {
             step="Run x86_64 tcc smoke gate",
         ),
         GateSpec(gate="aarch64-smoke", job="aarch64-smoke"),
-        GateSpec(gate="aarch64-smp4-gate", job="aarch64-smp4-gate"),
+        GateSpec(
+            gate="aarch64-smp4-syscall-trap",
+            job="aarch64-smoke",
+            step="Run aarch64 smp4 syscall/trap gate",
+        ),
+        GateSpec(
+            gate="aarch64-smp4-vfs-ipc",
+            job="aarch64-smoke",
+            step="Run aarch64 smp4 vfs/ipc gate",
+        ),
     ],
     "soak-long.yml": [
         GateSpec(gate="riscv64-soak-pr", job="riscv64-soak-pr"),
