@@ -83,19 +83,19 @@ static int socket_validate_send_control(uint64_t control_ptr, size_t controllen)
             return -EINVAL;
 
         size_t payload_len = hdr.cmsg_len - sizeof(struct socket_cmsghdr);
-        if (hdr.cmsg_level != SOL_SOCKET)
-            return -EOPNOTSUPP;
-        switch (hdr.cmsg_type) {
-        case SCM_RIGHTS:
-            if (payload_len % sizeof(int32_t))
-                return -EINVAL;
-            break;
-        case SCM_CREDENTIALS:
-            if (payload_len != sizeof(struct socket_ucred))
-                return -EINVAL;
-            break;
-        default:
-            return -EOPNOTSUPP;
+        if (hdr.cmsg_level == SOL_SOCKET) {
+            switch (hdr.cmsg_type) {
+            case SCM_RIGHTS:
+                if (payload_len % sizeof(int32_t))
+                    return -EINVAL;
+                break;
+            case SCM_CREDENTIALS:
+                if (payload_len != sizeof(struct socket_ucred))
+                    return -EINVAL;
+                break;
+            default:
+                return -EOPNOTSUPP;
+            }
         }
 
         size_t adv = socket_cmsg_align(hdr.cmsg_len);
@@ -153,7 +153,7 @@ static int socket_parse_send_control(const struct socket_msghdr *msg,
         size_t payload_len = hdr.cmsg_len - sizeof(struct socket_cmsghdr);
         uint64_t payload_ptr = control_ptr + off + sizeof(struct socket_cmsghdr);
 
-        if (hdr.cmsg_type == SCM_RIGHTS) {
+        if (hdr.cmsg_level == SOL_SOCKET && hdr.cmsg_type == SCM_RIGHTS) {
             size_t rights_nr = payload_len / sizeof(int32_t);
             if (rights_nr > SOCKET_MAX_RIGHTS ||
                 control->rights_count > SOCKET_MAX_RIGHTS - rights_nr) {
@@ -176,7 +176,8 @@ static int socket_parse_send_control(const struct socket_msghdr *msg,
                 }
                 control->rights[control->rights_count++] = f;
             }
-        } else if (hdr.cmsg_type == SCM_CREDENTIALS) {
+        } else if (hdr.cmsg_level == SOL_SOCKET &&
+                   hdr.cmsg_type == SCM_CREDENTIALS) {
             struct socket_ucred ucred;
             if (copy_from_user(&ucred, (const void *)payload_ptr,
                                sizeof(ucred)) < 0) {
@@ -1297,9 +1298,8 @@ int64_t sys_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
         return -ENOTSOCK;
     }
     if (!sock->ops || !sock->ops->setsockopt) {
-        /* Silently succeed for unsupported options */
         file_put(sock_file);
-        return 0;
+        return -EOPNOTSUPP;
     }
 
     if (klen < 0 || klen > 256) {

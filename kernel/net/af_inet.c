@@ -62,6 +62,11 @@ struct inet_sock {
     struct sockaddr_in last_src;
     bool has_last_src;
 
+    int so_reuseaddr;
+    int so_keepalive;
+    int so_sndbuf;
+    int so_rcvbuf;
+
     int shutdown_flags;
     bool peer_closed;
     struct mutex lock;
@@ -112,6 +117,10 @@ static struct inet_sock *inet_sock_alloc(struct socket *sock, int proto) {
     wait_queue_init(&is->send_wait);
     is->send_ready = true;
     is->has_last_src = false;
+    is->so_reuseaddr = 0;
+    is->so_keepalive = 0;
+    is->so_sndbuf = INET_RECV_BUF_SIZE;
+    is->so_rcvbuf = INET_RECV_BUF_SIZE;
     is->shutdown_flags = 0;
     is->peer_closed = false;
     mutex_init(&is->lock, "inet_sock");
@@ -1065,8 +1074,43 @@ static int inet_getpeername(struct socket *sock, struct sockaddr *addr,
 
 static int inet_setsockopt(struct socket *sock, int level, int optname,
                             const void *optval, int optlen) {
-    (void)sock; (void)level; (void)optname; (void)optval; (void)optlen;
-    /* Silently accept common options */
+    struct inet_sock *is = sock ? inet_ensure(sock) : NULL;
+    if (!is)
+        return -EINVAL;
+    if (level != SOL_SOCKET)
+        return -EOPNOTSUPP;
+    if (!optval || optlen < (int)sizeof(int))
+        return -EINVAL;
+
+    int value = 0;
+    memcpy(&value, optval, sizeof(value));
+    mutex_lock(&is->lock);
+    switch (optname) {
+    case SO_REUSEADDR:
+        is->so_reuseaddr = value ? 1 : 0;
+        break;
+    case SO_KEEPALIVE:
+        is->so_keepalive = value ? 1 : 0;
+        break;
+    case SO_SNDBUF:
+        if (value <= 0) {
+            mutex_unlock(&is->lock);
+            return -EINVAL;
+        }
+        is->so_sndbuf = value;
+        break;
+    case SO_RCVBUF:
+        if (value <= 0) {
+            mutex_unlock(&is->lock);
+            return -EINVAL;
+        }
+        is->so_rcvbuf = value;
+        break;
+    default:
+        mutex_unlock(&is->lock);
+        return -EOPNOTSUPP;
+    }
+    mutex_unlock(&is->lock);
     return 0;
 }
 
@@ -1074,16 +1118,43 @@ static int inet_getsockopt(struct socket *sock, int level, int optname,
                             void *optval, int *optlen) {
     if (!optlen || !optval || *optlen < (int)sizeof(int))
         return -EINVAL;
+    if (level != SOL_SOCKET)
+        return -EOPNOTSUPP;
+
+    struct inet_sock *is = sock ? inet_ensure(sock) : NULL;
+    if (!is)
+        return -EINVAL;
+
     int value = 0;
-    if (level == SOL_SOCKET && optname == SO_ERROR) {
-        struct inet_sock *is = sock ? sock->proto_data : NULL;
-        if (is) {
-            mutex_lock(&is->lock);
-            value = (is->connect_err < 0) ? -is->connect_err : 0;
-            is->connect_err = 0;
-            mutex_unlock(&is->lock);
-        }
+    mutex_lock(&is->lock);
+    switch (optname) {
+    case SO_ERROR:
+        value = (is->connect_err < 0) ? -is->connect_err : 0;
+        is->connect_err = 0;
+        break;
+    case SO_TYPE:
+        value = sock->type;
+        break;
+    case SO_ACCEPTCONN:
+        value = (sock->state == SS_LISTENING) ? 1 : 0;
+        break;
+    case SO_REUSEADDR:
+        value = is->so_reuseaddr;
+        break;
+    case SO_KEEPALIVE:
+        value = is->so_keepalive;
+        break;
+    case SO_SNDBUF:
+        value = is->so_sndbuf;
+        break;
+    case SO_RCVBUF:
+        value = is->so_rcvbuf;
+        break;
+    default:
+        mutex_unlock(&is->lock);
+        return -EOPNOTSUPP;
     }
+    mutex_unlock(&is->lock);
     *(int *)optval = value;
     *optlen = sizeof(int);
     return 0;

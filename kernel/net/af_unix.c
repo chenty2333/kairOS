@@ -95,6 +95,10 @@ struct unix_sock {
     atomic_t refcount;
     bool closing;
     int connect_err;
+    int so_reuseaddr;
+    int so_keepalive;
+    int so_sndbuf;
+    int so_rcvbuf;
 };
 
 /* Global bound socket registry (simple linear scan) */
@@ -232,6 +236,10 @@ static struct unix_sock *unix_sock_alloc(struct socket *sock) {
     atomic_init(&us->refcount, 1);
     us->closing = false;
     us->connect_err = 0;
+    us->so_reuseaddr = 0;
+    us->so_keepalive = 0;
+    us->so_sndbuf = UNIX_BUF_SIZE;
+    us->so_rcvbuf = UNIX_BUF_SIZE;
     sock->proto_data = us;
     return us;
 }
@@ -1382,18 +1390,88 @@ static int unix_getpeername(struct socket *sock, struct sockaddr *addr,
     return 0;
 }
 
+static int unix_setsockopt(struct socket *sock, int level, int optname,
+                           const void *optval, int optlen) {
+    if (!sock || !sock->proto_data)
+        return -EINVAL;
+    if (level != SOL_SOCKET)
+        return -EOPNOTSUPP;
+    if (!optval || optlen < (int)sizeof(int))
+        return -EINVAL;
+
+    int value = 0;
+    memcpy(&value, optval, sizeof(value));
+    struct unix_sock *us = sock->proto_data;
+    mutex_lock(&us->lock);
+    switch (optname) {
+    case SO_REUSEADDR:
+        us->so_reuseaddr = value ? 1 : 0;
+        break;
+    case SO_KEEPALIVE:
+        us->so_keepalive = value ? 1 : 0;
+        break;
+    case SO_SNDBUF:
+        if (value <= 0) {
+            mutex_unlock(&us->lock);
+            return -EINVAL;
+        }
+        us->so_sndbuf = value;
+        break;
+    case SO_RCVBUF:
+        if (value <= 0) {
+            mutex_unlock(&us->lock);
+            return -EINVAL;
+        }
+        us->so_rcvbuf = value;
+        break;
+    default:
+        mutex_unlock(&us->lock);
+        return -EOPNOTSUPP;
+    }
+    mutex_unlock(&us->lock);
+    return 0;
+}
+
 static int unix_getsockopt(struct socket *sock, int level, int optname,
-                            void *optval, int *optlen) {
+                           void *optval, int *optlen) {
     if (!optlen || !optval || *optlen < (int)sizeof(int))
         return -EINVAL;
+    if (!sock || !sock->proto_data)
+        return -EINVAL;
+    if (level != SOL_SOCKET)
+        return -EOPNOTSUPP;
+
+    struct unix_sock *us = sock->proto_data;
     int value = 0;
-    struct unix_sock *us = sock ? sock->proto_data : NULL;
-    if (us && level == SOL_SOCKET && optname == SO_ERROR) {
-        mutex_lock(&us->lock);
+    mutex_lock(&us->lock);
+    switch (optname) {
+    case SO_ERROR:
         value = (us->connect_err < 0) ? -us->connect_err : 0;
         us->connect_err = 0;
+        break;
+    case SO_TYPE:
+        value = sock->type;
+        break;
+    case SO_ACCEPTCONN:
+        value = (sock->state == SS_LISTENING) ? 1 : 0;
+        break;
+    case SO_REUSEADDR:
+        value = us->so_reuseaddr;
+        break;
+    case SO_KEEPALIVE:
+        value = us->so_keepalive;
+        break;
+    case SO_SNDBUF:
+        value = us->so_sndbuf;
+        break;
+    case SO_RCVBUF:
+        value = us->so_rcvbuf;
+        break;
+    default:
         mutex_unlock(&us->lock);
+        return -EOPNOTSUPP;
     }
+    mutex_unlock(&us->lock);
     *(int *)optval = value;
     *optlen = sizeof(int);
     return 0;
@@ -1489,11 +1567,6 @@ static ssize_t unix_stream_sendmsg_wrap(struct socket *sock, const void *buf,
             return ctrl_ret;
         if (!ctrl)
             return -EINVAL;
-        if (len == 0) {
-            unix_stream_ctrl_release(ctrl);
-            kfree(ctrl);
-            return -EINVAL;
-        }
 
         mutex_lock(&us->lock);
         if (sock->state != SS_CONNECTED || us->closing || !us->peer) {
@@ -1521,6 +1594,8 @@ static ssize_t unix_stream_sendmsg_wrap(struct socket *sock, const void *buf,
         mutex_lock(&peer->lock);
         if (peer->closing || !peer->buf.data) {
             ret = -ENOTCONN;
+        } else if (len == 0) {
+            ret = 0;
         } else {
             uint64_t attach_off = peer->stream_rx_write_off;
             ret = unix_buf_write_locked(&peer->buf, &peer->lock, buf, len,
@@ -1601,8 +1676,10 @@ static int unix_getpeername_wrap(struct socket *sock, struct sockaddr *addr,
 
 static int unix_setsockopt_wrap(struct socket *sock, int level, int optname,
                                  const void *optval, int optlen) {
-    (void)sock; (void)level; (void)optname; (void)optval; (void)optlen;
-    return 0;
+    if (!unix_ensure_proto_data(sock)) {
+        return -ENOMEM;
+    }
+    return unix_setsockopt(sock, level, optname, optval, optlen);
 }
 
 static int unix_getsockopt_wrap(struct socket *sock, int level, int optname,

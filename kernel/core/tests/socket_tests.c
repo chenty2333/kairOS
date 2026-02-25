@@ -30,6 +30,7 @@
 #define SOCKET_TEST_UNIX_MSG_TX_PATH "/tmp/.kairos_sock_msg_tx"
 #define SOCKET_TEST_UNIX_NB_SRV_PATH "/tmp/.kairos_sock_nb_srv"
 #define SOCKET_TEST_UNIX_NB_DGRAM_PATH "/tmp/.kairos_sock_nb_dgram"
+#define SOCKET_TEST_UNIX_SOCKOPT_PATH "/tmp/.kairos_sock_sockopt_srv"
 #define TEST_MSG_WAITFORONE 0x10000U
 #define TEST_MSG_CMSG_CLOEXEC 0x40000000U
 #define SOCKET_TEST_DGRAM_OVERSIZE (65536U + 1U)
@@ -3390,6 +3391,310 @@ out:
     return ok;
 }
 
+static void test_socket_msg_control_edge_semantics(void) {
+    struct socket *tx = NULL;
+    struct socket *rx = NULL;
+    int txfd = -1;
+    int rxfd = -1;
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &tx);
+    test_check(ret == 0, "sockmsg_edge create tx");
+    ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &rx);
+    test_check(ret == 0, "sockmsg_edge create rx");
+    if (!tx || !rx)
+        goto out;
+
+    ret = unix_socketpair_connect(tx, rx);
+    test_check(ret == 0, "sockmsg_edge socketpair connect");
+    if (ret < 0)
+        goto out;
+
+    txfd = socket_install_fd(&tx);
+    rxfd = socket_install_fd(&rx);
+    test_check(txfd >= 0, "sockmsg_edge install tx fd");
+    test_check(rxfd >= 0, "sockmsg_edge install rx fd");
+    if (txfd < 0 || rxfd < 0)
+        goto out;
+
+    ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "sockmsg_edge user map");
+    if (ret < 0)
+        goto out;
+    mapped = true;
+
+    struct test_socket_iovec *u_send_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x000);
+    struct test_socket_iovec *u_recv_iov =
+        (struct test_socket_iovec *)user_map_ptr(&um, 0x020);
+    struct test_socket_msghdr *u_send_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x040);
+    struct test_socket_msghdr *u_recv_msg =
+        (struct test_socket_msghdr *)user_map_ptr(&um, 0x080);
+    char *u_send_buf = (char *)user_map_ptr(&um, 0x0C0);
+    char *u_recv_buf = (char *)user_map_ptr(&um, 0x100);
+    struct test_socket_cmsghdr *u_ctrl =
+        (struct test_socket_cmsghdr *)user_map_ptr(&um, 0x140);
+    int32_t *u_rights = (int32_t *)user_map_ptr(&um, 0x180);
+    test_check(u_send_iov && u_recv_iov && u_send_msg && u_recv_msg &&
+                   u_send_buf && u_recv_buf && u_ctrl && u_rights,
+               "sockmsg_edge user pointers");
+    if (!u_send_iov || !u_recv_iov || !u_send_msg || !u_recv_msg ||
+        !u_send_buf || !u_recv_buf || !u_ctrl || !u_rights)
+        goto out;
+
+    struct test_socket_iovec send_iov = {
+        .iov_base = u_send_buf,
+        .iov_len = 0,
+    };
+    struct test_socket_iovec recv_iov = {
+        .iov_base = u_recv_buf,
+        .iov_len = 8,
+    };
+    ret = copy_to_user(u_send_iov, &send_iov, sizeof(send_iov));
+    test_check(ret == 0, "sockmsg_edge copy send iov zero");
+    ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+    test_check(ret == 0, "sockmsg_edge copy recv iov");
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_cmsghdr ctrl_rights = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = TEST_SCM_RIGHTS,
+    };
+    int32_t rights_fd = txfd;
+    ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+    test_check(ret == 0, "sockmsg_edge copy rights hdr");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights), &rights_fd,
+                           sizeof(rights_fd));
+        test_check(ret == 0, "sockmsg_edge copy rights payload");
+    }
+    if (ret < 0)
+        goto out;
+
+    struct test_socket_msghdr send_msg = {
+        .msg_iov = u_send_iov,
+        .msg_iovlen = 1,
+        .msg_control = u_ctrl,
+        .msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len),
+    };
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_edge copy send msg zero");
+    if (ret < 0)
+        goto out;
+
+    int64_t ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "sockmsg_edge sendmsg zero+rights");
+
+    ret = copy_to_user(u_send_buf, "ZCTL", 4);
+    test_check(ret == 0, "sockmsg_edge copy plain payload");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendto((uint64_t)txfd, (uint64_t)u_send_buf, 4, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_edge send plain after zero ctrl");
+
+    struct test_socket_msghdr recv_msg = {
+        .msg_iov = u_recv_iov,
+        .msg_iovlen = 1,
+        .msg_control = u_ctrl,
+        .msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len),
+    };
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "sockmsg_edge copy recv msg");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_edge recv plain after zero ctrl");
+    if (ret64 == 4) {
+        char got[4] = {0};
+        struct test_socket_msghdr got_msg = {0};
+        ret = copy_from_user(got, u_recv_buf, sizeof(got));
+        test_check(ret == 0, "sockmsg_edge read plain payload");
+        ret = copy_from_user(&got_msg, u_recv_msg, sizeof(got_msg));
+        test_check(ret == 0, "sockmsg_edge read recv msg");
+        if (ret == 0) {
+            test_check(memcmp(got, "ZCTL", 4) == 0,
+                       "sockmsg_edge plain payload matches");
+            test_check(got_msg.msg_controllen == 0,
+                       "sockmsg_edge zero+ctrl does not deliver ancillary");
+            test_check((got_msg.msg_flags & MSG_CTRUNC) == 0,
+                       "sockmsg_edge zero+ctrl no ctrunc");
+        }
+    }
+
+    struct test_socket_cmsghdr ctrl_other = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr),
+        .cmsg_level = IPPROTO_UDP,
+        .cmsg_type = 1,
+    };
+    send_iov.iov_len = 4;
+    ret = copy_to_user(u_send_iov, &send_iov, sizeof(send_iov));
+    test_check(ret == 0, "sockmsg_edge copy send iov data");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_ctrl, &ctrl_other, sizeof(ctrl_other));
+    test_check(ret == 0, "sockmsg_edge copy non-sol ctrl");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_send_buf, "LVL1", 4);
+    test_check(ret == 0, "sockmsg_edge copy non-sol payload");
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_other.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_edge copy send msg non-sol");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_edge sendmsg non-sol control tolerated");
+    if (ret64 == 4) {
+        ret64 = sys_recvfrom((uint64_t)rxfd, (uint64_t)u_recv_buf, 4, 0, 0, 0);
+        test_check(ret64 == 4, "sockmsg_edge recv non-sol payload");
+    }
+    if (ret64 == 4) {
+        char got[4] = {0};
+        ret = copy_from_user(got, u_recv_buf, sizeof(got));
+        test_check(ret == 0, "sockmsg_edge read non-sol payload");
+        if (ret == 0)
+            test_check(memcmp(got, "LVL1", 4) == 0,
+                       "sockmsg_edge non-sol payload matches");
+    }
+
+    struct test_socket_cmsghdr ctrl_bad = {
+        .cmsg_len = sizeof(struct test_socket_cmsghdr),
+        .cmsg_level = SOL_SOCKET,
+        .cmsg_type = 0x1234,
+    };
+    ret = copy_to_user(u_ctrl, &ctrl_bad, sizeof(ctrl_bad));
+    test_check(ret == 0, "sockmsg_edge copy unknown sol ctrl");
+    if (ret < 0)
+        goto out;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_bad.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_edge copy send msg unknown sol");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == -EOPNOTSUPP, "sockmsg_edge unknown sol ctrl eopnotsupp");
+
+out:
+    close_fd_if_open(&txfd);
+    close_fd_if_open(&rxfd);
+    close_socket_if_open(&tx);
+    close_socket_if_open(&rx);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_socket_sockopt_semantics(void) {
+    struct socket *us = NULL;
+    struct socket *is = NULL;
+    struct sockaddr_un uaddr;
+    int ret;
+    int one = 1;
+    int zero = 0;
+    int value = 0;
+    int len = sizeof(value);
+
+    ret = sock_create(AF_UNIX, SOCK_STREAM, 0, &us);
+    test_check(ret == 0, "sockopt create unix");
+    if (ret < 0 || !us)
+        goto out;
+
+    ret = us->ops->setsockopt(us, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+    test_check(ret == 0, "sockopt unix set keepalive");
+    len = sizeof(value);
+    ret = us->ops->getsockopt(us, SOL_SOCKET, SO_KEEPALIVE, &value, &len);
+    test_check(ret == 0, "sockopt unix get keepalive");
+    if (ret == 0) {
+        test_check(len == (int)sizeof(value), "sockopt unix keepalive len");
+        test_check(value == 1, "sockopt unix keepalive value");
+    }
+
+    len = sizeof(value);
+    ret = us->ops->getsockopt(us, SOL_SOCKET, SO_TYPE, &value, &len);
+    test_check(ret == 0, "sockopt unix get type");
+    if (ret == 0)
+        test_check(value == SOCK_STREAM, "sockopt unix type stream");
+
+    len = sizeof(value);
+    ret = us->ops->getsockopt(us, SOL_SOCKET, SO_ACCEPTCONN, &value, &len);
+    test_check(ret == 0, "sockopt unix get acceptconn pre-listen");
+    if (ret == 0)
+        test_check(value == 0, "sockopt unix acceptconn pre-listen zero");
+
+    make_unix_addr(&uaddr, SOCKET_TEST_UNIX_SOCKOPT_PATH);
+    ret = us->ops->bind(us, (const struct sockaddr *)&uaddr, sizeof(uaddr));
+    test_check(ret == 0, "sockopt unix bind");
+    if (ret == 0) {
+        ret = us->ops->listen(us, 2);
+        test_check(ret == 0, "sockopt unix listen");
+    }
+    if (ret == 0) {
+        len = sizeof(value);
+        ret = us->ops->getsockopt(us, SOL_SOCKET, SO_ACCEPTCONN, &value, &len);
+        test_check(ret == 0, "sockopt unix get acceptconn listen");
+        if (ret == 0)
+            test_check(value == 1, "sockopt unix acceptconn listen one");
+    }
+
+    ret = us->ops->setsockopt(us, SOL_SOCKET, SO_SNDBUF, &zero, sizeof(zero));
+    test_check(ret == -EINVAL, "sockopt unix set sndbuf zero einval");
+    ret = us->ops->setsockopt(us, SOL_SOCKET, 0x7777, &one, sizeof(one));
+    test_check(ret == -EOPNOTSUPP, "sockopt unix set unknown eopnotsupp");
+    len = sizeof(value);
+    ret = us->ops->getsockopt(us, SOL_SOCKET, 0x7777, &value, &len);
+    test_check(ret == -EOPNOTSUPP, "sockopt unix get unknown eopnotsupp");
+
+    ret = sock_create(AF_INET, SOCK_STREAM, 0, &is);
+    test_check(ret == 0, "sockopt create inet");
+    if (ret < 0 || !is)
+        goto out;
+
+    ret = is->ops->setsockopt(is, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    test_check(ret == 0, "sockopt inet set reuseaddr");
+    len = sizeof(value);
+    ret = is->ops->getsockopt(is, SOL_SOCKET, SO_REUSEADDR, &value, &len);
+    test_check(ret == 0, "sockopt inet get reuseaddr");
+    if (ret == 0)
+        test_check(value == 1, "sockopt inet reuseaddr value");
+
+    value = 8192;
+    ret = is->ops->setsockopt(is, SOL_SOCKET, SO_SNDBUF, &value, sizeof(value));
+    test_check(ret == 0, "sockopt inet set sndbuf");
+    value = 0;
+    len = sizeof(value);
+    ret = is->ops->getsockopt(is, SOL_SOCKET, SO_SNDBUF, &value, &len);
+    test_check(ret == 0, "sockopt inet get sndbuf");
+    if (ret == 0)
+        test_check(value == 8192, "sockopt inet sndbuf value");
+
+    value = 0;
+    ret = is->ops->setsockopt(is, SOL_SOCKET, SO_RCVBUF, &value, sizeof(value));
+    test_check(ret == -EINVAL, "sockopt inet set rcvbuf zero einval");
+
+    len = sizeof(value);
+    ret = is->ops->getsockopt(is, SOL_SOCKET, SO_TYPE, &value, &len);
+    test_check(ret == 0, "sockopt inet get type");
+    if (ret == 0)
+        test_check(value == SOCK_STREAM, "sockopt inet type stream");
+
+    len = sizeof(value);
+    ret = is->ops->getsockopt(is, SOL_SOCKET, 0x7777, &value, &len);
+    test_check(ret == -EOPNOTSUPP, "sockopt inet get unknown eopnotsupp");
+    ret = is->ops->setsockopt(is, SOL_SOCKET, 0x7777, &one, sizeof(one));
+    test_check(ret == -EOPNOTSUPP, "sockopt inet set unknown eopnotsupp");
+
+out:
+    close_socket_if_open(&is);
+    close_socket_if_open(&us);
+}
+
 struct inet_attempt_ctx {
     uint32_t loopback_ip;
     uint16_t server_port;
@@ -3558,6 +3863,8 @@ int run_socket_tests(void) {
     test_unix_stream_recvmmsg_control_semantics();
     test_unix_stream_recvmmsg_peek_control_semantics();
     test_unix_stream_msg_control_boundary_drop_semantics();
+    test_socket_msg_control_edge_semantics();
+    test_socket_sockopt_semantics();
     test_socket_syscall_abi_width_edges();
     test_socket_nonblock_syscall_semantics();
     test_unix_stream_connect_error_transitions();
