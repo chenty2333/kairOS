@@ -453,29 +453,10 @@ jobs:
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          log_candidates=(
-            "${latest}/aarch64/test.log"
-            "${latest}/aarch64/run.log"
-            "build/aarch64/test.log"
-            "build/aarch64/run.log"
-          )
-          smp_marker=0
-          for path in "${log_candidates[@]}"; do
-            if [[ -f "${path}" ]] && grep -Eq "SMP: 2/2 CPUs active" "${path}"; then
-              smp_marker=1
-              break
-            fi
-          done
-          if [[ "${smp_marker}" -ne 1 ]]; then
-            echo "aarch64 SMP gate missing marker: SMP: 2/2 CPUs active" >&2
-            for path in "${log_candidates[@]}"; do
-              if [[ -f "${path}" ]]; then
-                echo "--- tail ${path} ---" >&2
-                tail -n 120 "${path}" >&2
-              fi
-            done
-            exit 2
-          fi
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
 
       - name: Run aarch64 tcc smoke gate
         run: |
@@ -487,6 +468,10 @@ jobs:
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
 
       - name: Capture latest isolated run
         id: latest_run_aarch64

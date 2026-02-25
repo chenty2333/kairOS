@@ -587,6 +587,10 @@ jobs:
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
 
       - name: Capture latest isolated run
         id: latest_run_aarch64
