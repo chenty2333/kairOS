@@ -518,6 +518,36 @@ jobs:
             --arch aarch64 \
             --expected-online 2
 
+      - name: Run aarch64 smp4 syscall/trap gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=240 test-syscall-trap
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 syscall/trap gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
+      - name: Run aarch64 smp4 vfs/ipc gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-vfs-ipc
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 smp4 vfs/ipc gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 4
+
       - name: Capture latest isolated run
         id: latest_run_aarch64
         if: always()
@@ -552,10 +582,9 @@ jobs:
             build/aarch64/tcc-smoke.log
             build/aarch64/run.log
 
-  aarch64-smp4-shadow:
+  aarch64-smp4-gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -678,43 +707,13 @@ jobs:
           echo "Using UEFI_CODE_SRC=${code_src}"
           echo "Using UEFI_VARS_SRC=${vars_src}"
 
-      - name: Run aarch64 smp4 syscall/trap shadow
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=240 test-syscall-trap
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 syscall/trap shadow" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 4
-
-      - name: Run aarch64 smp4 vfs/ipc shadow
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-vfs-ipc
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 vfs/ipc shadow" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 4
-
-      - name: Run aarch64 smp4 driver shadow
+      - name: Run aarch64 smp4 driver gate
         run: |
           set -euo pipefail
           make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-driver
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 driver shadow" >&2
+            echo "No isolated run found after aarch64 smp4 driver gate" >&2
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
@@ -723,13 +722,13 @@ jobs:
             --arch aarch64 \
             --expected-online 4
 
-      - name: Run aarch64 smp4 socket shadow
+      - name: Run aarch64 smp4 socket gate
         run: |
           set -euo pipefail
           make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=360 test-socket
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 socket shadow" >&2
+            echo "No isolated run found after aarch64 smp4 socket gate" >&2
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
@@ -738,13 +737,13 @@ jobs:
             --arch aarch64 \
             --expected-online 4
 
-      - name: Run aarch64 smp4 tcc smoke shadow
+      - name: Run aarch64 smp4 tcc smoke gate
         run: |
           set -euo pipefail
           make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 tcc smoke shadow" >&2
+            echo "No isolated run found after aarch64 smp4 tcc smoke gate" >&2
             exit 2
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
@@ -754,7 +753,7 @@ jobs:
             --expected-online 4
 
       - name: Capture latest isolated run
-        id: latest_run_aarch64_smp4_shadow
+        id: latest_run_aarch64_smp4_gate
         if: always()
         run: |
           set -euo pipefail
@@ -765,20 +764,20 @@ jobs:
             cat "${latest}/result.json"
           fi
 
-      - name: Upload aarch64 smp4 shadow artifacts
+      - name: Upload aarch64 smp4 gate artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quick-aarch64-smp4-shadow-${{ github.run_id }}
+          name: quick-aarch64-smp4-${{ github.run_id }}
           retention-days: 14
           if-no-files-found: warn
           path: |
-            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/manifest.json
-            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/result.json
-            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/logs/test.log
-            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/test.log
-            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/tcc-smoke.log
-            ${{ steps.latest_run_aarch64_smp4_shadow.outputs.path }}/aarch64/run.log
+            ${{ steps.latest_run_aarch64_smp4_gate.outputs.path }}/manifest.json
+            ${{ steps.latest_run_aarch64_smp4_gate.outputs.path }}/result.json
+            ${{ steps.latest_run_aarch64_smp4_gate.outputs.path }}/aarch64/logs/test.log
+            ${{ steps.latest_run_aarch64_smp4_gate.outputs.path }}/aarch64/test.log
+            ${{ steps.latest_run_aarch64_smp4_gate.outputs.path }}/aarch64/tcc-smoke.log
+            ${{ steps.latest_run_aarch64_smp4_gate.outputs.path }}/aarch64/run.log
             build/runs/*/manifest.json
             build/runs/*/result.json
             build/runs/*/aarch64/logs/*.log
