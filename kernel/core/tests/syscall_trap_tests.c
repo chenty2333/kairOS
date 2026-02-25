@@ -867,6 +867,9 @@ out:
 }
 
 #define SYSCALL_MOUNT_FLAG_TEST_PATH "/tmp/.kairos_syscall_mount_flags"
+#define SYSCALL_MOUNT_PROP_TEST_ROOT "/tmp/.kairos_mount_prop_root"
+#define SYSCALL_MOUNT_PROP_TEST_CHILD "/tmp/.kairos_mount_prop_root/sub"
+#define SYSCALL_MOUNT_PROP_TEST_BIND "/tmp/.kairos_mount_prop_bind"
 #define SYSCALL_ACCT_TEST_FILE "/tmp/.kairos_syscall_acct"
 
 static void test_mount_umount_flag_semantics(void) {
@@ -911,17 +914,148 @@ static void test_mount_umount_flag_semantics(void) {
                       MS_REMOUNT | MS_RDONLY | MS_NOEXEC, 0, 0);
     test_check(ret64 == 0, "mountflags remount semantic");
 
+    ret64 = sys_umount2((uint64_t)u_tgt, MNT_FORCE, 0, 0, 0, 0);
+    test_check(ret64 == -EOPNOTSUPP, "mountflags umount2 force eopnotsupp");
+
+    ret64 = sys_umount2((uint64_t)u_tgt, MNT_EXPIRE | MNT_DETACH, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "mountflags umount2 expire_detach einval");
+
     ret64 = sys_umount2((uint64_t)u_tgt, MNT_DETACH | UMOUNT_NOFOLLOW, 0, 0, 0, 0);
     test_check(ret64 == 0, "mountflags umount2 detach_nofollow");
 
-    ret64 = sys_umount2((uint64_t)u_tgt, MNT_EXPIRE, 0, 0, 0, 0);
-    test_check(ret64 == -EINVAL, "mountflags umount2 unsupported");
+    ret64 = sys_mount(0, (uint64_t)u_tgt, (uint64_t)u_fstype, 0, 0, 0);
+    test_check(ret64 == 0, "mountflags mount for expire");
+    if (ret64 == 0) {
+        ret64 = sys_umount2((uint64_t)u_tgt, MNT_EXPIRE, 0, 0, 0, 0);
+        test_check(ret64 == -EAGAIN, "mountflags umount2 expire first eagain");
+
+        ret64 = sys_umount2((uint64_t)u_tgt, MNT_EXPIRE, 0, 0, 0, 0);
+        test_check(ret64 == 0, "mountflags umount2 expire second success");
+    }
 
 out:
     if (mapped)
         user_map_end(&um);
     (void)vfs_umount(SYSCALL_MOUNT_FLAG_TEST_PATH);
     (void)vfs_rmdir(SYSCALL_MOUNT_FLAG_TEST_PATH);
+}
+
+static void test_mount_propagation_recursive_semantics(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc = 0;
+
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_CHILD);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_ROOT);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND);
+    (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_CHILD);
+    (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_ROOT);
+    (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_BIND);
+
+    rc = vfs_mkdir(SYSCALL_MOUNT_PROP_TEST_ROOT, 0755);
+    test_check(rc == 0 || rc == -EEXIST, "mountprop mkdir root");
+    if (rc < 0 && rc != -EEXIST)
+        goto out;
+
+    rc = vfs_mkdir(SYSCALL_MOUNT_PROP_TEST_BIND, 0755);
+    test_check(rc == 0 || rc == -EEXIST, "mountprop mkdir bind");
+    if (rc < 0 && rc != -EEXIST)
+        goto out;
+
+    rc = vfs_mount(NULL, SYSCALL_MOUNT_PROP_TEST_ROOT, "tmpfs", 0);
+    test_check(rc == 0, "mountprop mount root");
+    if (rc < 0)
+        goto out;
+
+    rc = vfs_mkdir(SYSCALL_MOUNT_PROP_TEST_CHILD, 0755);
+    test_check(rc == 0 || rc == -EEXIST, "mountprop mkdir child");
+    if (rc < 0 && rc != -EEXIST)
+        goto out;
+
+    rc = vfs_mount(NULL, SYSCALL_MOUNT_PROP_TEST_CHILD, "tmpfs", 0);
+    test_check(rc == 0, "mountprop mount child");
+    if (rc < 0)
+        goto out;
+
+    rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "mountprop user_map");
+    if (rc < 0)
+        goto out;
+    mapped = true;
+
+    char *u_root = (char *)user_map_ptr(&um, 0x000);
+    char *u_bind = (char *)user_map_ptr(&um, 0x100);
+    test_check(u_root != NULL, "mountprop u_root");
+    test_check(u_bind != NULL, "mountprop u_bind");
+    if (!u_root || !u_bind)
+        goto out;
+
+    rc = copy_to_user(u_root, SYSCALL_MOUNT_PROP_TEST_ROOT,
+                      strlen(SYSCALL_MOUNT_PROP_TEST_ROOT) + 1);
+    test_check(rc == 0, "mountprop copy root");
+    rc = copy_to_user(u_bind, SYSCALL_MOUNT_PROP_TEST_BIND,
+                      strlen(SYSCALL_MOUNT_PROP_TEST_BIND) + 1);
+    test_check(rc == 0, "mountprop copy bind");
+    if (rc < 0)
+        goto out;
+
+    int64_t ret64 = sys_mount(0, (uint64_t)u_root, 0, MS_SHARED | MS_REC, 0, 0);
+    test_check(ret64 == 0, "mountprop shared rec");
+    if (ret64 == 0) {
+        struct mount *root_mnt = vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_ROOT);
+        struct mount *child_mnt = vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_CHILD);
+        test_check(root_mnt != NULL, "mountprop root mnt shared");
+        test_check(child_mnt != NULL, "mountprop child mnt shared");
+        if (root_mnt)
+            test_check(root_mnt->prop == MOUNT_SHARED, "mountprop root shared");
+        if (child_mnt)
+            test_check(child_mnt->prop == MOUNT_SHARED, "mountprop child shared");
+    }
+
+    ret64 = sys_mount(0, (uint64_t)u_root, 0, MS_PRIVATE, 0, 0);
+    test_check(ret64 == 0, "mountprop private nonrec");
+    if (ret64 == 0) {
+        struct mount *root_mnt = vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_ROOT);
+        struct mount *child_mnt = vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_CHILD);
+        test_check(root_mnt != NULL, "mountprop root mnt private");
+        test_check(child_mnt != NULL, "mountprop child mnt private");
+        if (root_mnt)
+            test_check(root_mnt->prop == MOUNT_PRIVATE, "mountprop root private");
+        if (child_mnt)
+            test_check(child_mnt->prop == MOUNT_SHARED,
+                       "mountprop child unchanged without rec");
+    }
+
+    ret64 = sys_mount(0, (uint64_t)u_root, 0, MS_UNBINDABLE | MS_REC, 0, 0);
+    test_check(ret64 == 0, "mountprop unbindable rec");
+    if (ret64 == 0) {
+        struct mount *root_mnt = vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_ROOT);
+        struct mount *child_mnt = vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_CHILD);
+        test_check(root_mnt != NULL, "mountprop root mnt unbindable");
+        test_check(child_mnt != NULL, "mountprop child mnt unbindable");
+        if (root_mnt)
+            test_check(root_mnt->prop == MOUNT_UNBINDABLE,
+                       "mountprop root unbindable");
+        if (child_mnt)
+            test_check(child_mnt->prop == MOUNT_UNBINDABLE,
+                       "mountprop child unbindable");
+    }
+
+    ret64 = sys_mount((uint64_t)u_root, (uint64_t)u_bind, 0, MS_BIND, 0, 0);
+    test_check(ret64 == -EINVAL, "mountprop bind from unbindable einval");
+
+    ret64 = sys_mount(0, (uint64_t)u_root, 0, MS_SHARED | MS_PRIVATE, 0, 0);
+    test_check(ret64 == -EINVAL, "mountprop multi propagation bits einval");
+
+out:
+    if (mapped)
+        user_map_end(&um);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_CHILD);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_ROOT);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND);
+    (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_CHILD);
+    (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_ROOT);
+    (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_BIND);
 }
 
 static void test_acct_syscall_semantics(void) {
@@ -1282,6 +1416,7 @@ int run_syscall_trap_tests(void) {
     test_uaccess_arg_validation_regression();
     test_sched_affinity_syscalls_regression();
     test_mount_umount_flag_semantics();
+    test_mount_propagation_recursive_semantics();
     test_acct_syscall_semantics();
     test_futex_waitv_syscalls_regression();
     test_trap_dispatch_guard_clauses();

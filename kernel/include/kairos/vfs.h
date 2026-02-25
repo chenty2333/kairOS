@@ -177,8 +177,11 @@ struct mount_group {
 #define MOUNT_F_BIND        0x1
 #define MOUNT_F_DETACHED    0x2
 #define MOUNT_F_REAP_FAILED 0x4
+#define MOUNT_F_EXPIRE_MARK 0x8
 
 #define VFS_UMOUNT_DETACH 0x1
+#define VFS_UMOUNT_FORCE  0x2
+#define VFS_UMOUNT_EXPIRE 0x4
 
 struct vfs_ops {
     const char *name;
@@ -256,6 +259,9 @@ int vfs_mount_ns_set_root(struct mount_ns *ns, struct dentry *root);
 int vfs_mount_set_shared(struct mount *mnt);
 void vfs_mount_set_private(struct mount *mnt);
 int vfs_mount_set_slave(struct mount *mnt);
+void vfs_mount_set_unbindable(struct mount *mnt);
+int vfs_mount_set_propagation(struct mount *mnt, enum mount_prop prop,
+                              bool recursive);
 int vfs_bind_mount(struct dentry *source, struct dentry *target,
                    uint32_t flags, bool propagate);
 ssize_t vfs_read(struct file *file, void *buf, size_t len);

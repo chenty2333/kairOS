@@ -33,7 +33,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `fchmodat2` is wired to `fchmodat` semantics and flag validation
   - `openat2` supports `struct open_how` parsing; `RESOLVE_NO_MAGICLINKS` is accepted, other `resolve` constraints are pending
   - `statfs` now resolves the target path before filesystem stat (non-existent paths return `ENOENT`), and `fstatfs` falls back to fd dentry mount when available (`EINVAL` only when no mount context exists)
-  - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); supports `UMOUNT_NOFOLLOW` and `MNT_DETACH` lazy-detach semantics
+  - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); supports `UMOUNT_NOFOLLOW`, `MNT_DETACH` lazy-detach, `MNT_FORCE` recognition (`EOPNOTSUPP`), and `MNT_EXPIRE` two-phase semantics (first call `EAGAIN`, second call unmount)
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 - `umount2` follows Linux `int` ABI flag decoding (upper 32 bits ignored); unsupported flags return `EINVAL`
 - `mount` validates `mountflags` using Linux ABI `unsigned long` width (native word size); supports semantic superblock flags (`MS_RDONLY`/`MS_NO*`/`MS_RELATIME` family), propagation flags, bind, and remount
@@ -50,10 +50,11 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 
 - mount_list: global mount linked list
 - Supports bind mount (MOUNT_F_BIND)
-- Mount propagation: private/shared/slave implemented, unbindable has enum value only
+- Mount propagation: private/shared/slave/unbindable implemented; propagation mode changes support `MS_REC` recursive subtree application
 - Mount namespace roots hold mount references; clone/set-root/put paths now maintain mount refcounts together with root_dentry refs
 - Unmount safety: `vfs_umount()` rejects unmount when child mounts exist or when mount refcount indicates external namespace/root users (returns `-EBUSY`)
 - `vfs_umount2(..., VFS_UMOUNT_DETACH)` detaches the mount subtree from namespace visibility (lazy unmount path), then reaps detached mounts when they become reclaimable
+- Bind mounts reject unbindable sources (`MS_BIND` from `MOUNT_UNBINDABLE` source returns `EINVAL`)
 - Root mount strategy (init_fs): prefers initramfs, then tries ext2 on vda-vdz block devices, falls back to devfs on / if all fail
 - Mount order: root filesystem → /dev(devfs) → /proc(procfs) → /tmp(tmpfs) → /sys(sysfs)
 

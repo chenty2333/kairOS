@@ -63,6 +63,18 @@ static void mount_set_private(struct mount *mnt) {
     mnt->prop = MOUNT_PRIVATE;
 }
 
+static void mount_set_unbindable(struct mount *mnt) {
+    if (!mnt)
+        return;
+    if (mnt->group)
+        mount_group_remove(mnt);
+    if (mnt->master) {
+        list_del(&mnt->slave_node);
+        mnt->master = NULL;
+    }
+    mnt->prop = MOUNT_UNBINDABLE;
+}
+
 static int mount_set_shared(struct mount *mnt) {
     if (!mnt)
         return -EINVAL;
@@ -105,6 +117,25 @@ static int mount_set_slave(struct mount *mnt) {
     }
     mnt->prop = MOUNT_SLAVE;
     return 0;
+}
+
+static int mount_set_propagation_mode(struct mount *mnt, enum mount_prop prop) {
+    if (!mnt)
+        return -EINVAL;
+    switch (prop) {
+    case MOUNT_PRIVATE:
+        mount_set_private(mnt);
+        return 0;
+    case MOUNT_SHARED:
+        return mount_set_shared(mnt);
+    case MOUNT_SLAVE:
+        return mount_set_slave(mnt);
+    case MOUNT_UNBINDABLE:
+        mount_set_unbindable(mnt);
+        return 0;
+    default:
+        return -EINVAL;
+    }
 }
 
 static void mount_inherit_propagation(struct mount *mnt, struct mount *src) {
@@ -256,6 +287,7 @@ static void mount_mark_detached_subtree_locked(struct mount *root) {
         if (mnt != root && !mount_is_descendant_of(mnt, root))
             continue;
         mnt->mflags |= MOUNT_F_DETACHED;
+        mnt->mflags &= ~MOUNT_F_EXPIRE_MARK;
         mnt->mflags &= ~MOUNT_F_REAP_FAILED;
         if (mnt->mountpoint_dentry) {
             mnt->mountpoint_dentry->mounted = NULL;
@@ -358,6 +390,28 @@ void vfs_mount_set_private(struct mount *mnt) {
 
 int vfs_mount_set_slave(struct mount *mnt) {
     return mount_set_slave(mnt);
+}
+
+void vfs_mount_set_unbindable(struct mount *mnt) {
+    mount_set_unbindable(mnt);
+}
+
+int vfs_mount_set_propagation(struct mount *mnt, enum mount_prop prop,
+                              bool recursive) {
+    if (!mnt)
+        return -EINVAL;
+    if (!recursive)
+        return mount_set_propagation_mode(mnt, prop);
+
+    struct mount *iter;
+    list_for_each_entry(iter, &mount_list, list) {
+        if (iter != mnt && !mount_is_descendant_of(iter, mnt))
+            continue;
+        int ret = mount_set_propagation_mode(iter, prop);
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
 }
 
 struct mount_ns *vfs_mount_ns_get(void) {
@@ -588,6 +642,8 @@ static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
     struct mount *src_mnt = source->mnt;
     if (!src_mnt || !src_mnt->ops)
         return -EINVAL;
+    if (src_mnt->prop == MOUNT_UNBINDABLE)
+        return -EINVAL;
 
     struct mount *mnt = kzalloc(sizeof(*mnt));
     if (!mnt)
@@ -658,8 +714,19 @@ int vfs_bind_mount(struct dentry *source, struct dentry *target,
 int vfs_umount2(const char *tgt, uint32_t flags) {
     if (!tgt)
         return -EINVAL;
-    if (flags & ~VFS_UMOUNT_DETACH)
+    uint32_t supported = VFS_UMOUNT_DETACH | VFS_UMOUNT_FORCE |
+                         VFS_UMOUNT_EXPIRE;
+    if (flags & ~supported)
         return -EINVAL;
+    if ((flags & VFS_UMOUNT_DETACH) && (flags & VFS_UMOUNT_EXPIRE))
+        return -EINVAL;
+    if (flags & VFS_UMOUNT_FORCE) {
+        if (flags & (VFS_UMOUNT_DETACH | VFS_UMOUNT_EXPIRE))
+            return -EINVAL;
+        return -EOPNOTSUPP;
+    }
+
+    bool expire = (flags & VFS_UMOUNT_EXPIRE) != 0;
 
     struct mount *mnt = NULL;
     bool found = false;
@@ -705,6 +772,17 @@ int vfs_umount2(const char *tgt, uint32_t flags) {
         spin_unlock(&vfs_lock);
         vfs_mount_global_unlock();
         return -EBUSY;
+    }
+    if (expire) {
+        if (!(mnt->mflags & MOUNT_F_EXPIRE_MARK)) {
+            mnt->mflags |= MOUNT_F_EXPIRE_MARK;
+            spin_unlock(&vfs_lock);
+            vfs_mount_global_unlock();
+            return -EAGAIN;
+        }
+        mnt->mflags &= ~MOUNT_F_EXPIRE_MARK;
+    } else {
+        mnt->mflags &= ~MOUNT_F_EXPIRE_MARK;
     }
     spin_unlock(&vfs_lock);
 

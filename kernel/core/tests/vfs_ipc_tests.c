@@ -530,7 +530,7 @@ static void test_umount2_flag_width_semantics(void) {
 
     int64_t ret64 = sys_umount2((uint64_t)u_path, (1ULL << 32) | 1ULL, 0, 0, 0,
                                 0);
-    test_check(ret64 == -EINVAL, "umount2 width low32 invalid");
+    test_check(ret64 == -EOPNOTSUPP, "umount2 width low32 mnt_force");
 
     ret64 = sys_umount2((uint64_t)u_path, 1ULL << 32, 0, 0, 0, 0);
     test_check(ret64 == 0, "umount2 width high32 ignored");

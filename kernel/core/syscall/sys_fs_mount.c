@@ -265,7 +265,7 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
     (void)a2; (void)a3; (void)a4; (void)a5;
     char kpath[CONFIG_PATH_MAX];
     uint32_t uflags = (uint32_t)sysmount_abi_i32(flags);
-    uint32_t supported = MNT_DETACH | UMOUNT_NOFOLLOW;
+    uint32_t supported = MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW;
     int resolve_flags = NAMEI_DIRECTORY;
     if (!target_ptr)
         return -EFAULT;
@@ -294,25 +294,35 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
     uint32_t vfs_flags = 0;
     if (uflags & MNT_DETACH)
         vfs_flags |= VFS_UMOUNT_DETACH;
+    if (uflags & MNT_FORCE)
+        vfs_flags |= VFS_UMOUNT_FORCE;
+    if (uflags & MNT_EXPIRE)
+        vfs_flags |= VFS_UMOUNT_EXPIRE;
     return vfs_umount2(full, vfs_flags);
 }
 
 static int set_mount_propagation(struct mount *mnt, uint32_t flags) {
     if (!mnt)
         return -EINVAL;
-    if (flags & MS_SHARED)
-        return vfs_mount_set_shared(mnt);
-    if (flags & MS_PRIVATE) {
-        vfs_mount_set_private(mnt);
-        return 0;
-    }
-    if (flags & MS_SLAVE)
-        return vfs_mount_set_slave(mnt);
-    if (flags & MS_UNBINDABLE) {
-        vfs_mount_set_private(mnt);
-        return 0;
-    }
-    return -EINVAL;
+    bool recursive = (flags & MS_REC) != 0;
+    uint32_t prop_mask = MS_SHARED | MS_PRIVATE | MS_SLAVE | MS_UNBINDABLE;
+    uint32_t prop = flags & prop_mask;
+    if (!prop || (prop & (prop - 1)))
+        return -EINVAL;
+
+    enum mount_prop mode = MOUNT_PRIVATE;
+    if (prop == MS_SHARED)
+        mode = MOUNT_SHARED;
+    else if (prop == MS_PRIVATE)
+        mode = MOUNT_PRIVATE;
+    else if (prop == MS_SLAVE)
+        mode = MOUNT_SLAVE;
+    else if (prop == MS_UNBINDABLE)
+        mode = MOUNT_UNBINDABLE;
+    else
+        return -EINVAL;
+
+    return vfs_mount_set_propagation(mnt, mode, recursive);
 }
 
 int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
