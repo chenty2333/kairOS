@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# push-soak-tag.sh - Push current branch and trigger soak workflow via tag push.
+# push-soak-tag.sh - Push current branch and trigger CI workflows via tag push.
 #
 
 set -euo pipefail
@@ -10,15 +10,20 @@ usage() {
 Usage: scripts/push-soak-tag.sh [options]
 
 Options:
+  --mode <long|short>   CI profile (default: short)
+  --long                Shorthand for --mode long
+  --short               Shorthand for --mode short
   --remote <name>       Git remote name (default: origin)
   --branch <name>       Branch to push (default: current branch)
-  --prefix <text>       Tag prefix (default: soak)
+  --prefix <text>       Tag prefix (default: soak for long, quick for short)
   --tag <name>          Explicit tag name (skip auto-generated tag)
   --skip-branch-push    Only push tag, skip branch push
   -h, --help            Show help
 
 Examples:
   scripts/push-soak-tag.sh
+  scripts/push-soak-tag.sh --long
+  scripts/push-soak-tag.sh --short --skip-branch-push
   scripts/push-soak-tag.sh --prefix night
   scripts/push-soak-tag.sh --tag soak-260223-2300
 EOF
@@ -48,12 +53,33 @@ to_web_url() {
 
 remote="origin"
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-prefix="soak"
+mode="short"
+prefix=""
 tag=""
 push_branch=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --mode)
+            [[ $# -ge 2 ]] || die "--mode requires a value"
+            case "$2" in
+                long | short)
+                    mode="$2"
+                    ;;
+                *)
+                    die "unknown mode: $2 (expected: long|short)"
+                    ;;
+            esac
+            shift 2
+            ;;
+        --long)
+            mode="long"
+            shift
+            ;;
+        --short)
+            mode="short"
+            shift
+            ;;
         --remote)
             [[ $# -ge 2 ]] || die "--remote requires a value"
             remote="$2"
@@ -88,6 +114,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -z "${prefix}" ]]; then
+    if [[ "${mode}" == "short" ]]; then
+        prefix="quick"
+    else
+        prefix="soak"
+    fi
+fi
+
 [[ -n "${branch}" ]] || die "unable to determine current branch"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
     die "must run inside a git repository"
@@ -119,10 +153,24 @@ git push "${remote}" "refs/tags/${tag}"
 
 remote_url="$(git remote get-url "${remote}")"
 web_url="$(to_web_url "${remote_url}")"
+workflow_file=""
+workflow_label=""
+if [[ "${tag}" == quick-* ]]; then
+    workflow_file="ci-quick.yml"
+    workflow_label="quick workflow"
+elif [[ "${tag}" == soak-* || "${tag}" == night-* ]]; then
+    workflow_file="soak-long.yml"
+    workflow_label="soak workflow"
+fi
 echo "push-soak-tag: done"
+echo "  mode:   ${mode}"
 echo "  branch: ${branch}"
 echo "  tag:    ${tag}"
 if [[ -n "${web_url}" ]]; then
     echo "  actions: ${web_url}/actions"
-    echo "  soak workflow: ${web_url}/actions/workflows/soak-long.yml"
+    if [[ -n "${workflow_file}" ]]; then
+        echo "  ${workflow_label}: ${web_url}/actions/workflows/${workflow_file}"
+    else
+        echo "  workflow hint: no built-in match for tag prefix"
+    fi
 fi
