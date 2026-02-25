@@ -27,7 +27,11 @@ PCI bus (bus/pci.c):
 - ECAM config space access (pci_read/write_config_8/16/32)
 - BAR decoding: supports 32-bit and 64-bit Memory BARs, I/O BARs
 - Common PCI capability traversal APIs: `pci_find_capability()` / `pci_find_next_capability()`
-- MSI baseline APIs: `pci_enable_msi()` / `pci_disable_msi()` with arch hook `arch_pci_msi_setup()`; unsupported arches cleanly fall back to INTx
+- MSI/MSI-X APIs:
+  - `pci_enable_msi()` / `pci_disable_msi()`
+  - `pci_enable_msix()` / `pci_enable_msix_nvec()` / `pci_disable_msix()`
+  - MSI-X helpers: `pci_msix_vector_irq()`, `pci_msix_set_vector_mask()`, `pci_msix_vector_pending()`, `pci_msix_set_affinity()`
+  - Message routing uses arch hook `arch_pci_msi_setup()`
 - Match strategy: by vendor_id/device_id (supports PCI_ANY_ID wildcard)
 - pci_enumerate(): calls arch_pci_host_init() (weak symbol, arch-overridable) to get ECAM base, then scans bus
 - pci_set_master(): enables bus-master and memory-space
@@ -36,7 +40,8 @@ VirtIO bus:
 - Registered as a separate bus_type (virtio_bus_type)
 - virtio_mmio.c: VirtIO MMIO transport layer, probed as a platform driver, discovers VirtIO devices and registers them on the virtio bus
 - virtio_pci.c: VirtIO PCI transport layer, probed as a PCI driver, parses VirtIO vendor capabilities (common/notify/isr/device config) and registers child virtio devices on the virtio bus
-  - probe path now attempts MSI first via PCI core API and falls back to INTx automatically when MSI is unavailable
+  - probe path attempts MSI-X first (`2 -> 1` vectors), then MSI, then falls back to INTx
+  - when MSI-X is active, common config and queue vector bindings are explicitly programmed
 - virtio_mmio probe stores transport state in `dev->driver_data`; remove path unregisters the child virtio device and frees transport resources
 
 ## Device Discovery Flow (core/init/devices.c)
@@ -109,7 +114,9 @@ lwIP integration:
 ## Current Limitations
 
 - ACPI platform-device discovery is still scaffolding (does not register fw descriptors); currently only PCI ECAM discovery via MCFG is wired for aarch64
-- MSI-X and architecture-specific MSI routing backends are not wired yet; current MSI path is a baseline core interface with INTx fallback
+- MSI routing backends:
+  - aarch64: baseline MSI/MSI-X route via GICD `SETSPI_NSR` doorbell path (QEMU virt)
+  - riscv64: current PLIC path remains INTx-only (`arch_pci_msi_setup()` returns `-EOPNOTSUPP` until AIA/IMSIC support is added)
 
 Related references:
 - references/00_REPO_MAP.md
