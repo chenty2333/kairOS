@@ -51,6 +51,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - mount_list: global mount linked list
 - Supports bind mount (MOUNT_F_BIND)
 - Mount propagation: private/shared/slave/unbindable implemented; propagation mode changes support `MS_REC` recursive subtree application
+- Bind mounts support both `MS_BIND` (single mount) and `MS_BIND|MS_REC` recursive subtree bind; recursive bind mirrors source submount topology under the target subtree
 - Mount namespace roots hold mount references; clone/set-root/put paths now maintain mount refcounts together with root_dentry refs
 - Unmount safety: `vfs_umount()` rejects unmount when child mounts exist or when mount refcount indicates external namespace/root users (returns `-EBUSY`)
 - `vfs_umount2(..., VFS_UMOUNT_DETACH)` detaches the mount subtree from namespace visibility (lazy unmount path), then reaps detached mounts when they become reclaimable

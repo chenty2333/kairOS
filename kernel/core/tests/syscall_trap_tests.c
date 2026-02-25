@@ -781,8 +781,13 @@ static void test_sched_affinity_syscalls_regression(void) {
     mapped = true;
 
     unsigned long *u_mask = (unsigned long *)user_map_ptr(&um, 0);
+    unsigned long *u_mask_ext = (unsigned long *)user_map_ptr(&um, 128);
+    unsigned long *u_mask_edge =
+        (unsigned long *)user_map_ptr(&um, CONFIG_PAGE_SIZE - sizeof(unsigned long));
     test_check(u_mask != NULL, "affinity user_ptr");
-    if (!u_mask)
+    test_check(u_mask_ext != NULL, "affinity user_ptr_ext");
+    test_check(u_mask_edge != NULL, "affinity user_ptr_edge");
+    if (!u_mask || !u_mask_ext || !u_mask_edge)
         goto out;
 
     int64_t ret64 = sys_sched_getaffinity(0, sizeof(unsigned long) - 1,
@@ -830,6 +835,32 @@ static void test_sched_affinity_syscalls_regression(void) {
                                           (uint64_t)u_mask, 0, 0, 0);
             test_check(ret64 == 0, "affinity set restore_ok");
         }
+
+        unsigned long ext_mask[2] = {saved_mask, 0};
+        rc = copy_to_user(u_mask_ext, ext_mask, sizeof(ext_mask));
+        test_check(rc == 0, "affinity set copy_ext_zero_tail");
+        if (rc == 0) {
+            ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
+                                          (uint64_t)u_mask_ext, 0, 0, 0);
+            test_check(ret64 == 0, "affinity set ext_zero_tail_ok");
+        }
+
+        ext_mask[1] = 1;
+        rc = copy_to_user(u_mask_ext, ext_mask, sizeof(ext_mask));
+        test_check(rc == 0, "affinity set copy_ext_nonzero_tail");
+        if (rc == 0) {
+            ret64 = sys_sched_setaffinity(0, sizeof(ext_mask),
+                                          (uint64_t)u_mask_ext, 0, 0, 0);
+            test_check(ret64 == -EINVAL, "affinity set ext_nonzero_tail_einval");
+        }
+
+        rc = copy_to_user(u_mask_edge, &saved_mask, sizeof(saved_mask));
+        test_check(rc == 0, "affinity set copy_edge");
+        if (rc == 0) {
+            ret64 = sys_sched_setaffinity(0, sizeof(saved_mask) + 1,
+                                          (uint64_t)u_mask_edge, 0, 0, 0);
+            test_check(ret64 == -EFAULT, "affinity set ext_tail_efault");
+        }
     }
 
     int cpus = sched_cpu_count();
@@ -870,6 +901,7 @@ out:
 #define SYSCALL_MOUNT_PROP_TEST_ROOT "/tmp/.kairos_mount_prop_root"
 #define SYSCALL_MOUNT_PROP_TEST_CHILD "/tmp/.kairos_mount_prop_root/sub"
 #define SYSCALL_MOUNT_PROP_TEST_BIND "/tmp/.kairos_mount_prop_bind"
+#define SYSCALL_MOUNT_PROP_TEST_BIND_CHILD "/tmp/.kairos_mount_prop_bind/sub"
 #define SYSCALL_ACCT_TEST_FILE "/tmp/.kairos_syscall_acct"
 
 static void test_mount_umount_flag_semantics(void) {
@@ -947,6 +979,7 @@ static void test_mount_propagation_recursive_semantics(void) {
 
     (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_CHILD);
     (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_ROOT);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND_CHILD);
     (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND);
     (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_CHILD);
     (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_ROOT);
@@ -1026,6 +1059,34 @@ static void test_mount_propagation_recursive_semantics(void) {
                        "mountprop child unchanged without rec");
     }
 
+    ret64 = sys_mount((uint64_t)u_root, (uint64_t)u_bind, 0, MS_BIND, 0, 0);
+    test_check(ret64 == 0, "mountprop bind nonrec");
+    if (ret64 == 0) {
+        struct mount *bind_sub_mnt =
+            vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_BIND_CHILD);
+        test_check(bind_sub_mnt != NULL, "mountprop bind nonrec sub lookup");
+        if (bind_sub_mnt)
+            test_check(strcmp(bind_sub_mnt->mountpoint,
+                              SYSCALL_MOUNT_PROP_TEST_BIND) == 0,
+                       "mountprop bind nonrec sub not mounted");
+        (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND);
+    }
+
+    ret64 = sys_mount((uint64_t)u_root, (uint64_t)u_bind, 0,
+                      MS_BIND | MS_REC, 0, 0);
+    test_check(ret64 == 0, "mountprop bind rec");
+    if (ret64 == 0) {
+        struct mount *bind_sub_mnt =
+            vfs_mount_for_path(SYSCALL_MOUNT_PROP_TEST_BIND_CHILD);
+        test_check(bind_sub_mnt != NULL, "mountprop bind rec sub lookup");
+        if (bind_sub_mnt)
+            test_check(strcmp(bind_sub_mnt->mountpoint,
+                              SYSCALL_MOUNT_PROP_TEST_BIND_CHILD) == 0,
+                       "mountprop bind rec sub mounted");
+        (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND_CHILD);
+        (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND);
+    }
+
     ret64 = sys_mount(0, (uint64_t)u_root, 0, MS_UNBINDABLE | MS_REC, 0, 0);
     test_check(ret64 == 0, "mountprop unbindable rec");
     if (ret64 == 0) {
@@ -1052,6 +1113,7 @@ out:
         user_map_end(&um);
     (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_CHILD);
     (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_ROOT);
+    (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND_CHILD);
     (void)vfs_umount(SYSCALL_MOUNT_PROP_TEST_BIND);
     (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_CHILD);
     (void)vfs_rmdir(SYSCALL_MOUNT_PROP_TEST_ROOT);

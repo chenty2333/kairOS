@@ -414,8 +414,11 @@ int64_t sys_mount(uint64_t source_ptr, uint64_t target_ptr, uint64_t fstype_ptr,
                                NAMEI_FOLLOW | NAMEI_DIRECTORY);
         if (ret < 0)
             goto out_tpath;
+        uint32_t bind_flags = 0;
+        if (uflags & MS_REC)
+            bind_flags |= VFS_BIND_RECURSIVE;
         vfs_mount_global_lock();
-        ret = vfs_bind_mount(spath.dentry, tpath.dentry, uflags, true);
+        ret = vfs_bind_mount(spath.dentry, tpath.dentry, bind_flags, true);
         vfs_mount_global_unlock();
         dentry_put(spath.dentry);
         dentry_put(tpath.dentry);

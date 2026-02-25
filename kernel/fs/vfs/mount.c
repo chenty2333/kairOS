@@ -153,6 +153,45 @@ static void mount_inherit_propagation(struct mount *mnt, struct mount *src) {
 static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
                              uint32_t flags, bool propagate);
 
+static bool mount_path_is_descendant(const char *root, const char *path) {
+    if (!root || !path)
+        return false;
+    if (root[0] != '/' || path[0] != '/')
+        return false;
+    if (strcmp(root, "/") == 0)
+        return path[1] != '\0';
+
+    size_t root_len = strlen(root);
+    if (strncmp(path, root, root_len) != 0)
+        return false;
+    if (path[root_len] != '/')
+        return false;
+    return path[root_len + 1] != '\0';
+}
+
+static int mount_bind_target_path(const char *target_root, const char *suffix,
+                                  char *out, size_t out_len) {
+    if (!target_root || !suffix || !out || out_len == 0)
+        return -EINVAL;
+    if (suffix[0] != '/')
+        return -EINVAL;
+
+    size_t target_len = strlen(target_root);
+    size_t suffix_len = strlen(suffix);
+    if (strcmp(target_root, "/") == 0) {
+        if (suffix_len + 1 > out_len)
+            return -ENAMETOOLONG;
+        memcpy(out, suffix, suffix_len + 1);
+        return 0;
+    }
+
+    if (target_len + suffix_len + 1 > out_len)
+        return -ENAMETOOLONG;
+    memcpy(out, target_root, target_len);
+    memcpy(out + target_len, suffix, suffix_len + 1);
+    return 0;
+}
+
 static int vfs_propagate_bind(struct dentry *source, struct dentry *target,
                               uint32_t flags) {
     if (!target || !target->mnt)
@@ -706,9 +745,108 @@ static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
     return 0;
 }
 
+static int vfs_bind_mount_recursive(struct dentry *source, struct dentry *target,
+                                    uint32_t flags) {
+    if (!source || !target)
+        return -EINVAL;
+
+    char source_path[CONFIG_PATH_MAX];
+    char target_path[CONFIG_PATH_MAX];
+    int sret = vfs_build_path_dentry(source, source_path, sizeof(source_path));
+    if (sret < 0)
+        return sret;
+    int tret = vfs_build_path_dentry(target, target_path, sizeof(target_path));
+    if (tret < 0)
+        return tret;
+
+    size_t count = 0;
+    struct mount *mnt;
+    spin_lock(&vfs_lock);
+    list_for_each_entry(mnt, &mount_list, list) {
+        if (!mnt->mountpoint || (mnt->mflags & MOUNT_F_DETACHED))
+            continue;
+        if (!mount_path_is_descendant(source_path, mnt->mountpoint))
+            continue;
+        count++;
+    }
+    spin_unlock(&vfs_lock);
+    if (count == 0)
+        return 0;
+
+    struct mount **subs = kmalloc(sizeof(*subs) * count);
+    if (!subs)
+        return -ENOMEM;
+
+    size_t idx = 0;
+    spin_lock(&vfs_lock);
+    list_for_each_entry(mnt, &mount_list, list) {
+        if (!mnt->mountpoint || (mnt->mflags & MOUNT_F_DETACHED))
+            continue;
+        if (!mount_path_is_descendant(source_path, mnt->mountpoint))
+            continue;
+        if (idx < count)
+            subs[idx++] = mnt;
+    }
+    spin_unlock(&vfs_lock);
+    count = idx;
+
+    for (size_t i = 1; i < count; i++) {
+        struct mount *key = subs[i];
+        size_t key_len = strlen(key->mountpoint);
+        size_t j = i;
+        while (j > 0 && strlen(subs[j - 1]->mountpoint) > key_len) {
+            subs[j] = subs[j - 1];
+            j--;
+        }
+        subs[j] = key;
+    }
+
+    int ret = 0;
+    for (size_t i = 0; i < count; i++) {
+        struct mount *sub = subs[i];
+        if (!sub->root_dentry || !sub->root_dentry->vnode)
+            continue;
+
+        const char *suffix = NULL;
+        if (strcmp(source_path, "/") == 0)
+            suffix = sub->mountpoint;
+        else
+            suffix = sub->mountpoint + strlen(source_path);
+        if (!suffix || suffix[0] != '/') {
+            ret = -EINVAL;
+            break;
+        }
+
+        char dst_path[CONFIG_PATH_MAX];
+        ret = mount_bind_target_path(target_path, suffix, dst_path,
+                                     sizeof(dst_path));
+        if (ret < 0)
+            break;
+
+        struct path dst;
+        path_init(&dst);
+        ret = vfs_namei_locked(NULL, dst_path, &dst, NAMEI_FOLLOW | NAMEI_DIRECTORY);
+        if (ret < 0)
+            break;
+
+        ret = vfs_mount_bind_at(sub->root_dentry, dst.dentry, flags, false);
+        dentry_put(dst.dentry);
+        if (ret < 0)
+            break;
+    }
+
+    kfree(subs);
+    return ret;
+}
+
 int vfs_bind_mount(struct dentry *source, struct dentry *target,
                    uint32_t flags, bool propagate) {
-    return vfs_mount_bind_at(source, target, flags, propagate);
+    int ret = vfs_mount_bind_at(source, target, flags, propagate);
+    if (ret < 0)
+        return ret;
+    if (!(flags & VFS_BIND_RECURSIVE))
+        return 0;
+    return vfs_bind_mount_recursive(source, target, flags);
 }
 
 int vfs_umount2(const char *tgt, uint32_t flags) {

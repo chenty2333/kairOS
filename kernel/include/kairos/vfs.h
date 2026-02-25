@@ -182,6 +182,7 @@ struct mount_group {
 #define VFS_UMOUNT_DETACH 0x1
 #define VFS_UMOUNT_FORCE  0x2
 #define VFS_UMOUNT_EXPIRE 0x4
+#define VFS_BIND_RECURSIVE 0x1
 
 struct vfs_ops {
     const char *name;
