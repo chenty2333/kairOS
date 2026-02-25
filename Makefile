@@ -81,8 +81,10 @@ ifeq ($(ARCH),riscv64)
   QEMU := qemu-system-riscv64
   QEMU_MACHINE := virt
   QEMU_CPU ?= max
-  # Keep boot hart deterministic for Limine on older OpenSBI firmware.
-  QEMU_ACCEL ?= tcg,thread=single
+  # Multi-threaded TCG keeps interactive rv64 shell workloads responsive.
+  # If deterministic boot-hart ordering is required, override to:
+  #   QEMU_ACCEL=tcg,thread=single
+  QEMU_ACCEL ?= tcg,thread=multi
   QEMU_VIRTIO_BLK_DEV := virtio-blk-device
   KERNEL_LOAD := 0x80200000
 else ifeq ($(ARCH),x86_64)
