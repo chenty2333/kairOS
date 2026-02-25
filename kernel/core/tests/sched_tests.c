@@ -555,12 +555,22 @@ static void test_eevdf_deadline_ordering(void) {
 #define LAG_ROUNDS 50
 static volatile int lag_sleeper_ran;
 static volatile int lag_spinner_ran;
+static volatile int lag_wake_budget;
 static struct wait_queue lag_wq;
 
 static int lag_sleeper(void *arg) {
     (void)arg;
     for (int i = 0; i < LAG_ROUNDS; i++) {
-        proc_sleep_on(&lag_wq, NULL, false);
+        while (1) {
+            int budget = __atomic_load_n(&lag_wake_budget, __ATOMIC_ACQUIRE);
+            if (budget > 0 &&
+                __atomic_compare_exchange_n(&lag_wake_budget, &budget,
+                                            budget - 1, false,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE))
+                break;
+            proc_sleep_on(&lag_wq, NULL, false);
+        }
         __atomic_fetch_add(&lag_sleeper_ran, 1, __ATOMIC_RELAXED);
     }
     proc_exit(0);
@@ -585,13 +595,16 @@ static int lag_spinner(void *arg) {
 static int lag_waker(void *arg) {
     (void)arg;
     for (int i = 0; i < LAG_ROUNDS; i++) {
-        /* Small delay between wakeups */
         for (int j = 0; j < 3; j++)
             proc_yield();
+        __atomic_fetch_add(&lag_wake_budget, 1, __ATOMIC_RELEASE);
         wait_queue_wakeup_all(&lag_wq);
     }
-    /* Ensure all sleepers finish */
-    for (int i = 0; i < LAG_ROUNDS; i++) {
+    uint64_t start = arch_timer_ticks();
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(5ULL * 1000 * 1000 * 1000);
+    while (__atomic_load_n(&lag_sleeper_ran, __ATOMIC_ACQUIRE) < LAG_ROUNDS) {
+        if ((arch_timer_ticks() - start) > timeout_ticks)
+            break;
         wait_queue_wakeup_all(&lag_wq);
         proc_yield();
     }
@@ -604,6 +617,7 @@ static void test_eevdf_lag_fairness(void) {
     wait_queue_init(&lag_wq);
     __atomic_store_n(&lag_sleeper_ran, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&lag_spinner_ran, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&lag_wake_budget, 0, __ATOMIC_RELEASE);
 
     struct process *s = kthread_create_joinable(lag_sleeper, NULL, "lslp");
     struct process *sp = kthread_create_joinable(lag_spinner, NULL, "lspn");
