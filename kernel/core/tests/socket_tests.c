@@ -1500,6 +1500,179 @@ static void test_unix_stream_msg_control_semantics(void) {
         }
     }
 
+    ret = copy_to_user(u_send_buf, "AA", 2);
+    test_check(ret == 0, "sockmsg_stream copy plain pre-ctrl");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendto((uint64_t)txfd, (uint64_t)u_send_buf, 2, 0, 0, 0);
+    test_check(ret64 == 2, "sockmsg_stream sendto plain pre-ctrl");
+
+    ret = copy_to_user(u_send_buf, "BFD1", 4);
+    test_check(ret == 0, "sockmsg_stream copy rights boundary buf");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+    test_check(ret == 0, "sockmsg_stream copy rights boundary hdr");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights), &rights_fd,
+                           sizeof(rights_fd));
+        test_check(ret == 0, "sockmsg_stream copy rights boundary payload");
+    }
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream copy rights boundary send msg");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendmsg rights boundary");
+
+    if (ret64 == 4) {
+        recv_iov.iov_len = 2;
+        ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+        test_check(ret == 0, "sockmsg_stream copy pre-ctrl recv iov");
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy pre-ctrl recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 2, "sockmsg_stream recvmsg pre-ctrl bytes");
+        }
+        if (ret64 == 2) {
+            char got_pre[2] = {0};
+            struct test_socket_msghdr got_msg = {0};
+            ret = copy_from_user(got_pre, u_recv_buf, sizeof(got_pre));
+            test_check(ret == 0, "sockmsg_stream read pre-ctrl bytes");
+            ret = copy_from_user(&got_msg, u_recv_msg, sizeof(got_msg));
+            test_check(ret == 0, "sockmsg_stream read pre-ctrl msg");
+            if (ret == 0) {
+                test_check(memcmp(got_pre, "AA", 2) == 0,
+                           "sockmsg_stream pre-ctrl data");
+                test_check(got_msg.msg_controllen == 0,
+                           "sockmsg_stream pre-ctrl no cmsg");
+                test_check((got_msg.msg_flags & MSG_CTRUNC) == 0,
+                           "sockmsg_stream pre-ctrl no ctrunc");
+            }
+        }
+    }
+
+    recv_iov.iov_len = 8;
+    ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+    test_check(ret == 0, "sockmsg_stream restore recv iov");
+
+    if (ret64 == 2) {
+        recv_iov.iov_len = 4;
+        ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+        test_check(ret == 0, "sockmsg_stream copy boundary recv iov");
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_rights.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy boundary recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 4, "sockmsg_stream recvmsg boundary rights");
+        }
+        if (ret64 == 4) {
+            char got[4] = {0};
+            struct test_socket_cmsghdr got_ctrl = {0};
+            int32_t got_fd = -1;
+            ret = copy_from_user(got, u_recv_buf, sizeof(got));
+            test_check(ret == 0, "sockmsg_stream read boundary data");
+            ret = copy_from_user(&got_ctrl, u_ctrl, sizeof(got_ctrl));
+            test_check(ret == 0, "sockmsg_stream read boundary ctrl");
+            ret = copy_from_user(&got_fd, u_rights, sizeof(got_fd));
+            test_check(ret == 0, "sockmsg_stream read boundary fd");
+            if (ret == 0) {
+                test_check(memcmp(got, "BFD1", 4) == 0,
+                           "sockmsg_stream boundary data");
+                test_check(got_ctrl.cmsg_type == TEST_SCM_RIGHTS,
+                           "sockmsg_stream boundary ctrl type");
+                test_check(got_fd >= 0, "sockmsg_stream boundary fd valid");
+            }
+            if (got_fd >= 0)
+                (void)fd_close(proc_current(), got_fd);
+        }
+    }
+
+    recv_iov.iov_len = 8;
+    ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+    test_check(ret == 0, "sockmsg_stream restore recv iov after boundary");
+
+    ret = copy_to_user(u_send_buf, "DROP", 4);
+    test_check(ret == 0, "sockmsg_stream copy recvfrom-drop send buf");
+    if (ret < 0)
+        goto out;
+    ret = copy_to_user(u_ctrl, &ctrl_cred, sizeof(ctrl_cred));
+    test_check(ret == 0, "sockmsg_stream copy recvfrom-drop cred hdr");
+    if (ret == 0) {
+        ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_cred), &cred,
+                           sizeof(cred));
+        test_check(ret == 0, "sockmsg_stream copy recvfrom-drop cred payload");
+    }
+    if (ret < 0)
+        goto out;
+    send_msg.msg_control = u_ctrl;
+    send_msg.msg_controllen = test_socket_cmsg_align(ctrl_cred.cmsg_len);
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "sockmsg_stream copy recvfrom-drop send msg");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendmsg recvfrom-drop");
+
+    if (ret64 == 4) {
+        ret64 = sys_recvfrom((uint64_t)rxfd, (uint64_t)u_recv_buf, 4, 0, 0, 0);
+        test_check(ret64 == 4, "sockmsg_stream recvfrom consumes ctrl-data");
+    }
+    if (ret64 == 4) {
+        char got_drop[4] = {0};
+        ret = copy_from_user(got_drop, u_recv_buf, sizeof(got_drop));
+        test_check(ret == 0, "sockmsg_stream read recvfrom consumed");
+        if (ret == 0) {
+            test_check(memcmp(got_drop, "DROP", 4) == 0,
+                       "sockmsg_stream recvfrom consumed data");
+        }
+    }
+
+    ret = copy_to_user(u_send_buf, "PLN1", 4);
+    test_check(ret == 0, "sockmsg_stream copy post-drop plain");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_sendto((uint64_t)txfd, (uint64_t)u_send_buf, 4, 0, 0, 0);
+    test_check(ret64 == 4, "sockmsg_stream sendto post-drop plain");
+    if (ret64 == 4) {
+        recv_iov.iov_len = 4;
+        ret = copy_to_user(u_recv_iov, &recv_iov, sizeof(recv_iov));
+        test_check(ret == 0, "sockmsg_stream copy post-drop recv iov");
+        recv_msg.msg_control = u_ctrl;
+        recv_msg.msg_controllen = test_socket_cmsg_align(ctrl_cred.cmsg_len);
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "sockmsg_stream copy post-drop recv msg");
+        if (ret == 0) {
+            ret64 = sys_recvmsg((uint64_t)rxfd, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+            test_check(ret64 == 4, "sockmsg_stream recvmsg post-drop plain");
+        }
+        if (ret64 == 4) {
+            char got_plain[4] = {0};
+            struct test_socket_msghdr got_msg = {0};
+            ret = copy_from_user(got_plain, u_recv_buf, sizeof(got_plain));
+            test_check(ret == 0, "sockmsg_stream read post-drop plain");
+            ret = copy_from_user(&got_msg, u_recv_msg, sizeof(got_msg));
+            test_check(ret == 0, "sockmsg_stream read post-drop msg");
+            if (ret == 0) {
+                test_check(memcmp(got_plain, "PLN1", 4) == 0,
+                           "sockmsg_stream post-drop plain data");
+                test_check(got_msg.msg_controllen == 0,
+                           "sockmsg_stream post-drop no stale ctrl");
+                test_check((got_msg.msg_flags & MSG_CTRUNC) == 0,
+                           "sockmsg_stream post-drop no ctrunc");
+            }
+        }
+    }
+
 out:
     close_fd_if_open(&txfd);
     close_fd_if_open(&rxfd);

@@ -117,7 +117,8 @@ Special:
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
 - `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
 - `sendmsg`/`recvmsg` support iovec payload and optional peer address; ancillary data supports `SOL_SOCKET` `SCM_RIGHTS`/`SCM_CREDENTIALS` with real AF_UNIX transport (`SCM_RIGHTS` installs new fds on receive, `SCM_CREDENTIALS` returns sender pid/uid/gid)
-- AF_UNIX ancillary transport is enabled for both `SOCK_DGRAM` and `SOCK_STREAM`; stream control payload is delivered in send order when stream data is received
+- AF_UNIX ancillary transport is enabled for both `SOCK_DGRAM` and `SOCK_STREAM`
+- `SOCK_STREAM` control payload is bound to stream byte offsets (not recv-call count): control is delivered only when its corresponding bytes are consumed, and data paths without ancillary buffers (`recvfrom`/`read`) still consume and drop crossed control payload to avoid stale later delivery
 - `recvmsg` sets `MSG_CTRUNC` when user ancillary buffer is too small to hold returned control payload
 - `recvmsg(MSG_CMSG_CLOEXEC)` installs received `SCM_RIGHTS` file descriptors with `FD_CLOEXEC`
 - `recvmsg` bounds source-address copy length by `min(user_msg_namelen, kernel_sockaddr_len)` using width-safe arithmetic (no signed wrap on large `msg_namelen`)

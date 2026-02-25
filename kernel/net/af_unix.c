@@ -53,6 +53,7 @@ struct unix_dgram_msg {
 /* STREAM ancillary control payload */
 struct unix_stream_ctrl {
     struct list_head node;
+    uint64_t attach_off;
     bool has_creds;
     struct socket_ucred creds;
     size_t rights_count;
@@ -87,6 +88,8 @@ struct unix_sock {
     struct wait_queue dgram_wait;
     struct list_head stream_ctrl_queue;
     int stream_ctrl_count;
+    uint64_t stream_rx_write_off;
+    uint64_t stream_rx_read_off;
 
     struct mutex lock;
     atomic_t refcount;
@@ -223,6 +226,8 @@ static struct unix_sock *unix_sock_alloc(struct socket *sock) {
     wait_queue_init(&us->dgram_wait);
     INIT_LIST_HEAD(&us->stream_ctrl_queue);
     us->stream_ctrl_count = 0;
+    us->stream_rx_write_off = 0;
+    us->stream_rx_read_off = 0;
     mutex_init(&us->lock, "unix_sock");
     atomic_init(&us->refcount, 1);
     us->closing = false;
@@ -330,16 +335,6 @@ static ssize_t unix_buf_write_locked(struct unix_buf *b, struct mutex *lock,
     return (ssize_t)total;
 }
 
-static ssize_t unix_buf_write(struct unix_buf *b, struct mutex *lock,
-                               const void *buf, size_t len,
-                               int *shutdown_flags, bool nonblock) {
-    mutex_lock(lock);
-    ssize_t ret =
-        unix_buf_write_locked(b, lock, buf, len, shutdown_flags, nonblock);
-    mutex_unlock(lock);
-    return ret;
-}
-
 static void unix_stream_ctrl_release(struct unix_stream_ctrl *msg) {
     if (!msg)
         return;
@@ -367,6 +362,7 @@ static int unix_stream_ctrl_from_send(const struct socket_control *control,
     if (!msg)
         return -ENOMEM;
     INIT_LIST_HEAD(&msg->node);
+    msg->attach_off = 0;
     msg->has_creds = control->has_creds;
     msg->creds = control->creds;
     msg->rights_count = control->rights_count;
@@ -381,6 +377,62 @@ static int unix_stream_ctrl_from_send(const struct socket_control *control,
     }
     *out = msg;
     return 0;
+}
+
+static void unix_stream_ctrl_move_to_recv(struct socket_control *control,
+                                          struct unix_stream_ctrl *msg) {
+    if (!control || !msg)
+        return;
+    if (control->has_creds || control->rights_count > 0)
+        return;
+
+    control->has_creds = msg->has_creds;
+    control->creds = msg->creds;
+    control->rights_count = msg->rights_count;
+    if (control->rights_count > SOCKET_MAX_RIGHTS)
+        control->rights_count = SOCKET_MAX_RIGHTS;
+    for (size_t i = 0; i < control->rights_count; i++) {
+        control->rights[i] = msg->rights[i];
+        msg->rights[i] = NULL;
+    }
+    msg->rights_count = 0;
+    msg->has_creds = false;
+}
+
+static void unix_stream_ctrl_consume_locked(struct unix_sock *us,
+                                            size_t consumed,
+                                            struct socket_control *control) {
+    if (!us || consumed == 0)
+        return;
+
+    uint64_t start = us->stream_rx_read_off;
+    uint64_t end = start + (uint64_t)consumed;
+    if (end < start)
+        end = UINT64_MAX;
+    us->stream_rx_read_off = end;
+
+    while (!list_empty(&us->stream_ctrl_queue)) {
+        struct unix_stream_ctrl *msg = list_first_entry(
+            &us->stream_ctrl_queue, struct unix_stream_ctrl, node);
+        if (msg->attach_off >= end)
+            break;
+        list_del(&msg->node);
+        if (us->stream_ctrl_count > 0)
+            us->stream_ctrl_count--;
+        if (msg->attach_off >= start)
+            unix_stream_ctrl_move_to_recv(control, msg);
+        unix_stream_ctrl_release(msg);
+        kfree(msg);
+    }
+}
+
+static void unix_stream_post_recv(struct unix_sock *us, ssize_t ret,
+                                  struct socket_control *control) {
+    if (!us || ret <= 0)
+        return;
+    mutex_lock(&us->lock);
+    unix_stream_ctrl_consume_locked(us, (size_t)ret, control);
+    mutex_unlock(&us->lock);
 }
 
 /* --- Proto ops (STREAM) --- */
@@ -743,13 +795,18 @@ static ssize_t unix_stream_sendto(struct socket *sock, const void *buf,
     unix_sock_get(peer);
     mutex_unlock(&us->lock);
 
+    ssize_t ret = 0;
+    mutex_lock(&peer->lock);
     if (peer->closing || !peer->buf.data) {
-        unix_sock_put(peer);
-        return -ENOTCONN;
+        ret = -ENOTCONN;
+    } else {
+        ret = unix_buf_write_locked(&peer->buf, &peer->lock, buf, len,
+                                    &peer->shutdown_flags, nonblock);
+        if (ret > 0)
+            peer->stream_rx_write_off += (uint64_t)ret;
     }
+    mutex_unlock(&peer->lock);
 
-    ssize_t ret = unix_buf_write(&peer->buf, &peer->lock, buf, len,
-                                 &peer->shutdown_flags, nonblock);
     unix_sock_put(peer);
     return ret;
 }
@@ -1370,7 +1427,10 @@ static ssize_t unix_stream_recvfrom_wrap(struct socket *sock, void *buf,
     if (!unix_ensure_proto_data(sock)) {
         return -ENOMEM;
     }
-    return unix_stream_recvfrom(sock, buf, len, flags, src, addrlen);
+    ssize_t ret = unix_stream_recvfrom(sock, buf, len, flags, src, addrlen);
+    struct unix_sock *us = sock->proto_data;
+    unix_stream_post_recv(us, ret, NULL);
+    return ret;
 }
 
 static ssize_t unix_stream_sendmsg_wrap(struct socket *sock, const void *buf,
@@ -1424,9 +1484,12 @@ static ssize_t unix_stream_sendmsg_wrap(struct socket *sock, const void *buf,
         if (peer->closing || !peer->buf.data) {
             ret = -ENOTCONN;
         } else {
+            uint64_t attach_off = peer->stream_rx_write_off;
             ret = unix_buf_write_locked(&peer->buf, &peer->lock, buf, len,
                                         &peer->shutdown_flags, nonblock);
             if (ret > 0) {
+                peer->stream_rx_write_off += (uint64_t)ret;
+                ctrl->attach_off = attach_off;
                 list_add_tail(&ctrl->node, &peer->stream_ctrl_queue);
                 peer->stream_ctrl_count++;
                 ctrl = NULL;
@@ -1454,34 +1517,10 @@ static ssize_t unix_stream_recvmsg_wrap(struct socket *sock, void *buf,
         return -ENOMEM;
     }
     ssize_t ret = unix_stream_recvfrom(sock, buf, len, flags, src, addrlen);
-    if (control) {
+    if (control)
         memset(control, 0, sizeof(*control));
-        if (ret > 0) {
-            struct unix_sock *us = sock->proto_data;
-            mutex_lock(&us->lock);
-            if (!list_empty(&us->stream_ctrl_queue)) {
-                struct unix_stream_ctrl *msg = list_first_entry(
-                    &us->stream_ctrl_queue, struct unix_stream_ctrl, node);
-                list_del(&msg->node);
-                if (us->stream_ctrl_count > 0)
-                    us->stream_ctrl_count--;
-                control->has_creds = msg->has_creds;
-                control->creds = msg->creds;
-                control->rights_count = msg->rights_count;
-                if (control->rights_count > SOCKET_MAX_RIGHTS)
-                    control->rights_count = SOCKET_MAX_RIGHTS;
-                for (size_t i = 0; i < control->rights_count; i++) {
-                    control->rights[i] = msg->rights[i];
-                    msg->rights[i] = NULL;
-                }
-                msg->rights_count = 0;
-                msg->has_creds = false;
-                unix_stream_ctrl_release(msg);
-                kfree(msg);
-            }
-            mutex_unlock(&us->lock);
-        }
-    }
+    struct unix_sock *us = sock->proto_data;
+    unix_stream_post_recv(us, ret, control);
     return ret;
 }
 
