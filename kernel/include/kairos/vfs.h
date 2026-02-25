@@ -276,6 +276,7 @@ int vfs_stat_vnode(struct vnode *vn, struct stat *st);
 int vfs_fstat(struct file *file, struct stat *st);
 int vfs_statfs(struct mount *mnt, struct kstatfs *st);
 int vfs_fsync(struct file *file, int datasync);
+int vfs_sync(void);
 int vfs_mkdir(const char *path, mode_t mode);
 int vfs_rmdir(const char *path);
 int vfs_unlink(const char *path);

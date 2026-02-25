@@ -16,7 +16,7 @@ struct buf *ext2_bread(struct ext2_mount *mnt, uint32_t bnum,
     uint32_t off = (bnum % per) * mnt->block_size;
     if (blk_off)
         *blk_off = off;
-    return bread(mnt->dev, bio);
+    return breadn(mnt->dev, bio, EXT2_IO_BLOCK_SIZE);
 }
 
 static int ext2_block_to_path(struct ext2_mount *mnt, uint32_t i_block,

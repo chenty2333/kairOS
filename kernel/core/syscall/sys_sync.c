@@ -7,6 +7,7 @@
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/uaccess.h>
+#include <kairos/vfs.h>
 
 #include "sys_time_helpers.h"
 
@@ -172,5 +173,5 @@ int64_t sys_syslog(uint64_t type, uint64_t bufp, uint64_t len, uint64_t a3,
 int64_t sys_sync(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                  uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return 0;
+    return vfs_sync();
 }

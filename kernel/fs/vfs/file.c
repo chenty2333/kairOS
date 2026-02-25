@@ -4,6 +4,7 @@
 
 #include <kairos/printk.h>
 #include <kairos/inotify.h>
+#include <kairos/buf.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -637,8 +638,12 @@ int vfs_fsync(struct file *file, int datasync) {
     if (!file || !file->vnode)
         return -EINVAL;
     if (!file->vnode->ops || !file->vnode->ops->fsync)
-        return 0;
+        return bsync_all();
     return file->vnode->ops->fsync(file->vnode, datasync);
+}
+
+int vfs_sync(void) {
+    return bsync_all();
 }
 
 ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz) {
