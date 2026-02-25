@@ -72,7 +72,11 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `irqchip_ops` includes `set_type(int irq, uint32_t type)` so trigger mode is configured from IRQ flags when enabling
   - `irqchip_ops` now includes `set_affinity(int irq, uint32_t cpu_mask)` and IRQ core stores per-IRQ CPU mask (default CPU0) for route programming hooks
   - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
+  - `irq_domain` now supports auto-allocated virq ranges (`platform_irq_domain_alloc_linear` / `IRQ_DOMAIN_AUTO_VIRQ`) for child/cascaded controllers
+  - root domain coverage is now board-configurable (`platform_desc.irqchip_root_irqs`) so root mappings no longer have to occupy the full global virq space
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
+  - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions
+  - `IRQ_FLAG_NO_CHIP` marks software/local IRQ lines that should use refcount gating without programming irqchip enable/disable paths
 - affinity routing details:
   - riscv64 PLIC now supports `set_affinity`: it updates per-hart enable bits for each IRQ and reroutes already-enabled IRQs
   - aarch64 GICv3 routes SPIs using CPU `hw_id` (MPIDR affinity bits) in `GICD_IROUTER`
@@ -105,6 +109,7 @@ Two-layer structure:
   - riscv64: SBI timer (stimecmp)
   - x86_64: LAPIC timer (PIT-calibrated, configured as periodic mode)
   - aarch64: ARM generic physical timer (CNTP, cntp_tval_el0)
+  - `platform_desc.timer` (`timer_ops`) is now wired in; timer registration/dispatch resolves timer virq via `platform_timer_irq()` and timer-trap paths use `platform_timer_dispatch()`
   - timer IRQs are registered into IRQ core and dispatched through the common IRQ action path (`platform_irq_dispatch`), then timer handlers call `tick_policy_on_timer_irq()`
 
 - Core layer:

@@ -18,6 +18,15 @@ static uint64_t timer_freq = TIMER_FREQ;
 static uint64_t ticks_per_int;
 static bool timer_irq_registered;
 
+static int riscv_timer_irq_virq(void)
+{
+    return RISCV_TIMER_VIRQ;
+}
+
+const struct timer_ops riscv_timer_ops = {
+    .irq = riscv_timer_irq_virq,
+};
+
 static void riscv_timer_irq_handler(void *arg,
                                     const struct trap_core_event *ev) {
     (void)arg;
@@ -36,12 +45,17 @@ void arch_timer_init(uint64_t hz) {
     if (need_register)
         timer_irq_registered = true;
     arch_irq_restore(irq_state);
+    int timer_virq = platform_timer_irq();
+    if (timer_virq < 0)
+        timer_virq = RISCV_TIMER_VIRQ;
 
     if (need_register) {
         arch_irq_register_ex(
-            RISCV_TIMER_VIRQ, riscv_timer_irq_handler, NULL,
+            timer_virq, riscv_timer_irq_handler, NULL,
             IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_PER_CPU | IRQ_FLAG_TIMER |
-                IRQ_FLAG_NO_AUTO_ENABLE);
+                IRQ_FLAG_NO_CHIP);
+    } else {
+        arch_irq_enable_nr(timer_virq);
     }
 
     pr_info("Timer: %lu Hz, interval %lu ticks\n", (unsigned long)timer_freq,

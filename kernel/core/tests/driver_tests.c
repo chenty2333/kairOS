@@ -353,6 +353,7 @@ static void test_irq_deferred_dispatch(void) {
     arch_irq_register_ex(irq, test_irq_deferred_handler, &last_seen,
                          IRQ_FLAG_SHARED | IRQ_FLAG_DEFERRED |
                              IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_enable_nr(irq);
     platform_irq_dispatch_nr((uint32_t)irq);
 
     for (int i = 0; i < 200; i++) {
@@ -363,6 +364,183 @@ static void test_irq_deferred_dispatch(void) {
     test_check(__atomic_load_n(&irq_deferred_hits, __ATOMIC_RELAXED) > 0,
                "irq deferred dispatch");
     test_check(last_seen > 0, "irq deferred handler ran");
+    arch_irq_disable_nr(irq);
+}
+
+static volatile uint32_t irq_shared_hits_a;
+static volatile uint32_t irq_shared_hits_b;
+static volatile uint32_t irq_gate_hits;
+static volatile uint32_t irq_mock_dispatch_hits;
+
+struct irq_mock_state {
+    uint32_t enable_hits;
+    uint32_t disable_hits;
+    uint32_t set_type_hits;
+    uint32_t set_affinity_hits;
+    int last_enable_irq;
+    int last_disable_irq;
+    int last_type_irq;
+    int last_affinity_irq;
+    uint32_t last_type;
+    uint32_t last_affinity_mask;
+};
+
+static struct irq_mock_state irq_mock_state;
+
+static void test_irq_shared_handler_a(void *arg __unused,
+                                      const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_shared_hits_a, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_shared_handler_b(void *arg __unused,
+                                      const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_shared_hits_b, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_gate_handler(void *arg __unused,
+                                  const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_gate_hits, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_mock_handler(void *arg __unused,
+                                  const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_mock_dispatch_hits, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_shared_actions(void) {
+    const int irq = 901;
+    irq_shared_hits_a = 0;
+    irq_shared_hits_b = 0;
+
+    arch_irq_register_ex(irq, test_irq_shared_handler_a, NULL,
+                         IRQ_FLAG_SHARED | IRQ_FLAG_TRIGGER_LEVEL |
+                             IRQ_FLAG_NO_AUTO_ENABLE | IRQ_FLAG_NO_CHIP);
+    arch_irq_register_ex(irq, test_irq_shared_handler_b, NULL,
+                         IRQ_FLAG_SHARED | IRQ_FLAG_TRIGGER_LEVEL |
+                             IRQ_FLAG_NO_AUTO_ENABLE | IRQ_FLAG_NO_CHIP);
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) == 0,
+               "irq shared disabled gate a");
+    test_check(__atomic_load_n(&irq_shared_hits_b, __ATOMIC_RELAXED) == 0,
+               "irq shared disabled gate b");
+
+    arch_irq_enable_nr(irq);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) == 1,
+               "irq shared handler a");
+    test_check(__atomic_load_n(&irq_shared_hits_b, __ATOMIC_RELAXED) == 1,
+               "irq shared handler b");
+    arch_irq_disable_nr(irq);
+}
+
+static void test_irq_enable_disable_gate(void) {
+    const int irq = 902;
+    irq_gate_hits = 0;
+
+    arch_irq_register_ex(irq, test_irq_gate_handler, NULL,
+                         IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_AUTO_ENABLE |
+                             IRQ_FLAG_NO_CHIP);
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_gate_hits, __ATOMIC_RELAXED) == 0,
+               "irq gate disabled no dispatch");
+
+    arch_irq_enable_nr(irq);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_gate_hits, __ATOMIC_RELAXED) == 1,
+               "irq gate enabled dispatch");
+
+    arch_irq_disable_nr(irq);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_gate_hits, __ATOMIC_RELAXED) == 1,
+               "irq gate disabled stops dispatch");
+}
+
+static void irq_mock_enable(int irq) {
+    irq_mock_state.enable_hits++;
+    irq_mock_state.last_enable_irq = irq;
+}
+
+static void irq_mock_disable(int irq) {
+    irq_mock_state.disable_hits++;
+    irq_mock_state.last_disable_irq = irq;
+}
+
+static int irq_mock_set_type(int irq, uint32_t type) {
+    irq_mock_state.set_type_hits++;
+    irq_mock_state.last_type_irq = irq;
+    irq_mock_state.last_type = type;
+    return 0;
+}
+
+static int irq_mock_set_affinity(int irq, uint32_t cpu_mask) {
+    irq_mock_state.set_affinity_hits++;
+    irq_mock_state.last_affinity_irq = irq;
+    irq_mock_state.last_affinity_mask = cpu_mask;
+    return 0;
+}
+
+static const struct irqchip_ops test_irq_mock_ops = {
+    .enable = irq_mock_enable,
+    .disable = irq_mock_disable,
+    .set_type = irq_mock_set_type,
+    .set_affinity = irq_mock_set_affinity,
+};
+
+static void test_irq_domain_programming(void) {
+    memset(&irq_mock_state, 0, sizeof(irq_mock_state));
+    irq_mock_state.last_enable_irq = -1;
+    irq_mock_state.last_disable_irq = -1;
+    irq_mock_state.last_type_irq = -1;
+    irq_mock_state.last_affinity_irq = -1;
+    irq_mock_dispatch_hits = 0;
+
+    uint32_t virq_base = 0;
+    int ret = platform_irq_domain_alloc_linear("test-mock-domain",
+                                               &test_irq_mock_ops,
+                                               32, 8, &virq_base);
+    test_check(ret == 0, "irq domain auto alloc");
+    if (ret < 0)
+        return;
+
+    int virq = (int)(virq_base + 1);
+    int mapped = platform_irq_domain_map(&test_irq_mock_ops, 33);
+    test_check(mapped == virq, "irq domain hwirq map");
+
+    arch_irq_register_ex(virq, test_irq_mock_handler, NULL,
+                         IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_set_affinity(virq, 0x3);
+    arch_irq_enable_nr(virq);
+
+#if CONFIG_MAX_CPUS >= 32
+    uint32_t expected_mask = 0x3U;
+#else
+    uint32_t expected_mask = 0x3U & ((1U << CONFIG_MAX_CPUS) - 1U);
+#endif
+    if (!expected_mask)
+        expected_mask = 1U;
+
+    test_check(irq_mock_state.enable_hits == 1 &&
+                   irq_mock_state.last_enable_irq == 33,
+               "irq chip enable uses hwirq");
+    test_check(irq_mock_state.set_type_hits > 0 &&
+                   irq_mock_state.last_type_irq == 33 &&
+                   irq_mock_state.last_type == IRQ_FLAG_TRIGGER_EDGE,
+               "irq chip set_type uses hwirq");
+    test_check(irq_mock_state.set_affinity_hits > 0 &&
+                   irq_mock_state.last_affinity_irq == 33 &&
+                   irq_mock_state.last_affinity_mask == expected_mask,
+               "irq chip set_affinity uses hwirq");
+
+    platform_irq_dispatch_hwirq(&test_irq_mock_ops, 33, NULL);
+    test_check(__atomic_load_n(&irq_mock_dispatch_hits, __ATOMIC_RELAXED) == 1,
+               "irq domain dispatch hwirq");
+
+    arch_irq_disable_nr(virq);
+    test_check(irq_mock_state.disable_hits == 1 &&
+                   irq_mock_state.last_disable_irq == 33,
+               "irq chip disable uses hwirq");
 }
 
 #if CONFIG_KERNEL_TESTS
@@ -429,6 +607,9 @@ int run_driver_tests(void) {
     test_netdev_registry();
     test_dma_coherent_alloc_free();
     test_irq_deferred_dispatch();
+    test_irq_shared_actions();
+    test_irq_enable_disable_gate();
+    test_irq_domain_programming();
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();
 #endif

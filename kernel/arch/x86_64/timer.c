@@ -46,6 +46,10 @@ static int x86_timer_irq_virq(void)
     return (virq >= 0) ? virq : X86_TIMER_VIRQ;
 }
 
+const struct timer_ops x86_timer_ops = {
+    .irq = x86_timer_irq_virq,
+};
+
 static void pit_sleep_10ms(void) {
     uint16_t count = PIT_FREQ / 100;
     uint8_t tmp = inb(PIT_SPKR);
@@ -85,13 +89,16 @@ void arch_timer_init(uint64_t hz) {
     if (need_register)
         timer_irq_registered = true;
     arch_irq_restore(irq_state);
-    timer_virq = x86_timer_irq_virq();
+    int irq = platform_timer_irq();
+    timer_virq = (irq >= 0) ? irq : x86_timer_irq_virq();
 
     if (need_register) {
         arch_irq_register_ex(
             timer_virq, x86_timer_irq_handler, NULL,
             IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_PER_CPU | IRQ_FLAG_TIMER |
-                IRQ_FLAG_NO_AUTO_ENABLE);
+                IRQ_FLAG_NO_CHIP);
+    } else {
+        arch_irq_enable_nr(timer_virq);
     }
 
     pr_info("Timer: %lu Hz (lapic=%lu)\n", (unsigned long)hz,

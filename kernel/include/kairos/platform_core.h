@@ -11,6 +11,7 @@
 #define PLATFORM_COMPAT_MAX     64
 #define PLATFORM_NAME_MAX       32
 #define IRQ_DOMAIN_MAX          8
+#define IRQ_DOMAIN_AUTO_VIRQ    UINT32_MAX
 
 struct early_mmio_region {
     paddr_t base;
@@ -35,6 +36,7 @@ struct trap_core_event;
 #define IRQ_FLAG_TIMER         (1U << 4)
 #define IRQ_FLAG_NO_AUTO_ENABLE (1U << 5)
 #define IRQ_FLAG_DEFERRED      (1U << 6)
+#define IRQ_FLAG_NO_CHIP       (1U << 7)
 
 typedef void (*irq_handler_fn)(void *arg);
 typedef void (*irq_handler_event_fn)(void *arg,
@@ -51,6 +53,10 @@ struct irqchip_ops {
     void (*send_sgi)(uint32_t cpu, uint32_t intid);
 };
 
+struct timer_ops {
+    int (*irq)(void);
+};
+
 struct platform_desc {
     const char name[PLATFORM_NAME_MAX];
     const char compatible[PLATFORM_COMPAT_MAX];
@@ -58,6 +64,7 @@ struct platform_desc {
 
     struct early_mmio_region early_mmio[PLATFORM_MAX_EARLY_MMIO];
     int num_early_mmio;
+    uint32_t irqchip_root_irqs;
 
     const struct irqchip_ops  *irqchip;
     const struct timer_ops    *timer;
@@ -82,11 +89,17 @@ int platform_irq_domain_add_linear(const char *name,
                                    const struct irqchip_ops *chip,
                                    uint32_t hwirq_base, uint32_t virq_base,
                                    uint32_t nr_irqs);
+int platform_irq_domain_alloc_linear(const char *name,
+                                     const struct irqchip_ops *chip,
+                                     uint32_t hwirq_base, uint32_t nr_irqs,
+                                     uint32_t *virq_base_out);
 int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq);
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
                                  uint32_t hwirq,
                                  const struct trap_core_event *ev);
 void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev);
 void platform_irq_dispatch_nr(uint32_t irq);
+int platform_timer_irq(void);
+void platform_timer_dispatch(const struct trap_core_event *ev);
 
 #endif

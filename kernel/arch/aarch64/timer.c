@@ -44,6 +44,10 @@ static int aarch64_timer_irq_virq(void)
     return (virq >= 0) ? virq : TIMER_PPI_IRQ;
 }
 
+const struct timer_ops aarch64_timer_ops = {
+    .irq = aarch64_timer_irq_virq,
+};
+
 void arch_timer_init(uint64_t hz) {
     if (!hz)
         hz = CONFIG_HZ;
@@ -58,7 +62,8 @@ void arch_timer_init(uint64_t hz) {
     if (need_register)
         timer_irq_registered = true;
     arch_irq_restore(irq_state);
-    timer_virq = aarch64_timer_irq_virq();
+    int irq = platform_timer_irq();
+    timer_virq = (irq >= 0) ? irq : aarch64_timer_irq_virq();
 
     if (need_register) {
         arch_irq_register_ex(timer_virq, aarch64_timer_irq_handler, NULL,
