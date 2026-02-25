@@ -182,6 +182,18 @@ int ext2_vnode_poll(struct file *file, uint32_t events) {
     return (int)(revents & events);
 }
 
+static int ext2_vnode_fsync(struct vnode *vn, int datasync __unused) {
+    struct ext2_inode_data *id = NULL;
+    struct ext2_mount *mnt = NULL;
+    int vctx = ext2_vnode_ctx(vn, &id, &mnt);
+    if (vctx < 0)
+        return vctx;
+
+    if (ext2_write_inode(mnt, id->ino, &id->inode) < 0)
+        return -EIO;
+    return bsync_dev(mnt->dev);
+}
+
 static struct file_ops ext2_file_ops = {
     .read = ext2_vnode_read,
     .write = ext2_vnode_write,
@@ -189,6 +201,7 @@ static struct file_ops ext2_file_ops = {
     .readdir = ext2_vnode_readdir,
     .poll = ext2_vnode_poll,
     .truncate = ext2_vnode_truncate,
+    .fsync = ext2_vnode_fsync,
 };
 
 struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {

@@ -8,6 +8,37 @@
 
 #include "ext2_internal.h"
 
+static int ext2_check_feature_gate(const struct ext2_superblock *sb) {
+    if (!sb)
+        return -EINVAL;
+
+    uint32_t incompat_supported = EXT2_FEATURE_INCOMPAT_FILETYPE;
+    uint32_t ro_compat_supported = EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER |
+                                   EXT2_FEATURE_RO_COMPAT_LARGE_FILE;
+
+    uint32_t incompat_unsupported = sb->s_feature_incompat & ~incompat_supported;
+    uint32_t ro_compat_unsupported = sb->s_feature_ro_compat & ~ro_compat_supported;
+
+    if (sb->s_feature_compat & EXT2_FEATURE_COMPAT_HAS_JOURNAL) {
+        pr_warn("ext2: refusing journaled filesystem (feature_compat=0x%x)\n",
+                sb->s_feature_compat);
+        return -EOPNOTSUPP;
+    }
+    if (sb->s_feature_incompat &
+        (EXT2_FEATURE_INCOMPAT_RECOVER | EXT2_FEATURE_INCOMPAT_JOURNAL_DEV)) {
+        pr_warn("ext2: refusing recovery/journal-dev incompat features (0x%x)\n",
+                sb->s_feature_incompat);
+        return -EOPNOTSUPP;
+    }
+    if (incompat_unsupported || ro_compat_unsupported) {
+        pr_warn("ext2: unsupported features compat=0x%x incompat=0x%x ro_compat=0x%x\n",
+                sb->s_feature_compat, sb->s_feature_incompat,
+                sb->s_feature_ro_compat);
+        return -EOPNOTSUPP;
+    }
+    return 0;
+}
+
 static void ext2_mount_destroy(struct ext2_mount *mnt) {
     if (!mnt)
         return;
@@ -58,6 +89,12 @@ int ext2_mount(struct mount *mnt) {
         kfree(e->sb);
         kfree(e);
         return -EINVAL;
+    }
+    int gate = ext2_check_feature_gate(e->sb);
+    if (gate < 0) {
+        kfree(e->sb);
+        kfree(e);
+        return gate;
     }
     e->block_size = 1024 << e->sb->s_log_block_size;
     e->inodes_per_group = e->sb->s_inodes_per_group;
