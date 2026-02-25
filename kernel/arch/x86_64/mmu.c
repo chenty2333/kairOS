@@ -53,8 +53,30 @@ static const struct mmu_ops x86_mmu_ops = {
     .va_index    = x86_va_index,
 };
 
-static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create) {
-    return mmu_walk_pgtable(&x86_mmu_ops, table, va, create);
+static uint64_t *walk_pgtable(paddr_t table, vaddr_t va, bool create,
+                              bool user) {
+    uint64_t *pt = (uint64_t *)phys_to_virt(table);
+    uint64_t user_bit = user ? PTE_U : 0;
+
+    for (int level = x86_mmu_ops.levels - 1; level > 0; level--) {
+        size_t idx = x86_mmu_ops.va_index(va, level);
+        uint64_t ent = pt[idx];
+        if (!x86_mmu_ops.pte_valid(ent)) {
+            if (!create)
+                return NULL;
+            paddr_t next = mmu_pt_alloc();
+            if (!next)
+                return NULL;
+            ent = x86_make_branch(next) | user_bit;
+            pt[idx] = ent;
+        } else if (user_bit && !(ent & PTE_U)) {
+            ent |= PTE_U;
+            pt[idx] = ent;
+        }
+        pt = (uint64_t *)phys_to_virt(x86_mmu_ops.pte_addr(ent));
+    }
+
+    return &pt[x86_mmu_ops.va_index(va, 0)];
 }
 
 static uint64_t flags_to_pte(uint64_t f) {
@@ -181,7 +203,8 @@ void arch_mmu_destroy_table(paddr_t table) {
 }
 
 int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
-    uint64_t *pte = walk_pgtable(table, va, true);
+    bool user = (flags & PTE_USER) != 0;
+    uint64_t *pte = walk_pgtable(table, va, true, user);
     if (!pte)
         return -ENOMEM;
     *pte = (pa & ~0xfffULL) | flags_to_pte(flags);
@@ -189,7 +212,8 @@ int arch_mmu_map(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
 }
 
 int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
-    uint64_t *pte = walk_pgtable(table, va, true);
+    bool user = (flags & PTE_USER) != 0;
+    uint64_t *pte = walk_pgtable(table, va, true, user);
     if (!pte)
         return -ENOMEM;
     uint64_t nf = flags_to_pte(flags);
@@ -205,7 +229,7 @@ int arch_mmu_map_merge(paddr_t table, vaddr_t va, paddr_t pa, uint64_t flags) {
 }
 
 int arch_mmu_unmap(paddr_t table, vaddr_t va) {
-    uint64_t *pte = walk_pgtable(table, va, false);
+    uint64_t *pte = walk_pgtable(table, va, false, false);
     if (!pte || !(*pte & PTE_P))
         return -ENOENT;
     *pte = 0;
@@ -214,14 +238,14 @@ int arch_mmu_unmap(paddr_t table, vaddr_t va) {
 }
 
 paddr_t arch_mmu_translate(paddr_t table, vaddr_t va) {
-    uint64_t *pte = walk_pgtable(table, va, false);
+    uint64_t *pte = walk_pgtable(table, va, false, false);
     if (!pte || !(*pte & PTE_P))
         return 0;
     return ((paddr_t)(*pte & PTE_ADDR_MASK)) | (va & 0xfffULL);
 }
 
 uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
-    uint64_t *pte = walk_pgtable(table, va, false);
+    uint64_t *pte = walk_pgtable(table, va, false, false);
     if (!pte || !(*pte & PTE_P))
         return 0;
     paddr_t pa = (paddr_t)(*pte & PTE_ADDR_MASK);
@@ -229,7 +253,7 @@ uint64_t arch_mmu_get_pte(paddr_t table, vaddr_t va) {
 }
 
 int arch_mmu_set_pte(paddr_t table, vaddr_t va, uint64_t pte) {
-    uint64_t *entry = walk_pgtable(table, va, false);
+    uint64_t *entry = walk_pgtable(table, va, false, false);
     if (!entry)
         return -ENOENT;
     paddr_t pa = (paddr_t)(((pte >> 10) << PAGE_SHIFT) & PTE_ADDR_MASK);

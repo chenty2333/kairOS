@@ -46,6 +46,7 @@ Runtime reservations:
   - low 10 bits are HAL PTE_* flags
   - upper bits store physical page number ((pa >> PAGE_SHIFT) << 10)
 - Common page table walk logic in arch/common/mmu_common.c: mmu_walk_pgtable() supports multi-level page table creation and lookup
+- x86_64 map path uses an arch-local walker that propagates `PTE_U` to all parent levels when mapping user pages, so user leaf mappings remain executable/readable from CPL3 after lazy page-table allocation
 - Each architecture implements arch_mmu_map/unmap/translate/flush_tlb interfaces
 - arch_mmu_destroy_table(): recursively frees user page table pages (x86_64: lower 256 PML4 slots only)
 - ioremap() uses HHDM; iounmap() is a no-op (no vmalloc VA allocator)

@@ -51,6 +51,8 @@ Per-architecture entry:
 - riscv64: stvec → trap_entry, switches to kernel stack via sscratch
   - trap_return keeps `sscratch=0` when returning to S-mode, and sets `sscratch` to kernel stack top only for U-mode return
 - x86_64: IDT → isr_common (syscall goes through IDT 0x80), switches to kernel stack via TSS
+  - x86_64 `#PF` first routes user-range faults through `mm_handle_fault()` (write/exec intent decoded from PF error bits) for both user and kernel origins; unresolved kernel faults then consult `search_exception_table(rip)` for uaccess fixup
+  - x86_64 uaccess assembly emits `__ex_table` fixups for `copy_from_user` / `copy_to_user` / `strncpy_from_user`; fixup returns remaining bytes for copy helpers and `-EFAULT` for string copy
 - aarch64: VBAR_EL1 → vector_table, distinguishes EL0/EL1 origin
 
 trap_core.c:trap_core_dispatch() is the architecture-independent dispatch boundary:

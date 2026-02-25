@@ -130,22 +130,37 @@ void arch_irq_handler(struct trap_frame *tf) {
 static void handle_exception(struct trap_frame *tf) {
     uint64_t trapno = tf->trapno;
     bool from_user = (tf->cs & 3) != 0;
+    uint64_t cr2 = 0;
+    struct process *cur = proc_current();
 
     if (trapno == 14) {
-        uint64_t cr2;
         __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
-        struct process *cur = proc_current();
-        if (from_user && cur && cur->mm) {
-            uint32_t f = (tf->err & 2) ? PTE_WRITE : 0;
+        bool user_addr = cr2 <= USER_SPACE_END;
+        if (cur && cur->mm && user_addr) {
+            uint32_t f = 0;
+            if (tf->err & (1U << 1))
+                f |= PTE_WRITE;
+            if (tf->err & (1U << 4))
+                f |= PTE_EXEC;
             if (mm_handle_fault(cur->mm, cr2, f) == 0)
                 return;
+        }
+        if (!from_user) {
+            unsigned long fixup = search_exception_table(tf->rip);
+            if (fixup) {
+                tf->rip = fixup;
+                return;
+            }
         }
     }
 
     if (from_user) {
-        signal_send(proc_current()->pid, SIGSEGV);
-        signal_deliver_pending();
-        return;
+        if (cur) {
+            signal_send(cur->pid, SIGSEGV);
+            signal_deliver_pending();
+            return;
+        }
+        panic("x86_64 user exception without current process");
     }
 
     if (trapno == 13) {
@@ -156,6 +171,9 @@ static void handle_exception(struct trap_frame *tf) {
                (void *)tf->rip, (void *)tf->err, (void *)tf->rsp, ra,
                (void *)tf->rdi, (void *)tf->rsi, (void *)tf->rcx,
                (void *)tf->rdx, (void *)tf->rax);
+    } else if (trapno == 14) {
+        pr_err("x86_64 #PF rip=%p err=%p cr2=%p\n",
+               (void *)tf->rip, (void *)tf->err, (void *)cr2);
     } else {
         pr_err("x86_64 exception %lu rip=%p err=%p\n", trapno,
                (void *)tf->rip, (void *)tf->err);
