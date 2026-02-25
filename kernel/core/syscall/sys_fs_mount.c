@@ -285,6 +285,18 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
     int ret = sysfs_resolve_at(AT_FDCWD, kpath, &tpath, resolve_flags);
     if (ret < 0)
         return ret;
+    bool is_mountpoint = false;
+    if (tpath.dentry) {
+        if (tpath.dentry->mounted)
+            is_mountpoint = true;
+        else if (tpath.dentry->mnt &&
+                 tpath.dentry == tpath.dentry->mnt->root_dentry)
+            is_mountpoint = true;
+    }
+    if (!is_mountpoint) {
+        dentry_put(tpath.dentry);
+        return -EINVAL;
+    }
     char full[CONFIG_PATH_MAX];
     if (vfs_build_path_dentry(tpath.dentry, full, sizeof(full)) < 0) {
         dentry_put(tpath.dentry);
@@ -298,7 +310,10 @@ int64_t sys_umount2(uint64_t target_ptr, uint64_t flags, uint64_t a2,
         vfs_flags |= VFS_UMOUNT_FORCE;
     if (uflags & MNT_EXPIRE)
         vfs_flags |= VFS_UMOUNT_EXPIRE;
-    return vfs_umount2(full, vfs_flags);
+    ret = vfs_umount2(full, vfs_flags);
+    if (ret == -ENOENT)
+        return -EINVAL;
+    return ret;
 }
 
 static int set_mount_propagation(struct mount *mnt, uint32_t flags) {

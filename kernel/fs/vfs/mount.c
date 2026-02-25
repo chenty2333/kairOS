@@ -801,11 +801,32 @@ static int vfs_bind_mount_recursive(struct dentry *source, struct dentry *target
         subs[j] = key;
     }
 
+    struct mount **pruned = kmalloc(sizeof(*pruned) * count);
+    if (!pruned) {
+        kfree(subs);
+        return -ENOMEM;
+    }
+    size_t pruned_count = 0;
+
     int ret = 0;
     for (size_t i = 0; i < count; i++) {
         struct mount *sub = subs[i];
         if (!sub->root_dentry || !sub->root_dentry->vnode)
             continue;
+
+        bool skip = false;
+        for (size_t j = 0; j < pruned_count; j++) {
+            if (sub == pruned[j] || mount_is_descendant_of(sub, pruned[j])) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip)
+            continue;
+        if (sub->prop == MOUNT_UNBINDABLE) {
+            pruned[pruned_count++] = sub;
+            continue;
+        }
 
         const char *suffix = NULL;
         if (strcmp(source_path, "/") == 0)
@@ -835,6 +856,7 @@ static int vfs_bind_mount_recursive(struct dentry *source, struct dentry *target
             break;
     }
 
+    kfree(pruned);
     kfree(subs);
     return ret;
 }

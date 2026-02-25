@@ -33,7 +33,8 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `fchmodat2` is wired to `fchmodat` semantics and flag validation
   - `openat2` supports `struct open_how` parsing; `RESOLVE_NO_MAGICLINKS` is accepted, other `resolve` constraints are pending
   - `statfs` now resolves the target path before filesystem stat (non-existent paths return `ENOENT`), and `fstatfs` falls back to fd dentry mount when available (`EINVAL` only when no mount context exists)
-  - `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); supports `UMOUNT_NOFOLLOW`, `MNT_DETACH` lazy-detach, `MNT_FORCE` recognition (`EOPNOTSUPP`), and `MNT_EXPIRE` two-phase semantics (first call `EAGAIN`, second call unmount)
+- `umount2` decodes `flags` using Linux ABI width (`int`/32-bit); supports `UMOUNT_NOFOLLOW`, `MNT_DETACH` lazy-detach, `MNT_FORCE` recognition (`EOPNOTSUPP`), and `MNT_EXPIRE` two-phase semantics (first call `EAGAIN`, second call unmount)
+- `umount2` returns `EINVAL` when the resolved path exists but is not a mountpoint (Linux-compatible error class for non-mount targets)
 - path.c is a path construction helper (vfs_build_relpath, etc.), not involved in path resolution
 - `umount2` follows Linux `int` ABI flag decoding (upper 32 bits ignored); unsupported flags return `EINVAL`
 - `mount` validates `mountflags` using Linux ABI `unsigned long` width (native word size); supports semantic superblock flags (`MS_RDONLY`/`MS_NO*`/`MS_RELATIME` family), propagation flags, bind, and remount
@@ -52,6 +53,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - Supports bind mount (MOUNT_F_BIND)
 - Mount propagation: private/shared/slave/unbindable implemented; propagation mode changes support `MS_REC` recursive subtree application
 - Bind mounts support both `MS_BIND` (single mount) and `MS_BIND|MS_REC` recursive subtree bind; recursive bind mirrors source submount topology under the target subtree
+- `MS_BIND|MS_REC` prunes unbindable submount subtrees instead of failing the whole bind operation
 - Mount namespace roots hold mount references; clone/set-root/put paths now maintain mount refcounts together with root_dentry refs
 - Unmount safety: `vfs_umount()` rejects unmount when child mounts exist or when mount refcount indicates external namespace/root users (returns `-EBUSY`)
 - `vfs_umount2(..., VFS_UMOUNT_DETACH)` detaches the mount subtree from namespace visibility (lazy unmount path), then reaps detached mounts when they become reclaimable
