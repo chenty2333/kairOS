@@ -370,6 +370,7 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
         return 0;
 
     struct vnode *vn = tty->vnode;
+    struct vnode *peer_vn = tty->link ? tty->link->vnode : NULL;
 
     for (;;) {
         bool irq_state = arch_irq_save();
@@ -385,6 +386,8 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
             wait_queue_wakeup_all(&tty->write_wait);
             if (vn)
                 vfs_poll_wake(vn, POLLOUT);
+            if (peer_vn)
+                vfs_poll_wake(peer_vn, POLLOUT);
             return (ssize_t)got;
         }
         if (tty->link && (tty->link->flags & TTY_HUPPED))
@@ -408,14 +411,33 @@ static ssize_t pty_master_ldisc_write(struct tty_struct *tty,
 
 static int pty_master_ldisc_poll(struct tty_struct *tty, uint32_t events) {
     uint32_t revents = 0;
+    struct tty_struct *peer = NULL;
+    bool hup = false;
+
     bool irq_state = arch_irq_save();
     spin_lock(&tty->lock);
+    peer = tty->link;
+    if ((tty->flags & TTY_HUPPED) || !peer)
+        hup = true;
     if (!ringbuf_empty(&tty->input_rb))
         revents |= POLLIN;
-    if (ringbuf_avail(&tty->input_rb) > 0)
-        revents |= POLLOUT;
     spin_unlock(&tty->lock);
     arch_irq_restore(irq_state);
+
+    if (peer && !hup) {
+        irq_state = arch_irq_save();
+        spin_lock(&peer->lock);
+        if (peer->flags & TTY_HUPPED)
+            hup = true;
+        spin_unlock(&peer->lock);
+        arch_irq_restore(irq_state);
+    }
+
+    if (hup)
+        revents |= POLLHUP;
+    else
+        revents |= POLLOUT;
+
     return (int)(revents & events);
 }
 

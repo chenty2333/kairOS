@@ -247,6 +247,8 @@ static void test_pty_open_read_write_ioctl(void) {
     drain_nonblock(master);
     close_file_if_open(&slave);
 
+    pe = vfs_poll(master, POLLIN | POLLHUP);
+    test_check((pe & POLLHUP) != 0, "pty master pollhup after slave close");
     rd = vfs_read(master, buf, sizeof(buf));
     test_check(rd == 0, "pty master eof after slave close");
 
@@ -289,19 +291,42 @@ static void test_pty_nonblock_write_backpressure(void) {
     test_check(total > 0, "pty nonblock fill progress");
     test_check(hit_eagain, "pty nonblock fill reaches eagain");
     if (hit_eagain) {
-        int pe = vfs_poll(master, POLLOUT);
-        test_check((pe & POLLOUT) == 0, "pty nonblock full poll not writable");
+        int pe = vfs_poll(slave, POLLOUT);
+        test_check((pe & POLLOUT) == 0, "pty nonblock full slave poll blocked");
     }
 
     uint8_t drain[256];
     ssize_t rd = vfs_read(master, drain, sizeof(drain));
     test_check(rd > 0, "pty nonblock drain read");
+    int pe = vfs_poll(slave, POLLOUT);
+    test_check((pe & POLLOUT) != 0, "pty nonblock slave poll writable after drain");
 
     wr = vfs_write(slave, "z", 1);
     test_check(wr == 1, "pty nonblock write resumes after drain");
 
     close_file_if_open(&slave);
     close_file_if_open(&master);
+}
+
+static void test_pty_poll_hup_semantics(void) {
+    struct file *master = NULL;
+    struct file *slave = NULL;
+    int ret = open_pty_pair(&master, &slave);
+    test_check(ret == 0, "pty hup open pair");
+    if (ret < 0)
+        return;
+
+    set_nonblock(master, true);
+    set_nonblock(slave, true);
+    drain_nonblock(master);
+    drain_nonblock(slave);
+
+    close_file_if_open(&master);
+
+    int pe = vfs_poll(slave, POLLIN | POLLOUT | POLLHUP);
+    test_check((pe & POLLHUP) != 0, "pty hup slave pollhup after master close");
+
+    close_file_if_open(&slave);
 }
 
 static void test_tty_fcntl_nonblock_semantics(void) {
@@ -660,6 +685,7 @@ int run_tty_tests(void) {
 
     test_pty_open_read_write_ioctl();
     test_pty_nonblock_write_backpressure();
+    test_pty_poll_hup_semantics();
     test_tty_fcntl_nonblock_semantics();
     test_n_tty_canonical_echo();
     test_n_tty_isig_behavior();

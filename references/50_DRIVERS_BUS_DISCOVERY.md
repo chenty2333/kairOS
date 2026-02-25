@@ -66,6 +66,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - drivers/tty/: terminal subsystem (tty_core, console_tty, n_tty line discipline, pty)
   - PTY slave->master output path now uses bounded buffering with backpressure (no overwrite-on-full); nonblocking writes return `EAGAIN`, and writable readiness is reflected by `POLLOUT`
   - n_tty/pty blocking read-write waits now use wait-queue sleep/wakeup paths (no poll-wait + yield spin loops)
+  - PTY poll readiness now reports peer hangup via `POLLHUP`; slave-side `POLLOUT` follows master input buffer room (and is woken when master drains data)
 - drivers/char/: character devices (console)
   - console input is IRQ-driven on supported arches (`arch_console_input_init()`), with tick-time polling retained as fallback
   - UART RX MMIO base/IRQ are resolved from FDT (`/chosen/stdout-path` + `/aliases` + `interrupts{,-extended}`) and fall back to arch defaults when firmware data is absent

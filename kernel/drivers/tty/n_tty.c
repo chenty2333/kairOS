@@ -294,13 +294,42 @@ static ssize_t n_tty_write(struct tty_struct *tty, const uint8_t *buf,
 
 static int n_tty_poll(struct tty_struct *tty, uint32_t events) {
     uint32_t revents = 0;
+    struct tty_struct *peer = NULL;
+    bool hup = false;
+    bool can_write = true;
+    bool is_pty_master = false;
+
     bool irq_state = arch_irq_save();
     spin_lock(&tty->lock);
+    peer = tty->link;
+    is_pty_master = (tty->flags & TTY_PTY_MASTER) != 0;
+    if (tty->flags & TTY_HUPPED) {
+        hup = true;
+        can_write = false;
+    }
     if (!ringbuf_empty(&tty->input_rb) || tty->eof_pending)
         revents |= POLLIN;
     spin_unlock(&tty->lock);
     arch_irq_restore(irq_state);
-    revents |= POLLOUT;  /* output always ready (no output buffer) */
+
+    if (peer && !is_pty_master) {
+        irq_state = arch_irq_save();
+        spin_lock(&peer->lock);
+        if (peer->flags & TTY_HUPPED) {
+            hup = true;
+            can_write = false;
+        } else {
+            can_write = ringbuf_avail(&peer->input_rb) > 0;
+        }
+        spin_unlock(&peer->lock);
+        arch_irq_restore(irq_state);
+    }
+
+    if (hup)
+        revents |= POLLHUP;
+    if (can_write)
+        revents |= POLLOUT;
+
     return (int)(revents & events);
 }
 

@@ -120,6 +120,7 @@ Special:
 - AF_UNIX ancillary transport is enabled for both `SOCK_DGRAM` and `SOCK_STREAM`
 - `SOCK_STREAM` control payload is bound to stream byte offsets (not recv-call count): control is delivered only when its corresponding bytes are consumed, and data paths without ancillary buffers (`recvfrom`/`read`) still consume and drop crossed control payload to avoid stale later delivery
 - `recvmsg(MSG_PEEK)` on AF_UNIX `SOCK_STREAM` does not consume stream bytes or ancillary payload; non-peek receive sees the same boundary afterward
+- `recvmmsg(MSG_PEEK)` on AF_UNIX `SOCK_STREAM` follows the same non-consuming rule for both data and ancillary payload; subsequent non-peek reads still observe the original stream/control boundary order
 - If one AF_UNIX stream `recvmsg` spans multiple ancillary attachment points, payload is merged in stream order; rights overflow in the merged kernel control set raises `MSG_CTRUNC`
 - `recvmsg` sets `MSG_CTRUNC` when user ancillary buffer is too small to hold returned control payload
 - `recvmsg(MSG_CMSG_CLOEXEC)` installs received `SCM_RIGHTS` file descriptors with `FD_CLOEXEC`
