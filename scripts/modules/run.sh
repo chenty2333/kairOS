@@ -275,7 +275,7 @@ for _ in $(seq 1 "$ready_wait"); do
     sleep 1
 done
 sleep "$boot_delay"
-printf 'bad=0; for a in %s; do if [ ! -x "/bin/$a" ]; then bad=$((bad+1)); echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1; rc=$?; if [ "$rc" -gt 128 ]; then bad=$((bad+1)); echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo TEST_SUMMARY: failed=$bad; echo TEST_RESULT_JSON: {\"schema_version\":1,\"failed\":$bad,\"done\":true,\"enabled_mask\":1}; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
+printf 'bad_marks=; for a in %s; do if [ ! -x "/bin/$a" ]; then bad_marks="${bad_marks}x"; echo APPLET_BAD_ITEM:missing:$a; continue; fi; "/bin/$a" --help </dev/null >/dev/null 2>&1; rc=$?; if [ "$rc" -gt 128 ]; then bad_marks="${bad_marks}x"; echo APPLET_BAD_ITEM:rc:$a:$rc; fi; done; bad=${#bad_marks}; echo APPLET_SMOKE_OK:%s; echo APPLET_BAD_COUNT:$bad; echo TEST_SUMMARY: failed=$bad; echo TEST_RESULT_JSON: {\\"schema_version\\":1,\\"failed\\":$bad,\\"done\\":true,\\"enabled_mask\\":1}; echo __BB_APPLET_SMOKE_DONE__\n' "$applet_list" "$expected_count" >&3
 sleep "$step_delay"
 for _ in $(seq 1 "$ready_wait"); do
     grep -q '__BB_APPLET_SMOKE_DONE__' "$log_path" 2>/dev/null && break
