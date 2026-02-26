@@ -410,13 +410,7 @@ static struct socket *sock_from_fd(struct process *p, uint64_t fd_arg,
                                    struct file **filep) {
     int fd = syssock_abi_i32(fd_arg);
     struct file *f = NULL;
-    int fr = 0;
-    if (required_rights) {
-        fr = fd_get_required(p, fd, required_rights, &f);
-    } else {
-        f = fd_get(p, fd);
-        fr = f ? 0 : -EBADF;
-    }
+    int fr = handle_bridge_pin_fd(p, fd, required_rights, &f, NULL);
     if (fr < 0)
         return NULL;
     if (!f || !f->vnode) {

@@ -42,28 +42,30 @@ int handle_bridge_kobj_from_fd(struct process *p, int fd, uint32_t rights_mask,
     if (!p || !out_obj)
         return -EINVAL;
 
-    uint32_t fd_rights = 0;
-    int rc = fd_get_rights(p, fd, &fd_rights);
-    if (rc < 0)
-        return rc;
-
     struct file *file = NULL;
-    rc = fd_get_required(p, fd, 0, &file);
+    uint32_t fd_rights = 0;
+    int rc = fd_get_required_with_rights(p, fd, 0, &file, &fd_rights);
     if (rc < 0)
         return rc;
-
-    uint32_t allowed = handle_bridge_fd_to_krights(fd_rights);
-    uint32_t desired = rights_mask ? (allowed & rights_mask) : allowed;
-    if (desired == 0) {
-        file_put(file);
-        return -EACCES;
-    }
 
     struct kobj *obj = NULL;
-    rc = kfile_create(file, &obj);
+    uint32_t allowed = 0;
+    if (file->vnode && file->vnode->ops && file->vnode->ops->to_kobj) {
+        rc = file->vnode->ops->to_kobj(file, fd_rights, &obj, &allowed);
+    } else {
+        rc = kfile_create(file, &obj);
+        if (rc == 0)
+            allowed = handle_bridge_fd_to_krights(fd_rights);
+    }
     file_put(file);
     if (rc < 0)
         return rc;
+
+    uint32_t desired = rights_mask ? (allowed & rights_mask) : allowed;
+    if (desired == 0) {
+        kobj_put(obj);
+        return -EACCES;
+    }
 
     *out_obj = obj;
     if (out_rights)
@@ -147,14 +149,9 @@ int handle_bridge_pin_fd(struct process *p, int fd, uint32_t required_rights,
         return -EINVAL;
 
     struct file *file = NULL;
-    int rc = fd_get_required(p, fd, required_rights, &file);
-    if (rc < 0)
-        return rc;
-
     uint32_t rights = 0;
-    rc = fd_get_rights(p, fd, &rights);
+    int rc = fd_get_required_with_rights(p, fd, required_rights, &file, &rights);
     if (rc < 0) {
-        file_put(file);
         return rc;
     }
 

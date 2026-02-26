@@ -269,7 +269,8 @@ int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t info,
     }
 
     struct file *file = NULL;
-    int frc = fd_get_required(proc_current(), kfd, FD_RIGHT_IOCTL, &file);
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, FD_RIGHT_IOCTL, &file,
+                                   NULL);
     if (frc < 0)
         return frc;
 
@@ -333,7 +334,8 @@ int64_t sys_pidfd_getfd(uint64_t pidfd, uint64_t targetfd, uint64_t flags,
         return -EINVAL;
 
     struct file *pidfd_file = NULL;
-    int rc = fd_get_required(self, kpidfd, FD_RIGHT_IOCTL, &pidfd_file);
+    int rc =
+        handle_bridge_pin_fd(self, kpidfd, FD_RIGHT_IOCTL, &pidfd_file, NULL);
     if (rc < 0)
         return rc;
 

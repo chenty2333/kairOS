@@ -426,6 +426,10 @@ int fd_alloc_rights(struct process *p, struct file *file, uint32_t fd_flags,
 struct file *fd_get(struct process *p, int fd);
 int fd_get_required(struct process *p, int fd, uint32_t required_rights,
                     struct file **out_file);
+int fd_get_required_with_rights(struct process *p, int fd,
+                                uint32_t required_rights,
+                                struct file **out_file,
+                                uint32_t *out_rights);
 int fd_get_rights(struct process *p, int fd, uint32_t *out_rights);
 int fd_limit_rights(struct process *p, int fd, uint32_t rights_mask,
                     uint32_t *out_rights);

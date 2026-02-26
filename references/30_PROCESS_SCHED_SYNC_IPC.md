@@ -145,6 +145,7 @@ Current IPC mechanisms:
 - Capability handles: per-process `handletable` (refcounted; cloned with `CLONE_FILES` sharing or copied otherwise), rights-mask model (`READ/WRITE/TRANSFER/DUPLICATE/WAIT/MANAGE`), and generic `kobj` refcounted object lifetime
 - Capability file bridge: Linux fd/file objects can be wrapped as `KOBJ_TYPE_FILE` handles and converted back to fd without changing Linux ABI syscalls; `fd_alloc_rights()` preserves rights attenuation when materializing fd from a handle
 - Internal bridge helpers (`handle_bridge`) centralize fd-rights <-> handle-rights mapping plus fd<->`KOBJ_TYPE_FILE` conversion, so non-syscall kernel paths can reuse one capability conversion entrypoint
+- fd core provides `fd_get_required_with_rights()` to pin `file*` and snapshot fd-rights in one lock pass; bridge paths now reuse this single pin/query entrypoint
 - `handle_bridge` also provides cross-process fd duplication helper used by `pidfd_getfd`, so fd-rights-preserving duplication no longer reimplements per-call rights/copy glue
 - FD capability rights: fdtable entries carry independent rights mask (`FD_RIGHT_READ/WRITE/IOCTL/DUP`); `read*`/`write*`/`copy_file_range`/`ioctl` enforce required rights, and `dup*`/`fcntl(F_DUPFD*)` require `FD_RIGHT_DUP`
 - Socket message data paths now use fd-right checks internally: `send*` requires `FD_RIGHT_WRITE`, `recv*` requires `FD_RIGHT_READ`
@@ -156,6 +157,7 @@ Current IPC mechanisms:
 - `port_wait` blocking now sleeps on object-level `kobj.waitq` (wake source remains channel/port enqueue/close paths), keeping fd-poll fanout unchanged
 - Channel fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_CHANNEL`; resulting fd supports `poll` (`POLLIN|POLLOUT|POLLHUP`) plus byte `read()`/`write()` on channel payload path
 - Port fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_PORT`; resulting fd is pollable (`POLLIN`) and `read()` consumes one `kairos_port_packet_user`
+- `file_ops` adds optional `to_kobj` export hook for typed fd endpoints; channel/port bridge vnodes implement it so `kairos_handle_from_fd` no longer needs syscall-local special-fd branching
 - Reverse bridge for channel/port fd: `kairos_handle_from_fd` recognizes bridge fds and recreates typed handles (`KOBJ_TYPE_CHANNEL` / `KOBJ_TYPE_PORT`) with rights derived from fd rights attenuation (`FD_RIGHT_READ`/`FD_RIGHT_IOCTL`/`FD_RIGHT_DUP` map to `KRIGHT_WAIT`/`KRIGHT_MANAGE`/`KRIGHT_DUPLICATE` on port handles; no implicit `KRIGHT_TRANSFER` escalation on port roundtrip)
 - `kairos_fd_from_handle` accepts `O_NONBLOCK` for channel/port bridges (read path returns `-EAGAIN` when empty); `KOBJ_TYPE_FILE` bridge keeps existing semantics and rejects `O_NONBLOCK` at conversion time
 - Channel `send/recv` options add `KCHANNEL_OPT_RENDEZVOUS`: when sender/receiver both opt in and a blocking receiver is armed, payload/control can bypass queue enqueue for a synchronous handoff fastpath

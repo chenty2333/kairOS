@@ -15,6 +15,7 @@
 struct dentry;
 struct path;
 struct timespec;
+struct kobj;
 
 struct kstatfs {
     uint64_t f_type;
@@ -225,6 +226,8 @@ struct file_ops {
     ssize_t (*fwrite)(struct file *file, const void *buf, size_t len);
     int (*ioctl)(struct file *file, uint64_t cmd, uint64_t arg);
     int (*poll)(struct file *file, uint32_t events);
+    int (*to_kobj)(struct file *file, uint32_t fd_rights,
+                   struct kobj **out_obj, uint32_t *out_rights);
 };
 
 struct poll_waiter;

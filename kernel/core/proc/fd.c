@@ -127,16 +127,19 @@ struct file *fd_get(struct process *p, int fd) {
     return file;
 }
 
-int fd_get_required(struct process *p, int fd, uint32_t required_rights,
-                    struct file **out_file) {
+int fd_get_required_with_rights(struct process *p, int fd,
+                                uint32_t required_rights,
+                                struct file **out_file,
+                                uint32_t *out_rights) {
     if (out_file)
         *out_file = NULL;
+    if (out_rights)
+        *out_rights = 0;
     if (!p || !p->fdtable || fd < 0 || fd >= CONFIG_MAX_FILES_PER_PROC)
         return -EBADF;
 
     if (required_rights & ~FD_RIGHTS_ALL)
         return -EINVAL;
-
     if (!out_file)
         return -EINVAL;
 
@@ -154,8 +157,16 @@ int fd_get_required(struct process *p, int fd, uint32_t required_rights,
     }
     atomic_inc(&file->refcount);
     mutex_unlock(&fdt->lock);
+
     *out_file = file;
+    if (out_rights)
+        *out_rights = rights;
     return 0;
+}
+
+int fd_get_required(struct process *p, int fd, uint32_t required_rights,
+                    struct file **out_file) {
+    return fd_get_required_with_rights(p, fd, required_rights, out_file, NULL);
 }
 
 int fd_get_rights(struct process *p, int fd, uint32_t *out_rights) {
