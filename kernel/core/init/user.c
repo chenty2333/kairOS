@@ -17,6 +17,7 @@ int run_socket_tests(void);
 int run_device_virtio_tests(void);
 int run_tty_tests(void);
 int run_soak_tests(void);
+int run_input_tests(void);
 extern int run_sched_stress_tests(void);
 
 #if CONFIG_KERNEL_TESTS
@@ -33,6 +34,7 @@ enum kernel_test_module_bits {
     KTEST_MOD_DEV_VIRTIO = 1U << 9,
     KTEST_MOD_TTY = 1U << 10,
     KTEST_MOD_SOAK = 1U << 11,
+    KTEST_MOD_INPUT = 1U << 12,
 };
 
 static int kernel_test_module_enabled(unsigned int bit) {
@@ -128,6 +130,13 @@ static int kernel_test_main(void *arg __attribute__((unused))) {
         total_failed += (suite_fail > 0) ? suite_fail : 0;
     } else {
         pr_info("Skipping soak tests (CONFIG_KERNEL_TEST_MASK)\n");
+    }
+
+    if (kernel_test_module_enabled(KTEST_MOD_INPUT)) {
+        suite_fail = run_input_tests();
+        total_failed += (suite_fail > 0) ? suite_fail : 0;
+    } else {
+        pr_info("Skipping input tests (CONFIG_KERNEL_TEST_MASK)\n");
     }
 
     if (kernel_test_module_enabled(KTEST_MOD_SYNC) ||

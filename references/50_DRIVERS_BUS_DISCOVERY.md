@@ -71,6 +71,7 @@ init_devices() execution order:
 3. Firmware descriptors: fw_init(), register_limine_framebuffers(), acpi_init()
 4. Device tree scan: fdt_scan_devices() (if DTB present)
 5. Enumerate devices: platform_bus_enumerate(), pci_enumerate()
+6. PS/2 input init (x86_64 only): ps2_controller_init(), ps2_kbd_init(), ps2_mouse_init()
 
 FDT scanning and Limine framebuffer registration call fw_register_desc(); ACPI probes RSDP, and aarch64 PCI host init additionally parses ACPI MCFG to discover ECAM for pci_enumerate().
 
@@ -147,6 +148,28 @@ lwIP integration:
 - net/lwip_port/: lwIP system adaptation layer (threads, semaphores, timers)
 - net/net_ioctl.c: network ioctl
 - LWIP_TCPIP_CORE_LOCKING is enabled; AF_INET raw API paths and net_ioctl netif mutations are serialized with LWIP core lock
+
+## Input Subsystem (drivers/input/)
+
+Core framework (input_core.c):
+- input_dev: generic input device, maintains client_list for evdev consumers
+- input_dev_alloc/free/register/unregister: lifecycle management
+- input_report_key/rel/abs + input_sync: event reporting, dispatches to all attached evdev clients
+- Global input_dev_list protected by spinlock
+
+evdev layer (evdev.c):
+- input_dev_register() auto-creates `/dev/input/eventN` via devfs
+- Each open() allocates an evdev_client with a 256-entry ring buffer
+- fread: blocking (via proc_sleep_on) or O_NONBLOCK, returns struct input_event (Linux compatible)
+- poll: returns POLLIN when buffer non-empty
+- ioctl: EVIOCGNAME, EVIOCGID
+
+PS/2 drivers (x86_64 only, guarded by `#ifdef __x86_64__`):
+- ps2_controller.c: 8042 init (disable ports, configure IRQ 1+12, re-enable)
+- ps2_kbd.c: IRQ 1 handler, scancode set 1 decode (standard + 0xE0 extended), keycode-to-ASCII for TTY integration via tty_receive_buf()
+- ps2_mouse.c: IRQ 12 handler, 3/4-byte packet decode (buttons, dx/dy, wheel), scroll wheel detection via magic sample rate sequence
+
+Data flow: hardware → IRQ handler → input_report_*() → evdev clients → userspace read(); keyboard also feeds tty_receive_buf() for shell input.
 
 ## Current Limitations
 

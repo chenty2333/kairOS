@@ -89,4 +89,14 @@ void init_devices(void) {
     int ret = pci_enumerate();
     if (ret < 0)
         pr_warn("pci: enumerate skipped (ret=%d)\n", ret);
+
+#if defined(__x86_64__)
+    extern void ps2_controller_init(void);
+    extern int ps2_kbd_init(void);
+    extern int ps2_mouse_init(void);
+
+    ps2_controller_init();
+    ps2_kbd_init();
+    ps2_mouse_init();
+#endif
 }
