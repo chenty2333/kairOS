@@ -22,6 +22,9 @@ Actions:
   test-errno-smoke
               Run errno smoke regression (ENOENT/EACCES/ENOEXEC/ENOMEM/ENAMETOOLONG)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
+  test-abi-smoke
+              Run ABI snapshot smoke regression (stable errno vector)
+              Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-soak   Run soak test (expects timeout)
               Options: --extra-cflags <flags> --timeout <sec> --log <path>
   test-debug  Run tests with CONFIG_DEBUG
@@ -425,6 +428,95 @@ EOF
     kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}" 1 0
 }
 
+kairos_run_test_abi_smoke_once() {
+    local extra_cflags="$1"
+    local timeout_s="$2"
+    local log_path="$3"
+    local boot_delay="${ABI_SMOKE_BOOT_DELAY_SEC:-8}"
+    local ready_wait="${ABI_SMOKE_READY_WAIT_SEC:-180}"
+    local done_wait="${ABI_SMOKE_DONE_WAIT_SEC:-180}"
+    local run_log="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/run.log"
+    local make_jobs="${KAIROS_JOBS:-$(nproc)}"
+    local inner_make_cmd=""
+    local smoke_script=""
+    local qemu_cmd=""
+    local required_any="ABI_SMOKE_OK"
+    local required_all=""
+    local forbidden='Process [0-9]+ killed by signal 11|\\[ERROR\\].*no vma|mm: fault .* no vma'
+
+    printf -v inner_make_cmd \
+        'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
+        "${make_jobs}" "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
+        "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
+
+    printf -v required_all '%b' \
+        'ABI_BASELINE_VERSION:1\nABI_CASE:fs.open_missing:errno=\nABI_CASE:fs.openat_bad_dirfd:errno=\nABI_CASE:fs.read_bad_fd:errno=\nABI_CASE:fs.write_bad_fd:errno=\nABI_CASE:fs.close_bad_fd:errno=\nABI_CASE:fs.pipe2_bad_flags:errno=\nABI_CASE:fs.dup2_bad_oldfd:errno=\nABI_CASE:socket.connect_unix_missing:errno=\nABI_CASE:socket.getsockopt_bad_fd:errno=\nABI_CASE:proc.waitpid_nochild:errno=\nABI_CASE:proc.kill_nonexistent:errno=\nABI_CASE:time.clock_gettime_bad_clockid:errno=\nABI_CASE:time.nanosleep_bad_nsec:errno=\nABI_CASE:mount.umount2_bad_flags:errno=\nABI_SMOKE_CASES:\nABI_SMOKE_OK\n__ABI_SMOKE_DONE__'
+
+    smoke_script="${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/abi-smoke-host.sh"
+    mkdir -p "$(dirname "${smoke_script}")"
+    {
+        printf 'run_log=%q\n' "${run_log}"
+        printf 'ready_wait=%q\n' "${ready_wait}"
+        printf 'done_wait=%q\n' "${done_wait}"
+        printf 'boot_delay=%q\n' "${boot_delay}"
+        printf 'inner_make_cmd=%q\n' "${inner_make_cmd}"
+        printf 'log_path=%q\n' "${log_path}"
+        cat <<'EOF'
+: > "$run_log"
+fifo="$(mktemp -u /tmp/kairos-abi-smoke.XXXXXX)"
+mkfifo "$fifo"
+( exec 3<>"$fifo"
+for _ in $(seq 1 "$ready_wait"); do
+    grep -Eiq 'init: starting shell|BusyBox v' "$run_log" 2>/dev/null && break
+    sleep 1
+done
+sleep "$boot_delay"
+cat >&3 <<'GUEST_CMDS'
+/usr/bin/abi_smoke
+GUEST_CMDS
+done_seen=0
+for _ in $(seq 1 "$done_wait"); do
+    if awk '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line ~ /^[[:space:]]*__ABI_SMOKE_DONE__[[:space:]]*$/) {
+                found = 1
+                exit 0
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$log_path" 2>/dev/null; then
+        done_seen=1
+        break
+    fi
+    sleep 1
+done
+if [ "$done_seen" -eq 1 ]; then
+    printf '\001x' >&3
+fi
+exec 3>&-
+) &
+feeder=$!
+eval "$inner_make_cmd QEMU_STDIN=\"<$fifo\" run-direct"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    kill "$feeder" 2>/dev/null || true
+fi
+wait "$feeder" 2>/dev/null || true
+rm -f "$fifo"
+exit $rc
+EOF
+    } > "${smoke_script}"
+    chmod +x "${smoke_script}"
+
+    printf -v qemu_cmd \
+        'bash %q' \
+        "${smoke_script}"
+
+    kairos_run_test_locked "${qemu_cmd}" "${timeout_s}" "${log_path}" 0 1 "${required_any}" "${required_all}" "${forbidden}" 1 0
+}
+
 kairos_run_test_locked() {
     local qemu_cmd="$1"
     local timeout_s="$2"
@@ -551,6 +643,13 @@ kairos_run_dispatch() {
             log_path="${ERRNO_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/errno-smoke.log}"
             kairos_run_parse_common_opts extra timeout_s log_path "$@"
             kairos_run_test_errno_smoke_once "$extra" "$timeout_s" "$log_path"
+            ;;
+        test-abi-smoke)
+            extra="${ABI_SMOKE_EXTRA_CFLAGS:-}"
+            timeout_s="${ABI_SMOKE_TIMEOUT:-360}"
+            log_path="${ABI_SMOKE_LOG:-${KAIROS_BUILD_ROOT}/${KAIROS_ARCH}/abi-smoke.log}"
+            kairos_run_parse_common_opts extra timeout_s log_path "$@"
+            kairos_run_test_abi_smoke_once "$extra" "$timeout_s" "$log_path"
             ;;
         test-soak)
             extra="${SOAK_EXTRA_CFLAGS:--DCONFIG_PMM_PCP_MODE=2}"

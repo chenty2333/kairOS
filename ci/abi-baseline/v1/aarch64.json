@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "suite": "abi-smoke-v1",
+  "arch": "aarch64",
+  "run_id": "baseline-v1",
+  "cases": {
+    "fs.close_bad_fd": {
+      "errno": 9,
+      "errno_name": "EBADF"
+    },
+    "fs.dup2_bad_oldfd": {
+      "errno": 9,
+      "errno_name": "EBADF"
+    },
+    "fs.open_missing": {
+      "errno": 2,
+      "errno_name": "ENOENT"
+    },
+    "fs.openat_bad_dirfd": {
+      "errno": 9,
+      "errno_name": "EBADF"
+    },
+    "fs.pipe2_bad_flags": {
+      "errno": 22,
+      "errno_name": "EINVAL"
+    },
+    "fs.read_bad_fd": {
+      "errno": 9,
+      "errno_name": "EBADF"
+    },
+    "fs.write_bad_fd": {
+      "errno": 9,
+      "errno_name": "EBADF"
+    },
+    "mount.umount2_bad_flags": {
+      "errno": 22,
+      "errno_name": "EINVAL"
+    },
+    "proc.kill_nonexistent": {
+      "errno": 3,
+      "errno_name": "ESRCH"
+    },
+    "proc.waitpid_nochild": {
+      "errno": 10,
+      "errno_name": "ECHILD"
+    },
+    "socket.connect_unix_missing": {
+      "errno": 2,
+      "errno_name": "ENOENT"
+    },
+    "socket.getsockopt_bad_fd": {
+      "errno": 9,
+      "errno_name": "EBADF"
+    },
+    "time.clock_gettime_bad_clockid": {
+      "errno": 22,
+      "errno_name": "EINVAL"
+    },
+    "time.nanosleep_bad_nsec": {
+      "errno": 22,
+      "errno_name": "EINVAL"
+    }
+  }
+}

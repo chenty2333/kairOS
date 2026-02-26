@@ -106,6 +106,30 @@ jobs:
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
+      - name: Run riscv64 ABI baseline gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 ABI_SMOKE_ISOLATED=1 ABI_SMOKE_TIMEOUT=300 test-abi-smoke
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after riscv64 ABI gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/capture-abi-snapshot.py \
+            --run-dir "${latest}" \
+            --arch riscv64 \
+            --json-out abi-snapshot-riscv64.json \
+            --markdown-out abi-snapshot-riscv64.md
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline ci/abi-baseline/v1/riscv64.json \
+            --current abi-snapshot-riscv64.json \
+            --label-baseline baseline/riscv64 \
+            --label-current current/riscv64 \
+            --markdown-out abi-compare-riscv64.md
+          cat abi-snapshot-riscv64.md >> "${GITHUB_STEP_SUMMARY}"
+          cat abi-compare-riscv64.md >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Capture latest isolated run
         id: latest_run
         if: always()
@@ -140,6 +164,9 @@ jobs:
             build/riscv64/test-device-virtio-*.log
             build/riscv64/tcc-smoke.log
             build/riscv64/run.log
+            abi-snapshot-riscv64.json
+            abi-snapshot-riscv64.md
+            abi-compare-riscv64.md
 
   x86_64-gates:
     runs-on: ubuntu-24.04
@@ -232,6 +259,30 @@ jobs:
           set -euo pipefail
           make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=180 test-x86-boot-smp
 
+      - name: Run x86_64 ABI baseline gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=x86_64 ABI_SMOKE_ISOLATED=1 ABI_SMOKE_TIMEOUT=300 test-abi-smoke
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after x86_64 ABI gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/capture-abi-snapshot.py \
+            --run-dir "${latest}" \
+            --arch x86_64 \
+            --json-out abi-snapshot-x86_64.json \
+            --markdown-out abi-snapshot-x86_64.md
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline ci/abi-baseline/v1/x86_64.json \
+            --current abi-snapshot-x86_64.json \
+            --label-baseline baseline/x86_64 \
+            --label-current current/x86_64 \
+            --markdown-out abi-compare-x86_64.md
+          cat abi-snapshot-x86_64.md >> "${GITHUB_STEP_SUMMARY}"
+          cat abi-compare-x86_64.md >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Capture latest isolated run
         id: latest_run_x86_64
         if: always()
@@ -267,6 +318,9 @@ jobs:
             build/x86_64/test-x86-boot-smp-4.log
             build/x86_64/tcc-smoke.log
             build/x86_64/run.log
+            abi-snapshot-x86_64.json
+            abi-snapshot-x86_64.md
+            abi-compare-x86_64.md
 
   aarch64-smoke:
     runs-on: ubuntu-24.04
@@ -404,6 +458,34 @@ jobs:
             --arch aarch64 \
             --expected-online 4
 
+      - name: Run aarch64 ABI baseline gate
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 ABI_SMOKE_ISOLATED=1 ABI_SMOKE_TIMEOUT=300 test-abi-smoke
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${latest}" ]]; then
+            echo "No isolated run found after aarch64 ABI gate" >&2
+            exit 2
+          fi
+          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --expected-online 2
+          python3 scripts/impl/capture-abi-snapshot.py \
+            --run-dir "${latest}" \
+            --arch aarch64 \
+            --json-out abi-snapshot-aarch64.json \
+            --markdown-out abi-snapshot-aarch64.md
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline ci/abi-baseline/v1/aarch64.json \
+            --current abi-snapshot-aarch64.json \
+            --label-baseline baseline/aarch64 \
+            --label-current current/aarch64 \
+            --markdown-out abi-compare-aarch64.md
+          cat abi-snapshot-aarch64.md >> "${GITHUB_STEP_SUMMARY}"
+          cat abi-compare-aarch64.md >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Capture latest isolated run
         id: latest_run_aarch64
         if: always()
@@ -437,3 +519,6 @@ jobs:
             build/aarch64/test.log
             build/aarch64/tcc-smoke.log
             build/aarch64/run.log
+            abi-snapshot-aarch64.json
+            abi-snapshot-aarch64.md
+            abi-compare-aarch64.md

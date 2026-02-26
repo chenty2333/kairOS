@@ -108,6 +108,21 @@ jobs:
             assert_structured_latest "${ARCH} tcc smoke gate" "${DEFAULT_SMP}"
           fi
 
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" ABI_SMOKE_ISOLATED=1 ABI_SMOKE_TIMEOUT=300 test-abi-smoke
+          assert_structured_latest "${ARCH} abi smoke gate" "${DEFAULT_SMP}"
+          latest="$(latest_run)"
+          python3 scripts/impl/capture-abi-snapshot.py \
+            --run-dir "${latest}" \
+            --arch "${ARCH}" \
+            --json-out "abi-snapshot-${ARCH}.json" \
+            --markdown-out "abi-snapshot-${ARCH}.md"
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline "ci/abi-baseline/v1/${ARCH}.json" \
+            --current "abi-snapshot-${ARCH}.json" \
+            --label-baseline "baseline/${ARCH}" \
+            --label-current "nightly/${ARCH}" \
+            --markdown-out "abi-compare-${ARCH}.md"
+
           if [[ "${ARCH}" == "aarch64" ]]; then
             make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-syscall-trap
             assert_structured_latest "aarch64 smp4 syscall/trap gate" 4
@@ -129,6 +144,17 @@ jobs:
             --markdown-out "${md_out}" || true
           if [[ -f "${md_out}" ]]; then
             cat "${md_out}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Publish ABI baseline summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -f "abi-snapshot-${ARCH}.md" ]]; then
+            cat "abi-snapshot-${ARCH}.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          if [[ -f "abi-compare-${ARCH}.md" ]]; then
+            cat "abi-compare-${ARCH}.md" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Capture latest isolated run
@@ -153,6 +179,9 @@ jobs:
           path: |
             nightly-failure-summary-${{ matrix.arch }}.json
             nightly-failure-summary-${{ matrix.arch }}.md
+            abi-snapshot-${{ matrix.arch }}.json
+            abi-snapshot-${{ matrix.arch }}.md
+            abi-compare-${{ matrix.arch }}.md
             ${{ steps.latest_run.outputs.path }}/manifest.json
             ${{ steps.latest_run.outputs.path }}/result.json
             ${{ steps.latest_run.outputs.path }}/${{ matrix.arch }}/logs/*.log
@@ -163,3 +192,77 @@ jobs:
             build/runs/*/${{ matrix.arch }}/*.log
             build/${{ matrix.arch }}/test-x86-boot-smp-*.log
             build/${{ matrix.arch }}/test-device-virtio-*.log
+
+  abi-cross-arch:
+    runs-on: ubuntu-24.04
+    needs:
+      - nightly-matrix
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download nightly artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-*
+          path: nightly-artifacts
+          merge-multiple: false
+
+      - name: Compare ABI snapshots across architectures
+        run: |
+          set -euo pipefail
+
+          locate_snapshot() {
+            local arch="$1"
+            find nightly-artifacts -type f -name "abi-snapshot-${arch}.json" | head -n 1 || true
+          }
+
+          rv="$(locate_snapshot riscv64)"
+          x86="$(locate_snapshot x86_64)"
+          a64="$(locate_snapshot aarch64)"
+          if [[ -z "${rv}" || -z "${x86}" || -z "${a64}" ]]; then
+            echo "Missing nightly ABI snapshots: riscv64=${rv} x86_64=${x86} aarch64=${a64}" >&2
+            exit 2
+          fi
+
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline "${rv}" \
+            --current "${x86}" \
+            --label-baseline nightly/riscv64 \
+            --label-current nightly/x86_64 \
+            --json-out abi-cross-riscv64-vs-x86_64.json \
+            --markdown-out abi-cross-riscv64-vs-x86_64.md
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline "${rv}" \
+            --current "${a64}" \
+            --label-baseline nightly/riscv64 \
+            --label-current nightly/aarch64 \
+            --json-out abi-cross-riscv64-vs-aarch64.json \
+            --markdown-out abi-cross-riscv64-vs-aarch64.md
+          python3 scripts/impl/compare-abi-snapshots.py \
+            --baseline "${x86}" \
+            --current "${a64}" \
+            --label-baseline nightly/x86_64 \
+            --label-current nightly/aarch64 \
+            --json-out abi-cross-x86_64-vs-aarch64.json \
+            --markdown-out abi-cross-x86_64-vs-aarch64.md
+
+          cat abi-cross-riscv64-vs-x86_64.md >> "${GITHUB_STEP_SUMMARY}"
+          cat abi-cross-riscv64-vs-aarch64.md >> "${GITHUB_STEP_SUMMARY}"
+          cat abi-cross-x86_64-vs-aarch64.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload ABI cross-arch artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-abi-cross-${{ github.run_id }}
+          retention-days: 21
+          if-no-files-found: warn
+          path: |
+            abi-cross-riscv64-vs-x86_64.json
+            abi-cross-riscv64-vs-x86_64.md
+            abi-cross-riscv64-vs-aarch64.json
+            abi-cross-riscv64-vs-aarch64.md
+            abi-cross-x86_64-vs-aarch64.json
+            abi-cross-x86_64-vs-aarch64.md
