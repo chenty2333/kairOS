@@ -76,6 +76,7 @@ struct irq_action {
     uint32_t deferred_pending;
     uint32_t registration_flags;
     bool removed;
+    bool reclaimed;
     bool managed_enable;
     bool deferred_queued;
     bool deferred_has_ev;
@@ -83,6 +84,7 @@ struct irq_action {
 
 struct irq_desc {
     struct list_head actions;
+    struct list_head retired_actions;
     uint32_t flags;
     uint32_t affinity_mask;
     int enable_count;
@@ -196,6 +198,20 @@ static void irq_action_put_locked(struct irq_action *action)
     action->refs--;
 }
 
+static bool irq_action_try_reclaim_locked(struct irq_action *action)
+{
+    if (!action || action->reclaimed)
+        return false;
+    if (!action->removed || action->refs != 0 || action->deferred_queued)
+        return false;
+
+    if (!list_empty(&action->node))
+        list_del(&action->node);
+    INIT_LIST_HEAD(&action->node);
+    action->reclaimed = true;
+    return true;
+}
+
 static void irq_action_put(struct irq_action *action)
 {
     if (!action)
@@ -205,10 +221,15 @@ static void irq_action_put(struct irq_action *action)
     if (!desc)
         return;
 
+    bool free_action = false;
     bool irq_state;
     spin_lock_irqsave(&desc->lock, &irq_state);
     irq_action_put_locked(action);
+    free_action = irq_action_try_reclaim_locked(action);
     spin_unlock_irqrestore(&desc->lock, irq_state);
+
+    if (free_action)
+        kfree(action);
 }
 
 static bool irq_deferred_queue_action(struct irq_desc *desc,
@@ -316,6 +337,7 @@ static void platform_irq_table_init(void)
 
         for (int i = 0; i < IRQCHIP_MAX_IRQS; i++) {
             INIT_LIST_HEAD(&irq_table[i].actions);
+            INIT_LIST_HEAD(&irq_table[i].retired_actions);
             irq_table[i].flags = 0;
             irq_table[i].affinity_mask = 1U;
             irq_table[i].enable_count = 0;
@@ -1261,7 +1283,8 @@ int platform_irq_domain_remove(uint32_t child_virq)
         struct irq_desc *desc = &irq_table[virq_base + i];
         bool desc_irq_state;
         spin_lock_irqsave(&desc->lock, &desc_irq_state);
-        bool busy = (desc->enable_count > 0) || !list_empty(&desc->actions);
+        bool busy = (desc->enable_count > 0) || !list_empty(&desc->actions) ||
+                    !list_empty(&desc->retired_actions);
         spin_unlock_irqrestore(&desc->lock, desc_irq_state);
         if (busy)
             return -EBUSY;
@@ -1331,14 +1354,17 @@ size_t platform_irq_snapshot(struct irq_stats_entry *entries, size_t capacity,
         bool irq_state;
         spin_lock_irqsave(&desc->lock, &irq_state);
         uint32_t action_count = 0;
+        uint32_t retired_count = 0;
         struct list_head *pos;
         list_for_each(pos, &desc->actions)
             action_count++;
+        list_for_each(pos, &desc->retired_actions)
+            retired_count++;
 
         bool active = action_count > 0 || desc->enable_count > 0 ||
                       desc->enable_count_total > 0 ||
                       desc->disable_count_total > 0 ||
-                      desc->dispatch_count > 0;
+                      desc->dispatch_count > 0 || retired_count > 0;
         if (active_only && !active)
             include = false;
 
@@ -1380,6 +1406,7 @@ int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only)
     for (uint32_t irq = 0; irq < IRQCHIP_MAX_IRQS; irq++) {
         struct irq_desc *desc = &irq_table[irq];
         uint32_t action_count = 0;
+        uint32_t retired_count = 0;
         uint32_t hwirq = 0;
         uint32_t flags = 0;
         uint32_t affinity = 0;
@@ -1393,6 +1420,8 @@ int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only)
         struct list_head *pos;
         list_for_each(pos, &desc->actions)
             action_count++;
+        list_for_each(pos, &desc->retired_actions)
+            retired_count++;
         hwirq = desc->hwirq;
         flags = desc->flags;
         affinity = desc->affinity_mask;
@@ -1403,7 +1432,8 @@ int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only)
         spin_unlock_irqrestore(&desc->lock, irq_state);
 
         if (active_only && action_count == 0 && enable_count == 0 &&
-            enable_total == 0 && disable_total == 0 && dispatch_total == 0) {
+            enable_total == 0 && disable_total == 0 && dispatch_total == 0 &&
+            retired_count == 0) {
             continue;
         }
 
@@ -1446,6 +1476,16 @@ static void irq_desc_recalc_flags_locked(struct irq_desc *desc)
     desc->flags |= merged_flags | merged_type;
 }
 
+static bool irq_action_matches(const struct irq_action *action,
+                               irq_handler_fn handler,
+                               irq_handler_event_fn handler_ev, void *arg)
+{
+    if (!action)
+        return false;
+    return action->handler == handler && action->handler_ev == handler_ev &&
+           action->arg == arg;
+}
+
 static int platform_irq_register_action(int irq, irq_handler_fn handler,
                                         irq_handler_event_fn handler_ev,
                                         void *arg, uint32_t flags,
@@ -1473,6 +1513,7 @@ static int platform_irq_register_action(int irq, irq_handler_fn handler,
     INIT_LIST_HEAD(&action->deferred_node);
     action->deferred_pending = 0;
     action->removed = false;
+    action->reclaimed = false;
     action->managed_enable = managed_enable;
     action->deferred_queued = false;
     action->deferred_has_ev = false;
@@ -1527,18 +1568,25 @@ static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
     struct list_head *next;
     list_for_each_safe(pos, next, &desc->actions) {
         struct irq_action *cur = list_entry(pos, struct irq_action, node);
-        if (cur->handler != handler || cur->handler_ev != handler_ev ||
-            cur->arg != arg)
+        if (!irq_action_matches(cur, handler, handler_ev, arg))
             continue;
         list_del(&cur->node);
         INIT_LIST_HEAD(&cur->node);
         cur->removed = true;
+        list_add_tail(&cur->node, &desc->retired_actions);
         action = cur;
         break;
     }
     if (!action) {
+        list_for_each(pos, &desc->retired_actions) {
+            struct irq_action *cur = list_entry(pos, struct irq_action, node);
+            if (irq_action_matches(cur, handler, handler_ev, arg)) {
+                spin_unlock_irqrestore(&desc->lock, irq_state);
+                return 0;
+            }
+        }
         spin_unlock_irqrestore(&desc->lock, irq_state);
-        return -ENOENT;
+        return 0;
     }
     if (managed_enable_out)
         *managed_enable_out = action->managed_enable;
@@ -1557,30 +1605,14 @@ static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
         spin_unlock_irqrestore(&irq_deferred.lock, deferred_irq_state);
     }
 
-    bool ready = action->refs == 0;
+    bool reclaim_now = irq_action_try_reclaim_locked(action);
 
     irq_desc_recalc_flags_locked(desc);
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
-    if (ready) {
+    if (reclaim_now)
         kfree(action);
-        return 0;
-    }
-
-    for (size_t i = 0; i < 10000; i++) {
-        proc_yield();
-        spin_lock_irqsave(&desc->lock, &irq_state);
-        bool ready = action->refs == 0;
-        spin_unlock_irqrestore(&desc->lock, irq_state);
-        if (!ready)
-            continue;
-        kfree(action);
-        return 0;
-    }
-
-    pr_warn("irq: unregister timeout irq=%d handler=%p arg=%p\n",
-            irq, handler_ev ? (void *)handler_ev : (void *)handler, arg);
-    return -EBUSY;
+    return 0;
 }
 
 int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,

@@ -399,6 +399,8 @@ static volatile uint32_t irq_mock_dispatch_hits;
 static volatile uint32_t irq_cascade_hits;
 static volatile uint32_t irq_request_hits;
 static volatile uint32_t irq_concurrent_hits;
+static volatile uint32_t irq_blocking_entered;
+static volatile uint32_t irq_blocking_release;
 
 struct irq_concurrency_ctx {
     int irq;
@@ -422,6 +424,7 @@ struct irq_mock_state {
 static struct irq_mock_state irq_mock_state;
 static struct irq_mock_state irq_parent_mock_state;
 static struct irq_mock_state irq_child_mock_state;
+static const struct irqchip_ops test_irq_mock_ops;
 
 static void test_irq_shared_handler_a(void *arg __unused,
                                       const struct trap_core_event *ev __unused) {
@@ -459,6 +462,13 @@ static void test_irq_concurrent_handler(void *arg __unused,
     proc_yield();
 }
 
+static void test_irq_blocking_handler(void *arg __unused,
+                                      const struct trap_core_event *ev __unused) {
+    __atomic_store_n(&irq_blocking_entered, 1, __ATOMIC_RELAXED);
+    while (!__atomic_load_n(&irq_blocking_release, __ATOMIC_RELAXED))
+        proc_yield();
+}
+
 static int irq_dispatch_storm_thread(void *arg) {
     struct irq_concurrency_ctx *ctx = arg;
     if (!ctx)
@@ -468,6 +478,14 @@ static int irq_dispatch_storm_thread(void *arg) {
         __atomic_add_fetch(&ctx->dispatch_calls, 1, __ATOMIC_RELAXED);
         proc_yield();
     }
+    return 0;
+}
+
+static int irq_dispatch_once_thread(void *arg) {
+    const int *irq = arg;
+    if (!irq)
+        return -EINVAL;
+    platform_irq_dispatch_nr((uint32_t)*irq);
     return 0;
 }
 
@@ -524,7 +542,7 @@ static void test_irq_unregister_actions(void) {
                "irq unregister keeps remaining handler");
 
     ret = platform_irq_unregister_ex(irq, test_irq_shared_handler_a, NULL);
-    test_check(ret == -ENOENT, "irq unregister missing handler");
+    test_check(ret == 0, "irq unregister idempotent");
 
     ret = platform_irq_unregister_ex(irq, test_irq_shared_handler_b, NULL);
     test_check(ret == 0, "irq unregister second handler");
@@ -579,12 +597,16 @@ static void test_irq_request_free_actions(void) {
 
     ret = arch_free_irq_ex(irq, test_irq_request_handler, NULL);
     test_check(ret == 0, "irq free first handler");
+    ret = arch_free_irq_ex(irq, test_irq_request_handler, NULL);
+    test_check(ret == 0, "irq free first handler idempotent");
     platform_irq_dispatch_nr((uint32_t)irq);
     test_check(__atomic_load_n(&irq_request_hits, __ATOMIC_RELAXED) == 1,
                "irq free removed first handler");
 
     ret = arch_free_irq_ex(irq, test_irq_shared_handler_a, NULL);
     test_check(ret == 0, "irq free second handler");
+    ret = arch_free_irq_ex(irq, test_irq_shared_handler_a, NULL);
+    test_check(ret == 0, "irq free second handler idempotent");
     uint32_t hits_before =
         __atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED);
     platform_irq_dispatch_nr((uint32_t)irq);
@@ -660,6 +682,61 @@ static void test_irq_unregister_dispatch_concurrency(void) {
     test_check(__atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED) ==
                    hits_before,
                "irq concurrent no hits after free");
+}
+
+static void test_irq_domain_remove_waits_reclaim(void) {
+    const uint32_t hwirq = 960;
+    uint32_t virq_base = 0;
+
+    int ret = platform_irq_domain_alloc_linear("test-reclaim-domain",
+                                               &test_irq_mock_ops, hwirq, 1,
+                                               &virq_base);
+    test_check(ret == 0, "irq reclaim domain alloc");
+    if (ret < 0)
+        return;
+
+    int irq = platform_irq_domain_map(&test_irq_mock_ops, hwirq);
+    test_check(irq == (int)virq_base, "irq reclaim domain map");
+    if (irq < 0)
+        return;
+
+    irq_blocking_entered = 0;
+    irq_blocking_release = 0;
+    ret = arch_request_irq_ex(irq, test_irq_blocking_handler, NULL,
+                              IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq reclaim request");
+    if (ret < 0)
+        return;
+
+    struct process *worker =
+        kthread_create_joinable(irq_dispatch_once_thread, &irq, "irqonce");
+    test_check(worker != NULL, "irq reclaim worker create");
+    if (!worker) {
+        (void)arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+        return;
+    }
+    sched_enqueue(worker);
+
+    for (int i = 0; i < 200; i++) {
+        if (__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED))
+            break;
+        proc_yield();
+    }
+    test_check(__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED) == 1,
+               "irq reclaim handler entered");
+
+    ret = arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+    test_check(ret == 0, "irq reclaim free while running");
+
+    ret = platform_irq_domain_remove(virq_base);
+    test_check(ret == -EBUSY, "irq reclaim remove busy before put");
+
+    __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+    int reaped = test_reap_children_bounded(1, "irq_reclaim_once");
+    test_check(reaped == 1, "irq reclaim worker reaped");
+
+    ret = platform_irq_domain_remove(virq_base);
+    test_check(ret == 0, "irq reclaim remove after put");
 }
 
 static void irq_mock_enable(int irq) {
@@ -1375,6 +1452,7 @@ int run_driver_tests(void) {
     test_irq_request_free_actions();
     test_irq_stats_export();
     test_irq_unregister_dispatch_concurrency();
+    test_irq_domain_remove_waits_reclaim();
     test_irq_domain_programming();
     test_irq_domain_custom_mapping();
     test_irq_domain_cascade();
