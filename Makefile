@@ -337,7 +337,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-abi-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-abi-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc test-focused test-focused-auto gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -860,6 +860,13 @@ TEST_CONCURRENCY ?= 3
 TEST_ROUNDS ?= 3
 TEST_CONCURRENT_TARGET ?= test-vfs-ipc
 TEST_CONCURRENT_TIMEOUT ?= $(TEST_TIMEOUT)
+FOCUSED_TARGETS_DEFAULT := test-ipc-cap test-vfs-ipc test-socket test-sched
+FOCUSED_TARGETS ?= $(FOCUSED_TARGETS_DEFAULT)
+FOCUSED_BASE_REF ?= origin/main
+FOCUSED_HEAD_REF ?= HEAD
+FOCUSED_AUTO_ALL_IF_EMPTY ?= 0
+FOCUSED_AUTO_MARKDOWN ?=
+FOCUSED_AUTO_JSON ?=
 RUN_RUNS_ROOT ?= build/runs/run
 RUNS_KEEP_RUN ?= 5
 RUN_GC_AUTO ?= 1
@@ -1365,6 +1372,38 @@ test-concurrent-vfs-ipc:
 		TEST_CONCURRENCY="$(TEST_CONCURRENCY)" TEST_ROUNDS="$(TEST_ROUNDS)" \
 		TEST_CONCURRENT_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" test-concurrent-smoke
 
+test-focused:
+	$(Q)set -eu; \
+	targets="$(strip $(FOCUSED_TARGETS))"; \
+	if [ -z "$$targets" ]; then \
+		echo "test-focused: no targets selected (FOCUSED_TARGETS is empty)" >&2; \
+		exit 2; \
+	fi; \
+	for t in $$targets; do \
+		echo "test-focused: ARCH=$(ARCH) target=$$t"; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" "$$t"; \
+	done
+
+test-focused-auto:
+	$(Q)set -eu; \
+	args="--base $(FOCUSED_BASE_REF) --head $(FOCUSED_HEAD_REF) --format make"; \
+	if [ "$(FOCUSED_AUTO_ALL_IF_EMPTY)" = "1" ]; then \
+		args="$$args --all-if-empty"; \
+	fi; \
+	if [ -n "$(FOCUSED_AUTO_MARKDOWN)" ]; then \
+		args="$$args --markdown-out $(FOCUSED_AUTO_MARKDOWN)"; \
+	fi; \
+	if [ -n "$(FOCUSED_AUTO_JSON)" ]; then \
+		args="$$args --json-out $(FOCUSED_AUTO_JSON)"; \
+	fi; \
+	targets="$$(python3 scripts/impl/select-focused-targets.py $$args)"; \
+	if [ -z "$$targets" ]; then \
+		echo "test-focused-auto: no focused targets selected (base=$(FOCUSED_BASE_REF), head=$(FOCUSED_HEAD_REF))"; \
+		exit 0; \
+	fi; \
+	echo "test-focused-auto: selected targets=$$targets"; \
+	$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" FOCUSED_TARGETS="$$targets" test-focused
+
 print-config:
 	@echo "Kairos Effective Configuration"
 	@echo ""
@@ -1422,6 +1461,8 @@ help:
 	@echo "  test-device-virtio - Run device model + virtio probe-path tests (IRQ matrix on aarch64/riscv64)"
 	@echo "  test-irq-soak - Run IRQ-only long-run soak gate (virtio_iommu forced off)"
 	@echo "  test-concurrent-vfs-ipc - Concurrent smoke preset for test-vfs-ipc"
+	@echo "  test-focused - Run focused high-conflict subsystem gates (ipc-cap/vfs-ipc/socket/sched)"
+	@echo "  test-focused-auto - Auto-select focused gates from git diff and run them"
 	@echo "  print-config - Show effective build/run/test configuration"
 	@echo "  gc-runs  - Keep only latest N isolated runs"
 	@echo "  lock-status - List lock files and metadata (pid/state)"
@@ -1502,6 +1543,8 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-debug - Run tests with CONFIG_DEBUG=1"
 	@echo "  test-matrix - Run SMP x DEBUG test matrix"
 	@echo "  test-concurrent-smoke - Run configurable concurrent test smoke"
+	@echo "  test-focused - Run focused high-conflict subsystem gates (ipc-cap/vfs-ipc/socket/sched)"
+	@echo "  test-focused-auto - Auto-select focused gates from git diff and run them"
 	@echo ""
 	@echo "Advanced Variables:"
 	@echo "  EMBEDDED_INIT - Build embedded init blob (riscv64 only)"
@@ -1515,6 +1558,12 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  TEST_ROUNDS - Rounds for concurrent smoke (default: 3)"
 	@echo "  TEST_CONCURRENT_TARGET - Target used by concurrent smoke (default: test-vfs-ipc)"
 	@echo "  TEST_CONCURRENT_TIMEOUT - TEST_TIMEOUT override for concurrent smoke jobs"
+	@echo "  FOCUSED_TARGETS - Space-separated focused targets (default: $(FOCUSED_TARGETS_DEFAULT))"
+	@echo "  FOCUSED_BASE_REF - Base git ref for test-focused-auto (default: origin/main)"
+	@echo "  FOCUSED_HEAD_REF - Head git ref for test-focused-auto (default: HEAD)"
+	@echo "  FOCUSED_AUTO_ALL_IF_EMPTY - 1 to run all focused targets when no file matched"
+	@echo "  FOCUSED_AUTO_MARKDOWN - Optional markdown selection report path"
+	@echo "  FOCUSED_AUTO_JSON - Optional JSON selection report path"
 	@echo "  RUN_RUNS_ROOT - Isolated run sessions root (default: build/runs/run)"
 	@echo "  RUNS_KEEP_RUN - Number of isolated run sessions to keep (default: 5)"
 	@echo "  RUN_GC_AUTO - Auto run gc-runs before run (default: 1)"

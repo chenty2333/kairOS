@@ -15,6 +15,73 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  focused-pr-riscv64:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          scripts/impl/ci-bootstrap.sh install-host-deps riscv64
+
+      - name: Restore third-party source cache
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+          restore-keys: |
+            third-party-${{ runner.os }}-
+
+      - name: Fetch required third-party sources
+        run: |
+          set -euo pipefail
+          scripts/impl/ci-bootstrap.sh fetch-required-third-party
+
+      - name: Locate riscv64 UEFI firmware
+        run: |
+          set -euo pipefail
+          scripts/impl/ci-bootstrap.sh locate-uefi riscv64
+
+      - name: Run focused subsystem gates (auto-selected)
+        run: |
+          set -euo pipefail
+          base_ref="${{ github.event.pull_request.base.sha }}"
+          head_ref="${{ github.event.pull_request.head.sha }}"
+          echo "focused gate diff: ${base_ref}...${head_ref}"
+          make --no-print-directory \
+            ARCH=riscv64 \
+            TEST_TIMEOUT=300 \
+            FOCUSED_BASE_REF="${base_ref}" \
+            FOCUSED_HEAD_REF="${head_ref}" \
+            FOCUSED_AUTO_MARKDOWN=focused-targets-riscv64.md \
+            FOCUSED_AUTO_JSON=focused-targets-riscv64.json \
+            test-focused-auto
+          if [[ -f focused-targets-riscv64.md ]]; then
+            cat focused-targets-riscv64.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload focused gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-focused-riscv64-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            focused-targets-riscv64.json
+            focused-targets-riscv64.md
+            build/runs/*/manifest.json
+            build/runs/*/result.json
+            build/runs/*/riscv64/logs/*.log
+            build/runs/*/riscv64/*.log
+
   riscv64-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
