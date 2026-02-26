@@ -3,10 +3,13 @@
  */
 
 #include <kairos/handle.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
+#include <kairos/syscall.h>
 #include <kairos/uaccess.h>
+#include <kairos/vfs.h>
 
 static inline int32_t syshandle_abi_i32(uint64_t raw) {
     return (int32_t)(uint32_t)raw;
@@ -125,6 +128,81 @@ int64_t sys_kairos_cap_rights_limit(uint64_t fd, uint64_t rights_mask,
         return -EINVAL;
 
     return fd_limit_rights(p, syshandle_abi_i32(fd), (uint32_t)rights_mask, NULL);
+}
+
+int64_t sys_kairos_handle_from_fd(uint64_t fd, uint64_t out_handle_ptr,
+                                  uint64_t rights_mask, uint64_t flags,
+                                  uint64_t a4, uint64_t a5) {
+    (void)a4;
+    (void)a5;
+
+    if (!out_handle_ptr)
+        return -EFAULT;
+    if ((uint32_t)flags != 0)
+        return -EINVAL;
+    if (rights_mask & ~(uint64_t)(KRIGHT_READ | KRIGHT_WRITE | KRIGHT_TRANSFER |
+                                  KRIGHT_DUPLICATE | KRIGHT_MANAGE))
+        return -EINVAL;
+
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+
+    struct kobj *file_obj = NULL;
+    uint32_t desired = 0;
+    int rc = handle_bridge_kobj_from_fd(p, syshandle_abi_i32(fd),
+                                        (uint32_t)rights_mask, &file_obj,
+                                        &desired);
+    if (rc < 0)
+        return rc;
+
+    int32_t handle = khandle_alloc(p, file_obj, desired);
+    kobj_put(file_obj);
+    if (handle < 0)
+        return handle;
+
+    if (copy_to_user((void *)out_handle_ptr, &handle, sizeof(handle)) < 0) {
+        (void)khandle_close(p, handle);
+        return -EFAULT;
+    }
+    return 0;
+}
+
+int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
+                                  uint64_t flags, uint64_t a3, uint64_t a4,
+                                  uint64_t a5) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+
+    if (!out_fd_ptr)
+        return -EFAULT;
+    if ((uint32_t)flags & ~O_CLOEXEC)
+        return -EINVAL;
+
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+
+    struct kobj *obj = NULL;
+    uint32_t rights = 0;
+    int rc = khandle_get(p, syshandle_abi_i32(handle), KRIGHT_DUPLICATE, &obj,
+                         &rights);
+    if (rc < 0)
+        return rc;
+
+    uint32_t fd_flags = ((uint32_t)flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    int new_fd = -1;
+    rc = handle_bridge_fd_from_kobj(p, obj, rights, fd_flags, &new_fd);
+    kobj_put(obj);
+    if (rc < 0)
+        return rc;
+
+    if (copy_to_user((void *)out_fd_ptr, &new_fd, sizeof(new_fd)) < 0) {
+        (void)fd_close(p, new_fd);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 int64_t sys_kairos_channel_create(uint64_t out0_ptr, uint64_t out1_ptr,

@@ -137,6 +137,7 @@ Current IPC mechanisms:
 - Inotify: `inotify_init1/add_watch/rm_watch` is wired with vnode-based watches and pollable event queue delivery
 - Capability handles: per-process `handletable` (refcounted; cloned with `CLONE_FILES` sharing or copied otherwise), rights-mask model (`READ/WRITE/TRANSFER/DUPLICATE/WAIT/MANAGE`), and generic `kobj` refcounted object lifetime
 - Capability file bridge: Linux fd/file objects can be wrapped as `KOBJ_TYPE_FILE` handles and converted back to fd without changing Linux ABI syscalls; `fd_alloc_rights()` preserves rights attenuation when materializing fd from a handle
+- Internal bridge helpers (`handle_bridge`) centralize fd-rights <-> handle-rights mapping plus fd<->`KOBJ_TYPE_FILE` conversion, so non-syscall kernel paths can reuse one capability conversion entrypoint
 - FD capability rights: fdtable entries carry independent rights mask (`FD_RIGHT_READ/WRITE/IOCTL/DUP`); `read*`/`write*`/`copy_file_range`/`ioctl` enforce required rights, and `dup*`/`fcntl(F_DUPFD*)` require `FD_RIGHT_DUP`
 - Socket message data paths now use fd-right checks internally: `send*` requires `FD_RIGHT_WRITE`, `recv*` requires `FD_RIGHT_READ`
 - FD rights coverage also gates mutating descriptor/file operations: `ftruncate`/`fchmod`/`fchown` require `FD_RIGHT_WRITE`, `fcntl(F_SETFL)` requires `FD_RIGHT_IOCTL`, and file-backed `mmap` enforces `FD_RIGHT_READ` (+ `FD_RIGHT_WRITE` for `MAP_SHARED|PROT_WRITE`)
