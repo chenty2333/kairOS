@@ -74,7 +74,9 @@ struct irq_action {
     struct list_head deferred_node;
     struct trap_core_event deferred_ev;
     uint32_t deferred_pending;
+    uint32_t registration_flags;
     bool removed;
+    bool managed_enable;
     bool deferred_queued;
     bool deferred_has_ev;
 };
@@ -87,6 +89,8 @@ struct irq_desc {
     uint32_t hwirq;
     const struct irqchip_ops *chip;
     uint64_t dispatch_count;
+    uint64_t enable_count_total;
+    uint64_t disable_count_total;
     bool overflow_warned;
     spinlock_t lock;
 };
@@ -101,6 +105,9 @@ struct irq_domain {
     struct irq_domain *parent;
     const char *name;
     const struct irqchip_ops *chip;
+    irq_domain_map_hwirq_fn map_hwirq;
+    irq_domain_map_virq_fn map_virq;
+    void *map_ctx;
     uint32_t fwnode;
     uint32_t hwirq_base;
     uint32_t virq_base;
@@ -134,10 +141,12 @@ static int irq_deferred_worker(void *arg __unused);
 static struct irq_desc *platform_irq_desc_get(int irq);
 static int platform_irq_register_action(int irq, irq_handler_fn handler,
                                         irq_handler_event_fn handler_ev,
-                                        void *arg, uint32_t flags);
+                                        void *arg, uint32_t flags,
+                                        bool managed_enable);
 static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
                                           irq_handler_event_fn handler_ev,
-                                          void *arg);
+                                          void *arg,
+                                          bool *managed_enable_out);
 
 static void irq_deferred_init(void)
 {
@@ -313,6 +322,8 @@ static void platform_irq_table_init(void)
             irq_table[i].hwirq = (uint32_t)i;
             irq_table[i].chip = chip;
             irq_table[i].dispatch_count = 0;
+            irq_table[i].enable_count_total = 0;
+            irq_table[i].disable_count_total = 0;
             irq_table[i].overflow_warned = false;
             spin_init(&irq_table[i].lock);
         }
@@ -355,6 +366,62 @@ static bool irq_ranges_overlap(uint32_t base_a, uint32_t count_a,
     return ((uint64_t)base_a < end_b) && ((uint64_t)base_b < end_a);
 }
 
+static int irq_domain_default_map_hwirq(uint32_t hwirq, uint32_t virq_base,
+                                        uint32_t nr_irqs, void *map_ctx,
+                                        uint32_t *virq_out)
+{
+    uint32_t hwirq_base = (uint32_t)(uintptr_t)map_ctx;
+    if (!virq_out || !nr_irqs)
+        return -EINVAL;
+    if ((uint64_t)hwirq < hwirq_base ||
+        (uint64_t)hwirq >= ((uint64_t)hwirq_base + nr_irqs))
+        return -ENOENT;
+    *virq_out = virq_base + (hwirq - hwirq_base);
+    return 0;
+}
+
+static int irq_domain_default_map_virq(uint32_t virq, uint32_t virq_base,
+                                       uint32_t nr_irqs, void *map_ctx,
+                                       uint32_t *hwirq_out)
+{
+    uint32_t hwirq_base = (uint32_t)(uintptr_t)map_ctx;
+    if (!hwirq_out || !nr_irqs)
+        return -EINVAL;
+    if ((uint64_t)virq < virq_base ||
+        (uint64_t)virq >= ((uint64_t)virq_base + nr_irqs))
+        return -ENOENT;
+    *hwirq_out = hwirq_base + (virq - virq_base);
+    return 0;
+}
+
+static int irq_domain_map_hwirq_to_virq_locked(const struct irq_domain *dom,
+                                               uint32_t hwirq,
+                                               uint32_t *virq_out)
+{
+    if (!dom || !virq_out || !dom->map_hwirq)
+        return -EINVAL;
+    uint32_t virq = 0;
+    int ret = dom->map_hwirq(hwirq, dom->virq_base, dom->nr_irqs,
+                             dom->map_ctx, &virq);
+    if (ret < 0)
+        return ret;
+    if ((uint64_t)virq < dom->virq_base ||
+        (uint64_t)virq >= ((uint64_t)dom->virq_base + dom->nr_irqs))
+        return -ERANGE;
+    *virq_out = virq;
+    return 0;
+}
+
+static int irq_domain_map_virq_to_hwirq_locked(const struct irq_domain *dom,
+                                               uint32_t virq,
+                                               uint32_t *hwirq_out)
+{
+    if (!dom || !hwirq_out || !dom->map_virq)
+        return -EINVAL;
+    return dom->map_virq(virq, dom->virq_base, dom->nr_irqs, dom->map_ctx,
+                         hwirq_out);
+}
+
 static int irq_domain_find_free_virq_base_locked(uint32_t nr_irqs,
                                                  uint32_t *virq_base_out)
 {
@@ -391,13 +458,12 @@ static int irq_domain_map_locked_by_chip(const struct irqchip_ops *chip,
     struct list_head *pos;
     list_for_each(pos, &irq_domains) {
         const struct irq_domain *dom = list_entry(pos, struct irq_domain, node);
-        uint64_t hwirq_end = (uint64_t)dom->hwirq_base + dom->nr_irqs;
         if (dom->chip != chip)
             continue;
-        if ((uint64_t)hwirq < dom->hwirq_base ||
-            (uint64_t)hwirq >= hwirq_end)
+        uint32_t virq = 0;
+        if (irq_domain_map_hwirq_to_virq_locked(dom, hwirq, &virq) < 0)
             continue;
-        return (int)(dom->virq_base + (hwirq - dom->hwirq_base));
+        return (int)virq;
     }
     return -ENOENT;
 }
@@ -407,13 +473,12 @@ static int irq_domain_map_locked_by_fwnode(uint32_t fwnode, uint32_t hwirq)
     struct list_head *pos;
     list_for_each(pos, &irq_domains) {
         const struct irq_domain *dom = list_entry(pos, struct irq_domain, node);
-        uint64_t hwirq_end = (uint64_t)dom->hwirq_base + dom->nr_irqs;
         if (!dom->fwnode || dom->fwnode != fwnode)
             continue;
-        if ((uint64_t)hwirq < dom->hwirq_base ||
-            (uint64_t)hwirq >= hwirq_end)
+        uint32_t virq = 0;
+        if (irq_domain_map_hwirq_to_virq_locked(dom, hwirq, &virq) < 0)
             continue;
-        return (int)(dom->virq_base + (hwirq - dom->hwirq_base));
+        return (int)virq;
     }
     return -ENOENT;
 }
@@ -427,6 +492,27 @@ static struct irq_domain *irq_domain_find_locked_by_fwnode(uint32_t fwnode)
         struct irq_domain *dom = list_entry(pos, struct irq_domain, node);
         if (dom->fwnode == fwnode)
             return dom;
+    }
+    return NULL;
+}
+
+static struct irq_domain *irq_domain_find_locked_by_chip(
+    const struct irqchip_ops *chip, uint32_t fwnode, uint32_t hwirq_base,
+    uint32_t nr_irqs, irq_domain_map_hwirq_fn map_hwirq,
+    irq_domain_map_virq_fn map_virq, void *map_ctx)
+{
+    if (!chip || !nr_irqs)
+        return NULL;
+    struct list_head *pos;
+    list_for_each(pos, &irq_domains) {
+        struct irq_domain *dom = list_entry(pos, struct irq_domain, node);
+        if (dom->chip != chip || dom->fwnode != fwnode ||
+            dom->hwirq_base != hwirq_base || dom->nr_irqs != nr_irqs ||
+            dom->map_hwirq != map_hwirq || dom->map_virq != map_virq ||
+            dom->map_ctx != map_ctx) {
+            continue;
+        }
+        return dom;
     }
     return NULL;
 }
@@ -565,47 +651,105 @@ static int irq_domain_cascade_ref_update(uint32_t virq, bool enable,
     return 0;
 }
 
-static int platform_irq_domain_add_linear_locked(const char *name,
-                                                 const struct irqchip_ops *chip,
-                                                 uint32_t fwnode,
-                                                 uint32_t hwirq_base,
-                                                 uint32_t *virq_base_io,
-                                                 uint32_t nr_irqs,
-                                                 struct irq_domain *new_domain,
-                                                 bool *inserted_out)
+static void irq_domain_reset_desc_range(uint32_t virq_base, uint32_t nr_irqs)
 {
-    if (!chip || !nr_irqs || !virq_base_io || !new_domain || !inserted_out)
+    const struct platform_desc *plat = platform_get();
+    const struct irqchip_ops *root_chip = plat ? plat->irqchip : NULL;
+
+    for (uint32_t i = 0; i < nr_irqs; i++) {
+        struct irq_desc *desc = &irq_table[virq_base + i];
+        bool desc_irq_state;
+        spin_lock_irqsave(&desc->lock, &desc_irq_state);
+        desc->flags = 0;
+        desc->affinity_mask = 1U;
+        desc->hwirq = virq_base + i;
+        desc->chip = root_chip;
+        desc->dispatch_count = 0;
+        desc->enable_count_total = 0;
+        desc->disable_count_total = 0;
+        desc->overflow_warned = false;
+        spin_unlock_irqrestore(&desc->lock, desc_irq_state);
+    }
+}
+
+static int irq_domain_program_desc_range(const struct irq_domain *domain)
+{
+    if (!domain)
         return -EINVAL;
+    for (uint32_t i = 0; i < domain->nr_irqs; i++) {
+        uint32_t virq = domain->virq_base + i;
+        uint32_t hwirq = 0;
+        int ret = irq_domain_map_virq_to_hwirq_locked(domain, virq, &hwirq);
+        if (ret < 0)
+            return ret;
+
+        struct irq_desc *desc = &irq_table[virq];
+        bool desc_irq_state;
+        spin_lock_irqsave(&desc->lock, &desc_irq_state);
+        desc->chip = domain->chip;
+        desc->hwirq = hwirq;
+        spin_unlock_irqrestore(&desc->lock, desc_irq_state);
+    }
+    return 0;
+}
+
+static int platform_irq_domain_add_mapped_locked(
+    const char *name, const struct irqchip_ops *chip, uint32_t fwnode,
+    uint32_t hwirq_base, uint32_t *virq_base_io, uint32_t nr_irqs,
+    irq_domain_map_hwirq_fn map_hwirq, irq_domain_map_virq_fn map_virq,
+    void *map_ctx, struct irq_domain *new_domain, bool *inserted_out)
+{
+    if (!chip || !nr_irqs || !virq_base_io || !new_domain || !inserted_out ||
+        !map_hwirq || !map_virq) {
+        return -EINVAL;
+    }
 
     *inserted_out = false;
 
     uint32_t virq_base = *virq_base_io;
     if (virq_base == IRQ_DOMAIN_AUTO_VIRQ) {
         int alloc_ret = irq_domain_find_free_virq_base_locked(nr_irqs,
-                                                              &virq_base);
+                                                               &virq_base);
         if (alloc_ret < 0)
             return alloc_ret;
     }
     if (virq_base >= IRQCHIP_MAX_IRQS ||
-        ((uint64_t)virq_base + nr_irqs) > IRQCHIP_MAX_IRQS)
+        ((uint64_t)virq_base + nr_irqs) > IRQCHIP_MAX_IRQS) {
         return -ERANGE;
+    }
+
+    bool new_is_linear = (map_hwirq == irq_domain_default_map_hwirq &&
+                          map_virq == irq_domain_default_map_virq);
 
     struct list_head *pos;
     list_for_each(pos, &irq_domains) {
         const struct irq_domain *dom = list_entry(pos, struct irq_domain, node);
+        bool dom_is_linear = (dom->map_hwirq == irq_domain_default_map_hwirq &&
+                              dom->map_virq == irq_domain_default_map_virq);
+
         if (dom->chip == chip && dom->fwnode == fwnode &&
             dom->hwirq_base == hwirq_base && dom->virq_base == virq_base &&
-            dom->nr_irqs == nr_irqs) {
+            dom->nr_irqs == nr_irqs && dom->map_hwirq == map_hwirq &&
+            dom->map_virq == map_virq && dom->map_ctx == map_ctx) {
             *virq_base_io = dom->virq_base;
             return 0;
         }
-        if (irq_ranges_overlap(dom->virq_base, dom->nr_irqs,
-                               virq_base, nr_irqs))
+
+        if (irq_ranges_overlap(dom->virq_base, dom->nr_irqs, virq_base,
+                               nr_irqs)) {
             return -EEXIST;
-        if (dom->chip == chip && dom->fwnode == fwnode &&
-            irq_ranges_overlap(dom->hwirq_base, dom->nr_irqs,
-                               hwirq_base, nr_irqs))
-            return -EEXIST;
+        }
+
+        if (dom->chip == chip && dom->fwnode == fwnode) {
+            if (new_is_linear && dom_is_linear &&
+                irq_ranges_overlap(dom->hwirq_base, dom->nr_irqs, hwirq_base,
+                                   nr_irqs)) {
+                return -EEXIST;
+            }
+            if (!new_is_linear || !dom_is_linear)
+                return -EEXIST;
+        }
+
         if (fwnode && dom->fwnode == fwnode)
             return -EEXIST;
     }
@@ -617,6 +761,9 @@ static int platform_irq_domain_add_linear_locked(const char *name,
     domain->parent = NULL;
     domain->name = name;
     domain->chip = chip;
+    domain->map_hwirq = map_hwirq;
+    domain->map_virq = map_virq;
+    domain->map_ctx = map_ctx;
     domain->fwnode = fwnode;
     domain->hwirq_base = hwirq_base;
     domain->virq_base = virq_base;
@@ -633,14 +780,25 @@ static int platform_irq_domain_add_linear_locked(const char *name,
     return 0;
 }
 
-int platform_irq_domain_add_linear_fwnode(const char *name,
+int platform_irq_domain_add_mapped_fwnode(const char *name,
                                           const struct irqchip_ops *chip,
                                           uint32_t fwnode,
                                           uint32_t hwirq_base,
                                           uint32_t virq_base,
-                                          uint32_t nr_irqs)
+                                          uint32_t nr_irqs,
+                                          irq_domain_map_hwirq_fn map_hwirq,
+                                          irq_domain_map_virq_fn map_virq,
+                                          void *map_ctx)
 {
     platform_irq_table_init();
+
+    if ((map_hwirq && !map_virq) || (!map_hwirq && map_virq))
+        return -EINVAL;
+    if (!map_hwirq || !map_virq) {
+        map_hwirq = irq_domain_default_map_hwirq;
+        map_virq = irq_domain_default_map_virq;
+        map_ctx = (void *)(uintptr_t)hwirq_base;
+    }
 
     struct irq_domain *new_domain = kzalloc(sizeof(*new_domain));
     if (!new_domain)
@@ -650,35 +808,68 @@ int platform_irq_domain_add_linear_fwnode(const char *name,
     bool inserted = false;
     bool irq_state;
     spin_lock_irqsave(&irq_domain_lock, &irq_state);
-    int ret = platform_irq_domain_add_linear_locked(name, chip, fwnode,
-                                                    hwirq_base,
-                                                    &resolved_virq_base,
-                                                    nr_irqs, new_domain,
-                                                    &inserted);
+    int ret = platform_irq_domain_add_mapped_locked(
+        name, chip, fwnode, hwirq_base, &resolved_virq_base, nr_irqs, map_hwirq,
+        map_virq, map_ctx, new_domain, &inserted);
     spin_unlock_irqrestore(&irq_domain_lock, irq_state);
     if (ret < 0) {
         kfree(new_domain);
         return ret;
     }
-    if (!inserted)
-        kfree(new_domain);
 
-    for (uint32_t i = 0; i < nr_irqs; i++) {
-        struct irq_desc *desc = &irq_table[resolved_virq_base + i];
-        bool desc_irq_state;
-        spin_lock_irqsave(&desc->lock, &desc_irq_state);
-        desc->chip = chip;
-        desc->hwirq = hwirq_base + i;
-        spin_unlock_irqrestore(&desc->lock, desc_irq_state);
+    if (!inserted) {
+        kfree(new_domain);
+        return 0;
+    }
+
+    ret = irq_domain_program_desc_range(new_domain);
+    if (ret < 0) {
+        if (inserted) {
+            spin_lock_irqsave(&irq_domain_lock, &irq_state);
+            struct irq_domain *dom =
+                irq_domain_find_locked_by_virq_base(resolved_virq_base);
+            if (dom && dom == new_domain) {
+                list_del(&dom->node);
+                irq_domain_count--;
+            }
+            spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+            irq_domain_reset_desc_range(resolved_virq_base, nr_irqs);
+            kfree(new_domain);
+        }
+        return ret;
     }
 
     if (inserted) {
-        pr_info("irq: domain '%s' fwnode=0x%x hwirq[%u..%u] -> virq[%u..%u]\n",
-                name ? name : "unnamed", fwnode,
-                hwirq_base, hwirq_base + nr_irqs - 1, resolved_virq_base,
+        pr_info("irq: domain '%s' fwnode=0x%x virq[%u..%u] mapped\n",
+                name ? name : "unnamed", fwnode, resolved_virq_base,
                 resolved_virq_base + nr_irqs - 1);
     }
     return 0;
+}
+
+int platform_irq_domain_add_mapped(const char *name,
+                                   const struct irqchip_ops *chip,
+                                   uint32_t hwirq_base, uint32_t virq_base,
+                                   uint32_t nr_irqs,
+                                   irq_domain_map_hwirq_fn map_hwirq,
+                                   irq_domain_map_virq_fn map_virq,
+                                   void *map_ctx)
+{
+    return platform_irq_domain_add_mapped_fwnode(
+        name, chip, 0, hwirq_base, virq_base, nr_irqs, map_hwirq, map_virq,
+        map_ctx);
+}
+
+int platform_irq_domain_add_linear_fwnode(const char *name,
+                                          const struct irqchip_ops *chip,
+                                          uint32_t fwnode,
+                                          uint32_t hwirq_base,
+                                          uint32_t virq_base,
+                                          uint32_t nr_irqs)
+{
+    return platform_irq_domain_add_mapped_fwnode(name, chip, fwnode,
+                                                 hwirq_base, virq_base,
+                                                 nr_irqs, NULL, NULL, NULL);
 }
 
 int platform_irq_domain_add_linear(const char *name,
@@ -690,13 +881,66 @@ int platform_irq_domain_add_linear(const char *name,
                                                  virq_base, nr_irqs);
 }
 
+int platform_irq_domain_alloc_mapped_fwnode(const char *name,
+                                            const struct irqchip_ops *chip,
+                                            uint32_t fwnode,
+                                            uint32_t hwirq_base,
+                                            uint32_t nr_irqs,
+                                            irq_domain_map_hwirq_fn map_hwirq,
+                                            irq_domain_map_virq_fn map_virq,
+                                            void *map_ctx,
+                                            uint32_t *virq_base_out)
+{
+    if (!virq_base_out)
+        return -EINVAL;
+
+    int ret = platform_irq_domain_add_mapped_fwnode(
+        name, chip, fwnode, hwirq_base, IRQ_DOMAIN_AUTO_VIRQ, nr_irqs,
+        map_hwirq, map_virq, map_ctx);
+    if (ret < 0)
+        return ret;
+
+    bool irq_state;
+    spin_lock_irqsave(&irq_domain_lock, &irq_state);
+    struct irq_domain *dom = irq_domain_find_locked_by_chip(chip, fwnode,
+                                                             hwirq_base,
+                                                             nr_irqs, map_hwirq,
+                                                             map_virq, map_ctx);
+    if (!dom && (!map_hwirq || !map_virq)) {
+        dom = irq_domain_find_locked_by_chip(chip, fwnode, hwirq_base, nr_irqs,
+                                             irq_domain_default_map_hwirq,
+                                             irq_domain_default_map_virq,
+                                             (void *)(uintptr_t)hwirq_base);
+    }
+    if (!dom) {
+        spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+        return -ENOENT;
+    }
+    *virq_base_out = dom->virq_base;
+    spin_unlock_irqrestore(&irq_domain_lock, irq_state);
+    return 0;
+}
+
+int platform_irq_domain_alloc_mapped(const char *name,
+                                     const struct irqchip_ops *chip,
+                                     uint32_t hwirq_base, uint32_t nr_irqs,
+                                     irq_domain_map_hwirq_fn map_hwirq,
+                                     irq_domain_map_virq_fn map_virq,
+                                     void *map_ctx,
+                                     uint32_t *virq_base_out)
+{
+    return platform_irq_domain_alloc_mapped_fwnode(
+        name, chip, 0, hwirq_base, nr_irqs, map_hwirq, map_virq, map_ctx,
+        virq_base_out);
+}
+
 int platform_irq_domain_alloc_linear(const char *name,
                                      const struct irqchip_ops *chip,
                                      uint32_t hwirq_base, uint32_t nr_irqs,
                                      uint32_t *virq_base_out)
 {
-    return platform_irq_domain_alloc_linear_fwnode(name, chip, 0, hwirq_base,
-                                                   nr_irqs, virq_base_out);
+    return platform_irq_domain_alloc_mapped(name, chip, hwirq_base, nr_irqs,
+                                            NULL, NULL, NULL, virq_base_out);
 }
 
 int platform_irq_domain_alloc_linear_fwnode(const char *name,
@@ -706,21 +950,9 @@ int platform_irq_domain_alloc_linear_fwnode(const char *name,
                                             uint32_t nr_irqs,
                                             uint32_t *virq_base_out)
 {
-    if (!virq_base_out)
-        return -EINVAL;
-
-    int ret = platform_irq_domain_add_linear_fwnode(name, chip, fwnode,
-                                                    hwirq_base,
-                                                    IRQ_DOMAIN_AUTO_VIRQ,
-                                                    nr_irqs);
-    if (ret < 0)
-        return ret;
-    int virq = (fwnode != 0) ? platform_irq_domain_map_fwnode(fwnode, hwirq_base)
-                             : platform_irq_domain_map(chip, hwirq_base);
-    if (virq < 0)
-        return virq;
-    *virq_base_out = (uint32_t)virq;
-    return 0;
+    return platform_irq_domain_alloc_mapped_fwnode(
+        name, chip, fwnode, hwirq_base, nr_irqs, NULL, NULL, NULL,
+        virq_base_out);
 }
 
 int platform_irq_domain_setup_cascade(const char *name,
@@ -731,7 +963,20 @@ int platform_irq_domain_setup_cascade(const char *name,
                                       uint32_t flags,
                                       uint32_t *virq_base_out)
 {
-    int ret = platform_irq_domain_alloc_linear(name, chip, hwirq_base, nr_irqs,
+    return platform_irq_domain_setup_cascade_mapped(
+        name, chip, hwirq_base, nr_irqs, NULL, NULL, NULL, parent_irq,
+        handler, arg, flags, virq_base_out);
+}
+
+int platform_irq_domain_setup_cascade_mapped(
+    const char *name, const struct irqchip_ops *chip, uint32_t hwirq_base,
+    uint32_t nr_irqs, irq_domain_map_hwirq_fn map_hwirq,
+    irq_domain_map_virq_fn map_virq, void *map_ctx, int parent_irq,
+    irq_handler_event_fn handler, void *arg, uint32_t flags,
+    uint32_t *virq_base_out)
+{
+    int ret = platform_irq_domain_alloc_mapped(name, chip, hwirq_base, nr_irqs,
+                                               map_hwirq, map_virq, map_ctx,
                                                virq_base_out);
     if (ret < 0)
         return ret;
@@ -749,9 +994,21 @@ int platform_irq_domain_setup_cascade_fwnode(const char *name,
                                              void *arg, uint32_t flags,
                                              uint32_t *virq_base_out)
 {
-    int ret = platform_irq_domain_alloc_linear_fwnode(name, chip, fwnode,
-                                                      hwirq_base, nr_irqs,
-                                                      virq_base_out);
+    return platform_irq_domain_setup_cascade_mapped_fwnode(
+        name, chip, fwnode, hwirq_base, nr_irqs, NULL, NULL, NULL, parent_irq,
+        handler, arg, flags, virq_base_out);
+}
+
+int platform_irq_domain_setup_cascade_mapped_fwnode(
+    const char *name, const struct irqchip_ops *chip, uint32_t fwnode,
+    uint32_t hwirq_base, uint32_t nr_irqs,
+    irq_domain_map_hwirq_fn map_hwirq, irq_domain_map_virq_fn map_virq,
+    void *map_ctx, int parent_irq, irq_handler_event_fn handler, void *arg,
+    uint32_t flags, uint32_t *virq_base_out)
+{
+    int ret = platform_irq_domain_alloc_mapped_fwnode(
+        name, chip, fwnode, hwirq_base, nr_irqs, map_hwirq, map_virq, map_ctx,
+        virq_base_out);
     if (ret < 0)
         return ret;
     return platform_irq_domain_set_cascade(*virq_base_out, parent_irq, handler,
@@ -873,7 +1130,7 @@ int platform_irq_domain_set_cascade(uint32_t child_virq, int parent_irq,
     action_flags |= (flags & (IRQ_FLAG_TRIGGER_MASK | IRQ_FLAG_DEFERRED));
     ret = platform_irq_register_action(parent_irq, NULL,
                                        irq_domain_cascade_action, dom,
-                                       action_flags);
+                                       action_flags, false);
     if (ret < 0) {
         spin_lock_irqsave(&irq_domain_lock, &irq_state);
         irq_domain_clear_cascade_locked(dom);
@@ -934,7 +1191,8 @@ int platform_irq_domain_unset_cascade(uint32_t child_virq)
     spin_unlock_irqrestore(&irq_domain_lock, irq_state);
 
     int ret = platform_irq_unregister_action(parent_irq, NULL,
-                                             irq_domain_cascade_action, dom);
+                                             irq_domain_cascade_action, dom,
+                                             NULL);
     if (ret < 0) {
         spin_lock_irqsave(&irq_domain_lock, &irq_state);
         if (dom->parent_irq < 0)
@@ -1025,20 +1283,7 @@ int platform_irq_domain_remove(uint32_t child_virq)
     irq_domain_count--;
     spin_unlock_irqrestore(&irq_domain_lock, irq_state);
 
-    const struct platform_desc *plat = platform_get();
-    const struct irqchip_ops *root_chip = plat ? plat->irqchip : NULL;
-    for (uint32_t i = 0; i < nr_irqs; i++) {
-        struct irq_desc *desc = &irq_table[virq_base + i];
-        bool desc_irq_state;
-        spin_lock_irqsave(&desc->lock, &desc_irq_state);
-        desc->flags = 0;
-        desc->affinity_mask = 1U;
-        desc->hwirq = virq_base + i;
-        desc->chip = root_chip;
-        desc->dispatch_count = 0;
-        desc->overflow_warned = false;
-        spin_unlock_irqrestore(&desc->lock, desc_irq_state);
-    }
+    irq_domain_reset_desc_range(virq_base, nr_irqs);
 
     kfree(dom);
     return 0;
@@ -1072,6 +1317,116 @@ int platform_irq_domain_map_fwnode(uint32_t fwnode, uint32_t hwirq)
     return virq;
 }
 
+size_t platform_irq_snapshot(struct irq_stats_entry *entries, size_t capacity,
+                             bool active_only)
+{
+    platform_irq_table_init();
+
+    size_t out = 0;
+    for (uint32_t irq = 0; irq < IRQCHIP_MAX_IRQS; irq++) {
+        struct irq_desc *desc = &irq_table[irq];
+        struct irq_stats_entry snap = {0};
+        bool include = true;
+
+        bool irq_state;
+        spin_lock_irqsave(&desc->lock, &irq_state);
+        uint32_t action_count = 0;
+        struct list_head *pos;
+        list_for_each(pos, &desc->actions)
+            action_count++;
+
+        bool active = action_count > 0 || desc->enable_count > 0 ||
+                      desc->enable_count_total > 0 ||
+                      desc->disable_count_total > 0 ||
+                      desc->dispatch_count > 0;
+        if (active_only && !active)
+            include = false;
+
+        if (include) {
+            snap.virq = irq;
+            snap.hwirq = desc->hwirq;
+            snap.flags = desc->flags;
+            snap.affinity_mask = desc->affinity_mask;
+            snap.enable_count = desc->enable_count;
+            snap.action_count = action_count;
+            snap.enable_calls = desc->enable_count_total;
+            snap.disable_calls = desc->disable_count_total;
+            snap.dispatch_calls = desc->dispatch_count;
+        }
+        spin_unlock_irqrestore(&desc->lock, irq_state);
+
+        if (!include)
+            continue;
+        if (entries && out < capacity)
+            entries[out] = snap;
+        out++;
+    }
+    return out;
+}
+
+int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only)
+{
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+    platform_irq_table_init();
+
+    int len = snprintf(buf, bufsz,
+                       "irq  hwirq en_cur  en_total dis_total dispatch actions flags      affinity\n");
+    if (len < 0)
+        return len;
+    if ((size_t)len >= bufsz)
+        return (int)(bufsz - 1);
+
+    for (uint32_t irq = 0; irq < IRQCHIP_MAX_IRQS; irq++) {
+        struct irq_desc *desc = &irq_table[irq];
+        uint32_t action_count = 0;
+        uint32_t hwirq = 0;
+        uint32_t flags = 0;
+        uint32_t affinity = 0;
+        int enable_count = 0;
+        uint64_t enable_total = 0;
+        uint64_t disable_total = 0;
+        uint64_t dispatch_total = 0;
+
+        bool irq_state;
+        spin_lock_irqsave(&desc->lock, &irq_state);
+        struct list_head *pos;
+        list_for_each(pos, &desc->actions)
+            action_count++;
+        hwirq = desc->hwirq;
+        flags = desc->flags;
+        affinity = desc->affinity_mask;
+        enable_count = desc->enable_count;
+        enable_total = desc->enable_count_total;
+        disable_total = desc->disable_count_total;
+        dispatch_total = desc->dispatch_count;
+        spin_unlock_irqrestore(&desc->lock, irq_state);
+
+        if (active_only && action_count == 0 && enable_count == 0 &&
+            enable_total == 0 && disable_total == 0 && dispatch_total == 0) {
+            continue;
+        }
+
+        if ((size_t)len >= bufsz)
+            break;
+        int n = snprintf(buf + len, bufsz - (size_t)len,
+                         "%3u %6u %6d %9llu %9llu %8llu %7u 0x%08x 0x%08x\n",
+                         irq, hwirq, enable_count,
+                         (unsigned long long)enable_total,
+                         (unsigned long long)disable_total,
+                         (unsigned long long)dispatch_total, action_count,
+                         flags, affinity);
+        if (n < 0)
+            return len;
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            break;
+        }
+        len += n;
+    }
+    return len;
+}
+
 static void irq_desc_recalc_flags_locked(struct irq_desc *desc)
 {
     if (!desc)
@@ -1082,8 +1437,8 @@ static void irq_desc_recalc_flags_locked(struct irq_desc *desc)
     struct list_head *pos;
     list_for_each(pos, &desc->actions) {
         struct irq_action *action = list_entry(pos, struct irq_action, node);
-        merged_flags |= (action->flags & ~IRQ_FLAG_TRIGGER_MASK);
-        uint32_t action_type = action->flags & IRQ_FLAG_TRIGGER_MASK;
+        merged_flags |= (action->registration_flags & ~IRQ_FLAG_TRIGGER_MASK);
+        uint32_t action_type = action->registration_flags & IRQ_FLAG_TRIGGER_MASK;
         if (!merged_type && action_type)
             merged_type = action_type;
     }
@@ -1093,7 +1448,8 @@ static void irq_desc_recalc_flags_locked(struct irq_desc *desc)
 
 static int platform_irq_register_action(int irq, irq_handler_fn handler,
                                         irq_handler_event_fn handler_ev,
-                                        void *arg, uint32_t flags)
+                                        void *arg, uint32_t flags,
+                                        bool managed_enable)
 {
     if ((!handler && !handler_ev) || irq < 0 || irq >= IRQCHIP_MAX_IRQS)
         return -EINVAL;
@@ -1112,10 +1468,12 @@ static int platform_irq_register_action(int irq, irq_handler_fn handler,
     action->arg = arg;
     action->irq = irq;
     action->flags = flags;
+    action->registration_flags = flags;
     action->refs = 0;
     INIT_LIST_HEAD(&action->deferred_node);
     action->deferred_pending = 0;
     action->removed = false;
+    action->managed_enable = managed_enable;
     action->deferred_queued = false;
     action->deferred_has_ev = false;
 
@@ -1150,10 +1508,13 @@ static int platform_irq_register_action(int irq, irq_handler_fn handler,
 
 static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
                                           irq_handler_event_fn handler_ev,
-                                          void *arg)
+                                          void *arg,
+                                          bool *managed_enable_out)
 {
     if ((!handler && !handler_ev) || irq < 0 || irq >= IRQCHIP_MAX_IRQS)
         return -EINVAL;
+    if (managed_enable_out)
+        *managed_enable_out = false;
 
     struct irq_desc *desc = platform_irq_desc_get(irq);
     if (!desc)
@@ -1179,6 +1540,8 @@ static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
         spin_unlock_irqrestore(&desc->lock, irq_state);
         return -ENOENT;
     }
+    if (managed_enable_out)
+        *managed_enable_out = action->managed_enable;
 
     if (action->deferred_queued) {
         bool deferred_irq_state;
@@ -1223,25 +1586,85 @@ static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
 int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,
                              uint32_t flags)
 {
-    return platform_irq_register_action(irq, NULL, handler, arg, flags);
+    return platform_irq_register_action(irq, NULL, handler, arg, flags, false);
 }
 
 int platform_irq_unregister_ex(int irq, irq_handler_event_fn handler, void *arg)
 {
-    return platform_irq_unregister_action(irq, NULL, handler, arg);
+    return platform_irq_unregister_action(irq, NULL, handler, arg, NULL);
 }
 
 void platform_irq_register(int irq, irq_handler_fn handler, void *arg)
 {
     int ret = platform_irq_register_action(irq, handler, NULL, arg,
-                                           IRQ_FLAG_TRIGGER_LEVEL);
+                                           IRQ_FLAG_TRIGGER_LEVEL, false);
     if (ret < 0)
         pr_warn("irq: failed to register irq %d (ret=%d)\n", irq, ret);
 }
 
 int platform_irq_unregister(int irq, irq_handler_fn handler, void *arg)
 {
-    return platform_irq_unregister_action(irq, handler, NULL, arg);
+    return platform_irq_unregister_action(irq, handler, NULL, arg, NULL);
+}
+
+int platform_irq_request_ex(int irq, irq_handler_event_fn handler, void *arg,
+                            uint32_t flags)
+{
+    if (!handler)
+        return -EINVAL;
+    if ((flags & IRQ_FLAG_TRIGGER_MASK) == IRQ_FLAG_TRIGGER_MASK)
+        return -EINVAL;
+
+    bool managed_enable = (flags & IRQ_FLAG_NO_AUTO_ENABLE) == 0;
+    int ret = platform_irq_register_action(irq, NULL, handler, arg, flags,
+                                           managed_enable);
+    if (ret < 0)
+        return ret;
+    if (managed_enable)
+        arch_irq_enable_nr(irq);
+    return 0;
+}
+
+int platform_irq_free_ex(int irq, irq_handler_event_fn handler, void *arg)
+{
+    bool managed_enable = false;
+    int ret =
+        platform_irq_unregister_action(irq, NULL, handler, arg, &managed_enable);
+    if (ret < 0)
+        return ret;
+    if (managed_enable)
+        arch_irq_disable_nr(irq);
+    return 0;
+}
+
+int platform_irq_request(int irq, irq_handler_fn handler, void *arg,
+                         uint32_t flags)
+{
+    if (!handler)
+        return -EINVAL;
+    if ((flags & IRQ_FLAG_TRIGGER_MASK) == IRQ_FLAG_TRIGGER_MASK)
+        return -EINVAL;
+
+    bool managed_enable = (flags & IRQ_FLAG_NO_AUTO_ENABLE) == 0;
+    int ret = platform_irq_register_action(irq, handler, NULL, arg, flags,
+                                           managed_enable);
+    if (ret < 0)
+        return ret;
+    if (managed_enable)
+        arch_irq_enable_nr(irq);
+    return 0;
+}
+
+int platform_irq_free(int irq, irq_handler_fn handler, void *arg)
+{
+    bool managed_enable = false;
+    int ret =
+        platform_irq_unregister_action(irq, handler, NULL, arg, &managed_enable);
+    if (ret < 0)
+        return ret;
+    if (managed_enable)
+        arch_irq_disable_nr(irq);
+    return 0;
 }
 
 void platform_irq_set_type(int irq, uint32_t flags)
@@ -1443,6 +1866,7 @@ void arch_irq_enable_nr(int irq)
             do_enable = true;
         desc->enable_count++;
     }
+    desc->enable_count_total++;
 
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
@@ -1484,6 +1908,7 @@ void arch_irq_disable_nr(int irq)
     }
 
     desc->enable_count--;
+    desc->disable_count_total++;
     if (is_per_cpu || desc->enable_count == 0)
         do_disable = true;
 
@@ -1503,14 +1928,39 @@ void arch_irq_register_ex(int irq,
                                           const struct trap_core_event *ev),
                           void *arg, uint32_t flags)
 {
-    int ret = platform_irq_register_ex(irq, handler, arg, flags);
+    int ret = arch_request_irq_ex(irq, handler, arg, flags);
     if (ret < 0) {
         pr_warn("irq: failed to register irq %d (ret=%d)\n", irq, ret);
-        return;
     }
+}
 
-    if (!(flags & IRQ_FLAG_NO_AUTO_ENABLE))
-        arch_irq_enable_nr(irq);
+int arch_request_irq_ex(int irq,
+                        void (*handler)(void *arg,
+                                        const struct trap_core_event *ev),
+                        void *arg, uint32_t flags)
+{
+    return platform_irq_request_ex(irq, handler, arg, flags);
+}
+
+int arch_free_irq_ex(int irq,
+                     void (*handler)(void *arg,
+                                     const struct trap_core_event *ev),
+                     void *arg)
+{
+    return platform_irq_free_ex(irq, handler, arg);
+}
+
+int arch_request_irq(int irq, void (*handler)(void *), void *arg,
+                     uint32_t flags)
+{
+    if ((flags & IRQ_FLAG_TRIGGER_MASK) == IRQ_FLAG_TRIGGER_NONE)
+        flags |= IRQ_FLAG_TRIGGER_LEVEL;
+    return platform_irq_request(irq, handler, arg, flags);
+}
+
+int arch_free_irq(int irq, void (*handler)(void *), void *arg)
+{
+    return platform_irq_free(irq, handler, arg);
 }
 
 void arch_irq_set_type(int irq, uint32_t flags)
@@ -1525,6 +1975,7 @@ void arch_irq_set_affinity(int irq, uint32_t cpu_mask)
 
 void arch_irq_register(int irq, void (*handler)(void *), void *arg)
 {
-    platform_irq_register(irq, handler, arg);
-    arch_irq_enable_nr(irq);
+    int ret = arch_request_irq(irq, handler, arg, IRQ_FLAG_TRIGGER_LEVEL);
+    if (ret < 0)
+        pr_warn("irq: failed to register irq %d (ret=%d)\n", irq, ret);
 }

@@ -66,9 +66,9 @@ void arch_timer_init(uint64_t hz) {
     timer_virq = (irq >= 0) ? irq : aarch64_timer_irq_virq();
 
     if (need_register) {
-        arch_irq_register_ex(timer_virq, aarch64_timer_irq_handler, NULL,
-                             IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_PER_CPU |
-                                 IRQ_FLAG_TIMER);
+        (void)arch_request_irq_ex(timer_virq, aarch64_timer_irq_handler, NULL,
+                                  IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_PER_CPU |
+                                      IRQ_FLAG_TIMER);
     } else {
         arch_irq_enable_nr(timer_virq);
     }

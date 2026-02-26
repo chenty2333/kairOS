@@ -93,7 +93,7 @@ void arch_timer_init(uint64_t hz) {
     timer_virq = (irq >= 0) ? irq : x86_timer_irq_virq();
 
     if (need_register) {
-        arch_irq_register_ex(
+        (void)arch_request_irq_ex(
             timer_virq, x86_timer_irq_handler, NULL,
             IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_PER_CPU | IRQ_FLAG_TIMER |
                 IRQ_FLAG_NO_CHIP);

@@ -154,6 +154,17 @@ void arch_irq_register_ex(int irq,
                           void (*handler)(void *arg,
                                           const struct trap_core_event *ev),
                           void *arg, uint32_t flags);
+int arch_request_irq_ex(int irq,
+                        void (*handler)(void *arg,
+                                        const struct trap_core_event *ev),
+                        void *arg, uint32_t flags);
+int arch_free_irq_ex(int irq,
+                     void (*handler)(void *arg,
+                                     const struct trap_core_event *ev),
+                     void *arg);
+int arch_request_irq(int irq, void (*handler)(void *), void *arg,
+                     uint32_t flags);
+int arch_free_irq(int irq, void (*handler)(void *), void *arg);
 void arch_irq_set_type(int irq, uint32_t flags);
 void arch_irq_set_affinity(int irq, uint32_t cpu_mask);
 

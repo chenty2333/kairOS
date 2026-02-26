@@ -10,6 +10,7 @@
 #include <kairos/boot.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
+#include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -68,6 +69,7 @@ static int procfs_close(struct vnode *vn);
 static int gen_meminfo(pid_t pid, char *buf, size_t bufsz);
 static int gen_uptime(pid_t pid, char *buf, size_t bufsz);
 static int gen_stat(pid_t pid, char *buf, size_t bufsz);
+static int gen_interrupts(pid_t pid, char *buf, size_t bufsz);
 static int gen_sched(pid_t pid, char *buf, size_t bufsz);
 static int gen_version(pid_t pid, char *buf, size_t bufsz);
 static int gen_cmdline(pid_t pid, char *buf, size_t bufsz);
@@ -202,6 +204,12 @@ static int gen_stat(pid_t pid __attribute__((unused)),
                         i, (unsigned long)t);
     }
     return len;
+}
+
+static int gen_interrupts(pid_t pid __attribute__((unused)),
+                          char *buf, size_t bufsz)
+{
+    return platform_irq_format_stats(buf, bufsz, true);
 }
 
 static int gen_sched(pid_t pid __attribute__((unused)),
@@ -592,6 +600,7 @@ static const struct static_entry_def static_entries[] = {
     {"meminfo", gen_meminfo},
     {"uptime",  gen_uptime},
     {"stat",    gen_stat},
+    {"interrupts", gen_interrupts},
     {"sched",   gen_sched},
     {"version", gen_version},
     {"cmdline", gen_cmdline},

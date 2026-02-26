@@ -40,6 +40,24 @@ struct trap_core_event;
 typedef void (*irq_handler_fn)(void *arg);
 typedef void (*irq_handler_event_fn)(void *arg,
                                      const struct trap_core_event *ev);
+typedef int (*irq_domain_map_hwirq_fn)(uint32_t hwirq, uint32_t virq_base,
+                                       uint32_t nr_irqs, void *map_ctx,
+                                       uint32_t *virq_out);
+typedef int (*irq_domain_map_virq_fn)(uint32_t virq, uint32_t virq_base,
+                                      uint32_t nr_irqs, void *map_ctx,
+                                      uint32_t *hwirq_out);
+
+struct irq_stats_entry {
+    uint32_t virq;
+    uint32_t hwirq;
+    uint32_t flags;
+    uint32_t affinity_mask;
+    int enable_count;
+    uint32_t action_count;
+    uint64_t enable_calls;
+    uint64_t disable_calls;
+    uint64_t dispatch_calls;
+};
 
 struct irqchip_ops {
     void (*init)(const struct platform_desc *plat);
@@ -84,21 +102,50 @@ int platform_irq_register_ex(int irq, irq_handler_event_fn handler, void *arg,
 int platform_irq_unregister_ex(int irq, irq_handler_event_fn handler, void *arg);
 void platform_irq_register(int irq, irq_handler_fn handler, void *arg);
 int platform_irq_unregister(int irq, irq_handler_fn handler, void *arg);
+int platform_irq_request_ex(int irq, irq_handler_event_fn handler, void *arg,
+                            uint32_t flags);
+int platform_irq_free_ex(int irq, irq_handler_event_fn handler, void *arg);
+int platform_irq_request(int irq, irq_handler_fn handler, void *arg,
+                         uint32_t flags);
+int platform_irq_free(int irq, irq_handler_fn handler, void *arg);
 void platform_irq_set_type(int irq, uint32_t flags);
 void platform_irq_set_affinity(int irq, uint32_t cpu_mask);
 int platform_irq_domain_add_linear(const char *name,
                                    const struct irqchip_ops *chip,
                                    uint32_t hwirq_base, uint32_t virq_base,
                                    uint32_t nr_irqs);
+int platform_irq_domain_add_mapped(const char *name,
+                                   const struct irqchip_ops *chip,
+                                   uint32_t hwirq_base, uint32_t virq_base,
+                                   uint32_t nr_irqs,
+                                   irq_domain_map_hwirq_fn map_hwirq,
+                                   irq_domain_map_virq_fn map_virq,
+                                   void *map_ctx);
 int platform_irq_domain_add_linear_fwnode(const char *name,
                                           const struct irqchip_ops *chip,
                                           uint32_t fwnode,
                                           uint32_t hwirq_base,
                                           uint32_t virq_base,
                                           uint32_t nr_irqs);
+int platform_irq_domain_add_mapped_fwnode(const char *name,
+                                          const struct irqchip_ops *chip,
+                                          uint32_t fwnode,
+                                          uint32_t hwirq_base,
+                                          uint32_t virq_base,
+                                          uint32_t nr_irqs,
+                                          irq_domain_map_hwirq_fn map_hwirq,
+                                          irq_domain_map_virq_fn map_virq,
+                                          void *map_ctx);
 int platform_irq_domain_alloc_linear(const char *name,
                                      const struct irqchip_ops *chip,
                                      uint32_t hwirq_base, uint32_t nr_irqs,
+                                     uint32_t *virq_base_out);
+int platform_irq_domain_alloc_mapped(const char *name,
+                                     const struct irqchip_ops *chip,
+                                     uint32_t hwirq_base, uint32_t nr_irqs,
+                                     irq_domain_map_hwirq_fn map_hwirq,
+                                     irq_domain_map_virq_fn map_virq,
+                                     void *map_ctx,
                                      uint32_t *virq_base_out);
 int platform_irq_domain_setup_cascade(const char *name,
                                       const struct irqchip_ops *chip,
@@ -107,11 +154,26 @@ int platform_irq_domain_setup_cascade(const char *name,
                                       irq_handler_event_fn handler, void *arg,
                                       uint32_t flags,
                                       uint32_t *virq_base_out);
+int platform_irq_domain_setup_cascade_mapped(
+    const char *name, const struct irqchip_ops *chip, uint32_t hwirq_base,
+    uint32_t nr_irqs, irq_domain_map_hwirq_fn map_hwirq,
+    irq_domain_map_virq_fn map_virq, void *map_ctx, int parent_irq,
+    irq_handler_event_fn handler, void *arg, uint32_t flags,
+    uint32_t *virq_base_out);
 int platform_irq_domain_alloc_linear_fwnode(const char *name,
                                             const struct irqchip_ops *chip,
                                             uint32_t fwnode,
                                             uint32_t hwirq_base,
                                             uint32_t nr_irqs,
+                                            uint32_t *virq_base_out);
+int platform_irq_domain_alloc_mapped_fwnode(const char *name,
+                                            const struct irqchip_ops *chip,
+                                            uint32_t fwnode,
+                                            uint32_t hwirq_base,
+                                            uint32_t nr_irqs,
+                                            irq_domain_map_hwirq_fn map_hwirq,
+                                            irq_domain_map_virq_fn map_virq,
+                                            void *map_ctx,
                                             uint32_t *virq_base_out);
 int platform_irq_domain_setup_cascade_fwnode(const char *name,
                                              const struct irqchip_ops *chip,
@@ -122,6 +184,12 @@ int platform_irq_domain_setup_cascade_fwnode(const char *name,
                                              irq_handler_event_fn handler,
                                              void *arg, uint32_t flags,
                                              uint32_t *virq_base_out);
+int platform_irq_domain_setup_cascade_mapped_fwnode(
+    const char *name, const struct irqchip_ops *chip, uint32_t fwnode,
+    uint32_t hwirq_base, uint32_t nr_irqs,
+    irq_domain_map_hwirq_fn map_hwirq, irq_domain_map_virq_fn map_virq,
+    void *map_ctx, int parent_irq, irq_handler_event_fn handler, void *arg,
+    uint32_t flags, uint32_t *virq_base_out);
 int platform_irq_domain_bind_fwnode(const struct irqchip_ops *chip,
                                     uint32_t hwirq_base, uint32_t nr_irqs,
                                     uint32_t fwnode);
@@ -137,6 +205,9 @@ int platform_irq_domain_remove(uint32_t child_virq);
 int platform_irq_domain_remove_fwnode(uint32_t fwnode);
 int platform_irq_domain_map(const struct irqchip_ops *chip, uint32_t hwirq);
 int platform_irq_domain_map_fwnode(uint32_t fwnode, uint32_t hwirq);
+size_t platform_irq_snapshot(struct irq_stats_entry *entries, size_t capacity,
+                             bool active_only);
+int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only);
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
                                  uint32_t hwirq,
                                  const struct trap_core_event *ev);

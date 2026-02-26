@@ -73,19 +73,23 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `irqchip_ops` includes `set_type(int irq, uint32_t type)` so trigger mode is configured from IRQ flags when enabling
   - `irqchip_ops` now includes `set_affinity(int irq, uint32_t cpu_mask)` and IRQ core stores per-IRQ CPU mask (default CPU0) for route programming hooks
   - IRQ action lifecycle now supports explicit unregister (`platform_irq_unregister_ex` / `platform_irq_unregister`) with safe detach from dispatch/deferred paths
+  - driver-facing managed lifecycle is available via `arch_request_irq*` / `arch_free_irq*` (`platform_irq_request*` / `platform_irq_free*`): request path registers + optional auto-enable, free path unregisters + matched auto-disable by action ownership
   - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
   - `irq_domain` manager now uses dynamic domain objects (linked list + parent/child links), removing the previous fixed-slot limit
   - `irq_domain` now supports auto-allocated virq ranges (`platform_irq_domain_alloc_linear` / `IRQ_DOMAIN_AUTO_VIRQ`) for child/cascaded controllers
+  - `irq_domain` mapping is no longer linear-only: mapped domains can provide custom callbacks (`platform_irq_domain_add/alloc_mapped*`) for sparse/non-linear `hwirq <-> virq` translation
   - `irq_domain` now supports firmware-node (`phandle`) bindings and mapping/dispatch (`platform_irq_domain_*_fwnode`) so cascaded controllers can resolve IRQs in per-controller namespaces
   - cascaded child domains can be chained to a parent virq via `platform_irq_domain_set_cascade(...)` (generic virq entry) or `platform_irq_domain_set_cascade_fwnode(...)`; IRQ core wires a shared parent action and tracks child-active refcount to auto-enable/disable the parent line
   - cascaded links can be explicitly detached (`platform_irq_domain_unset_cascade*`) and domains can be removed (`platform_irq_domain_remove*`) once handlers are quiesced
   - `platform_irq_domain_setup_cascade(...)` provides one-step generic child-domain bring-up (`alloc domain + chain parent irq`)
   - `platform_irq_domain_setup_cascade_fwnode(...)` provides one-step child-domain bring-up (`alloc domain + chain parent irq`) for cascaded irqchip drivers
+  - mapped cascades are also supported (`platform_irq_domain_setup_cascade_mapped*`) so child controllers can combine parent chaining with custom hwirq mapping
   - FDT device scan now enumerates cascaded `interrupt-controller` nodes as platform devices (with parent IRQ resource + `platform_device_info.fwnode`), enabling firmware-described cascaded irqchip drivers to hook directly into the generic cascade core
   - root domain coverage is now board-configurable (`platform_desc.irqchip_root_irqs`) so root mappings no longer have to occupy the full global virq space
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
   - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions
   - `IRQ_FLAG_NO_CHIP` marks software/local IRQ lines that should use refcount gating without programming irqchip enable/disable paths
+  - IRQ observability now exports per-IRQ `enable/disable/dispatch` totals with current enable refcount/action count via `platform_irq_format_stats()`; procfs exposes this as `/proc/interrupts`
 - affinity routing details:
   - riscv64 PLIC now supports `set_affinity`: it updates per-hart enable bits for each IRQ and reroutes already-enabled IRQs
   - aarch64 GICv3 routes SPIs using CPU `hw_id` (MPIDR affinity bits) in `GICD_IROUTER`

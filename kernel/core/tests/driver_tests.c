@@ -11,6 +11,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/ringbuf.h>
+#include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
@@ -31,6 +32,30 @@ static void test_check(bool cond, const char *name) {
         pr_err("tests: %s failed\n", name);
         tests_failed++;
     }
+}
+
+static int test_reap_children_bounded(int expected, const char *tag) {
+    int reaped = 0;
+    int status = 0;
+    uint64_t start = arch_timer_ticks();
+    uint64_t timeout_ticks =
+        arch_timer_ns_to_ticks(10ULL * 1000 * 1000 * 1000);
+
+    while (reaped < expected) {
+        pid_t pid = proc_wait(-1, &status, WNOHANG);
+        if (pid > 0) {
+            reaped++;
+            continue;
+        }
+        if (pid < 0)
+            break;
+        if ((arch_timer_ticks() - start) > timeout_ticks)
+            break;
+        proc_yield();
+    }
+    if (reaped < expected)
+        pr_warn("tests: %s reap timeout (%d/%d)\n", tag, reaped, expected);
+    return reaped;
 }
 
 static int dummy_blk_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
@@ -372,6 +397,14 @@ static volatile uint32_t irq_shared_hits_b;
 static volatile uint32_t irq_gate_hits;
 static volatile uint32_t irq_mock_dispatch_hits;
 static volatile uint32_t irq_cascade_hits;
+static volatile uint32_t irq_request_hits;
+static volatile uint32_t irq_concurrent_hits;
+
+struct irq_concurrency_ctx {
+    int irq;
+    int loops;
+    volatile uint32_t dispatch_calls;
+};
 
 struct irq_mock_state {
     uint32_t enable_hits;
@@ -413,6 +446,29 @@ static void test_irq_mock_handler(void *arg __unused,
 static void test_irq_cascade_handler(void *arg __unused,
                                      const struct trap_core_event *ev __unused) {
     __atomic_add_fetch(&irq_cascade_hits, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_request_handler(void *arg __unused,
+                                     const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_request_hits, 1, __ATOMIC_RELAXED);
+}
+
+static void test_irq_concurrent_handler(void *arg __unused,
+                                        const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_concurrent_hits, 1, __ATOMIC_RELAXED);
+    proc_yield();
+}
+
+static int irq_dispatch_storm_thread(void *arg) {
+    struct irq_concurrency_ctx *ctx = arg;
+    if (!ctx)
+        return -EINVAL;
+    for (int i = 0; i < ctx->loops; i++) {
+        platform_irq_dispatch_nr((uint32_t)ctx->irq);
+        __atomic_add_fetch(&ctx->dispatch_calls, 1, __ATOMIC_RELAXED);
+        proc_yield();
+    }
+    return 0;
 }
 
 static void test_irq_shared_actions(void) {
@@ -499,6 +555,111 @@ static void test_irq_enable_disable_gate(void) {
     platform_irq_dispatch_nr((uint32_t)irq);
     test_check(__atomic_load_n(&irq_gate_hits, __ATOMIC_RELAXED) == 1,
                "irq gate disabled stops dispatch");
+}
+
+static void test_irq_request_free_actions(void) {
+    const int irq = 904;
+    irq_request_hits = 0;
+    irq_shared_hits_a = 0;
+
+    int ret = arch_request_irq_ex(
+        irq, test_irq_request_handler, NULL,
+        IRQ_FLAG_SHARED | IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq request first handler");
+    ret = arch_request_irq_ex(
+        irq, test_irq_shared_handler_a, NULL,
+        IRQ_FLAG_SHARED | IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq request second handler");
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_request_hits, __ATOMIC_RELAXED) == 1,
+               "irq request auto-enable dispatch");
+    test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) > 0,
+               "irq request shared peer dispatch");
+
+    ret = arch_free_irq_ex(irq, test_irq_request_handler, NULL);
+    test_check(ret == 0, "irq free first handler");
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_request_hits, __ATOMIC_RELAXED) == 1,
+               "irq free removed first handler");
+
+    ret = arch_free_irq_ex(irq, test_irq_shared_handler_a, NULL);
+    test_check(ret == 0, "irq free second handler");
+    uint32_t hits_before =
+        __atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) ==
+                   hits_before,
+               "irq free disables empty irq");
+}
+
+static void test_irq_stats_export(void) {
+    const int irq = 906;
+    irq_gate_hits = 0;
+
+    int ret = arch_request_irq_ex(irq, test_irq_gate_handler, NULL,
+                                  IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq stats request");
+    platform_irq_dispatch_nr((uint32_t)irq);
+    platform_irq_dispatch_nr((uint32_t)irq);
+
+    char buf[1024];
+    int n = platform_irq_format_stats(buf, sizeof(buf), true);
+    test_check(n > 0, "irq stats format");
+    test_check(strstr(buf, "dispatch") != NULL, "irq stats header");
+
+    char needle[32];
+    snprintf(needle, sizeof(needle), "%3d ", irq);
+    test_check(strstr(buf, needle) != NULL, "irq stats contains irq line");
+
+    ret = arch_free_irq_ex(irq, test_irq_gate_handler, NULL);
+    test_check(ret == 0, "irq stats free");
+}
+
+static void test_irq_unregister_dispatch_concurrency(void) {
+    const int irq = 907;
+    irq_concurrent_hits = 0;
+
+    int ret = arch_request_irq_ex(
+        irq, test_irq_concurrent_handler, NULL,
+        IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_DEFERRED | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq concurrent request");
+    if (ret < 0)
+        return;
+
+    struct irq_concurrency_ctx ctx = {
+        .irq = irq,
+        .loops = 300,
+        .dispatch_calls = 0,
+    };
+    struct process *worker =
+        kthread_create_joinable(irq_dispatch_storm_thread, &ctx, "irqdisp");
+    test_check(worker != NULL, "irq concurrent dispatch worker create");
+    if (!worker) {
+        (void)arch_free_irq_ex(irq, test_irq_concurrent_handler, NULL);
+        return;
+    }
+    sched_enqueue(worker);
+
+    for (int i = 0; i < 100; i++) {
+        if (__atomic_load_n(&ctx.dispatch_calls, __ATOMIC_RELAXED) > 10)
+            break;
+        proc_yield();
+    }
+
+    ret = arch_free_irq_ex(irq, test_irq_concurrent_handler, NULL);
+    test_check(ret == 0, "irq concurrent free during dispatch");
+
+    int reaped = test_reap_children_bounded(1, "irq_concurrent_dispatch");
+    test_check(reaped == 1, "irq concurrent dispatch worker reaped");
+
+    uint32_t hits_before =
+        __atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED);
+    for (int i = 0; i < 8; i++)
+        platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED) ==
+                   hits_before,
+               "irq concurrent no hits after free");
 }
 
 static void irq_mock_enable(int irq) {
@@ -600,6 +761,11 @@ struct test_irq_cascade_ctx {
     uint32_t hwirq;
 };
 
+struct test_irq_sparse_map_ctx {
+    uint32_t hwirq[8];
+    uint32_t nr;
+};
+
 static void test_irq_cascade_parent_handler(void *arg,
                                             const struct trap_core_event *ev) {
     struct test_irq_cascade_ctx *ctx = (struct test_irq_cascade_ctx *)arg;
@@ -609,6 +775,38 @@ static void test_irq_cascade_parent_handler(void *arg,
         platform_irq_dispatch_fwnode_hwirq(ctx->fwnode, ctx->hwirq, ev);
     else if (ctx->chip)
         platform_irq_dispatch_hwirq(ctx->chip, ctx->hwirq, ev);
+}
+
+static int test_irq_sparse_map_hwirq(uint32_t hwirq, uint32_t virq_base,
+                                     uint32_t nr_irqs, void *map_ctx,
+                                     uint32_t *virq_out) {
+    struct test_irq_sparse_map_ctx *ctx = map_ctx;
+    if (!ctx || !virq_out || ctx->nr == 0 || ctx->nr > ARRAY_SIZE(ctx->hwirq))
+        return -EINVAL;
+    if (ctx->nr > nr_irqs)
+        return -EINVAL;
+
+    for (uint32_t i = 0; i < ctx->nr; i++) {
+        if (ctx->hwirq[i] != hwirq)
+            continue;
+        *virq_out = virq_base + i;
+        return 0;
+    }
+    return -ENOENT;
+}
+
+static int test_irq_sparse_map_virq(uint32_t virq, uint32_t virq_base,
+                                    uint32_t nr_irqs, void *map_ctx,
+                                    uint32_t *hwirq_out) {
+    struct test_irq_sparse_map_ctx *ctx = map_ctx;
+    if (!ctx || !hwirq_out || ctx->nr == 0 || ctx->nr > ARRAY_SIZE(ctx->hwirq))
+        return -EINVAL;
+    if (ctx->nr > nr_irqs)
+        return -EINVAL;
+    if (virq < virq_base || virq >= (virq_base + ctx->nr))
+        return -ENOENT;
+    *hwirq_out = ctx->hwirq[virq - virq_base];
+    return 0;
 }
 
 static void test_irq_domain_programming(void) {
@@ -668,6 +866,63 @@ static void test_irq_domain_programming(void) {
     test_check(irq_mock_state.disable_hits == 1 &&
                    irq_mock_state.last_disable_irq == 33,
                "irq chip disable uses hwirq");
+}
+
+static void test_irq_domain_custom_mapping(void) {
+    memset(&irq_mock_state, 0, sizeof(irq_mock_state));
+    irq_mock_state.last_enable_irq = -1;
+    irq_mock_state.last_disable_irq = -1;
+    irq_mock_state.last_type_irq = -1;
+    irq_mock_state.last_affinity_irq = -1;
+    irq_mock_dispatch_hits = 0;
+
+    struct test_irq_sparse_map_ctx sparse = {
+        .hwirq = {910, 914, 922, 931},
+        .nr = 4,
+    };
+    uint32_t virq_base = 0;
+    int ret = platform_irq_domain_alloc_mapped(
+        "test-sparse-domain", &test_irq_mock_ops, 0, sparse.nr,
+        test_irq_sparse_map_hwirq, test_irq_sparse_map_virq, &sparse,
+        &virq_base);
+    test_check(ret == 0, "irq custom domain alloc");
+    if (ret < 0)
+        return;
+
+    int virq = platform_irq_domain_map(&test_irq_mock_ops, 922);
+    test_check(virq == (int)(virq_base + 2), "irq custom hwirq map");
+    if (virq < 0)
+        goto out_remove_domain;
+
+    int missing = platform_irq_domain_map(&test_irq_mock_ops, 915);
+    test_check(missing == -ENOENT, "irq custom sparse miss");
+
+    arch_irq_register_ex(virq, test_irq_mock_handler, NULL,
+                         IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_enable_nr(virq);
+
+    test_check(irq_mock_state.enable_hits == 1 &&
+                   irq_mock_state.last_enable_irq == 922,
+               "irq custom enable uses mapped hwirq");
+    test_check(irq_mock_state.set_type_hits > 0 &&
+                   irq_mock_state.last_type_irq == 922 &&
+                   irq_mock_state.last_type == IRQ_FLAG_TRIGGER_EDGE,
+               "irq custom set_type uses mapped hwirq");
+
+    platform_irq_dispatch_hwirq(&test_irq_mock_ops, 922, NULL);
+    test_check(__atomic_load_n(&irq_mock_dispatch_hits, __ATOMIC_RELAXED) == 1,
+               "irq custom dispatch mapped hwirq");
+
+    arch_irq_disable_nr(virq);
+    test_check(irq_mock_state.disable_hits == 1 &&
+                   irq_mock_state.last_disable_irq == 922,
+               "irq custom disable uses mapped hwirq");
+
+    ret = platform_irq_unregister_ex(virq, test_irq_mock_handler, NULL);
+    test_check(ret == 0, "irq custom unregister");
+out_remove_domain:
+    ret = platform_irq_domain_remove(virq_base);
+    test_check(ret == 0, "irq custom domain remove");
 }
 
 static void test_irq_domain_cascade(void) {
@@ -859,6 +1114,87 @@ static void test_irq_domain_cascade_generic(void) {
                "irq cascade generic parent disabled on last child");
 }
 
+static void test_irq_domain_cascade_mapped(void) {
+    memset(&irq_parent_mock_state, 0, sizeof(irq_parent_mock_state));
+    memset(&irq_child_mock_state, 0, sizeof(irq_child_mock_state));
+    irq_parent_mock_state.last_enable_irq = -1;
+    irq_parent_mock_state.last_disable_irq = -1;
+    irq_child_mock_state.last_enable_irq = -1;
+    irq_child_mock_state.last_disable_irq = -1;
+    irq_cascade_hits = 0;
+    const uint32_t parent_fwnode = 0xD00D00A4U;
+    const uint32_t child_fwnode = 0xD00D00A5U;
+
+    uint32_t parent_virq_base = 0;
+    uint32_t child_virq_base = 0;
+    int ret = platform_irq_domain_alloc_linear_fwnode(
+        "test-mapped-parent", &test_irq_parent_mock_ops, parent_fwnode, 340, 8,
+        &parent_virq_base);
+    test_check(ret == 0, "irq mapped cascade parent alloc");
+    if (ret < 0)
+        return;
+
+    int parent_irq = platform_irq_domain_map_fwnode(parent_fwnode, 342);
+    test_check(parent_irq == (int)(parent_virq_base + 2),
+               "irq mapped cascade parent map");
+    if (parent_irq < 0)
+        return;
+
+    struct test_irq_sparse_map_ctx sparse = {
+        .hwirq = {41, 43, 47},
+        .nr = 3,
+    };
+    struct test_irq_cascade_ctx ctx = {
+        .fwnode = child_fwnode,
+        .chip = NULL,
+        .hwirq = 47,
+    };
+    ret = platform_irq_domain_setup_cascade_mapped_fwnode(
+        "test-mapped-child", &test_irq_child_mock_ops, child_fwnode, 0,
+        sparse.nr, test_irq_sparse_map_hwirq, test_irq_sparse_map_virq, &sparse,
+        parent_irq, test_irq_cascade_parent_handler, &ctx,
+        IRQ_FLAG_TRIGGER_LEVEL, &child_virq_base);
+    test_check(ret == 0, "irq mapped cascade child setup");
+    if (ret < 0)
+        return;
+
+    int child_irq = platform_irq_domain_map_fwnode(child_fwnode, 47);
+    test_check(child_irq == (int)(child_virq_base + 2),
+               "irq mapped cascade child map");
+    if (child_irq < 0)
+        return;
+
+    arch_irq_register_ex(child_irq, test_irq_cascade_handler, NULL,
+                         IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_enable_nr(child_irq);
+
+    test_check(irq_child_mock_state.enable_hits == 1 &&
+                   irq_child_mock_state.last_enable_irq == 47,
+               "irq mapped cascade child enable hwirq");
+    test_check(irq_parent_mock_state.enable_hits == 1 &&
+                   irq_parent_mock_state.last_enable_irq == 342,
+               "irq mapped cascade parent enabled");
+
+    platform_irq_dispatch_nr((uint32_t)parent_irq);
+    test_check(__atomic_load_n(&irq_cascade_hits, __ATOMIC_RELAXED) == 1,
+               "irq mapped cascade dispatch");
+
+    arch_irq_disable_nr(child_irq);
+    test_check(irq_child_mock_state.disable_hits == 1 &&
+                   irq_child_mock_state.last_disable_irq == 47,
+               "irq mapped cascade child disable hwirq");
+    test_check(irq_parent_mock_state.disable_hits == 1 &&
+                   irq_parent_mock_state.last_disable_irq == 342,
+               "irq mapped cascade parent disabled");
+
+    ret = platform_irq_unregister_ex(child_irq, test_irq_cascade_handler, NULL);
+    test_check(ret == 0, "irq mapped cascade unregister child");
+    ret = platform_irq_domain_remove_fwnode(child_fwnode);
+    test_check(ret == 0, "irq mapped cascade remove child");
+    ret = platform_irq_domain_remove_fwnode(parent_fwnode);
+    test_check(ret == 0, "irq mapped cascade remove parent");
+}
+
 static void test_irq_domain_lifecycle(void) {
     memset(&irq_parent_mock_state, 0, sizeof(irq_parent_mock_state));
     memset(&irq_child_mock_state, 0, sizeof(irq_child_mock_state));
@@ -1036,9 +1372,14 @@ int run_driver_tests(void) {
     test_irq_shared_actions();
     test_irq_unregister_actions();
     test_irq_enable_disable_gate();
+    test_irq_request_free_actions();
+    test_irq_stats_export();
+    test_irq_unregister_dispatch_concurrency();
     test_irq_domain_programming();
+    test_irq_domain_custom_mapping();
     test_irq_domain_cascade();
     test_irq_domain_cascade_generic();
+    test_irq_domain_cascade_mapped();
     test_irq_domain_lifecycle();
     test_irq_domain_dynamic_capacity();
 #if CONFIG_KERNEL_TESTS

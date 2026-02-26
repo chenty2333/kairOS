@@ -3,6 +3,7 @@
  */
 
 #include <kairos/virtio.h>
+#include <kairos/arch.h>
 #include <kairos/platform.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>
@@ -151,8 +152,7 @@ static int virtio_mmio_probe(struct device *dev) {
     snprintf(mdev->vdev.dev.name, sizeof(mdev->vdev.dev.name), "virtio-mmio.%p", base);
     
     /* Register physical interrupt */
-    extern void arch_irq_register(int irq, void (*handler)(void *), void *arg);
-    arch_irq_register(mdev->irq, virtio_mmio_intr, mdev);
+    (void)arch_request_irq(mdev->irq, virtio_mmio_intr, mdev, 0);
 
     pr_info("virtio-mmio: found device %d at %p, irq %d\n", virtio_id, base, mdev->irq);
 
@@ -171,6 +171,7 @@ static void virtio_mmio_remove(struct device *dev) {
     if (!mdev)
         return;
 
+    (void)arch_free_irq(mdev->irq, virtio_mmio_intr, mdev);
     device_unregister(&mdev->vdev.dev);
     dev_set_drvdata(dev, NULL);
     iounmap(mdev->base);

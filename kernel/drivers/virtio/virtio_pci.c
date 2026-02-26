@@ -406,8 +406,9 @@ static int virtio_pci_probe(struct pci_device *pdev) {
             int irq = vp->msix_irq[i];
             if (irq <= 0 || virtio_pci_irq_seen(vp->msix_irq, regd, irq))
                 continue;
-            arch_irq_register_ex(irq, virtio_pci_intr_ev, vp,
-                                 IRQ_FLAG_TRIGGER_EDGE);
+            if (arch_request_irq_ex(irq, virtio_pci_intr_ev, vp,
+                                    IRQ_FLAG_TRIGGER_EDGE) < 0)
+                continue;
             vp->msix_irq[regd++] = irq;
         }
         vp->msix_nvec = regd;
@@ -431,10 +432,11 @@ static int virtio_pci_probe(struct pci_device *pdev) {
         }
     } else if (vp->irq > 0) {
         if (pdev->msi_enabled) {
-            arch_irq_register_ex(vp->irq, virtio_pci_intr_ev, vp,
-                                 IRQ_FLAG_TRIGGER_EDGE);
+            (void)arch_request_irq_ex(vp->irq, virtio_pci_intr_ev, vp,
+                                      IRQ_FLAG_TRIGGER_EDGE);
         } else {
-        arch_irq_register(vp->irq, virtio_pci_intr, vp);
+            (void)arch_request_irq(vp->irq, virtio_pci_intr, vp,
+                                   IRQ_FLAG_TRIGGER_LEVEL);
         }
     }
 
@@ -468,10 +470,13 @@ static void virtio_pci_remove(struct pci_device *pdev) {
     if (pdev->msix_enabled && vp->msix_nvec > 0) {
         for (uint16_t i = 0; i < vp->msix_nvec && i < VIRTIO_PCI_MSIX_REQ_VECTORS; i++) {
             if (vp->msix_irq[i] > 0)
-                arch_irq_disable_nr(vp->msix_irq[i]);
+                (void)arch_free_irq_ex(vp->msix_irq[i], virtio_pci_intr_ev, vp);
         }
     } else if (vp->irq > 0) {
-        arch_irq_disable_nr(vp->irq);
+        if (pdev->msi_enabled)
+            (void)arch_free_irq_ex(vp->irq, virtio_pci_intr_ev, vp);
+        else
+            (void)arch_free_irq(vp->irq, virtio_pci_intr, vp);
     }
     if (pdev->msix_enabled)
         (void)pci_disable_msix(pdev);
