@@ -7,10 +7,10 @@
 #include <kairos/list.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
+#include <kairos/pollwait.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/vfs.h>
-#include <kairos/wait.h>
 
 struct kchannel;
 struct kport;
@@ -34,8 +34,8 @@ struct kchannel {
     struct kobj obj;
     atomic_t handle_refs;
     struct mutex lock;
-    struct wait_queue read_wait;
-    struct wait_queue write_wait;
+    struct poll_wait_source rd_src;
+    struct poll_wait_source wr_src;
     struct list_head rxq;
     size_t rxq_len;
     struct list_head poll_vnodes;
@@ -64,7 +64,7 @@ struct kchannel_watch {
 struct kport {
     struct kobj obj;
     struct mutex lock;
-    struct wait_queue waitq;
+    struct poll_wait_source rd_src;
     struct list_head queue;
     struct list_head poll_vnodes;
     size_t queue_len;
@@ -179,8 +179,8 @@ static void kchannel_on_last_handle_release(struct kchannel *ch) {
         dropped_peer_ref_to_ch = true;
     }
     peer->peer_closed = true;
-    wait_queue_wakeup_all(&peer->read_wait);
-    wait_queue_wakeup_all(&peer->write_wait);
+    poll_wait_source_wake_all(&peer->rd_src, 0);
+    poll_wait_source_wake_all(&peer->wr_src, 0);
     kchannel_poll_wake_locked(peer, POLLHUP);
     kchannel_emit_locked(peer, KPORT_BIND_PEER_CLOSED);
     mutex_unlock(&peer->lock);
@@ -489,7 +489,7 @@ static void kport_enqueue_locked(struct kport *port, uint64_t key,
         tail = list_entry(port->queue.prev, struct kport_packet, node);
         if (tail && tail->key == key) {
             tail->observed |= observed;
-            wait_queue_wakeup_one(&port->waitq);
+            poll_wait_source_wake_one(&port->rd_src, 0);
             return;
         }
     }
@@ -510,7 +510,7 @@ static void kport_enqueue_locked(struct kport *port, uint64_t key,
     pkt->observed = observed;
     list_add_tail(&pkt->node, &port->queue);
     port->queue_len++;
-    wait_queue_wakeup_one(&port->waitq);
+    poll_wait_source_wake_one(&port->rd_src, 0);
     struct kport_watch *watch;
     list_for_each_entry(watch, &port->poll_vnodes, node) {
         if (watch->vn)
@@ -549,8 +549,8 @@ static struct kchannel *kchannel_alloc(void) {
     kobj_init(&ch->obj, KOBJ_TYPE_CHANNEL, &kchannel_ops);
     atomic_init(&ch->handle_refs, 0);
     mutex_init(&ch->lock, "kchannel");
-    wait_queue_init(&ch->read_wait);
-    wait_queue_init(&ch->write_wait);
+    poll_wait_source_init(&ch->rd_src, NULL);
+    poll_wait_source_init(&ch->wr_src, NULL);
     INIT_LIST_HEAD(&ch->rxq);
     INIT_LIST_HEAD(&ch->poll_vnodes);
     ch->rxq_len = 0;
@@ -654,9 +654,8 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
             ret = -EAGAIN;
             goto out_unlock;
         }
-        int rc =
-            proc_sleep_on_mutex(&peer->write_wait, &peer->write_wait, &peer->lock,
-                                true);
+        int rc = poll_wait_source_block(&peer->wr_src, 0, &peer->wr_src,
+                                        &peer->lock);
         if (rc < 0) {
             ret = rc;
             goto out_unlock;
@@ -670,7 +669,7 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     list_add_tail(&msg->node, &peer->rxq);
     peer->rxq_len++;
     msg->owns_caps = true;
-    wait_queue_wakeup_one(&peer->read_wait);
+    poll_wait_source_wake_one(&peer->rd_src, 0);
     kchannel_poll_wake_locked(peer, POLLIN);
     kchannel_emit_locked(peer, KPORT_BIND_READABLE);
     ret = 0;
@@ -716,8 +715,8 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
             mutex_unlock(&ch->lock);
             return -EAGAIN;
         }
-        int rc = proc_sleep_on_mutex(&ch->read_wait, &ch->read_wait, &ch->lock,
-                                     true);
+        int rc =
+            poll_wait_source_block(&ch->rd_src, 0, &ch->rd_src, &ch->lock);
         if (rc < 0) {
             mutex_unlock(&ch->lock);
             return rc;
@@ -743,7 +742,7 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
         kchannel_poll_wake_locked(ch, POLLIN);
     if (!list_empty(&ch->rxq))
         kchannel_emit_locked(ch, KPORT_BIND_READABLE);
-    wait_queue_wakeup_one(&ch->write_wait);
+    poll_wait_source_wake_one(&ch->wr_src, 0);
     mutex_unlock(&ch->lock);
 
     if (peer_for_write) {
@@ -778,7 +777,7 @@ int kport_create(struct kobj **out) {
         return -ENOMEM;
     kobj_init(&port->obj, KOBJ_TYPE_PORT, &kport_ops);
     mutex_init(&port->lock, "kport");
-    wait_queue_init(&port->waitq);
+    poll_wait_source_init(&port->rd_src, NULL);
     INIT_LIST_HEAD(&port->queue);
     INIT_LIST_HEAD(&port->poll_vnodes);
     port->queue_len = 0;
@@ -922,11 +921,11 @@ int kport_wait(struct kobj *port_obj, struct kairos_port_packet_user *out,
 
         int rc = 0;
         if (infinite) {
-            rc = proc_sleep_on_mutex(&port->waitq, &port->waitq, &port->lock,
-                                     true);
+            rc = poll_wait_source_block(&port->rd_src, 0, &port->rd_src,
+                                        &port->lock);
         } else {
-            rc = proc_sleep_on_mutex_timeout(&port->waitq, &port->waitq,
-                                             &port->lock, true, deadline);
+            rc = poll_wait_source_block(&port->rd_src, deadline,
+                                        &port->rd_src, &port->lock);
             if (rc == -ETIMEDOUT) {
                 mutex_unlock(&port->lock);
                 return -ETIMEDOUT;
@@ -1108,8 +1107,8 @@ static void kchannel_release_obj(struct kobj *obj) {
         if (peer->peer == ch)
             peer->peer = NULL;
         peer->peer_closed = true;
-        wait_queue_wakeup_all(&peer->read_wait);
-        wait_queue_wakeup_all(&peer->write_wait);
+        poll_wait_source_wake_all(&peer->rd_src, 0);
+        poll_wait_source_wake_all(&peer->wr_src, 0);
         kchannel_poll_wake_locked(peer, POLLHUP);
         kchannel_emit_locked(peer, KPORT_BIND_PEER_CLOSED);
         mutex_unlock(&peer->lock);

@@ -154,8 +154,8 @@ static void epoll_item_detach(struct epoll_item *item) {
     }
     vfs_poll_unwatch(&item->watch);
     while (epoll_item_refs(item) > 1) {
-        int rc =
-            poll_block_current_ex(&item->detach_src.wq, 0, item, NULL, false);
+        int rc = poll_wait_source_block_ex(&item->detach_src, 0, item, NULL,
+                                           false);
         if (rc < 0)
             break;
     }

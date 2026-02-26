@@ -111,11 +111,13 @@ pollwait.c:
 - poll_wait_source: unified wait source object (`wait_queue` + optional pollable vnode), used to route block/wake through one kernel-internal interface
 - poll_sleep: global timed sleep queue, tick interrupt drives expiry wakeups
 - Unified wait-core helpers: `poll_timeout_to_deadline_ms`, `poll_deadline_expired`, `poll_block_current_ex`, `poll_block_current`, `poll_block_current_mutex` (supports wait_queue + mutex sleep sites and interruptible policy)
+- `poll_wait_source_block_ex` extends wait-source blocking with explicit interruptible policy; `poll_wait_source_block` remains the interruptible wrapper
 - Unified ready wake bridge: `poll_ready_wake_one/all` wakes wait_queue waiters and poll watchers on one path
 - `eventfd`/`timerfd`/`inotify`/`signalfd`/`pidfd` block+wake paths now use `poll_wait_source_*` wrappers over wait-core helpers instead of direct `proc_sleep_on*` call sites
 - pipe read/write blocking queues and close wakeups now route through `poll_wait_source` (pipe poll fanout remains on `poll_wait_head`)
 - AF_UNIX and AF_INET stream/listen/datagram wait queues now route through `poll_wait_source` while socket poll readiness fanout remains on socket poll heads
 - epoll internal detach wait (`epoll_item` teardown rendezvous) also routes through `poll_wait_source` instead of raw `wait_queue`
+- lwIP `sys_arch` semaphore/mailbox waits now also route through `poll_wait_source` with non-interruptible policy
 - `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
 - tracepoint ring snapshot uses release/acquire `seq` stabilization (double-sample verify) to avoid torn entries under concurrent writers
@@ -149,7 +151,10 @@ Current IPC mechanisms:
 - Channel IPC (Kairos extension): message-oriented pair endpoints with bounded queue (`KCHANNEL_MAX_QUEUE`), blocking/nonblocking send/recv, and handle transfer (`KRIGHT_TRANSFER`) with move semantics
 - Port wait queue (Kairos extension): channel endpoint can bind to a port key; events currently include `READABLE` and `PEER_CLOSED`, consumed through blocking/nonblocking `port_wait` with optional timeout
 - Channel/port internal sleep+wake paths now share `poll_wait_source` for waiter blocking and wakeup; port fd poll fanout to multiple vnodes remains unchanged
+- Channel fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_CHANNEL`; resulting fd supports `poll` (`POLLIN|POLLOUT|POLLHUP`) plus byte `read()`/`write()` on channel payload path
 - Port fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_PORT`; resulting fd is pollable (`POLLIN`) and `read()` consumes one `kairos_port_packet_user`
+- Reverse bridge for channel/port fd: `kairos_handle_from_fd` recognizes bridge fds and recreates typed handles (`KOBJ_TYPE_CHANNEL` / `KOBJ_TYPE_PORT`) with rights derived from fd rights attenuation (`FD_RIGHT_READ` maps to `KRIGHT_WAIT` on port handles)
+- `kairos_fd_from_handle` accepts `O_NONBLOCK` for channel/port bridges (read path returns `-EAGAIN` when empty); `KOBJ_TYPE_FILE` bridge keeps existing semantics and rejects `O_NONBLOCK` at conversion time
 - Kairos extension syscalls (custom Linux ABI numbers): `kairos_handle_close`(4600), `kairos_handle_duplicate`(4601), `kairos_channel_create/send/recv`(4602-4604), `kairos_port_create/bind/wait`(4605-4607), `kairos_cap_rights_get`(4608), `kairos_cap_rights_limit`(4609), `kairos_handle_from_fd`(4610), `kairos_fd_from_handle`(4611)
 
 Related references:

@@ -125,10 +125,16 @@ void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn) 
 
 int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
                            void *channel, struct mutex *mtx) {
+    return poll_wait_source_block_ex(src, deadline, channel, mtx, true);
+}
+
+int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
+                              void *channel, struct mutex *mtx,
+                              bool interruptible) {
     if (!src)
         return -EINVAL;
     return poll_block_current_ex(&src->wq, deadline, channel ? channel : src,
-                                 mtx, true);
+                                 mtx, interruptible);
 }
 
 void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events) {

@@ -10,7 +10,6 @@
 #include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/sync.h>
-#include <kairos/wait.h>
 
 #include "lwip/sys.h"
 #include "lwip/opt.h"
@@ -21,7 +20,7 @@
 err_t sys_sem_new(sys_sem_t *sem, u8_t count) {
     sem->count = count;
     mutex_init(&sem->lock, "lwip_sem");
-    wait_queue_init(&sem->wq);
+    poll_wait_source_init(&sem->wait_src, NULL);
     sem->valid = true;
     return ERR_OK;
 }
@@ -34,7 +33,7 @@ void sys_sem_signal(sys_sem_t *sem) {
     mutex_lock(&sem->lock);
     sem->count++;
     mutex_unlock(&sem->lock);
-    wait_queue_wakeup_one(&sem->wq);
+    poll_wait_source_wake_one(&sem->wait_src, 0);
 }
 
 u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout) {
@@ -48,14 +47,15 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout) {
     while (sem->count == 0) {
         int rc;
         if (deadline) {
-            rc = proc_sleep_on_mutex_timeout(&sem->wq, &sem->wq,
-                                             &sem->lock, false, deadline);
+            rc = poll_wait_source_block_ex(&sem->wait_src, deadline,
+                                           &sem->wait_src, &sem->lock, false);
             if (rc == -ETIMEDOUT) {
                 mutex_unlock(&sem->lock);
                 return SYS_ARCH_TIMEOUT;
             }
         } else {
-            rc = proc_sleep_on_mutex(&sem->wq, &sem->wq, &sem->lock, false);
+            rc = poll_wait_source_block_ex(&sem->wait_src, 0, &sem->wait_src,
+                                           &sem->lock, false);
         }
         (void)rc;
     }
@@ -108,8 +108,8 @@ err_t sys_mbox_new(sys_mbox_t *mbox, int size) {
     mbox->tail = 0;
     mbox->count = 0;
     mutex_init(&mbox->lock, "lwip_mbox");
-    wait_queue_init(&mbox->not_empty);
-    wait_queue_init(&mbox->not_full);
+    poll_wait_source_init(&mbox->not_empty, NULL);
+    poll_wait_source_init(&mbox->not_full, NULL);
     mbox->valid = true;
     return ERR_OK;
 }
@@ -121,14 +121,14 @@ void sys_mbox_free(sys_mbox_t *mbox) {
 void sys_mbox_post(sys_mbox_t *mbox, void *msg) {
     mutex_lock(&mbox->lock);
     while (mbox->count >= SYS_MBOX_SIZE) {
-        proc_sleep_on_mutex(&mbox->not_full, &mbox->not_full,
-                            &mbox->lock, false);
+        poll_wait_source_block_ex(&mbox->not_full, 0, &mbox->not_full,
+                                  &mbox->lock, false);
     }
     mbox->msgs[mbox->head] = msg;
     mbox->head = (mbox->head + 1) % SYS_MBOX_SIZE;
     mbox->count++;
     mutex_unlock(&mbox->lock);
-    wait_queue_wakeup_one(&mbox->not_empty);
+    poll_wait_source_wake_one(&mbox->not_empty, 0);
 }
 
 err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg) {
@@ -141,7 +141,7 @@ err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg) {
     mbox->head = (mbox->head + 1) % SYS_MBOX_SIZE;
     mbox->count++;
     mutex_unlock(&mbox->lock);
-    wait_queue_wakeup_one(&mbox->not_empty);
+    poll_wait_source_wake_one(&mbox->not_empty, 0);
     return ERR_OK;
 }
 
@@ -160,15 +160,17 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout) {
     while (mbox->count == 0) {
         int rc;
         if (deadline) {
-            rc = proc_sleep_on_mutex_timeout(&mbox->not_empty, &mbox->not_empty,
-                                             &mbox->lock, false, deadline);
+            rc = poll_wait_source_block_ex(&mbox->not_empty, deadline,
+                                           &mbox->not_empty, &mbox->lock,
+                                           false);
             if (rc == -ETIMEDOUT) {
                 mutex_unlock(&mbox->lock);
                 return SYS_ARCH_TIMEOUT;
             }
         } else {
-            rc = proc_sleep_on_mutex(&mbox->not_empty, &mbox->not_empty,
-                                     &mbox->lock, false);
+            rc = poll_wait_source_block_ex(&mbox->not_empty, 0,
+                                           &mbox->not_empty, &mbox->lock,
+                                           false);
         }
         (void)rc;
     }
@@ -176,7 +178,7 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout) {
     mbox->tail = (mbox->tail + 1) % SYS_MBOX_SIZE;
     mbox->count--;
     mutex_unlock(&mbox->lock);
-    wait_queue_wakeup_one(&mbox->not_full);
+    poll_wait_source_wake_one(&mbox->not_full, 0);
 
     if (msg) {
         *msg = m;
@@ -194,7 +196,7 @@ u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg) {
     mbox->tail = (mbox->tail + 1) % SYS_MBOX_SIZE;
     mbox->count--;
     mutex_unlock(&mbox->lock);
-    wait_queue_wakeup_one(&mbox->not_full);
+    poll_wait_source_wake_one(&mbox->not_full, 0);
 
     if (msg) {
         *msg = m;

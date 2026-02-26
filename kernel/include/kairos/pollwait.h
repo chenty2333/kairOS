@@ -66,6 +66,9 @@ void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn);
 void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn);
 int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
                            void *channel, struct mutex *mtx);
+int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
+                              void *channel, struct mutex *mtx,
+                              bool interruptible);
 void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events);
 void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events);
 

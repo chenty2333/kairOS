@@ -5,15 +5,15 @@
 #ifndef LWIP_ARCH_SYS_ARCH_H
 #define LWIP_ARCH_SYS_ARCH_H
 
+#include <kairos/pollwait.h>
 #include <kairos/sync.h>
-#include <kairos/wait.h>
 #include <kairos/list.h>
 
 /* Semaphore: counter + wait queue */
 struct sys_sem {
     int count;
     struct mutex lock;
-    struct wait_queue wq;
+    struct poll_wait_source wait_src;
     bool valid;
 };
 typedef struct sys_sem sys_sem_t;
@@ -34,8 +34,8 @@ struct sys_mbox {
     int tail;
     int count;
     struct mutex lock;
-    struct wait_queue not_empty;
-    struct wait_queue not_full;
+    struct poll_wait_source not_empty;
+    struct poll_wait_source not_full;
     bool valid;
 };
 typedef struct sys_mbox sys_mbox_t;
