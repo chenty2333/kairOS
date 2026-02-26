@@ -151,25 +151,11 @@ lwIP integration:
 
 ## Input Subsystem (drivers/input/)
 
-Core framework (input_core.c):
-- input_dev: generic input device, maintains client_list for evdev consumers
-- input_dev_alloc/free/register/unregister: lifecycle management
-- input_report_key/rel/abs + input_sync: event reporting, dispatches to all attached evdev clients
-- Global input_dev_list protected by spinlock
-
-evdev layer (evdev.c):
-- input_dev_register() auto-creates `/dev/input/eventN` via devfs
-- Each open() allocates an evdev_client with a 256-entry ring buffer
-- fread: blocking (via proc_sleep_on) or O_NONBLOCK, returns struct input_event (Linux compatible)
-- poll: returns POLLIN when buffer non-empty
-- ioctl: EVIOCGNAME, EVIOCGID
-
-PS/2 drivers (x86_64 only, guarded by `#ifdef __x86_64__`):
-- ps2_controller.c: 8042 init (disable ports, configure IRQ 1+12, re-enable)
-- ps2_kbd.c: IRQ 1 handler, scancode set 1 decode (standard + 0xE0 extended), keycode-to-ASCII for TTY integration via tty_receive_buf()
-- ps2_mouse.c: IRQ 12 handler, 3/4-byte packet decode (buttons, dx/dy, wheel), scroll wheel detection via magic sample rate sequence
-
-Data flow: hardware → IRQ handler → input_report_*() → evdev clients → userspace read(); keyboard also feeds tty_receive_buf() for shell input.
+- input_core.c: input_dev framework, event reporting (input_report_key/rel/abs + input_sync)
+- evdev.c: /dev/input/eventN char devices, blocking read/poll/ioctl (EVIOCGNAME/EVIOCGID)
+- ps2_controller.c: 8042 init (x86_64 only)
+- ps2_kbd.c: IRQ 1, scancode set 1 decode, feeds TTY via tty_receive_buf()
+- ps2_mouse.c: IRQ 12, 3/4-byte packet decode, scroll wheel detection
 
 ## Current Limitations
 
