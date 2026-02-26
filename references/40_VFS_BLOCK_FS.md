@@ -107,7 +107,7 @@ Pseudo filesystems:
   - generated procfs read path now uses growable staging buffer (up to 256 KiB) rather than fixed 4 KiB
   - `/proc/self` symlink target is generated per lookup from current task pid
 - sysfs (fs/sysfs/): device model filesystem
-  - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers}`)
+  - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers,transfers_v2,transfers_cursor,transfers_page_size}`)
 - tmpfs (fs/tmpfs/): in-memory filesystem
 
 Special:

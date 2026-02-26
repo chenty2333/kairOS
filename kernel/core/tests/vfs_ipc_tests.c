@@ -4409,11 +4409,12 @@ out:
 }
 
 static void test_sysfs_ipc_visibility(void) {
+    struct process *self = proc_current();
     struct kobj *ch0 = NULL;
     struct kobj *ch1 = NULL;
     struct file *f = NULL;
     char buf[512] = {0};
-    char path[96] = {0};
+    char path[128] = {0};
 
     int rc = kchannel_create_pair(&ch0, &ch1);
     test_check(rc == 0, "sysfs_ipc create channel pair");
@@ -4422,6 +4423,11 @@ static void test_sysfs_ipc_visibility(void) {
 
     uint32_t ch0_id = kobj_id(ch0);
     uint32_t ch1_id = kobj_id(ch1);
+    int32_t self_pid = self ? self->pid : -1;
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_TAKE, self_pid, -1,
+                         KRIGHT_TRANSFER);
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_RESTORE, -1, self_pid,
+                         KRIGHT_TRANSFER);
 
     rc = vfs_open("/sys/ipc/objects/page", O_RDONLY, 0, &f);
     test_check(rc == 0, "sysfs_ipc open objects page");
@@ -4478,6 +4484,167 @@ static void test_sysfs_ipc_visibility(void) {
             }
         }
         close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_page_size",
+                     ch0_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "sysfs_ipc xferv2 page_size path");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_WRONLY, 0, &f);
+        test_check(rc == 0, "sysfs_ipc open object transfers_page_size");
+        if (rc == 0) {
+            const char *value = "1\n";
+            ssize_t wr = vfs_write(f, value, strlen(value));
+            test_check(wr == (ssize_t)strlen(value),
+                       "sysfs_ipc write object transfers_page_size");
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_cursor",
+                     ch0_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "sysfs_ipc xferv2 cursor path");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_WRONLY, 0, &f);
+        test_check(rc == 0, "sysfs_ipc open object transfers_cursor");
+        if (rc == 0) {
+            const char *value = "0\n";
+            ssize_t wr = vfs_write(f, value, strlen(value));
+            test_check(wr == (ssize_t)strlen(value),
+                       "sysfs_ipc write object transfers_cursor page0");
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_v2", ch0_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "sysfs_ipc xferv2 path");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        char page0[1024] = {0};
+        char page1[1024] = {0};
+        char tail[1024] = {0};
+        char first0[128] = {0};
+        char first1[128] = {0};
+
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "sysfs_ipc open object transfers_v2");
+        if (rc == 0) {
+            ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
+            test_check(rd > 0, "sysfs_ipc read object transfers_v2 page0");
+            if (rd > 0) {
+                test_snapshot_expect_str(page0, "schema",
+                                         "sysfs_ipc_object_transfers_v2",
+                                         "sysfs_ipc xferv2 schema");
+                test_snapshot_expect_u64(page0, "obj_id", ch0_id,
+                                         "sysfs_ipc xferv2 obj id");
+                test_snapshot_expect_u64(page0, "cursor", 0,
+                                         "sysfs_ipc xferv2 cursor0");
+                test_snapshot_expect_u64(page0, "page_size", 1,
+                                         "sysfs_ipc xferv2 page_size");
+                test_snapshot_expect_u64(page0, "returned", 1,
+                                         "sysfs_ipc xferv2 returned0");
+                test_snapshot_expect_u64(page0, "next_cursor", 1,
+                                         "sysfs_ipc xferv2 next0");
+                test_snapshot_expect_u64(page0, "end", 0,
+                                         "sysfs_ipc xferv2 end0");
+                test_check(procfs_first_data_row(page0, first0, sizeof(first0)),
+                           "sysfs_ipc xferv2 row0");
+            }
+        }
+        close_file_if_open(&f);
+
+        if (npath > 0 && (size_t)npath < sizeof(path)) {
+            int nc = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_cursor",
+                              ch0_id);
+            test_check(nc > 0 && (size_t)nc < sizeof(path),
+                       "sysfs_ipc xferv2 cursor path second");
+            if (nc > 0 && (size_t)nc < sizeof(path)) {
+                rc = vfs_open(path, O_WRONLY, 0, &f);
+                test_check(rc == 0, "sysfs_ipc open object transfers_cursor second");
+                if (rc == 0) {
+                    const char *value = "1\n";
+                    ssize_t wr = vfs_write(f, value, strlen(value));
+                    test_check(wr == (ssize_t)strlen(value),
+                               "sysfs_ipc write object transfers_cursor page1");
+                }
+                close_file_if_open(&f);
+            }
+        }
+
+        npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_v2",
+                         ch0_id);
+        test_check(npath > 0 && (size_t)npath < sizeof(path),
+                   "sysfs_ipc xferv2 path second");
+        if (npath > 0 && (size_t)npath < sizeof(path)) {
+            rc = vfs_open(path, O_RDONLY, 0, &f);
+            test_check(rc == 0, "sysfs_ipc reopen object transfers_v2 page1");
+            if (rc == 0) {
+                ssize_t rd = proc_control_read_snapshot(f, page1, sizeof(page1));
+                test_check(rd > 0, "sysfs_ipc read object transfers_v2 page1");
+                if (rd > 0) {
+                    test_snapshot_expect_u64(page1, "cursor", 1,
+                                             "sysfs_ipc xferv2 cursor1");
+                    test_check(procfs_first_data_row(page1, first1, sizeof(first1)),
+                               "sysfs_ipc xferv2 row1");
+                    if (first0[0] != '\0' && first1[0] != '\0')
+                        test_check(strcmp(first0, first1) != 0,
+                                   "sysfs_ipc xferv2 cursor advances");
+                }
+            }
+            close_file_if_open(&f);
+        }
+
+        npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_cursor",
+                         ch0_id);
+        test_check(npath > 0 && (size_t)npath < sizeof(path),
+                   "sysfs_ipc xferv2 cursor path tail");
+        if (npath > 0 && (size_t)npath < sizeof(path)) {
+            rc = vfs_open(path, O_WRONLY, 0, &f);
+            test_check(rc == 0, "sysfs_ipc open object transfers_cursor tail");
+            if (rc == 0) {
+                const char *value = "999999\n";
+                ssize_t wr = vfs_write(f, value, strlen(value));
+                test_check(wr == (ssize_t)strlen(value),
+                           "sysfs_ipc write object transfers_cursor tail");
+            }
+            close_file_if_open(&f);
+        }
+
+        npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_v2",
+                         ch0_id);
+        test_check(npath > 0 && (size_t)npath < sizeof(path),
+                   "sysfs_ipc xferv2 path tail");
+        if (npath > 0 && (size_t)npath < sizeof(path)) {
+            rc = vfs_open(path, O_RDONLY, 0, &f);
+            test_check(rc == 0, "sysfs_ipc reopen object transfers_v2 tail");
+            if (rc == 0) {
+                ssize_t rd = proc_control_read_snapshot(f, tail, sizeof(tail));
+                test_check(rd > 0, "sysfs_ipc read object transfers_v2 tail");
+                if (rd > 0) {
+                    test_snapshot_expect_u64(tail, "returned", 0,
+                                             "sysfs_ipc xferv2 tail returned");
+                    test_snapshot_expect_u64(tail, "end", 1,
+                                             "sysfs_ipc xferv2 tail end");
+                }
+            }
+            close_file_if_open(&f);
+        }
+
+        npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers_v2",
+                         ch0_id);
+        test_check(npath > 0 && (size_t)npath < sizeof(path),
+                   "sysfs_ipc xferv2 path readonly");
+        if (npath > 0 && (size_t)npath < sizeof(path)) {
+            rc = vfs_open(path, O_RDONLY, 0, &f);
+            test_check(rc == 0, "sysfs_ipc reopen object transfers_v2 readonly");
+            if (rc == 0) {
+                ssize_t wr = vfs_write(f, "x", 1);
+                test_check(wr == -EPERM, "sysfs_ipc xferv2 readonly");
+            }
+            close_file_if_open(&f);
+        }
     }
 
     rc = vfs_open("/sys/ipc/objects/page_size", O_WRONLY, 0, &f);

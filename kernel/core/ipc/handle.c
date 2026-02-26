@@ -103,6 +103,11 @@ struct ipc_registry_entry {
     struct sysfs_node *sysfs_dir;
     struct sysfs_attribute summary_attr;
     struct sysfs_attribute transfers_attr;
+    struct sysfs_attribute transfers_v2_attr;
+    struct sysfs_attribute transfers_cursor_attr;
+    struct sysfs_attribute transfers_page_size_attr;
+    uint32_t transfers_cursor;
+    uint32_t transfers_page_size;
 };
 
 static LIST_HEAD(ipc_registry_all);
@@ -125,6 +130,8 @@ static atomic_t kobj_id_next = ATOMIC_INIT(0);
 
 #define IPC_SYSFS_PAGE_SIZE_DEFAULT 64U
 #define IPC_SYSFS_PAGE_SIZE_MAX     512U
+#define IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE 128U
+#define IPC_SYSFS_TRANSFER_V2_MAX_PAGE     512U
 
 struct ipc_sysfs_page_state {
     uint32_t cursor;
@@ -779,6 +786,151 @@ static ssize_t ipc_sysfs_show_object_transfers(void *priv, char *buf, size_t buf
     return (ssize_t)len;
 }
 
+static ssize_t ipc_sysfs_show_object_transfers_v2(void *priv, char *buf,
+                                                  size_t bufsz) {
+    if (!buf || bufsz == 0 || !priv)
+        return -EINVAL;
+
+    struct ipc_registry_entry *ent = priv;
+    struct kobj *obj = ent->obj;
+    if (!obj)
+        return -ENODEV;
+
+    uint32_t cursor =
+        __atomic_load_n(&ent->transfers_cursor, __ATOMIC_ACQUIRE);
+    uint32_t page_size =
+        __atomic_load_n(&ent->transfers_page_size, __ATOMIC_ACQUIRE);
+    if (page_size == 0)
+        page_size = IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE;
+
+    size_t len = 0;
+    int n = snprintf(buf + len, bufsz - len,
+                     "schema=sysfs_ipc_object_transfers_v2\n"
+                     "obj_id=%u\n"
+                     "type=%s\n"
+                     "cursor=%u\n"
+                     "page_size=%u\n"
+                     "columns=seq event from_pid to_pid rights cpu ticks\n",
+                     obj->id, kobj_type_name(obj->type), cursor, page_size);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - len)
+        return (ssize_t)bufsz;
+    len += (size_t)n;
+
+    struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+    size_t count =
+        kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+
+    uint32_t scanned = 0;
+    uint32_t emitted = 0;
+    bool has_more = false;
+    for (size_t i = 0; i < count; i++) {
+        if (hist[i].seq == 0)
+            continue;
+        if (scanned < cursor) {
+            scanned++;
+            continue;
+        }
+        if (emitted >= page_size) {
+            has_more = true;
+            break;
+        }
+
+        n = snprintf(buf + len, bufsz - len, "%u %s %d %d 0x%x %u %llu\n",
+                     hist[i].seq, kobj_transfer_event_name(hist[i].event),
+                     hist[i].from_pid, hist[i].to_pid, hist[i].rights,
+                     hist[i].cpu, (unsigned long long)hist[i].ticks);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+        emitted++;
+        scanned++;
+    }
+
+    uint64_t next_cursor64 = (uint64_t)cursor + (uint64_t)emitted;
+    if (next_cursor64 > 0xFFFFFFFFULL)
+        next_cursor64 = 0xFFFFFFFFULL;
+    uint32_t next_cursor = (uint32_t)next_cursor64;
+
+    n = snprintf(buf + len, bufsz - len,
+                 "returned=%u\n"
+                 "next_cursor=%u\n"
+                 "end=%u\n",
+                 emitted, next_cursor, has_more ? 0U : 1U);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - len)
+        return (ssize_t)bufsz;
+    len += (size_t)n;
+
+    return (ssize_t)len;
+}
+
+static ssize_t ipc_sysfs_show_object_transfers_cursor(void *priv, char *buf,
+                                                      size_t bufsz) {
+    if (!buf || bufsz == 0 || !priv)
+        return -EINVAL;
+    struct ipc_registry_entry *ent = priv;
+    uint32_t cursor =
+        __atomic_load_n(&ent->transfers_cursor, __ATOMIC_ACQUIRE);
+    int n = snprintf(buf, bufsz, "%u\n", cursor);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)bufsz;
+    return (ssize_t)n;
+}
+
+static ssize_t ipc_sysfs_store_object_transfers_cursor(void *priv,
+                                                       const char *buf,
+                                                       size_t len) {
+    if (!priv)
+        return -EINVAL;
+    uint32_t value = 0;
+    int rc = ipc_parse_u32(buf, len, &value);
+    if (rc < 0)
+        return rc;
+    struct ipc_registry_entry *ent = priv;
+    __atomic_store_n(&ent->transfers_cursor, value, __ATOMIC_RELEASE);
+    return (ssize_t)len;
+}
+
+static ssize_t ipc_sysfs_show_object_transfers_page_size(void *priv, char *buf,
+                                                         size_t bufsz) {
+    if (!buf || bufsz == 0 || !priv)
+        return -EINVAL;
+    struct ipc_registry_entry *ent = priv;
+    uint32_t page_size =
+        __atomic_load_n(&ent->transfers_page_size, __ATOMIC_ACQUIRE);
+    if (page_size == 0)
+        page_size = IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE;
+    int n = snprintf(buf, bufsz, "%u\n", page_size);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)bufsz;
+    return (ssize_t)n;
+}
+
+static ssize_t ipc_sysfs_store_object_transfers_page_size(void *priv,
+                                                          const char *buf,
+                                                          size_t len) {
+    if (!priv)
+        return -EINVAL;
+    uint32_t value = 0;
+    int rc = ipc_parse_u32(buf, len, &value);
+    if (rc < 0)
+        return rc;
+    if (value == 0 || value > IPC_SYSFS_TRANSFER_V2_MAX_PAGE)
+        return -EINVAL;
+    struct ipc_registry_entry *ent = priv;
+    __atomic_store_n(&ent->transfers_page_size, value, __ATOMIC_RELEASE);
+    return (ssize_t)len;
+}
+
 static ssize_t ipc_sysfs_show_channels(void *priv __attribute__((unused)),
                                        char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
@@ -1095,8 +1247,36 @@ static void ipc_sysfs_create_object_dir_locked(struct ipc_registry_entry *ent) {
     ent->transfers_attr.show = ipc_sysfs_show_object_transfers;
     ent->transfers_attr.priv = ent;
 
+    memset(&ent->transfers_v2_attr, 0, sizeof(ent->transfers_v2_attr));
+    ent->transfers_v2_attr.name = "transfers_v2";
+    ent->transfers_v2_attr.mode = 0444;
+    ent->transfers_v2_attr.show = ipc_sysfs_show_object_transfers_v2;
+    ent->transfers_v2_attr.priv = ent;
+
+    memset(&ent->transfers_cursor_attr, 0, sizeof(ent->transfers_cursor_attr));
+    ent->transfers_cursor_attr.name = "transfers_cursor";
+    ent->transfers_cursor_attr.mode = 0644;
+    ent->transfers_cursor_attr.show = ipc_sysfs_show_object_transfers_cursor;
+    ent->transfers_cursor_attr.store = ipc_sysfs_store_object_transfers_cursor;
+    ent->transfers_cursor_attr.priv = ent;
+
+    memset(&ent->transfers_page_size_attr, 0,
+           sizeof(ent->transfers_page_size_attr));
+    ent->transfers_page_size_attr.name = "transfers_page_size";
+    ent->transfers_page_size_attr.mode = 0644;
+    ent->transfers_page_size_attr.show = ipc_sysfs_show_object_transfers_page_size;
+    ent->transfers_page_size_attr.store =
+        ipc_sysfs_store_object_transfers_page_size;
+    ent->transfers_page_size_attr.priv = ent;
+
+    ent->transfers_cursor = 0;
+    ent->transfers_page_size = IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE;
+
     if (!sysfs_create_file(dir, &ent->summary_attr) ||
-        !sysfs_create_file(dir, &ent->transfers_attr)) {
+        !sysfs_create_file(dir, &ent->transfers_attr) ||
+        !sysfs_create_file(dir, &ent->transfers_v2_attr) ||
+        !sysfs_create_file(dir, &ent->transfers_cursor_attr) ||
+        !sysfs_create_file(dir, &ent->transfers_page_size_attr)) {
         sysfs_rmdir(dir);
         return;
     }
@@ -1178,6 +1358,12 @@ static void ipc_registry_register_obj(struct kobj *obj) {
     ent->sysfs_dir = NULL;
     memset(&ent->summary_attr, 0, sizeof(ent->summary_attr));
     memset(&ent->transfers_attr, 0, sizeof(ent->transfers_attr));
+    memset(&ent->transfers_v2_attr, 0, sizeof(ent->transfers_v2_attr));
+    memset(&ent->transfers_cursor_attr, 0, sizeof(ent->transfers_cursor_attr));
+    memset(&ent->transfers_page_size_attr, 0,
+           sizeof(ent->transfers_page_size_attr));
+    ent->transfers_cursor = 0;
+    ent->transfers_page_size = IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE;
     INIT_LIST_HEAD(&ent->type_node);
     INIT_LIST_HEAD(&ent->all_node);
 
