@@ -109,6 +109,7 @@ struct virtio_iommu_domain_ctx {
     struct virtio_iommu_state *state;
     uint32_t domain_id;
     uint32_t endpoint;
+    bool attached;
 };
 
 struct virtio_iommu_state {
@@ -283,17 +284,18 @@ static int virtio_iommu_domain_id_alloc(struct virtio_iommu_state *state,
     return -ENOSPC;
 }
 
-static void virtio_iommu_domain_id_free(struct virtio_iommu_domain_ctx *ctx) {
-    if (!ctx || !ctx->state)
+static void virtio_iommu_domain_id_free(struct virtio_iommu_state *state,
+                                        struct virtio_iommu_domain_ctx *ctx) {
+    if (!state || !ctx)
         return;
 
     bool irq_flags;
-    spin_lock_irqsave(&ctx->state->domain_lock, &irq_flags);
+    spin_lock_irqsave(&state->domain_lock, &irq_flags);
     if (!list_empty(&ctx->list)) {
         list_del(&ctx->list);
         INIT_LIST_HEAD(&ctx->list);
     }
-    spin_unlock_irqrestore(&ctx->state->domain_lock, irq_flags);
+    spin_unlock_irqrestore(&state->domain_lock, irq_flags);
 }
 
 static void virtio_iommu_drain_used_locked(struct virtio_iommu_state *state) {
@@ -495,6 +497,21 @@ static void virtio_iommu_domain_unmap(struct iommu_domain *domain, dma_addr_t io
     }
 }
 
+static int virtio_iommu_domain_set_fault_policy(
+    struct iommu_domain *domain __unused, enum iommu_fault_policy policy) {
+    if (policy == IOMMU_FAULT_POLICY_DISABLE)
+        return 0;
+    return -EOPNOTSUPP;
+}
+
+static int virtio_iommu_domain_recover_faults(struct iommu_domain *domain __unused,
+                                               uint32_t budget __unused,
+                                               uint32_t *recovered) {
+    if (recovered)
+        *recovered = 0;
+    return -EOPNOTSUPP;
+}
+
 static void virtio_iommu_domain_release(struct iommu_domain *domain) {
     if (!domain)
         return;
@@ -503,7 +520,16 @@ static void virtio_iommu_domain_release(struct iommu_domain *domain) {
     if (!ctx)
         return;
 
-    if (ctx->state && ctx->state->ready && !ctx->state->faulted) {
+    struct virtio_iommu_state *state = ctx->state;
+    if (state != &virtio_iommu_state) {
+        if (state) {
+            pr_warn("virtio-iommu: stale domain state ptr=%p domain=%u endpoint=0x%x\n",
+                    (void *)state, ctx->domain_id, ctx->endpoint);
+        }
+        state = NULL;
+    }
+
+    if (ctx->attached && state && state->ready && !state->faulted) {
         int ret = virtio_iommu_send_detach(ctx);
         if (ret < 0) {
             pr_warn("virtio-iommu: detach failed domain=%u endpoint=0x%x ret=%d\n",
@@ -511,17 +537,19 @@ static void virtio_iommu_domain_release(struct iommu_domain *domain) {
         }
     }
 
-    virtio_iommu_domain_id_free(ctx);
-    if (ctx->state && !ctx->state->ready) {
+    virtio_iommu_domain_id_free(state, ctx);
+    if (state && !state->ready) {
         bool irq_flags;
-        spin_lock_irqsave(&ctx->state->domain_lock, &irq_flags);
-        bool no_domains = list_empty(&ctx->state->domains);
-        spin_unlock_irqrestore(&ctx->state->domain_lock, irq_flags);
-        if (no_domains && ctx->state->req_vq) {
-            virtqueue_free(ctx->state->req_vq);
-            ctx->state->req_vq = NULL;
+        spin_lock_irqsave(&state->domain_lock, &irq_flags);
+        bool no_domains = list_empty(&state->domains);
+        spin_unlock_irqrestore(&state->domain_lock, irq_flags);
+        if (no_domains && state->req_vq) {
+            virtqueue_free(state->req_vq);
+            state->req_vq = NULL;
         }
     }
+    ctx->attached = false;
+    ctx->state = NULL;
     domain->ops_priv = NULL;
     kfree(ctx);
 }
@@ -529,6 +557,8 @@ static void virtio_iommu_domain_release(struct iommu_domain *domain) {
 static const struct iommu_domain_ops virtio_iommu_domain_ops = {
     .map = virtio_iommu_domain_map,
     .unmap = virtio_iommu_domain_unmap,
+    .set_fault_policy = virtio_iommu_domain_set_fault_policy,
+    .recover_faults = virtio_iommu_domain_recover_faults,
     .release = virtio_iommu_domain_release,
 };
 
@@ -587,6 +617,7 @@ static struct iommu_domain *virtio_iommu_provider_alloc(struct device *dev,
     INIT_LIST_HEAD(&ctx->list);
     ctx->state = state;
     ctx->endpoint = endpoint;
+    ctx->attached = false;
 
     bool irq_flags;
     spin_lock_irqsave(&state->domain_lock, &irq_flags);
@@ -599,13 +630,20 @@ static struct iommu_domain *virtio_iommu_provider_alloc(struct device *dev,
     }
 
     iommu_domain_set_ops(domain, &virtio_iommu_domain_ops, ctx);
-    ret = virtio_iommu_send_attach(ctx);
+    iommu_domain_set_caps(domain, iommu_domain_get_caps(domain) |
+                                      IOMMU_CAP_FAULT_REPORT |
+                                      IOMMU_CAP_FAULT_DISABLE);
+    ret = iommu_domain_set_fault_policy(domain, IOMMU_FAULT_POLICY_DISABLE);
     if (ret < 0) {
-        virtio_iommu_domain_id_free(ctx);
-        kfree(ctx);
         iommu_domain_destroy(domain);
         return NULL;
     }
+    ret = virtio_iommu_send_attach(ctx);
+    if (ret < 0) {
+        iommu_domain_destroy(domain);
+        return NULL;
+    }
+    ctx->attached = true;
 
     if (owned)
         *owned = true;

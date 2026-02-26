@@ -32,10 +32,9 @@ struct iommu_hw_provider_entry {
 static struct iommu_hw_provider_entry iommu_hw_providers[IOMMU_HW_PROVIDERS_MAX];
 static size_t iommu_hw_provider_count;
 static spinlock_t iommu_hw_ops_lock = SPINLOCK_INIT;
+static spinlock_t iommu_device_domain_lock = SPINLOCK_INIT;
 
-__attribute__((weak)) int arch_iommu_init(void) {
-    return -ENODEV;
-}
+int arch_iommu_init(void);
 
 __attribute__((weak)) int
 virtio_iommu_health_snapshot(struct virtio_iommu_health *out) {
@@ -326,6 +325,8 @@ struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
     domain->iova_limit = iova_limit;
     domain->iova_cursor = iova_base;
     domain->granule = granule;
+    domain->caps = (type == IOMMU_DOMAIN_DMA) ? IOMMU_CAP_MAP_UNMAP : 0;
+    domain->fault_policy = IOMMU_FAULT_POLICY_REPORT;
     spin_init(&domain->lock);
     INIT_LIST_HEAD(&domain->mappings);
     return domain;
@@ -344,6 +345,8 @@ struct iommu_domain *iommu_get_passthrough_domain(void) {
             IOMMU_IOVA_DEFAULT_BASE + IOMMU_IOVA_DEFAULT_SIZE;
         iommu_passthrough_domain.iova_cursor = iommu_passthrough_domain.iova_base;
         iommu_passthrough_domain.granule = CONFIG_PAGE_SIZE;
+        iommu_passthrough_domain.caps = 0;
+        iommu_passthrough_domain.fault_policy = IOMMU_FAULT_POLICY_REPORT;
         spin_init(&iommu_passthrough_domain.lock);
         INIT_LIST_HEAD(&iommu_passthrough_domain.mappings);
         __atomic_store_n(&iommu_passthrough_domain_init_done, true,
@@ -358,6 +361,8 @@ int iommu_init(void) {
     int ret = arch_iommu_init();
     if (ret == 0)
         pr_info("iommu: arch backend initialized\n");
+    else if (ret == -ENOTSUP)
+        pr_info("iommu: arch backend discoverable but not implemented, using passthrough\n");
     else
         pr_info("iommu: no arch backend (ret=%d), using passthrough\n", ret);
     return 0;
@@ -432,20 +437,164 @@ size_t iommu_domain_get_granule(const struct iommu_domain *domain) {
     return iommu_domain_granule(domain);
 }
 
+void iommu_domain_set_caps(struct iommu_domain *domain, uint64_t caps) {
+    if (!domain)
+        return;
+    __atomic_store_n(&domain->caps, caps, __ATOMIC_RELEASE);
+}
+
+uint64_t iommu_domain_get_caps(const struct iommu_domain *domain) {
+    if (!domain)
+        return 0;
+    return __atomic_load_n(&domain->caps, __ATOMIC_ACQUIRE);
+}
+
+bool iommu_domain_has_cap(const struct iommu_domain *domain, uint64_t cap) {
+    return (iommu_domain_get_caps(domain) & cap) != 0;
+}
+
+int iommu_domain_bind_pasid(struct iommu_domain *domain, struct device *dev,
+                            uint32_t pasid, uint32_t flags) {
+    if (!domain || !dev)
+        return -EINVAL;
+    if (!domain->ops || !domain->ops->bind_pasid)
+        return -EOPNOTSUPP;
+    return domain->ops->bind_pasid(domain, dev, pasid, flags);
+}
+
+int iommu_domain_unbind_pasid(struct iommu_domain *domain, struct device *dev,
+                              uint32_t pasid) {
+    if (!domain || !dev)
+        return -EINVAL;
+    if (!domain->ops || !domain->ops->unbind_pasid)
+        return -EOPNOTSUPP;
+    return domain->ops->unbind_pasid(domain, dev, pasid);
+}
+
+int iommu_domain_enable_pri(struct iommu_domain *domain, struct device *dev,
+                            uint32_t queue_depth) {
+    if (!domain || !dev || queue_depth == 0)
+        return -EINVAL;
+    if (!domain->ops || !domain->ops->enable_pri)
+        return -EOPNOTSUPP;
+    return domain->ops->enable_pri(domain, dev, queue_depth);
+}
+
+int iommu_domain_enable_ats(struct iommu_domain *domain, struct device *dev,
+                            uint32_t flags) {
+    if (!domain || !dev)
+        return -EINVAL;
+    if (!domain->ops || !domain->ops->enable_ats)
+        return -EOPNOTSUPP;
+    return domain->ops->enable_ats(domain, dev, flags);
+}
+
+int iommu_domain_set_fault_policy(struct iommu_domain *domain,
+                                  enum iommu_fault_policy policy) {
+    if (!domain)
+        return -EINVAL;
+    if (policy < IOMMU_FAULT_POLICY_REPORT ||
+        policy > IOMMU_FAULT_POLICY_RECOVER)
+        return -EINVAL;
+
+    if (policy == IOMMU_FAULT_POLICY_RECOVER &&
+        !iommu_domain_has_cap(domain, IOMMU_CAP_FAULT_RECOVER))
+        return -EOPNOTSUPP;
+
+    if (domain->ops && domain->ops->set_fault_policy) {
+        int ret = domain->ops->set_fault_policy(domain, policy);
+        if (ret < 0)
+            return ret;
+    } else if (policy != IOMMU_FAULT_POLICY_REPORT) {
+        return -EOPNOTSUPP;
+    }
+
+    __atomic_store_n(&domain->fault_policy, policy, __ATOMIC_RELEASE);
+    return 0;
+}
+
+enum iommu_fault_policy
+iommu_domain_get_fault_policy(const struct iommu_domain *domain) {
+    if (!domain)
+        return IOMMU_FAULT_POLICY_REPORT;
+    return __atomic_load_n(&domain->fault_policy, __ATOMIC_ACQUIRE);
+}
+
+int iommu_domain_recover_faults(struct iommu_domain *domain, uint32_t budget,
+                                uint32_t *recovered) {
+    if (!domain || budget == 0)
+        return -EINVAL;
+    if (recovered)
+        *recovered = 0;
+    if (!iommu_domain_has_cap(domain, IOMMU_CAP_FAULT_RECOVER))
+        return -EOPNOTSUPP;
+    if (!domain->ops || !domain->ops->recover_faults)
+        return -EOPNOTSUPP;
+    return domain->ops->recover_faults(domain, budget, recovered);
+}
+
+static void iommu_release_detached_domain(struct iommu_domain *domain, bool owned,
+                                          struct device *dev) {
+    if (!domain || !dev)
+        return;
+
+    const struct dma_ops *direct = dma_get_direct_ops();
+    if (domain->type == IOMMU_DOMAIN_DMA) {
+        struct list_head reclaimed;
+        INIT_LIST_HEAD(&reclaimed);
+
+        bool irq_flags;
+        spin_lock_irqsave(&domain->lock, &irq_flags);
+        struct list_head *pos, *n;
+        list_for_each_safe(pos, n, &domain->mappings) {
+            struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
+            if (m->dev != dev)
+                continue;
+            list_del(&m->list);
+            list_add_tail(&m->list, &reclaimed);
+        }
+        spin_unlock_irqrestore(&domain->lock, irq_flags);
+
+        list_for_each_safe(pos, n, &reclaimed) {
+            struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
+            list_del(&m->list);
+            if (domain->ops && domain->ops->unmap)
+                domain->ops->unmap(domain, m->iova_base, m->map_size);
+            if (direct && direct->unmap_single) {
+                direct->unmap_single(dev, (dma_addr_t)m->cpu_pa, m->req_size,
+                                     m->direction);
+            }
+            kfree(m);
+        }
+    }
+
+    if (owned)
+        iommu_domain_destroy(domain);
+}
+
 static int iommu_attach_device_internal(struct iommu_domain *domain,
                                         struct device *dev, bool owned) {
     if (!domain || !dev)
         return -EINVAL;
-    if (dev->iommu_domain == domain) {
+
+    struct iommu_domain *prev_domain = NULL;
+    bool prev_owned = false;
+
+    spin_lock(&iommu_device_domain_lock);
+    prev_domain = dev->iommu_domain;
+    prev_owned = dev->iommu_domain_owned;
+    if (prev_domain == domain) {
         dma_set_ops(dev, iommu_get_dma_ops());
+        spin_unlock(&iommu_device_domain_lock);
         return 0;
     }
-    if (dev->iommu_domain)
-        iommu_detach_device(dev);
-
     dev->iommu_domain = domain;
     dev->iommu_domain_owned = owned;
     dma_set_ops(dev, iommu_get_dma_ops());
+    spin_unlock(&iommu_device_domain_lock);
+
+    if (prev_domain)
+        iommu_release_detached_domain(prev_domain, prev_owned, dev);
     return 0;
 }
 
@@ -493,44 +642,18 @@ int iommu_attach_default_domain(struct device *dev) {
 void iommu_detach_device(struct device *dev) {
     if (!dev)
         return;
-    struct iommu_domain *domain = dev->iommu_domain;
-    bool owned = dev->iommu_domain_owned;
-    const struct dma_ops *direct = dma_get_direct_ops();
+    struct iommu_domain *domain = NULL;
+    bool owned = false;
 
-    if (domain && domain->type == IOMMU_DOMAIN_DMA) {
-        struct list_head reclaimed;
-        INIT_LIST_HEAD(&reclaimed);
-
-        bool irq_flags;
-        spin_lock_irqsave(&domain->lock, &irq_flags);
-        struct list_head *pos, *n;
-        list_for_each_safe(pos, n, &domain->mappings) {
-            struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
-            if (m->dev != dev)
-                continue;
-            list_del(&m->list);
-            list_add_tail(&m->list, &reclaimed);
-        }
-        spin_unlock_irqrestore(&domain->lock, irq_flags);
-
-        list_for_each_safe(pos, n, &reclaimed) {
-            struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
-            list_del(&m->list);
-            if (domain->ops && domain->ops->unmap)
-                domain->ops->unmap(domain, m->iova_base, m->map_size);
-            if (direct && direct->unmap_single) {
-                direct->unmap_single(dev, (dma_addr_t)m->cpu_pa, m->req_size,
-                                     m->direction);
-            }
-            kfree(m);
-        }
-    }
-
+    spin_lock(&iommu_device_domain_lock);
+    domain = dev->iommu_domain;
+    owned = dev->iommu_domain_owned;
     dev->iommu_domain = NULL;
     dev->iommu_domain_owned = false;
     dma_set_ops(dev, NULL);
-    if (owned)
-        iommu_domain_destroy(domain);
+    spin_unlock(&iommu_device_domain_lock);
+
+    iommu_release_detached_domain(domain, owned, dev);
 }
 
 struct iommu_domain *iommu_get_domain(struct device *dev) {
