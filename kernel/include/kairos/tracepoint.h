@@ -25,6 +25,7 @@ enum tracepoint_event {
     TRACE_SOCKET_HEAP_BUF = 6,
     TRACE_WAIT_EPOLL = 7,
     TRACE_WAIT_FD_EVENT = 8,
+    TRACE_WAIT_FUTEX = 9,
 };
 
 struct tracepoint_entry {

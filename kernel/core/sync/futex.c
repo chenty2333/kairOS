@@ -12,11 +12,15 @@
 #include <kairos/string.h>
 #include <kairos/sync.h>
 #include <kairos/time.h>
+#include <kairos/tracepoint.h>
 #include <kairos/types.h>
 #include <kairos/uaccess.h>
 
 #define FUTEX_BUCKETS 128
 #define NS_PER_SEC 1000000000ULL
+#define FUTEX_TRACE_WAIT  0x1U
+#define FUTEX_TRACE_WAITV 0x2U
+#define FUTEX_TRACE_WAKE  0x80000000U
 
 struct futex_waiter;
 
@@ -195,6 +199,8 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
         }
 
         poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_BLOCKS);
+        tracepoint_emit(TRACE_WAIT_FUTEX, FUTEX_TRACE_WAIT, (uint64_t)uaddr,
+                        deadline);
         int sleep_rc = poll_wait_source_block(&wait_src, deadline, (void *)uaddr,
                                               &waiter.bucket->lock);
 
@@ -261,6 +267,16 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
                                                  __ATOMIC_ACQUIRE);
         }
         waiter->woken = notify;
+        if (notify) {
+            uint32_t trace_flags =
+                FUTEX_TRACE_WAKE |
+                ((waiter->index >= 0) ? FUTEX_TRACE_WAITV : FUTEX_TRACE_WAIT);
+            uint64_t trace_arg1 =
+                (waiter->index >= 0) ? (uint64_t)(uint32_t)waiter->index
+                                     : UINT64_MAX;
+            tracepoint_emit(TRACE_WAIT_FUTEX, trace_flags, (uint64_t)uaddr,
+                            trace_arg1);
+        }
         if (notify && waiter->wait_src)
             poll_wait_source_wake_one(waiter->wait_src, 0);
         if (wait_lock)
@@ -384,6 +400,8 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         }
 
         poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_BLOCKS);
+        tracepoint_emit(TRACE_WAIT_FUTEX, FUTEX_TRACE_WAITV,
+                        (uint64_t)nr_waiters, deadline);
         int sleep_rc =
             poll_wait_source_block(&wait_src, deadline, kwaiters, &wait_lock);
 

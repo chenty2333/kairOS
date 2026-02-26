@@ -34,6 +34,8 @@ static const char *tracepoint_event_name(uint16_t event) {
         return "wait_epoll";
     case TRACE_WAIT_FD_EVENT:
         return "wait_fd_event";
+    case TRACE_WAIT_FUTEX:
+        return "wait_futex";
     default:
         return "unknown";
     }
@@ -45,7 +47,8 @@ static bool tracepoint_wait_event_legacy(uint16_t event) {
 
 static bool tracepoint_wait_event_core(uint16_t event) {
     return event == TRACE_WAIT_BLOCK || event == TRACE_WAIT_WAKE ||
-           event == TRACE_WAIT_EPOLL || event == TRACE_WAIT_FD_EVENT;
+           event == TRACE_WAIT_EPOLL || event == TRACE_WAIT_FD_EVENT ||
+           event == TRACE_WAIT_FUTEX;
 }
 
 static ssize_t tracepoint_wait_events_show_filtered(char *buf, size_t bufsz,
