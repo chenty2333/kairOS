@@ -154,6 +154,8 @@ static void evdev_release(struct file *file) {
 
     struct evdev_client *client = file->private_data;
     struct evdev *evdev = devfs_get_priv(file->vnode);
+    if (!evdev)
+        return;
 
     bool irq_state = arch_irq_save();
     spin_lock(&evdev->input_dev->lock);
@@ -292,6 +294,7 @@ int evdev_register_device(struct input_dev *dev) {
     spin_lock(&evdev_global_lock);
     evdev->index = evdev_count;
     evdev_devices[evdev_count] = evdev;
+    evdev_count++;
     spin_unlock(&evdev_global_lock);
     arch_irq_restore(irq_state);
 
@@ -304,17 +307,12 @@ int evdev_register_device(struct input_dev *dev) {
         irq_state = arch_irq_save();
         spin_lock(&evdev_global_lock);
         evdev_devices[evdev->index] = NULL;
+        evdev_count--;
         spin_unlock(&evdev_global_lock);
         arch_irq_restore(irq_state);
         kfree(evdev);
         return ret;
     }
-
-    irq_state = arch_irq_save();
-    spin_lock(&evdev_global_lock);
-    evdev_count++;
-    spin_unlock(&evdev_global_lock);
-    arch_irq_restore(irq_state);
 
     pr_info("evdev: registered %s for '%s'\n", name, dev->name);
 

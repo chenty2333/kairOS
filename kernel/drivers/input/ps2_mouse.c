@@ -148,6 +148,7 @@ int ps2_mouse_init(void) {
         return -ENOMEM;
 
     strncpy(dev->name, "PS/2 Mouse", sizeof(dev->name) - 1);
+    dev->name[sizeof(dev->name) - 1] = '\0';
     dev->id_bus = BUS_I8042;
     dev->id_vendor = 0x0002;
     dev->id_product = 0x0001;
