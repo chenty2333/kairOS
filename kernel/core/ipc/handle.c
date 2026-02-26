@@ -138,6 +138,10 @@ static spinlock_t ipc_registry_init_lock = SPINLOCK_INIT;
 static struct completion ipc_sysfs_project_completion;
 static bool ipc_sysfs_project_completion_ready;
 static bool ipc_sysfs_projector_started;
+/* Suppress registry reentry while sysfs projection holds ipc_registry_lock. */
+static struct process *ipc_registry_register_suppress_proc;
+static int ipc_registry_register_suppress_cpu = -1;
+static uint32_t ipc_registry_register_suppress_depth;
 static struct sysfs_node *ipc_sysfs_root;
 static struct sysfs_node *ipc_sysfs_objects_dir;
 static bool ipc_sysfs_ready;
@@ -204,6 +208,9 @@ static bool kchannel_try_rendezvous_raw_locked(
     const struct khandle_transfer *handles, size_t num_handles);
 static void ipc_registry_register_obj(struct kobj *obj);
 static void ipc_registry_unregister_obj(struct kobj *obj);
+static bool ipc_registry_register_suppressed_for_current(void);
+static void ipc_registry_register_suppress_enter(void);
+static void ipc_registry_register_suppress_exit(void);
 static void ipc_sysfs_ensure_ready(void);
 static void ipc_sysfs_create_object_dir_locked(struct ipc_registry_entry *ent);
 static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent);
@@ -414,6 +421,55 @@ static bool ipc_registry_track_object(struct kobj *obj) {
     return true;
 }
 
+static bool ipc_registry_register_suppressed_for_current(void) {
+    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
+                                     __ATOMIC_ACQUIRE);
+    if (depth == 0)
+        return false;
+
+    struct process *owner = __atomic_load_n(
+        &ipc_registry_register_suppress_proc, __ATOMIC_ACQUIRE);
+    struct process *curr = proc_current();
+    if (owner)
+        return curr == owner;
+    if (curr)
+        return false;
+
+    int owner_cpu = __atomic_load_n(&ipc_registry_register_suppress_cpu,
+                                    __ATOMIC_ACQUIRE);
+    return owner_cpu == arch_cpu_id();
+}
+
+static void ipc_registry_register_suppress_enter(void) {
+    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
+                                     __ATOMIC_ACQUIRE);
+    if (depth == 0) {
+        struct process *curr = proc_current();
+        __atomic_store_n(&ipc_registry_register_suppress_proc, curr,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&ipc_registry_register_suppress_cpu,
+                         curr ? -1 : arch_cpu_id(), __ATOMIC_RELEASE);
+    }
+    __atomic_add_fetch(&ipc_registry_register_suppress_depth, 1,
+                       __ATOMIC_ACQ_REL);
+}
+
+static void ipc_registry_register_suppress_exit(void) {
+    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
+                                     __ATOMIC_ACQUIRE);
+    if (depth == 0)
+        return;
+
+    depth = __atomic_sub_fetch(&ipc_registry_register_suppress_depth, 1,
+                               __ATOMIC_ACQ_REL);
+    if (depth == 0) {
+        __atomic_store_n(&ipc_registry_register_suppress_proc, NULL,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&ipc_registry_register_suppress_cpu, -1,
+                         __ATOMIC_RELEASE);
+    }
+}
+
 static bool ipc_sysfs_project_mark_locked(struct ipc_registry_entry *ent,
                                           uint8_t ops) {
     if (!ent)
@@ -447,12 +503,14 @@ static bool ipc_sysfs_project_drain_once(void) {
     ops = ent->pending_proj_ops;
     ent->pending_proj_ops = 0;
 
+    ipc_registry_register_suppress_enter();
     if (ipc_sysfs_ready) {
         if ((ops & IPC_PROJ_OP_ADD) && ent->lifecycle == IPC_REG_ENTRY_LIVE)
             ipc_sysfs_create_object_dir_locked(ent);
         if ((ops & IPC_PROJ_OP_DEL) || ent->lifecycle == IPC_REG_ENTRY_DYING)
             ipc_sysfs_remove_object_dir_locked(ent);
     }
+    ipc_registry_register_suppress_exit();
 
     do_free = ent->lifecycle == IPC_REG_ENTRY_DYING && !ent->project_queued &&
               ent->pending_proj_ops == 0;
@@ -1470,6 +1528,7 @@ static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent) {
 static void ipc_sysfs_ensure_ready(void) {
     ipc_registry_ensure_lock();
     mutex_lock(&ipc_registry_lock);
+    ipc_registry_register_suppress_enter();
 
     if (!ipc_sysfs_ready) {
         struct sysfs_node *root = sysfs_root();
@@ -1506,6 +1565,7 @@ static void ipc_sysfs_ensure_ready(void) {
     }
 
 out_unlock:
+    ipc_registry_register_suppress_exit();
     mutex_unlock(&ipc_registry_lock);
 }
 
@@ -1537,6 +1597,8 @@ void ipc_registry_sysfs_bootstrap(void) {
 
 static void ipc_registry_register_obj(struct kobj *obj) {
     if (!ipc_registry_track_object(obj))
+        return;
+    if (ipc_registry_register_suppressed_for_current())
         return;
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
@@ -1587,6 +1649,8 @@ static void ipc_registry_register_obj(struct kobj *obj) {
 
 static void ipc_registry_unregister_obj(struct kobj *obj) {
     if (!ipc_registry_track_object(obj))
+        return;
+    if (ipc_registry_register_suppressed_for_current())
         return;
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
