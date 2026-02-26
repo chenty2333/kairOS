@@ -5,6 +5,7 @@
 #include <kairos/platform_core.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/completion.h>
 #include <kairos/fdt.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
@@ -76,11 +77,13 @@ struct irq_action {
     uint32_t deferred_pending;
     uint32_t registration_flags;
     uint64_t cookie;
+    struct completion sync_wait;
     bool removed;
     bool reclaimed;
     bool managed_enable;
     bool deferred_queued;
     bool deferred_has_ev;
+    bool sync_waiting;
 };
 
 struct irq_desc {
@@ -214,6 +217,8 @@ static void irq_action_put_locked(struct irq_action *action)
     if (!action || action->refs == 0)
         return;
     action->refs--;
+    if (action->removed && action->sync_waiting)
+        complete_one(&action->sync_wait);
 }
 
 static bool irq_action_try_reclaim_locked(struct irq_desc *desc,
@@ -1592,6 +1597,8 @@ static int irq_action_detach_locked(struct irq_desc *desc,
     }
 
     if (sync_wait) {
+        reinit_completion(&action->sync_wait);
+        action->sync_waiting = true;
         action->refs++;
         *need_wait_out = true;
     } else {
@@ -1611,9 +1618,10 @@ static int irq_action_wait_sync(struct irq_desc *desc, struct irq_action *action
         bool reclaim_now = false;
         bool irq_state;
         spin_lock_irqsave(&desc->lock, &irq_state);
-        bool ready = action->refs == 1 && !action->deferred_queued;
+        bool ready = action->refs == 1;
         if (ready) {
             action->refs--;
+            action->sync_waiting = false;
             reclaim_now = irq_action_try_reclaim_locked(desc, action);
         }
         spin_unlock_irqrestore(&desc->lock, irq_state);
@@ -1623,7 +1631,7 @@ static int irq_action_wait_sync(struct irq_desc *desc, struct irq_action *action
                 kfree(action);
             return 0;
         }
-        proc_yield();
+        wait_for_completion(&action->sync_wait);
     }
 }
 
@@ -1652,6 +1660,7 @@ static int platform_irq_register_action(int irq, irq_handler_fn handler,
     action->flags = flags;
     action->registration_flags = flags;
     action->cookie = irq_action_alloc_cookie();
+    completion_init(&action->sync_wait);
     action->refs = 0;
     INIT_LIST_HEAD(&action->deferred_node);
     action->deferred_pending = 0;
@@ -1660,6 +1669,7 @@ static int platform_irq_register_action(int irq, irq_handler_fn handler,
     action->managed_enable = managed_enable;
     action->deferred_queued = false;
     action->deferred_has_ev = false;
+    action->sync_waiting = false;
 
     bool irq_state;
     spin_lock_irqsave(&desc->lock, &irq_state);

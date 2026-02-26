@@ -403,6 +403,7 @@ static volatile uint32_t irq_request_hits;
 static volatile uint32_t irq_concurrent_hits;
 static volatile uint32_t irq_blocking_entered;
 static volatile uint32_t irq_blocking_release;
+static volatile uint32_t irq_blocking_hits;
 
 struct irq_concurrency_ctx {
     int irq;
@@ -412,6 +413,12 @@ struct irq_concurrency_ctx {
 
 struct irq_free_sync_ctx {
     int irq;
+    volatile uint32_t done;
+    int ret;
+};
+
+struct irq_free_cookie_sync_ctx {
+    uint64_t cookie;
     volatile uint32_t done;
     int ret;
 };
@@ -472,6 +479,7 @@ static void test_irq_concurrent_handler(void *arg __unused,
 
 static void test_irq_blocking_handler(void *arg __unused,
                                       const struct trap_core_event *ev __unused) {
+    __atomic_add_fetch(&irq_blocking_hits, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&irq_blocking_entered, 1, __ATOMIC_RELAXED);
     while (!__atomic_load_n(&irq_blocking_release, __ATOMIC_RELAXED))
         proc_yield();
@@ -502,6 +510,15 @@ static int irq_free_sync_thread(void *arg) {
     if (!ctx)
         return -EINVAL;
     ctx->ret = arch_free_irq_ex_sync(ctx->irq, test_irq_blocking_handler, NULL);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int irq_free_cookie_sync_thread(void *arg) {
+    struct irq_free_cookie_sync_ctx *ctx = arg;
+    if (!ctx)
+        return -EINVAL;
+    ctx->ret = arch_free_irq_cookie_sync(ctx->cookie);
     __atomic_store_n(&ctx->done, 1, __ATOMIC_RELAXED);
     return 0;
 }
@@ -778,6 +795,7 @@ static void test_irq_free_sync_waits_handler(void) {
     int irq = 961;
     irq_blocking_entered = 0;
     irq_blocking_release = 0;
+    irq_blocking_hits = 0;
 
     int ret = arch_request_irq_ex(irq, test_irq_blocking_handler, NULL,
                                   IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
@@ -862,6 +880,67 @@ static void test_irq_cookie_lifecycle(void) {
     test_check(__atomic_load_n(&irq_request_hits, __ATOMIC_RELAXED) ==
                    hits_before,
                "irq cookie removed");
+}
+
+static void test_irq_cookie_sync_waits_deferred_handler(void) {
+    const int irq = 963;
+    irq_blocking_entered = 0;
+    irq_blocking_release = 0;
+    irq_blocking_hits = 0;
+    uint64_t cookie = 0;
+
+    int ret = arch_request_irq_ex_cookie(
+        irq, test_irq_blocking_handler, NULL,
+        IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_DEFERRED | IRQ_FLAG_NO_CHIP, &cookie);
+    test_check(ret == 0 && cookie != 0, "irq cookie sync deferred request");
+    if (ret < 0 || cookie == 0)
+        return;
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    for (int i = 0; i < 300; i++) {
+        if (__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED))
+            break;
+        proc_yield();
+    }
+    test_check(__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED) == 1,
+               "irq cookie sync deferred entered");
+
+    struct irq_free_cookie_sync_ctx sync_ctx = {
+        .cookie = cookie,
+        .done = 0,
+        .ret = -1,
+    };
+    struct process *free_worker = kthread_create_joinable(
+        irq_free_cookie_sync_thread, &sync_ctx, "irqcookiesyncfree");
+    test_check(free_worker != NULL, "irq cookie sync free worker create");
+    if (!free_worker) {
+        __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    sched_enqueue(free_worker);
+
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&sync_ctx.done, __ATOMIC_RELAXED) == 0,
+               "irq cookie sync waits in-flight");
+
+    __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+    int reaped = test_reap_children_bounded(1, "irq_cookie_sync_deferred");
+    test_check(reaped == 1, "irq cookie sync deferred worker reaped");
+    test_check(sync_ctx.ret == 0 &&
+                   __atomic_load_n(&sync_ctx.done, __ATOMIC_RELAXED) == 1,
+               "irq cookie sync deferred completed");
+
+    ret = arch_free_irq_cookie(cookie);
+    test_check(ret == 0, "irq cookie sync deferred idempotent");
+
+    uint32_t hits_before = __atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED) ==
+                   hits_before,
+               "irq cookie sync deferred removed");
 }
 
 static void irq_mock_enable(int irq) {
@@ -1617,6 +1696,7 @@ static void run_driver_suite_once(void) {
     test_irq_domain_remove_waits_reclaim();
     test_irq_free_sync_waits_handler();
     test_irq_cookie_lifecycle();
+    test_irq_cookie_sync_waits_deferred_handler();
     test_irq_domain_programming();
     test_irq_domain_custom_mapping();
     test_irq_domain_cascade();
