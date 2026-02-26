@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/blkdev.h>
 #include <kairos/config.h>
+#include <kairos/device.h>
 #include <kairos/dma.h>
 #include <kairos/iommu.h>
 #include <kairos/net.h>
@@ -16,11 +17,14 @@
 #include <kairos/ringbuf.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
+#include <kairos/sysfs.h>
+#include <kairos/tracepoint.h>
 #include <kairos/types.h>
 #include <kairos/vfs.h>
 #include <kairos/virtio.h>
 
 static int tests_failed;
+static uint32_t test_device_sysfs_seq;
 
 #if CONFIG_KERNEL_TESTS
 extern int virtio_net_test_rx_deliver_len(uint32_t len);
@@ -59,6 +63,72 @@ static int test_reap_children_bounded(int expected, const char *tag) {
     if (reaped < expected)
         pr_warn("tests: %s reap timeout (%d/%d)\n", tag, reaped, expected);
     return reaped;
+}
+
+static ssize_t test_devctl_show(void *priv, char *buf, size_t bufsz) {
+    if (!priv || !buf || bufsz == 0)
+        return -EINVAL;
+    int n = snprintf(buf, bufsz, "%d\n", *(int *)priv);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)bufsz;
+    return n;
+}
+
+static ssize_t test_devctl_store(void *priv, const char *buf, size_t len) {
+    if (!priv || !buf)
+        return -EINVAL;
+
+    bool neg = false;
+    bool seen_digit = false;
+    int value = 0;
+    size_t i = 0;
+
+    while (i < len &&
+           (buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\n' ||
+            buf[i] == '\r'))
+        i++;
+    if (i < len && buf[i] == '-') {
+        neg = true;
+        i++;
+    }
+    for (; i < len; i++) {
+        char c = buf[i];
+        if (c >= '0' && c <= '9') {
+            seen_digit = true;
+            value = (value * 10) + (c - '0');
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+            continue;
+        return -EINVAL;
+    }
+    if (!seen_digit)
+        return -EINVAL;
+
+    *(int *)priv = neg ? -value : value;
+    return (ssize_t)len;
+}
+
+struct test_device_sysfs_core_ctl_ctx {
+    int probe_calls;
+    int remove_calls;
+};
+
+static int test_device_sysfs_core_ctl_probe(struct device *dev) {
+    if (!dev || !dev->platform_data)
+        return -EINVAL;
+    struct test_device_sysfs_core_ctl_ctx *ctx = dev->platform_data;
+    ctx->probe_calls++;
+    return 0;
+}
+
+static void test_device_sysfs_core_ctl_remove(struct device *dev) {
+    if (!dev || !dev->platform_data)
+        return;
+    struct test_device_sysfs_core_ctl_ctx *ctx = dev->platform_data;
+    ctx->remove_calls++;
 }
 
 static int dummy_blk_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
@@ -129,6 +199,23 @@ static int dummy_net_xmit(struct netdev *dev, const void *data, size_t len) {
     return 0;
 }
 
+static int test_iommu_stub_map(struct iommu_domain *domain __unused,
+                               dma_addr_t iova __unused,
+                               paddr_t paddr __unused,
+                               size_t size __unused,
+                               uint32_t prot __unused) {
+    return 0;
+}
+
+static void test_iommu_stub_unmap(struct iommu_domain *domain __unused,
+                                  dma_addr_t iova __unused,
+                                  size_t size __unused) {}
+
+static const struct iommu_domain_ops test_iommu_stub_ops = {
+    .map = test_iommu_stub_map,
+    .unmap = test_iommu_stub_unmap,
+};
+
 static void test_ringbuf(void) {
     struct ringbuf rb;
     char storage[4];
@@ -196,6 +283,7 @@ static void test_virtqueue_dma_addresses(void) {
     test_check(domain != NULL, "virtqueue iommu domain create");
     if (!domain)
         return;
+    iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
 
     struct virtio_device iommu_vdev = {0};
     int ret = iommu_attach_device(domain, &iommu_vdev.dev);
@@ -442,6 +530,7 @@ static void test_iommu_domain_dma_ops(void) {
     test_check(domain != NULL, "iommu domain create");
     if (!domain)
         return;
+    iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
 
     struct device dev;
     memset(&dev, 0, sizeof(dev));
@@ -576,6 +665,8 @@ static struct iommu_domain *test_iommu_hw_prio_primary_alloc(struct device *dev 
     __atomic_add_fetch(&iommu_hw_prio_primary_alloc_calls, 1, __ATOMIC_RELAXED);
     struct iommu_domain *domain =
         iommu_domain_create(IOMMU_DOMAIN_DMA, 0x200000ULL, 0x40000ULL);
+    if (domain)
+        iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
     if (owned)
         *owned = true;
     return domain;
@@ -587,6 +678,8 @@ static struct iommu_domain *test_iommu_hw_prio_fallback_alloc(struct device *dev
     __atomic_add_fetch(&iommu_hw_prio_fallback_alloc_calls, 1, __ATOMIC_RELAXED);
     struct iommu_domain *domain =
         iommu_domain_create(IOMMU_DOMAIN_DMA, 0x300000ULL, 0x40000ULL);
+    if (domain)
+        iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
     if (owned)
         *owned = true;
     return domain;
@@ -662,6 +755,7 @@ static void test_dma_constraints_iommu_backend(void) {
     test_check(domain != NULL, "dma iommu constraints domain create");
     if (!domain)
         return;
+    iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
 
     struct device dev;
     memset(&dev, 0, sizeof(dev));
@@ -723,7 +817,10 @@ static struct iommu_domain *test_iommu_hw_alloc_default(struct device *dev __unu
                                                         bool *owned, void *priv __unused) {
     if (owned)
         *owned = true;
-    return iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    if (domain)
+        iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
+    return domain;
 }
 
 static const struct iommu_hw_ops test_iommu_hw_ops = {
@@ -858,6 +955,161 @@ static void test_iommu_domain_release_callback(void) {
 
     test_check(__atomic_load_n(&iommu_release_calls, __ATOMIC_RELAXED) == 1,
                "iommu release callback called");
+}
+
+static volatile uint32_t iommu_adv_bind_pasid_calls;
+static volatile uint32_t iommu_adv_unbind_pasid_calls;
+static volatile uint32_t iommu_adv_enable_pri_calls;
+static volatile uint32_t iommu_adv_enable_ats_calls;
+static volatile uint32_t iommu_adv_set_fault_policy_calls;
+static volatile uint32_t iommu_adv_recover_faults_calls;
+
+static int test_iommu_adv_bind_pasid(struct iommu_domain *domain __unused,
+                                     struct device *dev __unused, uint32_t pasid,
+                                     uint32_t flags) {
+    if (pasid == 0 || flags == 0)
+        return -EINVAL;
+    __atomic_add_fetch(&iommu_adv_bind_pasid_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int test_iommu_adv_unbind_pasid(struct iommu_domain *domain __unused,
+                                       struct device *dev __unused,
+                                       uint32_t pasid) {
+    if (pasid == 0)
+        return -EINVAL;
+    __atomic_add_fetch(&iommu_adv_unbind_pasid_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int test_iommu_adv_enable_pri(struct iommu_domain *domain __unused,
+                                     struct device *dev __unused,
+                                     uint32_t queue_depth) {
+    if (queue_depth == 0)
+        return -EINVAL;
+    __atomic_add_fetch(&iommu_adv_enable_pri_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int test_iommu_adv_enable_ats(struct iommu_domain *domain __unused,
+                                     struct device *dev __unused,
+                                     uint32_t flags) {
+    if (flags == 0)
+        return -EINVAL;
+    __atomic_add_fetch(&iommu_adv_enable_ats_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int test_iommu_adv_set_fault_policy(
+    struct iommu_domain *domain __unused, enum iommu_fault_policy policy) {
+    if (policy < IOMMU_FAULT_POLICY_REPORT ||
+        policy > IOMMU_FAULT_POLICY_RECOVER)
+        return -EINVAL;
+    __atomic_add_fetch(&iommu_adv_set_fault_policy_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int test_iommu_adv_recover_faults(struct iommu_domain *domain __unused,
+                                         uint32_t budget, uint32_t *recovered) {
+    if (budget == 0)
+        return -EINVAL;
+    if (recovered)
+        *recovered = budget > 4 ? 4 : budget;
+    __atomic_add_fetch(&iommu_adv_recover_faults_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static const struct iommu_domain_ops test_iommu_adv_ops = {
+    .bind_pasid = test_iommu_adv_bind_pasid,
+    .unbind_pasid = test_iommu_adv_unbind_pasid,
+    .enable_pri = test_iommu_adv_enable_pri,
+    .enable_ats = test_iommu_adv_enable_ats,
+    .set_fault_policy = test_iommu_adv_set_fault_policy,
+    .recover_faults = test_iommu_adv_recover_faults,
+};
+
+static void test_iommu_advanced_api_surface(void) {
+    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    test_check(domain != NULL, "iommu advanced domain create");
+    if (!domain)
+        return;
+
+    test_check(iommu_domain_has_cap(domain, IOMMU_CAP_MAP_UNMAP),
+               "iommu advanced default map cap");
+    test_check(!iommu_domain_has_cap(domain, IOMMU_CAP_PASID),
+               "iommu advanced default no pasid");
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    test_check(iommu_domain_bind_pasid(domain, &dev, 1, 1) == -EOPNOTSUPP,
+               "iommu advanced bind pasid unsupported");
+    test_check(iommu_domain_enable_pri(domain, &dev, 32) == -EOPNOTSUPP,
+               "iommu advanced pri unsupported");
+    test_check(iommu_domain_enable_ats(domain, &dev, 1) == -EOPNOTSUPP,
+               "iommu advanced ats unsupported");
+    test_check(iommu_domain_set_fault_policy(domain,
+                                             IOMMU_FAULT_POLICY_DISABLE) ==
+                   -EOPNOTSUPP,
+               "iommu advanced fault policy unsupported");
+
+    iommu_domain_set_ops(domain, &test_iommu_adv_ops, NULL);
+    iommu_domain_set_caps(domain,
+                          iommu_domain_get_caps(domain) | IOMMU_CAP_PASID |
+                              IOMMU_CAP_PRI | IOMMU_CAP_ATS |
+                              IOMMU_CAP_FAULT_REPORT |
+                              IOMMU_CAP_FAULT_DISABLE |
+                              IOMMU_CAP_FAULT_RECOVER);
+
+    iommu_adv_bind_pasid_calls = 0;
+    iommu_adv_unbind_pasid_calls = 0;
+    iommu_adv_enable_pri_calls = 0;
+    iommu_adv_enable_ats_calls = 0;
+    iommu_adv_set_fault_policy_calls = 0;
+    iommu_adv_recover_faults_calls = 0;
+
+    int ret = iommu_domain_bind_pasid(domain, &dev, 1, 1);
+    test_check(ret == 0, "iommu advanced bind pasid");
+    ret = iommu_domain_unbind_pasid(domain, &dev, 1);
+    test_check(ret == 0, "iommu advanced unbind pasid");
+    ret = iommu_domain_enable_pri(domain, &dev, 32);
+    test_check(ret == 0, "iommu advanced enable pri");
+    ret = iommu_domain_enable_ats(domain, &dev, 1);
+    test_check(ret == 0, "iommu advanced enable ats");
+
+    ret = iommu_domain_set_fault_policy(domain, IOMMU_FAULT_POLICY_DISABLE);
+    test_check(ret == 0, "iommu advanced set fault disable");
+    test_check(iommu_domain_get_fault_policy(domain) ==
+                   IOMMU_FAULT_POLICY_DISABLE,
+               "iommu advanced get fault disable");
+    ret = iommu_domain_set_fault_policy(domain, IOMMU_FAULT_POLICY_RECOVER);
+    test_check(ret == 0, "iommu advanced set fault recover");
+
+    uint32_t recovered = 0;
+    ret = iommu_domain_recover_faults(domain, 6, &recovered);
+    test_check(ret == 0, "iommu advanced recover faults");
+    test_check(recovered == 4, "iommu advanced recover budget clamp");
+
+    test_check(__atomic_load_n(&iommu_adv_bind_pasid_calls, __ATOMIC_RELAXED) ==
+                   1,
+               "iommu advanced bind pasid callback");
+    test_check(__atomic_load_n(&iommu_adv_unbind_pasid_calls, __ATOMIC_RELAXED) ==
+                   1,
+               "iommu advanced unbind pasid callback");
+    test_check(__atomic_load_n(&iommu_adv_enable_pri_calls, __ATOMIC_RELAXED) ==
+                   1,
+               "iommu advanced enable pri callback");
+    test_check(__atomic_load_n(&iommu_adv_enable_ats_calls, __ATOMIC_RELAXED) ==
+                   1,
+               "iommu advanced enable ats callback");
+    test_check(
+        __atomic_load_n(&iommu_adv_set_fault_policy_calls, __ATOMIC_RELAXED) ==
+            2,
+        "iommu advanced set fault callback");
+    test_check(__atomic_load_n(&iommu_adv_recover_faults_calls, __ATOMIC_RELAXED) ==
+                   1,
+               "iommu advanced recover callback");
+
+    iommu_domain_destroy(domain);
 }
 
 static volatile uint32_t irq_deferred_hits;
@@ -1381,6 +1633,412 @@ static void test_irq_stats_snapshot_and_procfs(void) {
 
     ret = arch_free_irq_ex(irq, test_irq_gate_handler, NULL);
     test_check(ret == 0, "irq snapshot free");
+}
+
+
+static void test_tracepoint_wait_sysfs_export(void) {
+    struct stat st;
+    int ret = vfs_stat("/sys/kernel/tracepoint", &st);
+    if (ret < 0 || !S_ISDIR(st.st_mode)) {
+        pr_warn("tests: skip tracepoint wait sysfs export (/sys unavailable)\n");
+        return;
+    }
+
+    tracepoint_reset_all();
+    const uint64_t block_deadline = 0x1111222233334444ULL;
+    const uint64_t block_channel = 0x5555666677778888ULL;
+    const uint64_t wake_wq = 0x9999aaaabbbbccccULL;
+    const uint64_t wake_vn = 0xddddeeeeffff0001ULL;
+
+    tracepoint_emit(TRACE_WAIT_BLOCK, 1U, block_deadline, block_channel);
+    tracepoint_emit(TRACE_WAIT_WAKE, 0x80000005U, wake_wq, wake_vn);
+
+    struct file *events = NULL;
+    ret = vfs_open("/sys/kernel/tracepoint/wait_events", O_RDONLY, 0, &events);
+    test_check(ret == 0 && events != NULL, "tracepoint wait_events open");
+    if (ret == 0 && events) {
+        char buf[4096];
+        ssize_t n = vfs_read(events, buf, sizeof(buf) - 1);
+        test_check(n > 0, "tracepoint wait_events read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "wait_block") != NULL,
+                       "tracepoint wait_events block row");
+            test_check(strstr(buf, "wait_wake") != NULL,
+                       "tracepoint wait_events wake row");
+
+            char needle_block[32];
+            char needle_wake[32];
+            snprintf(needle_block, sizeof(needle_block), "0x%llx",
+                     (unsigned long long)block_deadline);
+            snprintf(needle_wake, sizeof(needle_wake), "0x%llx",
+                     (unsigned long long)wake_wq);
+            test_check(strstr(buf, needle_block) != NULL,
+                       "tracepoint wait_events block arg");
+            test_check(strstr(buf, needle_wake) != NULL,
+                       "tracepoint wait_events wake arg");
+        }
+        vfs_close(events);
+    }
+
+    struct file *reset = NULL;
+    ret = vfs_open("/sys/kernel/tracepoint/reset", O_WRONLY, 0, &reset);
+    test_check(ret == 0 && reset != NULL, "tracepoint reset open");
+    if (ret == 0 && reset) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(reset, cmd, sizeof(cmd) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd) - 1), "tracepoint reset write");
+        vfs_close(reset);
+    }
+
+    ret = vfs_open("/sys/kernel/tracepoint/wait_events", O_RDONLY, 0, &events);
+    test_check(ret == 0 && events != NULL, "tracepoint wait_events reopen");
+    if (ret == 0 && events) {
+        char buf[4096];
+        ssize_t n = vfs_read(events, buf, sizeof(buf) - 1);
+        test_check(n > 0, "tracepoint wait_events reread");
+        if (n > 0) {
+            buf[n] = '\0';
+            char needle_block[32];
+            char needle_wake[32];
+            snprintf(needle_block, sizeof(needle_block), "0x%llx",
+                     (unsigned long long)block_deadline);
+            snprintf(needle_wake, sizeof(needle_wake), "0x%llx",
+                     (unsigned long long)wake_wq);
+            test_check(strstr(buf, needle_block) == NULL,
+                       "tracepoint reset drops block arg");
+            test_check(strstr(buf, needle_wake) == NULL,
+                       "tracepoint reset drops wake arg");
+        }
+        vfs_close(events);
+    }
+}
+
+static void test_device_sysfs_control_rw(void) {
+    struct stat st;
+    int ret = vfs_stat("/sys/devices", &st);
+    if (ret < 0 || !S_ISDIR(st.st_mode)) {
+        pr_warn("tests: skip device sysfs control test (/sys unavailable)\n");
+        return;
+    }
+
+    uint32_t seq =
+        __atomic_fetch_add(&test_device_sysfs_seq, 1, __ATOMIC_RELAXED);
+
+    char bus_name[32];
+    snprintf(bus_name, sizeof(bus_name), "test-sysfs-bus%u", seq);
+
+    struct bus_type bus;
+    memset(&bus, 0, sizeof(bus));
+    INIT_LIST_HEAD(&bus.list);
+    bus.name = bus_name;
+    ret = bus_register(&bus);
+    test_check(ret == 0, "device sysfs test bus register");
+    if (ret < 0)
+        return;
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    snprintf(dev.name, sizeof(dev.name), "test-devctl%u", seq);
+    dev.bus = &bus;
+    ret = device_register(&dev);
+    test_check(ret == 0, "device sysfs test device register");
+    if (ret < 0) {
+        bus_unregister(&bus);
+        return;
+    }
+
+    int ctrl_value = 0;
+    struct sysfs_attribute ctrl_attr = {
+        .name = "control",
+        .mode = 0644,
+        .show = test_devctl_show,
+        .store = test_devctl_store,
+        .priv = &ctrl_value,
+    };
+    ret = device_sysfs_create_file(&dev, &ctrl_attr, NULL);
+    test_check(ret == 0, "device sysfs create control");
+    if (ret < 0) {
+        device_unregister(&dev);
+        bus_unregister(&bus);
+        return;
+    }
+
+    char path[96];
+    snprintf(path, sizeof(path), "/sys/devices/%s/control", dev.name);
+
+    struct file *f = NULL;
+    ret = vfs_open(path, O_RDONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device sysfs control open read");
+    if (ret == 0 && f) {
+        char buf[64];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "device sysfs control read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "0") != NULL, "device sysfs control init");
+        }
+        vfs_close(f);
+    }
+
+    ret = vfs_open(path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device sysfs control open write");
+    if (ret == 0 && f) {
+        const char value[] = "17\n";
+        ssize_t wr = vfs_write(f, value, sizeof(value) - 1);
+        test_check(wr == (ssize_t)(sizeof(value) - 1),
+                   "device sysfs control write");
+        vfs_close(f);
+    }
+    test_check(ctrl_value == 17, "device sysfs control store callback");
+
+    ret = vfs_open(path, O_RDONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device sysfs control reopen read");
+    if (ret == 0 && f) {
+        char buf[64];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "device sysfs control reread");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "17") != NULL,
+                       "device sysfs control readback value");
+        }
+        vfs_close(f);
+    }
+
+    device_unregister(&dev);
+    bus_unregister(&bus);
+}
+
+static void test_device_sysfs_core_controls(void) {
+    struct stat st;
+    int ret = vfs_stat("/sys/devices", &st);
+    if (ret < 0 || !S_ISDIR(st.st_mode)) {
+        pr_warn("tests: skip device core sysfs control test (/sys unavailable)\n");
+        return;
+    }
+
+    uint32_t seq =
+        __atomic_fetch_add(&test_device_sysfs_seq, 1, __ATOMIC_RELAXED);
+
+    char bus_name[32];
+    char dev_name[32];
+    snprintf(bus_name, sizeof(bus_name), "corectl-bus%u", seq);
+    snprintf(dev_name, sizeof(dev_name), "corectl-dev%u", seq);
+
+    struct bus_type bus;
+    memset(&bus, 0, sizeof(bus));
+    INIT_LIST_HEAD(&bus.list);
+    bus.name = bus_name;
+    ret = bus_register(&bus);
+    test_check(ret == 0, "device core sysfs bus register");
+    if (ret < 0)
+        return;
+
+    struct test_device_sysfs_core_ctl_ctx ctx = {0};
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    strncpy(dev.name, dev_name, sizeof(dev.name) - 1);
+    dev.bus = &bus;
+    dev.platform_data = &ctx;
+    ret = device_register(&dev);
+    test_check(ret == 0, "device core sysfs device register");
+    if (ret < 0) {
+        bus_unregister(&bus);
+        return;
+    }
+
+    char driver_path[128];
+    char bind_path[128];
+    char unbind_path[128];
+    char rescan_path[128];
+    char policy_path[128];
+    char stats_path[128];
+    snprintf(driver_path, sizeof(driver_path), "/sys/devices/%s/driver",
+             dev.name);
+    snprintf(bind_path, sizeof(bind_path), "/sys/devices/%s/bind", dev.name);
+    snprintf(unbind_path, sizeof(unbind_path), "/sys/devices/%s/unbind",
+             dev.name);
+    snprintf(rescan_path, sizeof(rescan_path), "/sys/devices/%s/rescan",
+             dev.name);
+    snprintf(policy_path, sizeof(policy_path), "/sys/devices/%s/control_policy",
+             dev.name);
+    snprintf(stats_path, sizeof(stats_path), "/sys/devices/%s/control_stats",
+             dev.name);
+
+    struct file *f = NULL;
+    ret = vfs_open(driver_path, O_RDONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs driver open");
+    if (ret == 0 && f) {
+        char buf[96];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "device core sysfs driver read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "bound=0") != NULL,
+                       "device core sysfs initial unbound");
+        }
+        vfs_close(f);
+    }
+
+    ret = vfs_open(policy_path, O_RDONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs policy open");
+    if (ret == 0 && f) {
+        char buf[160];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "device core sysfs policy read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "driver=0444") != NULL,
+                       "device core sysfs policy driver mode");
+            test_check(strstr(buf, "bind=0200") != NULL,
+                       "device core sysfs policy bind mode");
+            test_check(strstr(buf, "write_token=required") != NULL,
+                       "device core sysfs policy token rule");
+        }
+        vfs_close(f);
+    }
+
+    ret = vfs_open(stats_path, O_RDONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs stats open");
+    if (ret == 0 && f) {
+        char buf[256];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "device core sysfs stats read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "ops_total 0") != NULL,
+                       "device core sysfs stats initial total");
+            test_check(strstr(buf, "ops_fail 0") != NULL,
+                       "device core sysfs stats initial fail");
+            test_check(strstr(buf, "last_op none") != NULL,
+                       "device core sysfs stats initial op");
+        }
+        vfs_close(f);
+    }
+
+    struct driver drv;
+    memset(&drv, 0, sizeof(drv));
+    drv.name = dev_name;
+    drv.bus = &bus;
+    drv.probe = test_device_sysfs_core_ctl_probe;
+    drv.remove = test_device_sysfs_core_ctl_remove;
+    INIT_LIST_HEAD(&drv.list);
+    ret = driver_register(&drv);
+    test_check(ret == 0, "device core sysfs driver register");
+    test_check(ctx.probe_calls == 1, "device core sysfs initial probe");
+    test_check(dev.driver == &drv, "device core sysfs bound after register");
+
+    ret = vfs_open(unbind_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs unbind open");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd) - 1),
+                   "device core sysfs unbind write");
+        vfs_close(f);
+    }
+    test_check(ctx.remove_calls == 1, "device core sysfs unbind remove");
+    test_check(dev.driver == NULL, "device core sysfs unbind clears binding");
+
+    ret = vfs_open(bind_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs bind open");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd) - 1),
+                   "device core sysfs bind write");
+        vfs_close(f);
+    }
+    test_check(ctx.probe_calls == 2, "device core sysfs bind probe");
+    test_check(dev.driver == &drv, "device core sysfs bind restores binding");
+
+    ret = vfs_open(bind_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs bind fail open");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == -EALREADY, "device core sysfs bind fail already");
+        vfs_close(f);
+    }
+
+    ret = vfs_open(unbind_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs unbind reopen");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd) - 1),
+                   "device core sysfs second unbind write");
+        vfs_close(f);
+    }
+    test_check(ctx.remove_calls == 2, "device core sysfs second unbind");
+
+    ret = vfs_open(unbind_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs unbind fail open");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == -ENODEV, "device core sysfs unbind fail unbound");
+        vfs_close(f);
+    }
+
+    ret = vfs_open(rescan_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs rescan open");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd) - 1),
+                   "device core sysfs rescan write");
+        vfs_close(f);
+    }
+    test_check(ctx.probe_calls == 3, "device core sysfs rescan probe");
+
+    ret = vfs_open(unbind_path, O_WRONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs final unbind open");
+    if (ret == 0 && f) {
+        const char cmd[] = "1\n";
+        ssize_t wr = vfs_write(f, cmd, sizeof(cmd) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd) - 1),
+                   "device core sysfs final unbind write");
+        vfs_close(f);
+    }
+    test_check(ctx.remove_calls == 3, "device core sysfs final unbind");
+
+    ret = vfs_open(stats_path, O_RDONLY, 0, &f);
+    test_check(ret == 0 && f != NULL, "device core sysfs stats final open");
+    if (ret == 0 && f) {
+        char buf[320];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "device core sysfs stats final read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "ops_total 7") != NULL,
+                       "device core sysfs stats total");
+            test_check(strstr(buf, "ops_fail 2") != NULL,
+                       "device core sysfs stats fail");
+            test_check(strstr(buf, "bind_ok 1") != NULL,
+                       "device core sysfs stats bind ok");
+            test_check(strstr(buf, "bind_fail 1") != NULL,
+                       "device core sysfs stats bind fail");
+            test_check(strstr(buf, "unbind_ok 3") != NULL,
+                       "device core sysfs stats unbind ok");
+            test_check(strstr(buf, "unbind_fail 1") != NULL,
+                       "device core sysfs stats unbind fail");
+            test_check(strstr(buf, "rescan_ok 1") != NULL,
+                       "device core sysfs stats rescan ok");
+            test_check(strstr(buf, "rescan_fail 0") != NULL,
+                       "device core sysfs stats rescan fail");
+            test_check(strstr(buf, "last_op unbind") != NULL,
+                       "device core sysfs stats last op");
+            test_check(strstr(buf, "last_ret 0") != NULL,
+                       "device core sysfs stats last ret");
+        }
+        vfs_close(f);
+    }
+
+    device_unregister(&dev);
+    driver_unregister(&drv);
+    bus_unregister(&bus);
 }
 
 static void test_irq_unregister_dispatch_concurrency(void) {
@@ -2747,7 +3405,6 @@ static void test_virtio_iommu_health_gate(void) {
         test_check(false, "virtio-iommu backend required");
         return;
     }
-
     test_check(ret == 0, "virtio-iommu health snapshot");
     if (ret < 0)
         return;
@@ -2757,7 +3414,6 @@ static void test_virtio_iommu_health_gate(void) {
     if (!health.ready)
         return;
 #endif
-
     test_check(!health.faulted, "virtio-iommu not faulted");
     test_check(health.req_timeout_count == 0, "virtio-iommu no request timeout");
     test_check(health.req_complete_count <= health.req_submit_count,
@@ -2803,6 +3459,7 @@ static void run_driver_irq_suite_once(void) {
     test_platform_device_irq_helpers();
     test_irq_stats_export();
     test_irq_stats_snapshot_and_procfs();
+    test_tracepoint_wait_sysfs_export();
     test_irq_unregister_dispatch_concurrency();
     test_irq_longrun_concurrency_soak();
     test_irq_domain_remove_waits_reclaim();
@@ -2844,6 +3501,9 @@ static void run_driver_suite_once(void) {
     test_iommu_hw_ops_default_attach();
     test_iommu_attach_replaces_owned_domain();
     test_iommu_domain_release_callback();
+    test_iommu_advanced_api_surface();
+    test_device_sysfs_core_controls();
+    test_device_sysfs_control_rw();
     run_driver_irq_suite_once();
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();

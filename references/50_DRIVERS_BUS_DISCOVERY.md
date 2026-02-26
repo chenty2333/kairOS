@@ -10,11 +10,25 @@ Three core abstractions (include/kairos/device.h):
 Global linked lists: bus_list, device_list, driver_list, protected by device_model_lock.
 
 Matching flow:
-- device_register(): after registering a device, immediately iterates driver_list to attempt matching
+- device_register(): creates `/sys/devices/<devname>` first, then registers the device and iterates `driver_list` to attempt matching (so probe-time sysfs control files can be created safely)
 - driver_register(): after registering a driver, immediately iterates device_list to attempt matching
 - bus_match_probe_locked(): calls bus->match() first (if available), otherwise matches by exact name; on match, releases lock and calls drv->probe()
 
 Device registration automatically creates a sysfs node under /sys/devices/.
+Driver-facing per-device sysfs helpers are available:
+- `device_sysfs_create_file()`, `device_sysfs_create_files()`, `device_sysfs_remove_file()`
+- Intended for writable control attributes (for example `0644` mode files with `show/store` callbacks) under `/sys/devices/<devname>/...`
+
+Core `/sys/devices/<devname>/` control skeleton is built-in:
+- `driver` (`0444`): exports `bus=<name> driver=<name|"(none)"> bound=<0|1>`
+- `bind` (`0200`): triggers `device_bind()` to probe and bind an unbound device
+- `unbind` (`0200`): triggers `device_unbind()` to detach current driver
+- `rescan` (`0200`): triggers `device_rescan()` to retry matching for unbound devices
+- `control_policy` (`0444`): exports control-file permission policy and write token rule
+- `control_stats` (`0444`): exports per-device control operation audit counters (`ops_total`, `ops_fail`, per-op success/failure, `last_op`, `last_ret`)
+
+Driver core also exposes callable APIs for the same lifecycle controls:
+- `device_bind()`, `device_unbind()`, `device_rescan()`
 
 ## Bus Implementations
 
@@ -75,15 +89,18 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - IOMMU core now provides `iommu_domain` + basic IOVA allocation and an IOMMU DMA backend (`iommu_get_dma_ops()`); PCI enumeration uses `iommu_attach_default_domain()`, which currently falls back to a global passthrough domain and can later be redirected by registering `iommu_hw_ops`
 - IOMMU hardware provider registration supports multiple backends with `priority` + optional `match(dev, priv)` selection; default-domain attach walks providers in priority order, then falls back to passthrough
 - IOMMU DMA domains now expose configurable mapping granularity (`iommu_domain_set_granule()`), so backend-required page size (for example 64K) can be enforced in IOVA allocation/map size alignment
+- IOMMU domain API now includes forward-compatible capability/fault-control surfaces: `iommu_domain_set_caps()/get_caps()/has_cap()`, PASID/PRI/ATS hooks (`iommu_domain_bind_pasid()`, `iommu_domain_enable_pri()`, `iommu_domain_enable_ats()`), and fault policy/recovery hooks (`iommu_domain_set_fault_policy()`, `iommu_domain_recover_faults()`)
 - IOMMU domain ops now include an optional `release()` lifecycle callback so hardware backends can tear down per-domain resources (for example endpoint detach) at `iommu_domain_destroy()` time
 - IOMMU IOVA allocation also honors the same per-device DMA mask/aperture checks, so translated DMA addresses stay inside the declared device-visible window
 - Re-attaching a device to another IOMMU domain now auto-detaches the previous domain attachment and reclaims any per-device DMA mappings from the old domain before switching
-- Device init now runs `iommu_init()` before PCI enumeration; architecture code can provide `arch_iommu_init()` to register hardware-backed domain allocation
+- Device init now runs `iommu_init()` before PCI enumeration; `arch_iommu_init()` is now explicit per-arch (`x86_64`/`aarch64`/`riscv64`) and delegates to arch-native weak hooks (`arch_<arch>_iommu_native_init`) for future hardware backend landing
 - A `virtio-iommu` backend driver is wired as an `iommu_hw_ops` provider: it matches PCI translatable endpoints (bridge class excluded), allocates per-device IOMMU domains (using device `input_range` when advertised), and issues ATTACH/MAP/UNMAP/DETACH requests through virtqueue 0
+- `virtio-iommu` domains now advertise fault-report/fault-disable capabilities in the shared IOMMU capability surface and pin fault policy to `IOMMU_FAULT_POLICY_DISABLE`
 - When `virtio-iommu` comes online, it sweeps already-registered PCI devices and re-attaches passthrough-attached endpoints to backend-managed default domains, avoiding boot-order loss of IOMMU coverage
 - `virtio-iommu` request submission uses heap-backed request/cookie context with bounded wait timeout; backend stalls now fail with `-ETIMEDOUT` instead of unbounded spin
 - On first request-timeout fault, `virtio-iommu` marks backend faulted and unregisters its `iommu_hw_ops` provider to stop further default-domain attachments until reprobe
 - `virtio-iommu` exports runtime health telemetry (`virtio_iommu_health_snapshot()`): submit/complete/timeout/error counters and last request/fault tuple, so kernel tests can gate on backend timeout/fault regressions
+- Make/QEMU defaults now support explicit virtio-iommu wiring on PCI-capable arches: `QEMU_IOMMU=auto` resolves to `virtio` on `x86_64`/`aarch64` when host QEMU supports `virtio-iommu-pci` (otherwise `off`); driver tests auto-enable strict health-gate enforcement in that mode via `CONFIG_VIRTIO_IOMMU_HEALTH_REQUIRED=1`
 
 ## Driver Overview
 
