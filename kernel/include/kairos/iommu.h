@@ -23,12 +23,39 @@ enum iommu_domain_type {
 #define IOMMU_PROT_READ  (1U << 0)
 #define IOMMU_PROT_WRITE (1U << 1)
 
+#define IOMMU_CAP_MAP_UNMAP      (1ULL << 0)
+#define IOMMU_CAP_PASID          (1ULL << 1)
+#define IOMMU_CAP_PRI            (1ULL << 2)
+#define IOMMU_CAP_ATS            (1ULL << 3)
+#define IOMMU_CAP_INT_REMAP      (1ULL << 4)
+#define IOMMU_CAP_FAULT_REPORT   (1ULL << 5)
+#define IOMMU_CAP_FAULT_DISABLE  (1ULL << 6)
+#define IOMMU_CAP_FAULT_RECOVER  (1ULL << 7)
+
+enum iommu_fault_policy {
+    IOMMU_FAULT_POLICY_REPORT = 0,
+    IOMMU_FAULT_POLICY_DISABLE = 1,
+    IOMMU_FAULT_POLICY_RECOVER = 2,
+};
+
 struct iommu_domain;
 
 struct iommu_domain_ops {
     int (*map)(struct iommu_domain *domain, dma_addr_t iova, paddr_t paddr,
                size_t size, uint32_t prot);
     void (*unmap)(struct iommu_domain *domain, dma_addr_t iova, size_t size);
+    int (*bind_pasid)(struct iommu_domain *domain, struct device *dev,
+                      uint32_t pasid, uint32_t flags);
+    int (*unbind_pasid)(struct iommu_domain *domain, struct device *dev,
+                        uint32_t pasid);
+    int (*enable_pri)(struct iommu_domain *domain, struct device *dev,
+                      uint32_t queue_depth);
+    int (*enable_ats)(struct iommu_domain *domain, struct device *dev,
+                      uint32_t flags);
+    int (*set_fault_policy)(struct iommu_domain *domain,
+                            enum iommu_fault_policy policy);
+    int (*recover_faults)(struct iommu_domain *domain, uint32_t budget,
+                          uint32_t *recovered);
     void (*release)(struct iommu_domain *domain);
 };
 
@@ -64,6 +91,8 @@ struct iommu_domain {
     dma_addr_t iova_limit;
     dma_addr_t iova_cursor;
     size_t granule;
+    uint64_t caps;
+    enum iommu_fault_policy fault_policy;
 };
 
 struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
@@ -76,6 +105,23 @@ void iommu_domain_set_ops(struct iommu_domain *domain,
                           const struct iommu_domain_ops *ops, void *ops_priv);
 int iommu_domain_set_granule(struct iommu_domain *domain, size_t granule);
 size_t iommu_domain_get_granule(const struct iommu_domain *domain);
+void iommu_domain_set_caps(struct iommu_domain *domain, uint64_t caps);
+uint64_t iommu_domain_get_caps(const struct iommu_domain *domain);
+bool iommu_domain_has_cap(const struct iommu_domain *domain, uint64_t cap);
+int iommu_domain_bind_pasid(struct iommu_domain *domain, struct device *dev,
+                            uint32_t pasid, uint32_t flags);
+int iommu_domain_unbind_pasid(struct iommu_domain *domain, struct device *dev,
+                              uint32_t pasid);
+int iommu_domain_enable_pri(struct iommu_domain *domain, struct device *dev,
+                            uint32_t queue_depth);
+int iommu_domain_enable_ats(struct iommu_domain *domain, struct device *dev,
+                            uint32_t flags);
+int iommu_domain_set_fault_policy(struct iommu_domain *domain,
+                                  enum iommu_fault_policy policy);
+enum iommu_fault_policy
+iommu_domain_get_fault_policy(const struct iommu_domain *domain);
+int iommu_domain_recover_faults(struct iommu_domain *domain, uint32_t budget,
+                                uint32_t *recovered);
 
 int iommu_attach_device(struct iommu_domain *domain, struct device *dev);
 int iommu_attach_default_domain(struct device *dev);
