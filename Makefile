@@ -20,7 +20,7 @@ ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
 EXTRA_CFLAGS ?=
 VIRTIO_PCI_TEST_CFLAGS ?=
-KERNEL_TESTS ?= 0
+KERNEL_TESTS ?= 1
 
 # Auto-detect parallelism: use all available cores
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
