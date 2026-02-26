@@ -34,6 +34,44 @@ enum procfs_type {
     PROCFS_SELF_LINK
 };
 
+enum procfs_control_action {
+    PROCFS_CONTROL_ACTION_NONE = 0,
+    PROCFS_CONTROL_ACTION_STOP,
+    PROCFS_CONTROL_ACTION_CONT,
+    PROCFS_CONTROL_ACTION_TERM,
+    PROCFS_CONTROL_ACTION_KILL,
+    PROCFS_CONTROL_ACTION_SIGNAL,
+    PROCFS_CONTROL_ACTION_COUNT
+};
+
+enum procfs_control_result {
+    PROCFS_CONTROL_RESULT_NONE = 0,
+    PROCFS_CONTROL_RESULT_QUEUED,
+    PROCFS_CONTROL_RESULT_PARSE_ERROR,
+    PROCFS_CONTROL_RESULT_TOO_LONG,
+    PROCFS_CONTROL_RESULT_PERMISSION_DENIED,
+    PROCFS_CONTROL_RESULT_NO_SUCH_PROCESS,
+    PROCFS_CONTROL_RESULT_ERROR
+};
+
+struct procfs_control_audit {
+    uint64_t total;
+    uint64_t parse_error;
+    uint64_t too_long;
+    uint64_t error_perm;
+    uint64_t error_noent;
+    uint64_t error_other;
+    uint64_t action_attempt[PROCFS_CONTROL_ACTION_COUNT];
+    uint64_t action_ok[PROCFS_CONTROL_ACTION_COUNT];
+    uint64_t action_fail[PROCFS_CONTROL_ACTION_COUNT];
+    uint64_t last_seq;
+    enum procfs_control_action last_action;
+    enum procfs_control_result last_result;
+    int last_signal;
+    int last_errno;
+    uid_t last_sender_uid;
+};
+
 /* Generator function type */
 typedef int (*procfs_gen_t)(pid_t pid, char *buf, size_t bufsz);
 
@@ -43,6 +81,7 @@ struct procfs_entry {
     ino_t ino;
     pid_t pid;
     procfs_gen_t generate;
+    struct procfs_control_audit control_audit;
     struct vnode vn;
     struct procfs_entry *next;
 };
@@ -84,6 +123,7 @@ static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_status(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz);
+static int gen_pid_control(struct procfs_entry *ent, char *buf, size_t bufsz);
 
 static size_t procfs_self_target(char *buf, size_t bufsz) {
     struct process *cur = proc_current();
@@ -496,14 +536,23 @@ static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len,
                            off_t off,
                            uint32_t flags __attribute__((unused))) {
     struct procfs_entry *ent = vn->fs_data;
-    if (!ent || !ent->generate)
+    if (!ent)
         return -EINVAL;
 
     char *kbuf = kmalloc(PROCFS_BUF_SIZE);
     if (!kbuf)
         return -ENOMEM;
 
-    int total = ent->generate(ent->pid, kbuf, PROCFS_BUF_SIZE);
+    int total = 0;
+    if (ent->type == PROCFS_PID_ENTRY && strcmp(ent->name, "control") == 0) {
+        total = gen_pid_control(ent, kbuf, PROCFS_BUF_SIZE);
+    } else {
+        if (!ent->generate) {
+            kfree(kbuf);
+            return -EINVAL;
+        }
+        total = ent->generate(ent->pid, kbuf, PROCFS_BUF_SIZE);
+    }
     if (total < 0) {
         kfree(kbuf);
         return total;
@@ -556,15 +605,116 @@ static int procfs_parse_u32(const char *s, uint32_t *out) {
     return 0;
 }
 
-static int procfs_control_signal_from_cmd(const char *cmd) {
-    if (strcmp(cmd, "stop") == 0)
-        return SIGSTOP;
-    if (strcmp(cmd, "cont") == 0 || strcmp(cmd, "resume") == 0)
-        return SIGCONT;
-    if (strcmp(cmd, "term") == 0)
-        return SIGTERM;
-    if (strcmp(cmd, "kill") == 0)
-        return SIGKILL;
+struct procfs_control_cmd {
+    enum procfs_control_action action;
+    int signal;
+};
+
+static const char *procfs_control_action_name(enum procfs_control_action action) {
+    switch (action) {
+    case PROCFS_CONTROL_ACTION_STOP:
+        return "stop";
+    case PROCFS_CONTROL_ACTION_CONT:
+        return "cont";
+    case PROCFS_CONTROL_ACTION_TERM:
+        return "term";
+    case PROCFS_CONTROL_ACTION_KILL:
+        return "kill";
+    case PROCFS_CONTROL_ACTION_SIGNAL:
+        return "signal";
+    default:
+        return "none";
+    }
+}
+
+static const char *procfs_control_result_name(enum procfs_control_result result) {
+    switch (result) {
+    case PROCFS_CONTROL_RESULT_QUEUED:
+        return "queued";
+    case PROCFS_CONTROL_RESULT_PARSE_ERROR:
+        return "parse_error";
+    case PROCFS_CONTROL_RESULT_TOO_LONG:
+        return "too_long";
+    case PROCFS_CONTROL_RESULT_PERMISSION_DENIED:
+        return "permission_denied";
+    case PROCFS_CONTROL_RESULT_NO_SUCH_PROCESS:
+        return "no_such_process";
+    case PROCFS_CONTROL_RESULT_ERROR:
+        return "error";
+    default:
+        return "none";
+    }
+}
+
+static void procfs_control_audit_begin(struct procfs_entry *ent, uid_t sender_uid) {
+    ent->control_audit.total++;
+    ent->control_audit.last_seq++;
+    ent->control_audit.last_sender_uid = sender_uid;
+}
+
+static void procfs_control_audit_record(struct procfs_entry *ent,
+                                        enum procfs_control_action action,
+                                        int sig, int rc) {
+    if (action > PROCFS_CONTROL_ACTION_NONE &&
+        action < PROCFS_CONTROL_ACTION_COUNT) {
+        ent->control_audit.action_attempt[action]++;
+    }
+    ent->control_audit.last_action = action;
+    ent->control_audit.last_signal = sig;
+    ent->control_audit.last_errno = (rc < 0) ? -rc : 0;
+
+    if (rc == 0) {
+        if (action > PROCFS_CONTROL_ACTION_NONE &&
+            action < PROCFS_CONTROL_ACTION_COUNT) {
+            ent->control_audit.action_ok[action]++;
+        }
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_QUEUED;
+        return;
+    }
+
+    if (action > PROCFS_CONTROL_ACTION_NONE &&
+        action < PROCFS_CONTROL_ACTION_COUNT) {
+        ent->control_audit.action_fail[action]++;
+    }
+    if (rc == -EPERM) {
+        ent->control_audit.error_perm++;
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_PERMISSION_DENIED;
+    } else if (rc == -ESRCH) {
+        ent->control_audit.error_noent++;
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_NO_SUCH_PROCESS;
+    } else if (rc == -EINVAL) {
+        ent->control_audit.parse_error++;
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_PARSE_ERROR;
+    } else {
+        ent->control_audit.error_other++;
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_ERROR;
+    }
+}
+
+static int procfs_control_parse_cmd(const char *cmd, struct procfs_control_cmd *out) {
+    if (!cmd || !out)
+        return -EINVAL;
+
+    if (strcmp(cmd, "stop") == 0) {
+        out->action = PROCFS_CONTROL_ACTION_STOP;
+        out->signal = SIGSTOP;
+        return 0;
+    }
+    if (strcmp(cmd, "cont") == 0 || strcmp(cmd, "resume") == 0) {
+        out->action = PROCFS_CONTROL_ACTION_CONT;
+        out->signal = SIGCONT;
+        return 0;
+    }
+    if (strcmp(cmd, "term") == 0) {
+        out->action = PROCFS_CONTROL_ACTION_TERM;
+        out->signal = SIGTERM;
+        return 0;
+    }
+    if (strcmp(cmd, "kill") == 0) {
+        out->action = PROCFS_CONTROL_ACTION_KILL;
+        out->signal = SIGKILL;
+        return 0;
+    }
 
     const char *arg = NULL;
     if (strncmp(cmd, "sig ", 4) == 0)
@@ -583,7 +733,80 @@ static int procfs_control_signal_from_cmd(const char *cmd) {
         return -EINVAL;
     if (sig == 0 || sig > NSIG)
         return -EINVAL;
-    return (int)sig;
+    out->action = PROCFS_CONTROL_ACTION_SIGNAL;
+    out->signal = (int)sig;
+    return 0;
+}
+
+static int gen_pid_control(struct procfs_entry *ent, char *buf, size_t bufsz) {
+    if (!ent || !buf || bufsz == 0)
+        return -EINVAL;
+    struct process *target = pid_to_proc(ent->pid);
+    const struct procfs_control_audit *audit = &ent->control_audit;
+    int len = snprintf(
+        buf, bufsz,
+        "schema=procfs_pid_control_v1\n"
+        "pid=%d\n"
+        "target.exists=%u\n"
+        "last.seq=%llu\n"
+        "last.action=%s\n"
+        "last.signal=%d\n"
+        "last.errno=%d\n"
+        "last.result=%s\n"
+        "last.sender_uid=%u\n"
+        "audit.total=%llu\n"
+        "audit.stop.attempt=%llu\n"
+        "audit.stop.ok=%llu\n"
+        "audit.stop.fail=%llu\n"
+        "audit.cont.attempt=%llu\n"
+        "audit.cont.ok=%llu\n"
+        "audit.cont.fail=%llu\n"
+        "audit.term.attempt=%llu\n"
+        "audit.term.ok=%llu\n"
+        "audit.term.fail=%llu\n"
+        "audit.kill.attempt=%llu\n"
+        "audit.kill.ok=%llu\n"
+        "audit.kill.fail=%llu\n"
+        "audit.signal.attempt=%llu\n"
+        "audit.signal.ok=%llu\n"
+        "audit.signal.fail=%llu\n"
+        "audit.error.parse=%llu\n"
+        "audit.error.too_long=%llu\n"
+        "audit.error.perm=%llu\n"
+        "audit.error.noent=%llu\n"
+        "audit.error.other=%llu\n",
+        ent->pid, target ? 1U : 0U,
+        (unsigned long long)audit->last_seq,
+        procfs_control_action_name(audit->last_action),
+        audit->last_signal, audit->last_errno,
+        procfs_control_result_name(audit->last_result),
+        (unsigned)audit->last_sender_uid,
+        (unsigned long long)audit->total,
+        (unsigned long long)audit->action_attempt[PROCFS_CONTROL_ACTION_STOP],
+        (unsigned long long)audit->action_ok[PROCFS_CONTROL_ACTION_STOP],
+        (unsigned long long)audit->action_fail[PROCFS_CONTROL_ACTION_STOP],
+        (unsigned long long)audit->action_attempt[PROCFS_CONTROL_ACTION_CONT],
+        (unsigned long long)audit->action_ok[PROCFS_CONTROL_ACTION_CONT],
+        (unsigned long long)audit->action_fail[PROCFS_CONTROL_ACTION_CONT],
+        (unsigned long long)audit->action_attempt[PROCFS_CONTROL_ACTION_TERM],
+        (unsigned long long)audit->action_ok[PROCFS_CONTROL_ACTION_TERM],
+        (unsigned long long)audit->action_fail[PROCFS_CONTROL_ACTION_TERM],
+        (unsigned long long)audit->action_attempt[PROCFS_CONTROL_ACTION_KILL],
+        (unsigned long long)audit->action_ok[PROCFS_CONTROL_ACTION_KILL],
+        (unsigned long long)audit->action_fail[PROCFS_CONTROL_ACTION_KILL],
+        (unsigned long long)audit->action_attempt[PROCFS_CONTROL_ACTION_SIGNAL],
+        (unsigned long long)audit->action_ok[PROCFS_CONTROL_ACTION_SIGNAL],
+        (unsigned long long)audit->action_fail[PROCFS_CONTROL_ACTION_SIGNAL],
+        (unsigned long long)audit->parse_error,
+        (unsigned long long)audit->too_long,
+        (unsigned long long)audit->error_perm,
+        (unsigned long long)audit->error_noent,
+        (unsigned long long)audit->error_other);
+    if (len < 0)
+        return -EINVAL;
+    if ((size_t)len >= bufsz)
+        return (int)bufsz - 1;
+    return len;
 }
 
 static ssize_t procfs_write(struct vnode *vn, const void *buf, size_t len,
@@ -601,24 +824,47 @@ static ssize_t procfs_write(struct vnode *vn, const void *buf, size_t len,
     if (len == 0)
         return 0;
 
+    struct process *curr = proc_current();
+    uid_t sender_uid = curr ? curr->uid : 0;
+    bool sender_is_superuser = curr ? (curr->uid == 0) : false;
+    procfs_control_audit_begin(ent, sender_uid);
+
     char cmd[64];
-    if (len >= sizeof(cmd))
+    if (len >= sizeof(cmd)) {
+        ent->control_audit.too_long++;
+        ent->control_audit.last_action = PROCFS_CONTROL_ACTION_NONE;
+        ent->control_audit.last_signal = 0;
+        ent->control_audit.last_errno = E2BIG;
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_TOO_LONG;
         return -E2BIG;
+    }
     size_t n = len;
     memcpy(cmd, buf, n);
     cmd[n] = '\0';
     procfs_rstrip(cmd);
     const char *trim = procfs_skip_space(cmd);
-    if (!*trim)
+    if (!*trim) {
+        ent->control_audit.parse_error++;
+        ent->control_audit.last_action = PROCFS_CONTROL_ACTION_NONE;
+        ent->control_audit.last_signal = 0;
+        ent->control_audit.last_errno = EINVAL;
+        ent->control_audit.last_result = PROCFS_CONTROL_RESULT_PARSE_ERROR;
         return -EINVAL;
+    }
 
-    struct process *curr = proc_current();
-    int sig = procfs_control_signal_from_cmd(trim);
-    if (sig < 0)
-        return sig;
-    int rc = signal_send_authorized(ent->pid, sig,
-                                    curr ? curr->uid : 0,
-                                    curr ? (curr->uid == 0) : false);
+    struct procfs_control_cmd parsed = {
+        .action = PROCFS_CONTROL_ACTION_NONE,
+        .signal = 0,
+    };
+    int rc = procfs_control_parse_cmd(trim, &parsed);
+    if (rc < 0) {
+        procfs_control_audit_record(ent, PROCFS_CONTROL_ACTION_NONE, 0, rc);
+        return rc;
+    }
+
+    rc = signal_send_authorized(ent->pid, parsed.signal, sender_uid,
+                                sender_is_superuser);
+    procfs_control_audit_record(ent, parsed.action, parsed.signal, rc);
     if (rc < 0)
         return rc;
     return (ssize_t)len;
@@ -654,7 +900,7 @@ static const struct pid_entry_def pid_entries[] = {
     {"cmdline", gen_pid_cmdline, S_IFREG | 0444},
     {"mounts",  gen_mounts,      S_IFREG | 0444},
     {"maps",    gen_pid_maps,    S_IFREG | 0444},
-    {"control", NULL,            S_IFREG | 0200},
+    {"control", NULL,            S_IFREG | 0600},
 };
 
 #define NUM_PID_ENTRIES ARRAY_SIZE(pid_entries)

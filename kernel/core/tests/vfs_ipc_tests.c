@@ -3168,6 +3168,43 @@ static int proc_control_worker(void *arg) {
     proc_exit(0);
 }
 
+static ssize_t proc_control_read_snapshot(struct file *f, char *buf,
+                                          size_t bufsz) {
+    if (!f || !buf || bufsz < 2)
+        return -EINVAL;
+    off_t off = vfs_seek(f, 0, SEEK_SET);
+    if (off < 0) {
+        buf[0] = '\0';
+        return (ssize_t)off;
+    }
+    ssize_t rd = vfs_read(f, buf, bufsz - 1);
+    if (rd < 0) {
+        buf[0] = '\0';
+        return rd;
+    }
+    buf[rd] = '\0';
+    return rd;
+}
+
+static void test_snapshot_expect_u64(const char *snapshot, const char *key,
+                                     uint64_t value, const char *name) {
+    char needle[96];
+    int n = snprintf(needle, sizeof(needle), "%s=%llu\n", key,
+                     (unsigned long long)value);
+    bool ok = n > 0 && (size_t)n < sizeof(needle) &&
+              snapshot && strstr(snapshot, needle) != NULL;
+    test_check(ok, name);
+}
+
+static void test_snapshot_expect_str(const char *snapshot, const char *key,
+                                     const char *value, const char *name) {
+    char needle[96];
+    int n = snprintf(needle, sizeof(needle), "%s=%s\n", key, value ? value : "");
+    bool ok = n > 0 && (size_t)n < sizeof(needle) &&
+              snapshot && strstr(snapshot, needle) != NULL;
+    test_check(ok, name);
+}
+
 static void test_procfs_pid_control_write_semantics(void) {
     struct process *self = proc_current();
     test_check(self != NULL, "procfs control self present");
@@ -3190,18 +3227,40 @@ static void test_procfs_pid_control_write_semantics(void) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/control", child->pid);
     struct file *f = NULL;
-    int rc = vfs_open(path, O_WRONLY, 0, &f);
+    int rc = vfs_open(path, O_RDWR, 0, &f);
     test_check(rc == 0 && f != NULL, "procfs control open");
     if (rc == 0 && f) {
-        const char cmd_term[] = "signal 15\n";
-        ssize_t wr = vfs_write(f, cmd_term, sizeof(cmd_term) - 1);
-        test_check(wr == (ssize_t)(sizeof(cmd_term) - 1),
-                   "procfs control signal term accepted");
-        uint64_t term_mask = (1ULL << (SIGTERM - 1));
+        char snapshot[1024];
+        ssize_t rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control snapshot read");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "schema", "procfs_pid_control_v1",
+                                     "procfs control schema");
+            test_snapshot_expect_u64(snapshot, "audit.total", 0,
+                                     "procfs control audit init total");
+            test_snapshot_expect_str(snapshot, "last.action", "none",
+                                     "procfs control last action init");
+        }
+
+        const char cmd_stop[] = "stop\n";
+        ssize_t wr = vfs_write(f, cmd_stop, sizeof(cmd_stop) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd_stop) - 1),
+                   "procfs control stop accepted");
+        uint64_t stop_mask = (1ULL << (SIGSTOP - 1));
         test_check((__atomic_load_n(&child->sig_pending, __ATOMIC_ACQUIRE) &
-                    term_mask) != 0,
-                   "procfs control term pending set");
-        __atomic_fetch_and(&child->sig_pending, ~term_mask, __ATOMIC_RELEASE);
+                    stop_mask) != 0,
+                   "procfs control stop pending set");
+        __atomic_fetch_and(&child->sig_pending, ~stop_mask, __ATOMIC_RELEASE);
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control stop snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.action", "stop",
+                                     "procfs control stop last action");
+            test_snapshot_expect_str(snapshot, "last.result", "queued",
+                                     "procfs control stop last result");
+            test_snapshot_expect_u64(snapshot, "audit.stop.ok", 1,
+                                     "procfs control stop ok count");
+        }
 
         const char cmd_resume[] = "  resume \n";
         wr = vfs_write(f, cmd_resume, sizeof(cmd_resume) - 1);
@@ -3212,6 +3271,50 @@ static void test_procfs_pid_control_write_semantics(void) {
                     cont_mask) != 0,
                    "procfs control cont pending set");
         __atomic_fetch_and(&child->sig_pending, ~cont_mask, __ATOMIC_RELEASE);
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control cont snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.action", "cont",
+                                     "procfs control cont last action");
+            test_snapshot_expect_u64(snapshot, "audit.cont.ok", 1,
+                                     "procfs control cont ok count");
+        }
+
+        const char cmd_term[] = "term";
+        wr = vfs_write(f, cmd_term, sizeof(cmd_term) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd_term) - 1),
+                   "procfs control term accepted");
+        uint64_t term_mask = (1ULL << (SIGTERM - 1));
+        test_check((__atomic_load_n(&child->sig_pending, __ATOMIC_ACQUIRE) &
+                    term_mask) != 0,
+                   "procfs control term pending set");
+        __atomic_fetch_and(&child->sig_pending, ~term_mask, __ATOMIC_RELEASE);
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control term snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.action", "term",
+                                     "procfs control term last action");
+            test_snapshot_expect_u64(snapshot, "audit.term.ok", 1,
+                                     "procfs control term ok count");
+        }
+
+        const char cmd_kill[] = "kill";
+        wr = vfs_write(f, cmd_kill, sizeof(cmd_kill) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd_kill) - 1),
+                   "procfs control kill accepted");
+        uint64_t kill_mask = (1ULL << (SIGKILL - 1));
+        test_check((__atomic_load_n(&child->sig_pending, __ATOMIC_ACQUIRE) &
+                    kill_mask) != 0,
+                   "procfs control kill pending set");
+        __atomic_fetch_and(&child->sig_pending, ~kill_mask, __ATOMIC_RELEASE);
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control kill snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.action", "kill",
+                                     "procfs control kill last action");
+            test_snapshot_expect_u64(snapshot, "audit.kill.ok", 1,
+                                     "procfs control kill ok count");
+        }
 
         const char cmd_usr1[] = "sig 10";
         wr = vfs_write(f, cmd_usr1, sizeof(cmd_usr1) - 1);
@@ -3222,15 +3325,39 @@ static void test_procfs_pid_control_write_semantics(void) {
                     usr1_mask) != 0,
                    "procfs control usr1 pending set");
         __atomic_fetch_and(&child->sig_pending, ~usr1_mask, __ATOMIC_RELEASE);
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control signal snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.action", "signal",
+                                     "procfs control signal last action");
+            test_snapshot_expect_u64(snapshot, "audit.signal.ok", 1,
+                                     "procfs control signal ok count");
+        }
 
         const char cmd_bad_sig[] = "sig 0";
         wr = vfs_write(f, cmd_bad_sig, sizeof(cmd_bad_sig) - 1);
         test_check(wr == -EINVAL, "procfs control sig zero rejected");
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control parse error snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.result", "parse_error",
+                                     "procfs control parse error result");
+            test_snapshot_expect_u64(snapshot, "audit.error.parse", 1,
+                                     "procfs control parse error count");
+        }
 
         char long_cmd[80];
         memset(long_cmd, 'x', sizeof(long_cmd));
         wr = vfs_write(f, long_cmd, sizeof(long_cmd));
         test_check(wr == -E2BIG, "procfs control oversized write rejected");
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control too long snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.result", "too_long",
+                                     "procfs control too long result");
+            test_snapshot_expect_u64(snapshot, "audit.error.too_long", 1,
+                                     "procfs control too long count");
+        }
 
         uid_t saved_uid = self->uid;
         uid_t saved_child_uid = child->uid;
@@ -3240,6 +3367,26 @@ static void test_procfs_pid_control_write_semantics(void) {
         test_check(wr == -EPERM, "procfs control uid mismatch eperm");
         self->uid = saved_uid;
         child->uid = saved_child_uid;
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs control eperm snapshot");
+        if (rd > 0) {
+            test_snapshot_expect_str(snapshot, "last.action", "term",
+                                     "procfs control eperm last action");
+            test_snapshot_expect_str(snapshot, "last.result", "permission_denied",
+                                     "procfs control eperm last result");
+            test_snapshot_expect_u64(snapshot, "audit.term.attempt", 2,
+                                     "procfs control term attempt count");
+            test_snapshot_expect_u64(snapshot, "audit.term.ok", 1,
+                                     "procfs control term ok retained");
+            test_snapshot_expect_u64(snapshot, "audit.term.fail", 1,
+                                     "procfs control term fail count");
+            test_snapshot_expect_u64(snapshot, "audit.error.perm", 1,
+                                     "procfs control perm error count");
+            test_snapshot_expect_u64(snapshot, "audit.total", 8,
+                                     "procfs control total write count");
+            test_snapshot_expect_u64(snapshot, "last.seq", 8,
+                                     "procfs control sequence count");
+        }
         close_file_if_open(&f);
     }
 
@@ -3905,23 +4052,144 @@ static void test_sysfs_ipc_visibility(void) {
     struct kobj *ch1 = NULL;
     struct file *f = NULL;
     char buf[512] = {0};
+    char path[96] = {0};
 
     int rc = kchannel_create_pair(&ch0, &ch1);
     test_check(rc == 0, "sysfs_ipc create channel pair");
     if (rc < 0)
         return;
 
-    rc = vfs_open("/sys/ipc/objects", O_RDONLY, 0, &f);
-    test_check(rc == 0, "sysfs_ipc open objects");
+    uint32_t ch0_id = kobj_id(ch0);
+    uint32_t ch1_id = kobj_id(ch1);
+
+    rc = vfs_open("/sys/ipc/objects/page", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc open objects page");
     if (rc == 0) {
         ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
-        test_check(n > 0, "sysfs_ipc read objects");
+        test_check(n > 0, "sysfs_ipc read objects page");
         if (n > 0) {
             buf[n] = '\0';
-            test_check(strstr(buf, "id type refcount") != NULL,
-                       "sysfs_ipc objects header");
-            test_check(strstr(buf, "channel") != NULL,
-                       "sysfs_ipc objects include channel");
+            test_check(strstr(buf, "cursor=") != NULL,
+                       "sysfs_ipc page cursor header");
+            test_check(strstr(buf, "id type refcount state") != NULL,
+                       "sysfs_ipc page objects header");
+        }
+    }
+    close_file_if_open(&f);
+
+    int npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/summary", ch0_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path), "sysfs_ipc ch0 path");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        memset(buf, 0, sizeof(buf));
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "sysfs_ipc open object summary");
+        if (rc == 0) {
+            ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+            test_check(n > 0, "sysfs_ipc read object summary");
+            if (n > 0) {
+                char id_line[32];
+                int idn = snprintf(id_line, sizeof(id_line), "id=%u\n", ch0_id);
+                buf[n] = '\0';
+                test_check(idn > 0 && (size_t)idn < sizeof(id_line) &&
+                               strstr(buf, id_line) != NULL,
+                           "sysfs_ipc summary id");
+                test_check(strstr(buf, "type=channel\n") != NULL,
+                           "sysfs_ipc summary type");
+            }
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path), "/sys/ipc/objects/%u/transfers", ch0_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path), "sysfs_ipc xfer path");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        memset(buf, 0, sizeof(buf));
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "sysfs_ipc open object transfers");
+        if (rc == 0) {
+            ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+            test_check(n > 0, "sysfs_ipc read object transfers");
+            if (n > 0) {
+                buf[n] = '\0';
+                test_check(strstr(buf, "seq event from_pid to_pid rights cpu ticks\n") !=
+                               NULL,
+                           "sysfs_ipc transfers header");
+            }
+        }
+        close_file_if_open(&f);
+    }
+
+    rc = vfs_open("/sys/ipc/objects/page_size", O_WRONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc open page_size");
+    if (rc == 0) {
+        const char *value = "1\n";
+        ssize_t wr = vfs_write(f, value, strlen(value));
+        test_check(wr == (ssize_t)strlen(value), "sysfs_ipc write page_size");
+    }
+    close_file_if_open(&f);
+
+    uint32_t cursor = (ch0_id > 0) ? (ch0_id - 1) : 0;
+    rc = vfs_open("/sys/ipc/objects/cursor", O_WRONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc open cursor");
+    if (rc == 0) {
+        char value[32];
+        int n = snprintf(value, sizeof(value), "%u\n", cursor);
+        ssize_t wr = (n > 0 && (size_t)n < sizeof(value)) ? vfs_write(f, value, (size_t)n)
+                                                          : -EINVAL;
+        test_check(n > 0 && (size_t)n < sizeof(value) && wr == n,
+                   "sysfs_ipc write cursor first");
+    }
+    close_file_if_open(&f);
+
+    memset(buf, 0, sizeof(buf));
+    rc = vfs_open("/sys/ipc/objects/page", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc reopen page first");
+    if (rc == 0) {
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "sysfs_ipc read page first");
+        if (n > 0) {
+            char needle[48];
+            char next_line[32];
+            buf[n] = '\0';
+            int nn = snprintf(needle, sizeof(needle), "%u channel ", ch0_id);
+            int nx = snprintf(next_line, sizeof(next_line), "next_cursor=%u\n", ch0_id);
+            test_check(nn > 0 && (size_t)nn < sizeof(needle) &&
+                           strstr(buf, needle) != NULL,
+                       "sysfs_ipc page first object");
+            test_check(strstr(buf, "has_more=1\n") != NULL,
+                       "sysfs_ipc page first has_more");
+            test_check(nx > 0 && (size_t)nx < sizeof(next_line) &&
+                           strstr(buf, next_line) != NULL,
+                       "sysfs_ipc page first next_cursor");
+        }
+    }
+    close_file_if_open(&f);
+
+    rc = vfs_open("/sys/ipc/objects/cursor", O_WRONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc reopen cursor");
+    if (rc == 0) {
+        char value[32];
+        int n = snprintf(value, sizeof(value), "%u\n", ch0_id);
+        ssize_t wr = (n > 0 && (size_t)n < sizeof(value)) ? vfs_write(f, value, (size_t)n)
+                                                          : -EINVAL;
+        test_check(n > 0 && (size_t)n < sizeof(value) && wr == n,
+                   "sysfs_ipc write cursor second");
+    }
+    close_file_if_open(&f);
+
+    memset(buf, 0, sizeof(buf));
+    rc = vfs_open("/sys/ipc/objects/page", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc reopen page second");
+    if (rc == 0) {
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "sysfs_ipc read page second");
+        if (n > 0) {
+            char needle[48];
+            buf[n] = '\0';
+            int nn = snprintf(needle, sizeof(needle), "%u channel ", ch1_id);
+            test_check(nn > 0 && (size_t)nn < sizeof(needle) &&
+                           strstr(buf, needle) != NULL,
+                       "sysfs_ipc page second object");
         }
     }
     close_file_if_open(&f);
