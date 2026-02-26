@@ -31,6 +31,11 @@ struct iommu_domain_ops {
     void (*unmap)(struct iommu_domain *domain, dma_addr_t iova, size_t size);
 };
 
+struct iommu_hw_ops {
+    struct iommu_domain *(*alloc_default_domain)(struct device *dev, bool *owned,
+                                                 void *priv);
+};
+
 struct iommu_domain {
     enum iommu_domain_type type;
     const struct iommu_domain_ops *ops;
@@ -51,8 +56,12 @@ void iommu_domain_set_ops(struct iommu_domain *domain,
                           const struct iommu_domain_ops *ops, void *ops_priv);
 
 int iommu_attach_device(struct iommu_domain *domain, struct device *dev);
+int iommu_attach_default_domain(struct device *dev);
 void iommu_detach_device(struct device *dev);
 struct iommu_domain *iommu_get_domain(struct device *dev);
+
+int iommu_register_hw_ops(const struct iommu_hw_ops *ops, void *priv);
+void iommu_unregister_hw_ops(const struct iommu_hw_ops *ops);
 
 const struct dma_ops *iommu_get_dma_ops(void);
 

@@ -857,7 +857,10 @@ int pci_scan_bus(struct pci_host *host)
                 snprintf(pdev->dev.name, sizeof(pdev->dev.name),
                          "pci-%02x:%02x.%x", b, s, f);
                 pdev->dev.bus = &pci_bus_type;
-                iommu_attach_device(iommu_get_passthrough_domain(), &pdev->dev);
+                int iommu_ret = iommu_attach_default_domain(&pdev->dev);
+                if (iommu_ret < 0)
+                    pr_warn("pci: iommu attach failed (%d) for %02x:%02x.%x\n",
+                            iommu_ret, b, s, f);
 
                 pr_info("pci: %02x:%02x.%x %04x:%04x class %06x (%s)\n",
                         b, s, f, vendor, device,

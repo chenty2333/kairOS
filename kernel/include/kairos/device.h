@@ -39,6 +39,7 @@ struct device {
     size_t num_resources;
     const struct dma_ops *dma_ops; /* DMA backend (NULL => direct mapping) */
     struct iommu_domain *iommu_domain; /* Attached IOMMU domain */
+    bool iommu_domain_owned;      /* Destroy domain on device detach */
     void *driver_data;          /* Driver private data */
     struct sysfs_node *sysfs_node; /* sysfs directory for this device */
     struct list_head list;      /* Global device list node */

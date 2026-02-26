@@ -21,6 +21,9 @@ struct iommu_mapping {
 static struct iommu_domain iommu_passthrough_domain;
 static bool iommu_passthrough_domain_init_done;
 static spinlock_t iommu_passthrough_domain_init_lock = SPINLOCK_INIT;
+static const struct iommu_hw_ops *iommu_hw_ops;
+static void *iommu_hw_ops_priv;
+static spinlock_t iommu_hw_ops_lock = SPINLOCK_INIT;
 
 static uint32_t iommu_dma_dir_to_prot(int direction) {
     if (direction == DMA_TO_DEVICE)
@@ -306,23 +309,81 @@ void iommu_domain_set_ops(struct iommu_domain *domain,
     spin_unlock_irqrestore(&domain->lock, irq_flags);
 }
 
-int iommu_attach_device(struct iommu_domain *domain, struct device *dev) {
+static int iommu_attach_device_internal(struct iommu_domain *domain,
+                                        struct device *dev, bool owned) {
     if (!domain || !dev)
         return -EINVAL;
     dev->iommu_domain = domain;
+    dev->iommu_domain_owned = owned;
     dma_set_ops(dev, iommu_get_dma_ops());
     return 0;
+}
+
+int iommu_attach_device(struct iommu_domain *domain, struct device *dev) {
+    return iommu_attach_device_internal(domain, dev, false);
+}
+
+int iommu_attach_default_domain(struct device *dev) {
+    if (!dev)
+        return -EINVAL;
+
+    const struct iommu_hw_ops *ops = NULL;
+    void *priv = NULL;
+    spin_lock(&iommu_hw_ops_lock);
+    ops = iommu_hw_ops;
+    priv = iommu_hw_ops_priv;
+    spin_unlock(&iommu_hw_ops_lock);
+
+    struct iommu_domain *domain = NULL;
+    bool owned = false;
+    if (ops && ops->alloc_default_domain)
+        domain = ops->alloc_default_domain(dev, &owned, priv);
+    if (!domain) {
+        domain = iommu_get_passthrough_domain();
+        owned = false;
+    }
+    return iommu_attach_device_internal(domain, dev, owned);
 }
 
 void iommu_detach_device(struct device *dev) {
     if (!dev)
         return;
+    struct iommu_domain *domain = dev->iommu_domain;
+    bool owned = dev->iommu_domain_owned;
     dev->iommu_domain = NULL;
+    dev->iommu_domain_owned = false;
     dma_set_ops(dev, NULL);
+    if (owned)
+        iommu_domain_destroy(domain);
 }
 
 struct iommu_domain *iommu_get_domain(struct device *dev) {
     return dev ? dev->iommu_domain : NULL;
+}
+
+int iommu_register_hw_ops(const struct iommu_hw_ops *ops, void *priv) {
+    if (!ops || !ops->alloc_default_domain)
+        return -EINVAL;
+    spin_lock(&iommu_hw_ops_lock);
+    if (iommu_hw_ops) {
+        spin_unlock(&iommu_hw_ops_lock);
+        return -EBUSY;
+    }
+    iommu_hw_ops = ops;
+    iommu_hw_ops_priv = priv;
+    spin_unlock(&iommu_hw_ops_lock);
+    return 0;
+}
+
+void iommu_unregister_hw_ops(const struct iommu_hw_ops *ops) {
+    if (!ops)
+        return;
+    spin_lock(&iommu_hw_ops_lock);
+    if (iommu_hw_ops == ops) {
+        iommu_hw_ops = NULL;
+        iommu_hw_ops_priv = NULL;
+    }
+    spin_unlock(&iommu_hw_ops_lock);
 }
 
 const struct dma_ops *iommu_get_dma_ops(void) {

@@ -401,6 +401,26 @@ static void test_iommu_domain_dma_ops(void) {
     iommu_domain_destroy(domain);
 }
 
+static void test_iommu_default_domain_attach(void) {
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    int ret = iommu_attach_default_domain(&dev);
+    test_check(ret == 0, "iommu default attach");
+    if (ret < 0)
+        return;
+
+    test_check(iommu_get_domain(&dev) == iommu_get_passthrough_domain(),
+               "iommu default passthrough domain");
+
+    uint8_t buf[128];
+    dma_addr_t dma = dma_map_single(&dev, buf, sizeof(buf), DMA_TO_DEVICE);
+    dma_addr_t phys = (dma_addr_t)virt_to_phys(buf);
+    test_check(dma == phys, "iommu default passthrough dma");
+    dma_unmap_single(&dev, dma, sizeof(buf), DMA_TO_DEVICE);
+
+    iommu_detach_device(&dev);
+}
+
 static volatile uint32_t irq_deferred_hits;
 
 static void test_irq_deferred_handler(void *arg,
@@ -1958,6 +1978,7 @@ static void run_driver_suite_once(void) {
     test_netdev_registry();
     test_dma_coherent_alloc_free();
     test_iommu_domain_dma_ops();
+    test_iommu_default_domain_attach();
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
     test_irq_unregister_actions();
