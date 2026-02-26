@@ -8,9 +8,11 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/printk.h>
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
+#include <kairos/pollwait.h>
 #include <kairos/wait.h>
 
 static int tests_failed;
@@ -408,6 +410,104 @@ static void test_sched_sleep_wakeup_stress(void) {
             created, SLEEP_WAKE_SLEEPERS);
 }
 
+/* ---------- test_poll_wait_head_single_waiter_fastpath ---------- */
+
+struct poll_wait_head_fastpath_ctx {
+    struct poll_wait_head head;
+    volatile int armed;
+    volatile int done;
+    int wake_rc;
+};
+
+static int poll_wait_head_fastpath_sleeper(void *arg) {
+    struct poll_wait_head_fastpath_ctx *ctx =
+        (struct poll_wait_head_fastpath_ctx *)arg;
+    if (!ctx) {
+        proc_exit(1);
+        return 0;
+    }
+
+    struct process *curr = proc_current();
+    struct poll_waiter waiter = {0};
+    INIT_LIST_HEAD(&waiter.entry.node);
+    waiter.entry.proc = curr;
+    poll_wait_add(&ctx->head, &waiter);
+    __atomic_store_n(&ctx->armed, 1, __ATOMIC_RELEASE);
+
+    uint64_t deadline = arch_timer_ticks() + CONFIG_HZ;
+    if (deadline == 0)
+        deadline = 1;
+    ctx->wake_rc = poll_block_current(deadline, curr);
+    poll_wait_remove(&waiter);
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    proc_exit(0);
+    return 0;
+}
+
+static void test_poll_wait_head_single_waiter_fastpath(void) {
+    pr_info("sched_stress: poll_wait_head_single_waiter_fastpath\n");
+
+    struct poll_wait_head_fastpath_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    poll_wait_head_init(&ctx.head);
+    ctx.wake_rc = -ETIMEDOUT;
+
+    poll_wait_stats_reset();
+    uint64_t before[POLL_WAIT_STAT_COUNT] = {0};
+    uint64_t after[POLL_WAIT_STAT_COUNT] = {0};
+    poll_wait_stats_snapshot(before);
+
+    struct process *thr =
+        kthread_create_joinable(poll_wait_head_fastpath_sleeper, &ctx, "pwhf");
+    if (!thr) {
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: create\n");
+        return;
+    }
+
+    pid_t tid = thr->pid;
+    sched_enqueue(thr);
+
+    uint64_t start = arch_timer_ticks();
+    while (__atomic_load_n(&ctx.armed, __ATOMIC_ACQUIRE) == 0) {
+        if ((arch_timer_ticks() - start) > CONFIG_HZ)
+            break;
+        proc_yield();
+    }
+
+    bool armed = __atomic_load_n(&ctx.armed, __ATOMIC_ACQUIRE) != 0;
+    if (!armed)
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: not armed\n");
+    if (armed)
+        poll_wait_wake(&ctx.head, POLLIN);
+
+    int status = 0;
+    pid_t wp = proc_wait(tid, &status, 0);
+    if (wp != tid)
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: reap %d/%d\n",
+                  wp, tid);
+    if (__atomic_load_n(&ctx.done, __ATOMIC_ACQUIRE) == 0)
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: not done\n");
+    if (ctx.wake_rc != 0)
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: wake_rc=%d\n",
+                  ctx.wake_rc);
+
+    poll_wait_stats_snapshot(after);
+    uint64_t wake_delta =
+        after[POLL_WAIT_STAT_POLL_HEAD_WAKE_CALLS] -
+        before[POLL_WAIT_STAT_POLL_HEAD_WAKE_CALLS];
+    uint64_t direct_delta =
+        after[POLL_WAIT_STAT_POLL_HEAD_DIRECT_SWITCH] -
+        before[POLL_WAIT_STAT_POLL_HEAD_DIRECT_SWITCH];
+    if (wake_delta < 1) {
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: wake_delta=%llu\n",
+                  (unsigned long long)wake_delta);
+    }
+    if (direct_delta < 1) {
+        test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: direct_delta=%llu\n",
+                  (unsigned long long)direct_delta);
+    }
+}
+
 /* ---------- test_sched_yield_storm ---------- */
 
 #define YIELD_ROUNDS 500
@@ -763,6 +863,8 @@ int run_sched_stress_tests(void) {
     test_sched_fork_exit_storm();
     if (tests_failed == 0)
         test_sched_sleep_wakeup_stress();
+    if (tests_failed == 0)
+        test_poll_wait_head_single_waiter_fastpath();
     if (tests_failed == 0)
         test_sched_yield_storm();
     if (tests_failed == 0)
