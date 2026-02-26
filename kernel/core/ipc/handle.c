@@ -114,6 +114,10 @@ static LIST_HEAD(ipc_dentry_registry);
 static struct mutex ipc_registry_lock;
 static bool ipc_registry_lock_ready;
 static spinlock_t ipc_registry_init_lock = SPINLOCK_INIT;
+/* Suppress only reentrant register/unregister from the ensure() call chain. */
+static struct process *ipc_registry_register_suppress_proc;
+static int ipc_registry_register_suppress_cpu = -1;
+static uint32_t ipc_registry_register_suppress_depth;
 static struct sysfs_node *ipc_sysfs_root;
 static struct sysfs_node *ipc_sysfs_objects_dir;
 static bool ipc_sysfs_ready;
@@ -293,6 +297,60 @@ static struct list_head *ipc_registry_list_for_type(uint32_t type) {
         return &ipc_dentry_registry;
     default:
         return NULL;
+    }
+}
+
+static bool ipc_registry_should_auto_ensure_sysfs(uint32_t type) {
+    (void)type;
+    return true;
+}
+
+static bool ipc_registry_register_suppressed_for_current(void) {
+    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
+                                     __ATOMIC_ACQUIRE);
+    if (depth == 0)
+        return false;
+
+    struct process *owner = __atomic_load_n(
+        &ipc_registry_register_suppress_proc, __ATOMIC_ACQUIRE);
+    struct process *curr = proc_current();
+    if (owner)
+        return curr == owner;
+    if (curr)
+        return false;
+
+    int owner_cpu = __atomic_load_n(&ipc_registry_register_suppress_cpu,
+                                    __ATOMIC_ACQUIRE);
+    return owner_cpu == arch_cpu_id();
+}
+
+static void ipc_registry_register_suppress_enter(void) {
+    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
+                                     __ATOMIC_ACQUIRE);
+    if (depth == 0) {
+        struct process *curr = proc_current();
+        __atomic_store_n(&ipc_registry_register_suppress_proc, curr,
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&ipc_registry_register_suppress_cpu,
+                         curr ? -1 : arch_cpu_id(), __ATOMIC_RELAXED);
+    }
+    __atomic_add_fetch(&ipc_registry_register_suppress_depth, 1,
+                       __ATOMIC_ACQ_REL);
+}
+
+static void ipc_registry_register_suppress_exit(void) {
+    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
+                                     __ATOMIC_ACQUIRE);
+    if (depth == 0)
+        return;
+
+    depth = __atomic_sub_fetch(&ipc_registry_register_suppress_depth, 1,
+                               __ATOMIC_ACQ_REL);
+    if (depth == 0) {
+        __atomic_store_n(&ipc_registry_register_suppress_proc, NULL,
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&ipc_registry_register_suppress_cpu, -1,
+                         __ATOMIC_RELAXED);
     }
 }
 
@@ -1056,39 +1114,35 @@ static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent) {
 static void ipc_sysfs_ensure_ready(void) {
     ipc_registry_ensure_lock();
     mutex_lock(&ipc_registry_lock);
+    ipc_registry_register_suppress_enter();
 
     if (!ipc_sysfs_ready) {
         struct sysfs_node *root = sysfs_root();
         if (!root) {
-            mutex_unlock(&ipc_registry_lock);
-            return;
+            goto out_unlock;
         }
 
         ipc_sysfs_root = sysfs_mkdir(root, "ipc");
         if (!ipc_sysfs_root) {
-            mutex_unlock(&ipc_registry_lock);
-            return;
+            goto out_unlock;
         }
 
         if (sysfs_create_files(ipc_sysfs_root, ipc_sysfs_attrs,
                                ARRAY_SIZE(ipc_sysfs_attrs)) < 0) {
             pr_warn("ipc: failed to create /sys/ipc attributes\n");
-            mutex_unlock(&ipc_registry_lock);
-            return;
+            goto out_unlock;
         }
 
         ipc_sysfs_objects_dir = sysfs_mkdir(ipc_sysfs_root, "objects");
         if (!ipc_sysfs_objects_dir) {
             pr_warn("ipc: failed to create /sys/ipc/objects\n");
-            mutex_unlock(&ipc_registry_lock);
-            return;
+            goto out_unlock;
         }
 
         if (sysfs_create_files(ipc_sysfs_objects_dir, ipc_sysfs_objects_attrs,
                                ARRAY_SIZE(ipc_sysfs_objects_attrs)) < 0) {
             pr_warn("ipc: failed to create /sys/ipc/objects attributes\n");
-            mutex_unlock(&ipc_registry_lock);
-            return;
+            goto out_unlock;
         }
 
         ipc_sysfs_page.cursor = 0;
@@ -1099,12 +1153,19 @@ static void ipc_sysfs_ensure_ready(void) {
     struct ipc_registry_entry *ent;
     list_for_each_entry(ent, &ipc_registry_all, all_node)
         ipc_sysfs_create_object_dir_locked(ent);
+out_unlock:
+    ipc_registry_register_suppress_exit();
     mutex_unlock(&ipc_registry_lock);
 }
 
 static void ipc_registry_register_obj(struct kobj *obj) {
     if (!obj)
         return;
+    if ((obj->type == VFS_KOBJ_TYPE_VNODE ||
+         obj->type == VFS_KOBJ_TYPE_DENTRY) &&
+        ipc_registry_register_suppressed_for_current()) {
+        return;
+    }
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
         return;
@@ -1125,12 +1186,18 @@ static void ipc_registry_register_obj(struct kobj *obj) {
     list_add_tail(&ent->all_node, &ipc_registry_all);
     mutex_unlock(&ipc_registry_lock);
 
-    ipc_sysfs_ensure_ready();
+    if (ipc_registry_should_auto_ensure_sysfs(obj->type))
+        ipc_sysfs_ensure_ready();
 }
 
 static void ipc_registry_unregister_obj(struct kobj *obj) {
     if (!obj)
         return;
+    if ((obj->type == VFS_KOBJ_TYPE_VNODE ||
+         obj->type == VFS_KOBJ_TYPE_DENTRY) &&
+        ipc_registry_register_suppressed_for_current()) {
+        return;
+    }
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
         return;
