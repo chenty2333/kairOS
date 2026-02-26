@@ -924,6 +924,87 @@ static void test_irq_free_sync_waits_after_async_free(void) {
                "irq syncfree retired removed");
 }
 
+static void test_irq_free_sync_waits_with_two_waiters(void) {
+    const int irq = 966;
+    irq_blocking_entered = 0;
+    irq_blocking_release = 0;
+    irq_blocking_hits = 0;
+
+    int ret = arch_request_irq_ex(irq, test_irq_blocking_handler, NULL,
+                                  IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq syncfree two waiters request");
+    if (ret < 0)
+        return;
+
+    struct process *dispatch_worker = kthread_create_joinable(
+        irq_dispatch_once_thread, (void *)&irq, "irqsync2disp");
+    test_check(dispatch_worker != NULL, "irq syncfree two waiters dispatch create");
+    if (!dispatch_worker) {
+        (void)arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+        return;
+    }
+    sched_enqueue(dispatch_worker);
+
+    for (int i = 0; i < 200; i++) {
+        if (__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED))
+            break;
+        proc_yield();
+    }
+    test_check(__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED) == 1,
+               "irq syncfree two waiters entered");
+
+    struct irq_free_sync_ctx sync_a = {
+        .irq = irq,
+        .done = 0,
+        .ret = -1,
+    };
+    struct irq_free_sync_ctx sync_b = {
+        .irq = irq,
+        .done = 0,
+        .ret = -1,
+    };
+    struct process *worker_a =
+        kthread_create_joinable(irq_free_sync_thread, &sync_a, "irqsync2a");
+    struct process *worker_b =
+        kthread_create_joinable(irq_free_sync_thread, &sync_b, "irqsync2b");
+    test_check(worker_a != NULL && worker_b != NULL,
+               "irq syncfree two waiters worker create");
+    if (!worker_a || !worker_b) {
+        __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+        if (worker_a)
+            sched_enqueue(worker_a);
+        if (worker_b)
+            sched_enqueue(worker_b);
+        int expected = 1;
+        if (worker_a)
+            expected++;
+        if (worker_b)
+            expected++;
+        (void)test_reap_children_bounded(expected,
+                                         "irq_syncfree_two_waiters_fallback");
+        (void)arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+        return;
+    }
+    sched_enqueue(worker_a);
+    sched_enqueue(worker_b);
+
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&sync_a.done, __ATOMIC_RELAXED) == 0 &&
+                   __atomic_load_n(&sync_b.done, __ATOMIC_RELAXED) == 0,
+               "irq syncfree two waiters blocked");
+
+    __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+    int reaped = test_reap_children_bounded(3, "irq_syncfree_two_waiters");
+    test_check(reaped == 3, "irq syncfree two waiters reaped");
+    test_check(sync_a.ret == 0 &&
+                   __atomic_load_n(&sync_a.done, __ATOMIC_RELAXED) == 1,
+               "irq syncfree two waiters first completed");
+    test_check(sync_b.ret == 0 &&
+                   __atomic_load_n(&sync_b.done, __ATOMIC_RELAXED) == 1,
+               "irq syncfree two waiters second completed");
+}
+
 static void test_irq_cookie_lifecycle(void) {
     const int irq = 962;
     irq_request_hits = 0;
@@ -1843,6 +1924,7 @@ static void run_driver_suite_once(void) {
     test_irq_domain_remove_waits_reclaim();
     test_irq_free_sync_waits_handler();
     test_irq_free_sync_waits_after_async_free();
+    test_irq_free_sync_waits_with_two_waiters();
     test_irq_cookie_lifecycle();
     test_irq_cookie_sync_waits_deferred_handler();
     test_irq_cookie_sync_waits_after_async_free();

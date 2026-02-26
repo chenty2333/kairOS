@@ -75,7 +75,7 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - IRQ action lifecycle now supports explicit unregister (`platform_irq_unregister_ex` / `platform_irq_unregister`) with safe detach from dispatch/deferred paths
   - driver-facing managed lifecycle is available via `arch_request_irq*` / `arch_free_irq*` (`platform_irq_request*` / `platform_irq_free*`): request path registers + optional auto-enable, free path unregisters + matched auto-disable by action ownership
   - IRQ free/unregister is now idempotent and reclaim-safe under concurrency (action detaches immediately, object reclaim completes once in-flight refs drain)
-  - sync teardown variants are available (`arch_free_irq*_sync` / `platform_irq_free*_sync`) to wait for in-flight handler completion before returning, including actions already detached into retired lists by an earlier async free/unregister
+  - sync teardown variants are available (`arch_free_irq*_sync` / `platform_irq_free*_sync`) to wait for in-flight handler completion before returning, including actions already detached into retired lists by an earlier async free/unregister; concurrent sync waiters on the same action are coalesced safely
   - cookie-based lifecycle is available (`arch_request_irq*_cookie`, `arch_free_irq_cookie*`; platform equivalents) so drivers can release by opaque handle instead of `(irq, handler, arg)` tuple matching
   - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
   - `irq_domain` manager now uses dynamic domain objects (linked list + parent/child links), removing the previous fixed-slot limit

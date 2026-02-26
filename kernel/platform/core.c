@@ -84,6 +84,7 @@ struct irq_action {
     bool deferred_queued;
     bool deferred_has_ev;
     bool sync_waiting;
+    uint32_t sync_waiters;
 };
 
 struct irq_desc {
@@ -217,8 +218,8 @@ static void irq_action_put_locked(struct irq_action *action)
     if (!action || action->refs == 0)
         return;
     action->refs--;
-    if (action->removed && action->sync_waiting)
-        complete_one(&action->sync_wait);
+    if (action->removed && action->sync_waiting && action->refs == 0)
+        complete_all(&action->sync_wait);
 }
 
 static bool irq_action_try_reclaim_locked(struct irq_desc *desc,
@@ -226,7 +227,8 @@ static bool irq_action_try_reclaim_locked(struct irq_desc *desc,
 {
     if (!desc || !action || action->reclaimed)
         return false;
-    if (!action->removed || action->refs != 0 || action->deferred_queued)
+    if (!action->removed || action->refs != 0 || action->deferred_queued ||
+        action->sync_waiters != 0)
         return false;
 
     if (!list_empty(&action->node)) {
@@ -1561,11 +1563,12 @@ static int irq_action_prepare_sync_wait_locked(struct irq_action *action)
 {
     if (!action)
         return -EINVAL;
-    if (action->refs == UINT32_MAX)
+    if (action->sync_waiters == UINT32_MAX)
         return -ERANGE;
-    reinit_completion(&action->sync_wait);
+    if (action->sync_waiters == 0)
+        reinit_completion(&action->sync_wait);
     action->sync_waiting = true;
-    action->refs++;
+    action->sync_waiters++;
     return 0;
 }
 
@@ -1580,9 +1583,6 @@ static int irq_action_detach_locked(struct irq_desc *desc,
 
     *need_wait_out = false;
     *reclaim_now_out = false;
-
-    if (sync_wait && action->refs == UINT32_MAX)
-        return -ERANGE;
 
     list_del(&action->node);
     INIT_LIST_HEAD(&action->node);
@@ -1630,11 +1630,14 @@ static int irq_action_wait_sync(struct irq_desc *desc, struct irq_action *action
         bool reclaim_now = false;
         bool irq_state;
         spin_lock_irqsave(&desc->lock, &irq_state);
-        bool ready = action->refs == 1;
+        bool ready = action->refs == 0;
         if (ready) {
-            action->refs--;
-            action->sync_waiting = false;
-            reclaim_now = irq_action_try_reclaim_locked(desc, action);
+            if (action->sync_waiters > 0)
+                action->sync_waiters--;
+            if (action->sync_waiters == 0) {
+                action->sync_waiting = false;
+                reclaim_now = irq_action_try_reclaim_locked(desc, action);
+            }
         }
         spin_unlock_irqrestore(&desc->lock, irq_state);
 
@@ -1682,6 +1685,7 @@ static int platform_irq_register_action(int irq, irq_handler_fn handler,
     action->deferred_queued = false;
     action->deferred_has_ev = false;
     action->sync_waiting = false;
+    action->sync_waiters = 0;
 
     bool irq_state;
     spin_lock_irqsave(&desc->lock, &irq_state);
