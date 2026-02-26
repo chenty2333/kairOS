@@ -572,10 +572,33 @@ static void iommu_release_detached_domain(struct iommu_domain *domain, bool owne
         iommu_domain_destroy(domain);
 }
 
+static int iommu_domain_validate_attach(struct iommu_domain *domain) {
+    if (!domain)
+        return -EINVAL;
+    if (domain->type != IOMMU_DOMAIN_DMA)
+        return 0;
+    if (!iommu_domain_has_cap(domain, IOMMU_CAP_MAP_UNMAP))
+        return -EOPNOTSUPP;
+
+    bool irq_flags;
+    bool has_map = false;
+    bool has_unmap = false;
+    spin_lock_irqsave(&domain->lock, &irq_flags);
+    has_map = domain->ops && domain->ops->map;
+    has_unmap = domain->ops && domain->ops->unmap;
+    spin_unlock_irqrestore(&domain->lock, irq_flags);
+    if (!has_map || !has_unmap)
+        return -EOPNOTSUPP;
+    return 0;
+}
+
 static int iommu_attach_device_internal(struct iommu_domain *domain,
                                         struct device *dev, bool owned) {
     if (!domain || !dev)
         return -EINVAL;
+    int ret = iommu_domain_validate_attach(domain);
+    if (ret < 0)
+        return ret;
 
     struct iommu_domain *prev_domain = NULL;
     bool prev_owned = false;
@@ -636,7 +659,10 @@ int iommu_attach_default_domain(struct device *dev) {
         domain = iommu_get_passthrough_domain();
         owned = false;
     }
-    return iommu_attach_device_internal(domain, dev, owned);
+    int ret = iommu_attach_device_internal(domain, dev, owned);
+    if (ret < 0 && owned)
+        iommu_domain_destroy(domain);
+    return ret;
 }
 
 void iommu_detach_device(struct device *dev) {

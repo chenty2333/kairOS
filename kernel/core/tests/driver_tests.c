@@ -568,6 +568,36 @@ static void test_iommu_domain_dma_ops(void) {
     iommu_domain_destroy(domain);
 }
 
+static void test_iommu_dma_domain_attach_contract(void) {
+    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    test_check(domain != NULL, "iommu contract domain create");
+    if (!domain)
+        return;
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    int ret = iommu_attach_device(domain, &dev);
+    test_check(ret == -EOPNOTSUPP, "iommu contract reject missing map ops");
+    test_check(iommu_get_domain(&dev) == NULL,
+               "iommu contract keep device detached on reject");
+    iommu_domain_destroy(domain);
+
+    domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    test_check(domain != NULL, "iommu contract cap domain create");
+    if (!domain)
+        return;
+    iommu_domain_set_ops(domain, &test_iommu_stub_ops, NULL);
+    iommu_domain_set_caps(domain,
+                          iommu_domain_get_caps(domain) & ~IOMMU_CAP_MAP_UNMAP);
+
+    memset(&dev, 0, sizeof(dev));
+    ret = iommu_attach_device(domain, &dev);
+    test_check(ret == -EOPNOTSUPP, "iommu contract reject missing map cap");
+    test_check(iommu_get_domain(&dev) == NULL,
+               "iommu contract keep detached without map cap");
+    iommu_domain_destroy(domain);
+}
+
 static volatile uint32_t iommu_granule_map_calls;
 static volatile uint32_t iommu_granule_unmap_calls;
 static volatile dma_addr_t iommu_granule_last_iova;
@@ -3494,6 +3524,7 @@ static void run_driver_suite_once(void) {
     test_dma_coherent_alloc_free();
     test_dma_constraints_direct_backend();
     test_iommu_domain_dma_ops();
+    test_iommu_dma_domain_attach_contract();
     test_iommu_domain_granule();
     test_dma_constraints_iommu_backend();
     test_iommu_default_domain_attach();
