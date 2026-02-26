@@ -1158,7 +1158,14 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
     int sent = 0;
     for (uint32_t i = 0; i < uvlen; i++) {
-        uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
+        uint64_t off = 0;
+        uint64_t ent_ptr = 0;
+        if (__builtin_mul_overflow((uint64_t)i, sizeof(struct socket_mmsghdr),
+                                   &off) ||
+            __builtin_add_overflow(msgvec_ptr, off, &ent_ptr)) {
+            file_put(sock_file);
+            return sent ? sent : -EFAULT;
+        }
         struct socket_msghdr msg_hdr;
         if (copy_from_user(&msg_hdr, (const void *)ent_ptr,
                            sizeof(msg_hdr)) < 0) {
@@ -1216,7 +1223,14 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
     int recved = 0;
     for (uint32_t i = 0; i < uvlen; i++) {
-        uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
+        uint64_t off = 0;
+        uint64_t ent_ptr = 0;
+        if (__builtin_mul_overflow((uint64_t)i, sizeof(struct socket_mmsghdr),
+                                   &off) ||
+            __builtin_add_overflow(msgvec_ptr, off, &ent_ptr)) {
+            file_put(sock_file);
+            return recved ? recved : -EFAULT;
+        }
         struct socket_mmsghdr msg = {0};
         if (copy_from_user(&msg.msg_hdr, (const void *)ent_ptr,
                            sizeof(msg.msg_hdr)) < 0) {
