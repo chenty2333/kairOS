@@ -107,14 +107,16 @@ static int portfd_poll(struct file *file, uint32_t events) {
     struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
     if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
         return POLLNVAL;
-    if ((ctx->rights & KRIGHT_WAIT) == 0)
-        return POLLNVAL;
+
+    uint32_t allowed_events = POLLHUP | POLLERR;
+    if (ctx->rights & KRIGHT_WAIT)
+        allowed_events |= POLLIN;
 
     uint32_t revents = 0;
     int rc = kobj_poll(ctx->port_obj, events, &revents);
     if (rc < 0)
         return POLLERR;
-    return (int)revents;
+    return (int)(revents & allowed_events);
 }
 
 static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {

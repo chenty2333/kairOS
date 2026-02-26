@@ -2262,13 +2262,13 @@ static void test_kairos_channel_port_syscalls(void) {
             if (ret < 0)
                 goto out;
             ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
-            test_check(ret64 == 1, "kh poll port manage_only");
-            if (ret64 == 1) {
+            test_check(ret64 == 0, "kh poll port manage_only suppress pollin");
+            if (ret64 == 0) {
                 ret = copy_from_user(&pmfd, u_pollfd, sizeof(pmfd));
                 test_check(ret == 0, "kh read pollfd port manage_only");
                 if (ret == 0)
-                    test_check((pmfd.revents & POLLNVAL) != 0,
-                               "kh pollnval port manage_only");
+                    test_check(pmfd.revents == 0,
+                               "kh poll revents clear port manage_only");
             }
 
             ret64 = sys_kairos_handle_from_fd((uint64_t)port_manage_fd,
