@@ -56,6 +56,7 @@ struct user_map_ctx {
 
 struct futex_waker_ctx {
     vaddr_t uaddr;
+    int wake_nr;
     volatile int started;
     int wake_ret;
 };
@@ -196,7 +197,9 @@ static int futex_waitv_waker_worker(void *arg) {
     if (wake_deadline == 0)
         wake_deadline = 1;
     while (arch_timer_get_ticks() < wake_deadline) {
-        int64_t ret = sys_futex((uint64_t)ctx->uaddr, FUTEX_WAKE, 1, 0, 0, 0);
+        int nr = ctx->wake_nr > 0 ? ctx->wake_nr : 1;
+        int64_t ret =
+            sys_futex((uint64_t)ctx->uaddr, FUTEX_WAKE, (uint64_t)nr, 0, 0, 0);
         if (ret > 0) {
             ctx->wake_ret = (int)ret;
             proc_exit(0);
@@ -1823,6 +1826,7 @@ static void test_futex_waitv_syscalls_regression(void) {
 
     struct futex_waker_ctx wctx = {
         .uaddr = (vaddr_t)u_word,
+        .wake_nr = 1,
         .started = 0,
         .wake_ret = 0,
     };
@@ -1851,6 +1855,57 @@ static void test_futex_waitv_syscalls_regression(void) {
     pid_t wp = proc_wait(wpid, &status, 0);
     test_check(wp == wpid, "futex_waitv waker_reaped");
     test_check(wctx.wake_ret > 0, "futex_waitv wake_positive");
+
+    struct futex_waitv waiter_pair[2] = {
+        {
+            .val = 0,
+            .uaddr = (uint64_t)(uintptr_t)u_word,
+            .flags = FUTEX_32,
+            .__reserved = 0,
+        },
+        {
+            .val = 0,
+            .uaddr = (uint64_t)(uintptr_t)u_word,
+            .flags = FUTEX_32,
+            .__reserved = 0,
+        },
+    };
+    rc = copy_to_user(u_waiter, waiter_pair, sizeof(waiter_pair));
+    test_check(rc == 0, "futex_waitv copy_duplicate_waiters");
+    if (rc == 0) {
+        struct futex_waker_ctx dup_wctx = {
+            .uaddr = (vaddr_t)u_word,
+            .wake_nr = 2,
+            .started = 0,
+            .wake_ret = 0,
+        };
+        struct process *dup_waker =
+            kthread_create_joinable(futex_waitv_waker_worker, &dup_wctx, "fwdup");
+        test_check(dup_waker != NULL, "futex_waitv create_dup_waker");
+        if (dup_waker) {
+            pid_t dup_pid = dup_waker->pid;
+            sched_enqueue(dup_waker);
+            for (int i = 0; i < 2000 && !dup_wctx.started; i++)
+                proc_yield();
+            test_check(dup_wctx.started != 0, "futex_waitv dup_waker_started");
+
+            wake_deadline_ns = time_now_ns() + 1000ULL * 1000ULL * 1000ULL;
+            wake_abs = ns_to_timespec(wake_deadline_ns);
+            rc = copy_to_user(u_timeout, &wake_abs, sizeof(wake_abs));
+            test_check(rc == 0, "futex_waitv copy_dup_wake_timeout");
+            if (rc == 0) {
+                ret64 = sys_futex_waitv((uint64_t)u_waiter, 2, 0,
+                                        (uint64_t)u_timeout, CLOCK_MONOTONIC, 0);
+                test_check(ret64 == 0, "futex_waitv duplicate_wake_index_zero");
+            }
+
+            status = 0;
+            wp = proc_wait(dup_pid, &status, 0);
+            test_check(wp == dup_pid, "futex_waitv dup_waker_reaped");
+            test_check(dup_wctx.wake_ret == 1,
+                       "futex_waitv duplicate_wake_count_one");
+        }
+    }
 
 out:
     if (mapped)
