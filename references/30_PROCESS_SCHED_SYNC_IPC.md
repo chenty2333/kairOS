@@ -37,6 +37,8 @@ Other:
 - proc_idle_init(): create idle process
 - userspace `/init` supervises the login shell in a restart loop, logs exit cause (exit code / signal), and uses bounded exponential backoff on repeated failures
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
+- default signal handling now treats `SIGSTOP` as suspend-until-`SIGCONT` (or `SIGKILL`) and consumes `SIGCONT` as a resume event
+- procfs per-pid control endpoint: `/proc/<pid>/control` (mode `0200`) accepts `stop|cont|resume|kill|term|sig N|signal N` and maps to `signal_send`
 - Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` and `dirfd` as 32-bit `int`; `setuid`/`setgid` and `setre*id`/`setres*id` decode uid/gid arguments as 32-bit values (`-1` sentinel is `0xffffffff`)
 - Linux ABI process compatibility also normalizes `pid`/`signal`/`priority` scalar args to 32-bit ABI width for `tgkill`/`tkill`, `getpriority`/`setpriority`, `prlimit64`, `sched_{get,set}affinity`, `setpgid`, `getpgid`, and `getsid`
 - Linux ABI pidfd baseline: `pidfd_open`, `pidfd_send_signal`, and `pidfd_getfd` are wired; pidfd is pollable (`POLLIN|POLLHUP` after target exit), `pidfd_open` enforces Linux-style `O_CLOEXEC` on returned fd, `pidfd_send_signal` supports `flags=0` plus optional `siginfo_t *info` user-pointer validation, `waitid(P_PIDFD, ...)` resolves pidfd targets through the fd table (including `WNOWAIT` no-reap path for exited children), and `pidfd_getfd` duplicates target fds with `FD_CLOEXEC`
@@ -125,7 +127,10 @@ pollwait.c:
 - `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
 - wait-core epoll/fd-event paths now expose dedicated observability: `TRACE_WAIT_EPOLL` / `TRACE_WAIT_FD_EVENT`, plus unified wait-core counters (`poll_wait_stat_*`) for epoll wait cycles and fd-event block/wake hot paths
+- wait-core counters also include `poll_wait_wake` head-level metrics (`poll_head_wake_calls`, `poll_head_direct_switch`) for single-waiter fastpath regression/telemetry
 - `/sys/kernel/tracepoint/wait_core_events` exports wait-core traces (including epoll/fd-event), and `/sys/kernel/tracepoint/wait_core_stats` exports wait-core counters; `reset` clears both trace rings and wait-core counters
+- `/sys/kernel/tracepoint/wait_events` keeps a legacy-compatible wait-only view (`TRACE_WAIT_BLOCK`/`TRACE_WAIT_WAKE`) for simpler tooling input
+- `scripts/impl/tracepoint-wait-report.py` summarizes exported wait events (`total/by-event/by-cpu`, wake-one vs wake-all, timeout-vs-nontimeout waits)
 - tracepoint ring snapshot uses release/acquire `seq` stabilization (double-sample verify) to avoid torn entries under concurrent writers
 
 lockdep.c (when CONFIG_LOCKDEP enabled):
@@ -149,6 +154,9 @@ Current IPC mechanisms:
 - Inotify: `inotify_init1/add_watch/rm_watch` is wired with vnode-based watches and pollable event queue delivery
 - Capability handles: per-process `handletable` (refcounted; cloned with `CLONE_FILES` sharing or copied otherwise), rights-mask model (`READ/WRITE/TRANSFER/DUPLICATE/WAIT/MANAGE`), and generic `kobj` refcounted object lifetime
 - Handle access checks now expose a unified op-based entry (`khandle_get_for_access` / `khandle_take_for_access`) so new fast paths reuse one rights-check surface instead of per-callsite bespoke masks
+- Handletable entries now carry internal capability lineage id (`cap_id`), and the kernel tracks a parent/child delegation tree so derived capabilities can be revoked recursively
+- Handle close supports optional descendant revoke (`KHANDLE_CLOSE_F_REVOKE_DESCENDANTS`) before closing the target handle itself
+- Hot IPC handle lookup path now has a per-CPU access cache keyed by `(current process handletable, handle, access-op)` and validated by handletable sequence/epoch; rights checks still route through the same access-rights predicate used by slow path
 - Capability file bridge: Linux fd/file objects can be wrapped as `KOBJ_TYPE_FILE` handles and converted back to fd without changing Linux ABI syscalls; `fd_alloc_rights()` preserves rights attenuation when materializing fd from a handle
 - Internal bridge helpers (`handle_bridge`) centralize fd-rights <-> handle-rights mapping plus fd<->`KOBJ_TYPE_FILE` conversion, so non-syscall kernel paths can reuse one capability conversion entrypoint
 - fd core provides `fd_get_required_with_rights()` to pin `file*` and snapshot fd-rights in one lock pass; bridge paths now reuse this single pin/query entrypoint
@@ -168,6 +176,12 @@ Current IPC mechanisms:
 - Reverse bridge for channel/port fd: `kairos_handle_from_fd` recognizes bridge fds and recreates typed handles (`KOBJ_TYPE_CHANNEL` / `KOBJ_TYPE_PORT`) with rights derived from fd rights attenuation (`FD_RIGHT_READ`/`FD_RIGHT_IOCTL`/`FD_RIGHT_DUP` map to `KRIGHT_WAIT`/`KRIGHT_MANAGE`/`KRIGHT_DUPLICATE` on port handles; no implicit `KRIGHT_TRANSFER` escalation on port roundtrip)
 - `kairos_fd_from_handle` accepts `O_NONBLOCK` for channel/port bridges (read path returns `-EAGAIN` when empty); `KOBJ_TYPE_FILE` bridge keeps existing semantics and rejects `O_NONBLOCK` at conversion time
 - Channel `send/recv` options add `KCHANNEL_OPT_RENDEZVOUS`: when sender/receiver both opt in and a blocking receiver is armed, payload/control can bypass queue enqueue for a synchronous handoff fastpath
+- Channel payload path adds small-message inline optimizations: queued messages now embed up to `KCHANNEL_INLINE_MSG_BYTES` bytes in `kchannel_msg` (no separate payload heap allocation), and syscall send/recv staging uses stack inline buffers for small payloads
+- Rendezvous send path now attempts a direct armed-receiver handoff before queue-message allocation, reducing allocation overhead on synchronous transfer cases
+- `kobj` now also records bounded transfer-history events (`TAKE/ENQUEUE/DELIVER/INSTALL/RESTORE/DROP`) with snapshot API (`kobj_transfer_history_snapshot`) for capability movement auditing
+- transfer install/drop helpers (`khandle_install_transferred`, `khandle_transfer_drop_with_rights`) keep transfer lifecycle bookkeeping in one internal entrypoint without changing Linux fd syscall ABI
+- transfer metadata now carries `cap_id`; transfer install/restore prefers rebinding the same capability node, and transfer drop paths prune detached lineage nodes
+- sysfs exports IPC observability at `/sys/ipc/{objects,channels,ports,transfers}` (read-only aggregated views over live channel/port objects and transfer-history traces)
 - Kairos extension syscalls (custom Linux ABI numbers): `kairos_handle_close`(4600), `kairos_handle_duplicate`(4601), `kairos_channel_create/send/recv`(4602-4604), `kairos_port_create/bind/wait`(4605-4607), `kairos_cap_rights_get`(4608), `kairos_cap_rights_limit`(4609), `kairos_handle_from_fd`(4610), `kairos_fd_from_handle`(4611)
 
 Related references:

@@ -20,6 +20,10 @@
 
 #if CONFIG_KERNEL_TESTS
 
+#ifndef CONFIG_SYSCALL_TRAP_IPC_CAP_ONLY
+#define CONFIG_SYSCALL_TRAP_IPC_CAP_ONLY 0
+#endif
+
 static int tests_failed;
 
 static void test_check(bool cond, const char *name) {
@@ -3359,6 +3363,7 @@ static void test_kobj_ops_refcount_history(void) {
     struct kobj *tx_obj = NULL;
     struct kobj *rx_obj = NULL;
     struct kobj *port_obj = NULL;
+    int32_t moved_handle = -1;
 
     int rc = kchannel_create_pair(&tx_obj, &rx_obj);
     test_check(rc == 0, "kobj_ops create pair");
@@ -3425,7 +3430,61 @@ static void test_kobj_ops_refcount_history(void) {
     test_check(saw_get, "kobj_refhist get");
     test_check(saw_put, "kobj_refhist put");
 
+    struct process *p = proc_current();
+    int32_t src_handle = -1;
+    bool src_handle_live = false;
+    struct kobj *moved_obj = NULL;
+    uint32_t moved_rights = 0;
+    if (p) {
+        src_handle = khandle_alloc(p, rx_obj, KRIGHT_CHANNEL_DEFAULT);
+        src_handle_live = (src_handle >= 0);
+        test_check(src_handle >= 0, "kobj_xferhist alloc source handle");
+        if (src_handle >= 0) {
+            rc = khandle_take_for_access(p, src_handle, KOBJ_ACCESS_TRANSFER,
+                                         &moved_obj, &moved_rights);
+            test_check(rc == 0 && moved_obj != NULL,
+                       "kobj_xferhist take transfer");
+            if (rc == 0 && moved_obj) {
+                src_handle_live = false;
+                rc = khandle_install_transferred(p, moved_obj, moved_rights,
+                                                 &moved_handle);
+                test_check(rc == 0 && moved_handle >= 0,
+                           "kobj_xferhist install transfer");
+                if (rc == 0 && moved_handle >= 0) {
+                    khandle_transfer_drop_with_rights(moved_obj, moved_rights);
+                    moved_obj = NULL;
+                } else {
+                    if (khandle_restore(p, src_handle, moved_obj, moved_rights) ==
+                        0)
+                        src_handle_live = true;
+                    moved_obj = NULL;
+                }
+            }
+        }
+    }
+
+    struct kobj_transfer_history_entry xhist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+    size_t xhist_count = kobj_transfer_history_snapshot(
+        rx_obj, xhist, KOBJ_TRANSFER_HISTORY_DEPTH);
+    test_check(xhist_count > 0, "kobj_xferhist snapshot");
+    bool saw_take = false;
+    bool saw_install = false;
+    for (size_t i = 0; i < xhist_count; i++) {
+        if (xhist[i].event == KOBJ_TRANSFER_TAKE)
+            saw_take = true;
+        else if (xhist[i].event == KOBJ_TRANSFER_INSTALL)
+            saw_install = true;
+    }
+    test_check(saw_take, "kobj_xferhist take");
+    test_check(saw_install, "kobj_xferhist install");
+
 out:
+    if (src_handle_live && src_handle >= 0)
+        (void)khandle_close(proc_current(), src_handle);
+    if (moved_handle >= 0)
+        (void)khandle_close(proc_current(), moved_handle);
+    if (moved_obj)
+        khandle_transfer_drop_with_rights(moved_obj, moved_rights);
     if (port_obj)
         kobj_put(port_obj);
     if (rx_obj)
@@ -3434,10 +3493,7 @@ out:
         kobj_put(tx_obj);
 }
 
-int run_syscall_trap_tests(void) {
-    tests_failed = 0;
-    pr_info("Running syscall/trap tests...\n");
-
+static void run_syscall_trap_tests_full(void) {
     test_syscall_table_slot_coverage();
     test_syscall_invalid_num_legacy();
     test_syscall_unimplemented_slot_legacy();
@@ -3465,6 +3521,26 @@ int run_syscall_trap_tests(void) {
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
     test_syscall_user_e2e();
+}
+
+static void run_syscall_trap_tests_ipc_cap_only(void) {
+    test_kairos_cap_rights_fd_syscalls();
+    test_kairos_channel_port_syscalls();
+    test_kairos_channel_port_stress_mpmc();
+    test_kairos_file_handle_bridge();
+    test_kobj_ops_refcount_history();
+}
+
+int run_syscall_trap_tests(void) {
+    tests_failed = 0;
+    pr_info("Running syscall/trap tests...\n");
+
+    if (CONFIG_SYSCALL_TRAP_IPC_CAP_ONLY) {
+        pr_info("syscall_trap_tests: ipc/cap focused subset enabled\n");
+        run_syscall_trap_tests_ipc_cap_only();
+    } else {
+        run_syscall_trap_tests_full();
+    }
 
     if (tests_failed == 0)
         pr_info("syscall/trap tests: all passed\n");

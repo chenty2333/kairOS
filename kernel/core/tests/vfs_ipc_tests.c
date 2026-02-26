@@ -7,6 +7,7 @@
 #include <kairos/inotify.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/pipe.h>
 #include <kairos/poll.h>
@@ -3682,6 +3683,50 @@ out:
         cleanup_tmpfs_mount();
 }
 
+static void test_sysfs_ipc_visibility(void) {
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    struct file *f = NULL;
+    char buf[512] = {0};
+
+    int rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0, "sysfs_ipc create channel pair");
+    if (rc < 0)
+        return;
+
+    rc = vfs_open("/sys/ipc/objects", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc open objects");
+    if (rc == 0) {
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "sysfs_ipc read objects");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "id type refcount") != NULL,
+                       "sysfs_ipc objects header");
+            test_check(strstr(buf, "channel") != NULL,
+                       "sysfs_ipc objects include channel");
+        }
+    }
+    close_file_if_open(&f);
+
+    memset(buf, 0, sizeof(buf));
+    rc = vfs_open("/sys/ipc/channels", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc open channels");
+    if (rc == 0) {
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "sysfs_ipc read channels");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "id refcount handle_refs") != NULL,
+                       "sysfs_ipc channels header");
+        }
+    }
+    close_file_if_open(&f);
+
+    kobj_put(ch1);
+    kobj_put(ch0);
+}
+
 int run_vfs_ipc_tests(void) {
     tests_failed = 0;
     pr_info("\n=== VFS/IPC Tests ===\n");
@@ -3718,6 +3763,7 @@ int run_vfs_ipc_tests(void) {
     test_inotify_syscall_semantics();
     test_inotify_syscall_functional();
     test_inotify_mask_update_functional();
+    test_sysfs_ipc_visibility();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");

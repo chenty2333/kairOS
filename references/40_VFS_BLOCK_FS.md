@@ -103,6 +103,7 @@ Pseudo filesystems:
   - exposes `/proc/mounts` and `/proc/<pid>/mounts`
   - `/proc/self` symlink target is generated per lookup from current task pid
 - sysfs (fs/sysfs/): device model filesystem
+  - exposes `/sys/ipc` aggregated IPC observability files (`objects`, `channels`, `ports`, `transfers`) populated from live channel/port registries
 - tmpfs (fs/tmpfs/): in-memory filesystem
 
 Special:
@@ -120,6 +121,7 @@ Special:
 - eventfd/timerfd/inotify/signalfd/pidfd wakeups now route through `poll_wait_source_wake_*` (built on `poll_ready_wake_all`) to keep wait_queue + poll watcher wake paths consistent
 - eventfd/timerfd/inotify/signalfd blocking waits now go through `poll_wait_source_block` (wait-core wrapper) instead of direct `proc_sleep_on*`
 - wait-core now tracks epoll/fd-event hot-path counters (`poll_wait_stat_*`) and emits dedicated tracepoint events (`TRACE_WAIT_EPOLL` / `TRACE_WAIT_FD_EVENT`) for block/wake/rescan observability
+- wait-core counter snapshot also exposes `poll_wait_head` wake telemetry (`poll_head_wake_calls` / `poll_head_direct_switch`) used by fastpath regression checks
 - `/sys/kernel/tracepoint` adds `wait_core_events` (extended wait-core trace stream) and `wait_core_stats` (counter snapshot); `reset` clears both trace ring and wait-core counters
 - pipe read/write blocking and close-end waiter wakeups now also use `poll_wait_source`; pipe poll readiness fanout still uses `poll_wait_head`
 - AF_UNIX/AF_INET stream/listen/datagram wait queues now also use `poll_wait_source`; socket readiness notifications still route through socket poll heads
