@@ -15,20 +15,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#ifdef SYS_mount
-#undef SYS_mount
-#endif
-#ifdef SYS_umount2
-#undef SYS_umount2
-#endif
-#ifdef SYS_pivot_root
-#undef SYS_pivot_root
-#endif
-
-#define SYS_mount 40
-#define SYS_umount2 39
-#define SYS_pivot_root 41
-
 static void log_msg(const char *fmt, ...) {
     char buf[256];
     va_list ap;

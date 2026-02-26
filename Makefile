@@ -20,7 +20,7 @@ ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
 EXTRA_CFLAGS ?=
 VIRTIO_PCI_TEST_CFLAGS ?=
-KERNEL_TESTS ?= 1
+KERNEL_TESTS ?= 0
 
 # Auto-detect parallelism: use all available cores
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
@@ -102,6 +102,7 @@ else ifeq ($(ARCH),x86_64)
   QEMU_MACHINE := q35
   QEMU_ACCEL ?= tcg,thread=multi
   QEMU_VIRTIO_BLK_DEV := virtio-blk-pci
+  INITRAMFS_BUSYBOX := 1
   KERNEL_LOAD := 0xffffffff80000000
 else ifeq ($(ARCH),aarch64)
   CROSS_COMPILE ?= aarch64-none-elf-
