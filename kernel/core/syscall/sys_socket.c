@@ -19,6 +19,7 @@
 #define SOCKET_MSG_IOV_MAX 1024
 #define SOCKET_MSG_MAX_LEN 65536
 #define SOCKET_MSG_INLINE_LEN 256
+#define SOCKET_MSG_INLINE_IOV 8
 #define MSG_WAITFORONE 0x10000
 #define NS_PER_SEC 1000000000ULL
 #define SCM_RIGHTS 1
@@ -449,51 +450,63 @@ static int copy_sockaddr_from_user(struct sockaddr_storage *kaddr,
     return len;
 }
 
-static int socket_msg_sum_iov(uint64_t iov_ptr, size_t iovcnt, size_t *total_out) {
-    if (!iovcnt) {
-        *total_out = 0;
+static int socket_msg_load_iov(uint64_t iov_ptr, size_t iovcnt,
+                               struct socket_iovec inline_iov[SOCKET_MSG_INLINE_IOV],
+                               struct socket_iovec **iov_out,
+                               bool *heap_out, size_t *total_out) {
+    if (!iov_out || !heap_out || !total_out)
+        return -EINVAL;
+    *iov_out = NULL;
+    *heap_out = false;
+    *total_out = 0;
+    if (!iovcnt)
         return 0;
-    }
-    if (!iov_ptr) {
+    if (!iov_ptr)
         return -EFAULT;
+
+    struct socket_iovec *iov = inline_iov;
+    bool use_heap = iovcnt > SOCKET_MSG_INLINE_IOV;
+    if (use_heap) {
+        iov = kmalloc(iovcnt * sizeof(*iov));
+        if (!iov)
+            return -ENOMEM;
     }
 
     size_t total = 0;
     for (size_t i = 0; i < iovcnt; i++) {
-        struct socket_iovec iov;
-        if (copy_from_user(&iov,
-                           (const void *)(iov_ptr + i * sizeof(iov)),
-                           sizeof(iov)) < 0) {
+        if (copy_from_user(&iov[i],
+                           (const void *)(iov_ptr + i * sizeof(iov[i])),
+                           sizeof(iov[i])) < 0) {
+            if (use_heap)
+                kfree(iov);
             return -EFAULT;
         }
-        if (iov.iov_len > (size_t)-1 - total) {
+        if (iov[i].iov_len > (size_t)-1 - total) {
+            if (use_heap)
+                kfree(iov);
             return -EINVAL;
         }
-        total += iov.iov_len;
+        total += iov[i].iov_len;
     }
+
+    *iov_out = iov;
+    *heap_out = use_heap;
     *total_out = total;
     return 0;
 }
 
-static int socket_msg_copyin_iov(uint64_t iov_ptr, size_t iovcnt,
+static int socket_msg_copyin_iov(const struct socket_iovec *iov, size_t iovcnt,
                                  void *dst, size_t max_len, size_t *copied_out) {
     size_t done = 0;
     for (size_t i = 0; i < iovcnt && done < max_len; i++) {
-        struct socket_iovec iov;
-        if (copy_from_user(&iov,
-                           (const void *)(iov_ptr + i * sizeof(iov)),
-                           sizeof(iov)) < 0) {
-            return -EFAULT;
-        }
-        if (!iov.iov_len) {
+        if (!iov[i].iov_len) {
             continue;
         }
-        size_t chunk = iov.iov_len;
+        size_t chunk = iov[i].iov_len;
         if (chunk > (max_len - done)) {
             chunk = max_len - done;
         }
-        if (copy_from_user((uint8_t *)dst + done,
-                           iov.iov_base, chunk) < 0) {
+        if (copy_from_user((uint8_t *)dst + done, iov[i].iov_base, chunk) < 0) {
             return -EFAULT;
         }
         done += chunk;
@@ -502,25 +515,19 @@ static int socket_msg_copyin_iov(uint64_t iov_ptr, size_t iovcnt,
     return 0;
 }
 
-static int socket_msg_copyout_iov(uint64_t iov_ptr, size_t iovcnt,
+static int socket_msg_copyout_iov(const struct socket_iovec *iov, size_t iovcnt,
                                   const void *src, size_t src_len) {
     size_t done = 0;
     for (size_t i = 0; i < iovcnt && done < src_len; i++) {
-        struct socket_iovec iov;
-        if (copy_from_user(&iov,
-                           (const void *)(iov_ptr + i * sizeof(iov)),
-                           sizeof(iov)) < 0) {
-            return -EFAULT;
-        }
-        if (!iov.iov_len) {
+        if (!iov[i].iov_len) {
             continue;
         }
-        size_t chunk = iov.iov_len;
+        size_t chunk = iov[i].iov_len;
         if (chunk > (src_len - done)) {
             chunk = src_len - done;
         }
-        if (copy_to_user(iov.iov_base,
-                         (const uint8_t *)src + done, chunk) < 0) {
+        if (copy_to_user(iov[i].iov_base, (const uint8_t *)src + done, chunk) <
+            0) {
             return -EFAULT;
         }
         done += chunk;
@@ -561,8 +568,12 @@ static int64_t socket_sendmsg(struct socket *sock,
     }
 
     uint64_t iov_ptr = (uint64_t)(uintptr_t)msg->msg_iov;
+    struct socket_iovec iov_inline[SOCKET_MSG_INLINE_IOV];
+    struct socket_iovec *iov = NULL;
+    bool iov_heap = false;
     size_t total = 0;
-    rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
+    rc = socket_msg_load_iov(iov_ptr, msg->msg_iovlen, iov_inline, &iov,
+                             &iov_heap, &total);
     if (rc < 0) {
         socket_control_release(&control);
         return rc;
@@ -576,6 +587,8 @@ static int64_t socket_sendmsg(struct socket *sock,
                                                destp, dlen, &control)
                           : sock->ops->sendto(sock, NULL, 0, (int32_t)flags,
                                               destp, dlen);
+        if (iov_heap)
+            kfree(iov);
         socket_control_release(&control);
         if (ret >= 0 && sent_out) {
             *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
@@ -587,16 +600,20 @@ static int64_t socket_sendmsg(struct socket *sock,
     bool use_heap = total > sizeof(inline_buf);
     void *kbuf = use_heap ? kmalloc(total) : (void *)inline_buf;
     if (!kbuf) {
+        if (iov_heap)
+            kfree(iov);
         socket_control_release(&control);
         return -ENOMEM;
     }
     tracepoint_emit(use_heap ? TRACE_SOCKET_HEAP_BUF : TRACE_SOCKET_INLINE_BUF,
                     0, total, 0);
     size_t copied = 0;
-    rc = socket_msg_copyin_iov(iov_ptr, msg->msg_iovlen, kbuf, total, &copied);
+    rc = socket_msg_copyin_iov(iov, msg->msg_iovlen, kbuf, total, &copied);
     if (rc < 0) {
         if (use_heap)
             kfree(kbuf);
+        if (iov_heap)
+            kfree(iov);
         socket_control_release(&control);
         return rc;
     }
@@ -608,6 +625,8 @@ static int64_t socket_sendmsg(struct socket *sock,
                                           destp, dlen);
     if (use_heap)
         kfree(kbuf);
+    if (iov_heap)
+        kfree(iov);
     socket_control_release(&control);
     if (ret >= 0 && sent_out) {
         *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
@@ -627,8 +646,12 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
         return -EFAULT;
 
     uint64_t iov_ptr = (uint64_t)(uintptr_t)msg->msg_iov;
+    struct socket_iovec iov_inline[SOCKET_MSG_INLINE_IOV];
+    struct socket_iovec *iov = NULL;
+    bool iov_heap = false;
     size_t total = 0;
-    int rc = socket_msg_sum_iov(iov_ptr, msg->msg_iovlen, &total);
+    int rc = socket_msg_load_iov(iov_ptr, msg->msg_iovlen, iov_inline, &iov,
+                                 &iov_heap, &total);
     if (rc < 0) {
         return rc;
     }
@@ -641,8 +664,11 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
     void *kbuf = NULL;
     if (total > 0) {
         kbuf = use_heap ? kmalloc(total) : (void *)inline_buf;
-        if (!kbuf)
+        if (!kbuf) {
+            if (iov_heap)
+                kfree(iov);
             return -ENOMEM;
+        }
         tracepoint_emit(use_heap ? TRACE_SOCKET_HEAP_BUF
                                  : TRACE_SOCKET_INLINE_BUF,
                         0, total, 1);
@@ -666,16 +692,20 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
                                                 : NULL,
                                             msg->msg_name ? &alen : NULL);
     if (ret > 0) {
-        rc = socket_msg_copyout_iov(iov_ptr, msg->msg_iovlen, kbuf, (size_t)ret);
+        rc = socket_msg_copyout_iov(iov, msg->msg_iovlen, kbuf, (size_t)ret);
         if (rc < 0) {
             if (use_heap)
                 kfree(kbuf);
+            if (iov_heap)
+                kfree(iov);
             socket_control_release(&control);
             return rc;
         }
     }
     if (use_heap)
         kfree(kbuf);
+    if (iov_heap)
+        kfree(iov);
 
     if (ret >= 0 && msg->msg_name) {
         size_t user_len = (size_t)msg->msg_namelen;
