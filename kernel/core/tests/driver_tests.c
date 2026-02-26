@@ -421,6 +421,50 @@ static void test_iommu_default_domain_attach(void) {
     iommu_detach_device(&dev);
 }
 
+static struct iommu_domain *test_iommu_hw_alloc_default(struct device *dev __unused,
+                                                        bool *owned, void *priv __unused) {
+    if (owned)
+        *owned = true;
+    return iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+}
+
+static const struct iommu_hw_ops test_iommu_hw_ops = {
+    .alloc_default_domain = test_iommu_hw_alloc_default,
+};
+
+static void test_iommu_hw_ops_default_attach(void) {
+    iommu_unregister_hw_ops(&test_iommu_hw_ops);
+    int ret = iommu_register_hw_ops(&test_iommu_hw_ops, NULL);
+    test_check(ret == 0, "iommu hw ops register");
+    if (ret < 0)
+        return;
+
+    ret = iommu_register_hw_ops(&test_iommu_hw_ops, NULL);
+    test_check(ret == -EBUSY, "iommu hw ops register busy");
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    ret = iommu_attach_default_domain(&dev);
+    test_check(ret == 0, "iommu hw ops default attach");
+    if (ret == 0) {
+        struct iommu_domain *domain = iommu_get_domain(&dev);
+        test_check(domain != NULL && domain->type == IOMMU_DOMAIN_DMA,
+                   "iommu hw ops dma domain");
+        test_check(dev.iommu_domain_owned, "iommu hw ops domain ownership");
+
+        uint8_t buf[128];
+        dma_addr_t dma = dma_map_single(&dev, buf, sizeof(buf), DMA_TO_DEVICE);
+        dma_addr_t phys = (dma_addr_t)virt_to_phys(buf);
+        test_check(dma != 0 && dma != phys, "iommu hw ops translated dma");
+        dma_unmap_single(&dev, dma, sizeof(buf), DMA_TO_DEVICE);
+        iommu_detach_device(&dev);
+        test_check(iommu_get_domain(&dev) == NULL,
+                   "iommu hw ops detach clears domain");
+    }
+
+    iommu_unregister_hw_ops(&test_iommu_hw_ops);
+}
+
 static volatile uint32_t irq_deferred_hits;
 
 static void test_irq_deferred_handler(void *arg,
@@ -1979,6 +2023,7 @@ static void run_driver_suite_once(void) {
     test_dma_coherent_alloc_free();
     test_iommu_domain_dma_ops();
     test_iommu_default_domain_attach();
+    test_iommu_hw_ops_default_attach();
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
     test_irq_unregister_actions();
