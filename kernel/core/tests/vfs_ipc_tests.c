@@ -11,6 +11,7 @@
 #include <kairos/mm.h>
 #include <kairos/pipe.h>
 #include <kairos/poll.h>
+#include <kairos/pollwait.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -19,6 +20,7 @@
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/time.h>
+#include <kairos/tracepoint.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
@@ -2150,6 +2152,207 @@ static void test_eventfd_syscall_semantics(void) {
     close_fd_if_open(&efd_sem);
     close_fd_if_open(&efd_cloexec);
     close_fd_if_open(&efd_width);
+}
+
+static void test_wait_core_epoll_fd_event_stats(void) {
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    struct file *epf = NULL;
+    int rfd = -1;
+    int wfd = -1;
+    int epfd = -1;
+    int efd = -1;
+    int ret = 0;
+    bool have_tracepoint_sysfs = false;
+    struct stat st;
+    uint64_t before[POLL_WAIT_STAT_COUNT] = {0};
+    uint64_t after[POLL_WAIT_STAT_COUNT] = {0};
+
+    if (vfs_stat("/sys/kernel/tracepoint", &st) == 0 && S_ISDIR(st.st_mode))
+        have_tracepoint_sysfs = true;
+
+    poll_wait_stats_reset();
+    tracepoint_reset_all();
+    poll_wait_stats_snapshot(before);
+
+    do {
+        ret = pipe_create(&rf, &wf);
+        test_check(ret == 0, "wait_core stats pipe create");
+        if (ret < 0)
+            break;
+
+        rfd = fd_alloc(proc_current(), rf);
+        test_check(rfd >= 0, "wait_core stats alloc rfd");
+        if (rfd < 0)
+            break;
+        wfd = fd_alloc(proc_current(), wf);
+        test_check(wfd >= 0, "wait_core stats alloc wfd");
+        if (wfd < 0)
+            break;
+        rf = NULL;
+        wf = NULL;
+
+        ret = epoll_create_file(&epf);
+        test_check(ret == 0, "wait_core stats epoll create");
+        if (ret < 0)
+            break;
+        epfd = fd_alloc(proc_current(), epf);
+        test_check(epfd >= 0, "wait_core stats alloc epfd");
+        if (epfd < 0)
+            break;
+        epf = NULL;
+
+        struct epoll_event add_ev = {
+            .events = EPOLLIN,
+            .data = 0xE5,
+        };
+        ret = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, rfd, &add_ev);
+        test_check(ret == 0, "wait_core stats epoll add");
+        if (ret < 0)
+            break;
+
+        struct epoll_event out_ev[4];
+        memset(out_ev, 0, sizeof(out_ev));
+        int ready = epoll_wait_events(epfd, out_ev, 4, 0);
+        test_check(ready == 0, "wait_core stats epoll empty timeout0");
+
+        ssize_t wr = fd_write_once(wfd, "K", 1);
+        test_check(wr == 1, "wait_core stats epoll write");
+        if (wr != 1)
+            break;
+
+        memset(out_ev, 0, sizeof(out_ev));
+        ready = epoll_wait_events(epfd, out_ev, 4, 50);
+        test_check(ready > 0, "wait_core stats epoll ready");
+        test_check(epoll_has_event(out_ev, ready, 0xE5, EPOLLIN),
+                   "wait_core stats epoll mask");
+
+        int64_t ret64 = sys_eventfd2(0, O_NONBLOCK, 0, 0, 0, 0);
+        test_check(ret64 >= 0, "wait_core stats eventfd create");
+        if (ret64 < 0)
+            break;
+        efd = (int)ret64;
+
+        uint64_t counter = 1;
+        wr = fd_write_once(efd, &counter, sizeof(counter));
+        test_check(wr == (ssize_t)sizeof(counter), "wait_core stats eventfd write");
+        if (wr != (ssize_t)sizeof(counter))
+            break;
+
+        counter = 0;
+        ssize_t rd = fd_read_once(efd, &counter, sizeof(counter));
+        test_check(rd == (ssize_t)sizeof(counter), "wait_core stats eventfd read");
+        if (rd == (ssize_t)sizeof(counter))
+            test_check(counter == 1, "wait_core stats eventfd value");
+    } while (0);
+
+    poll_wait_stats_snapshot(after);
+    uint64_t epoll_wait_calls_delta =
+        after[POLL_WAIT_STAT_EPOLL_WAIT_CALLS] -
+        before[POLL_WAIT_STAT_EPOLL_WAIT_CALLS];
+    uint64_t epoll_ready_returns_delta =
+        after[POLL_WAIT_STAT_EPOLL_READY_RETURNS] -
+        before[POLL_WAIT_STAT_EPOLL_READY_RETURNS];
+    uint64_t epoll_ready_events_delta =
+        after[POLL_WAIT_STAT_EPOLL_READY_EVENTS] -
+        before[POLL_WAIT_STAT_EPOLL_READY_EVENTS];
+    uint64_t epoll_timeouts_delta =
+        after[POLL_WAIT_STAT_EPOLL_TIMEOUTS] -
+        before[POLL_WAIT_STAT_EPOLL_TIMEOUTS];
+    uint64_t eventfd_rd_wakes_delta =
+        after[POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES] -
+        before[POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES];
+    uint64_t eventfd_wr_wakes_delta =
+        after[POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES] -
+        before[POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES];
+
+    test_check(epoll_wait_calls_delta >= 2,
+               "wait_core stats epoll wait calls delta");
+    test_check(epoll_ready_returns_delta >= 1,
+               "wait_core stats epoll ready returns delta");
+    test_check(epoll_ready_events_delta >= 1,
+               "wait_core stats epoll ready events delta");
+    test_check(epoll_timeouts_delta >= 1,
+               "wait_core stats epoll timeouts delta");
+    test_check(eventfd_rd_wakes_delta >= 1,
+               "wait_core stats eventfd read wakes delta");
+    test_check(eventfd_wr_wakes_delta >= 1,
+               "wait_core stats eventfd write wakes delta");
+
+    if (have_tracepoint_sysfs) {
+        struct file *stats_file = NULL;
+        ret = vfs_open("/sys/kernel/tracepoint/wait_core_stats", O_RDONLY, 0,
+                       &stats_file);
+        test_check(ret == 0 && stats_file != NULL, "wait_core stats sysfs open");
+        if (ret == 0 && stats_file) {
+            char buf[4096];
+            ssize_t n = vfs_read(stats_file, buf, sizeof(buf) - 1);
+            test_check(n > 0, "wait_core stats sysfs read");
+            if (n > 0) {
+                buf[n] = '\0';
+                test_check(strstr(buf, "epoll_wait_calls ") != NULL,
+                           "wait_core stats sysfs epoll name");
+                test_check(strstr(buf, "fdevent_eventfd_read_wakes ") != NULL,
+                           "wait_core stats sysfs eventfd rd name");
+                test_check(strstr(buf, "fdevent_eventfd_write_wakes ") != NULL,
+                           "wait_core stats sysfs eventfd wr name");
+            }
+            vfs_close(stats_file);
+        }
+
+        struct file *events_file = NULL;
+        ret = vfs_open("/sys/kernel/tracepoint/wait_core_events", O_RDONLY, 0,
+                       &events_file);
+        test_check(ret == 0 && events_file != NULL, "wait_core events sysfs open");
+        if (ret == 0 && events_file) {
+            char buf[4096];
+            ssize_t n = vfs_read(events_file, buf, sizeof(buf) - 1);
+            test_check(n > 0, "wait_core events sysfs read");
+            if (n > 0) {
+                buf[n] = '\0';
+                if (strstr(buf, "tracepoints disabled") == NULL) {
+                    test_check(strstr(buf, "wait_epoll") != NULL,
+                               "wait_core events include epoll");
+                    test_check(strstr(buf, "wait_fd_event") != NULL,
+                               "wait_core events include fd_event");
+                }
+            }
+            vfs_close(events_file);
+        }
+
+        struct file *reset_file = NULL;
+        ret = vfs_open("/sys/kernel/tracepoint/reset", O_WRONLY, 0, &reset_file);
+        test_check(ret == 0 && reset_file != NULL, "wait_core stats reset open");
+        if (ret == 0 && reset_file) {
+            const char cmd[] = "1\n";
+            ssize_t wr = vfs_write(reset_file, cmd, sizeof(cmd) - 1);
+            test_check(wr == (ssize_t)(sizeof(cmd) - 1),
+                       "wait_core stats reset write");
+            vfs_close(reset_file);
+            if (wr == (ssize_t)(sizeof(cmd) - 1)) {
+                uint64_t reset_stats[POLL_WAIT_STAT_COUNT] = {0};
+                poll_wait_stats_snapshot(reset_stats);
+                test_check(reset_stats[POLL_WAIT_STAT_EPOLL_WAIT_CALLS] == 0,
+                           "wait_core stats reset epoll waits");
+                test_check(reset_stats[POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES] ==
+                               0,
+                           "wait_core stats reset eventfd rd wakes");
+                test_check(reset_stats[POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES] ==
+                               0,
+                           "wait_core stats reset eventfd wr wakes");
+            }
+        }
+    } else {
+        pr_warn("vfs_ipc_tests: skip wait-core sysfs checks (/sys unavailable)\n");
+    }
+
+    close_fd_if_open(&efd);
+    close_fd_if_open(&epfd);
+    close_fd_if_open(&wfd);
+    close_fd_if_open(&rfd);
+    close_file_if_open(&epf);
+    close_file_if_open(&wf);
+    close_file_if_open(&rf);
 }
 
 static void test_copy_file_range_syscall_semantics(void) {
@@ -4758,6 +4961,7 @@ int run_vfs_ipc_tests(void) {
     test_ppoll_pselect6_syscall_semantics();
     test_renameat2_syscall_semantics();
     test_eventfd_syscall_semantics();
+    test_wait_core_epoll_fd_event_stats();
     test_copy_file_range_syscall_semantics();
     test_timerfd_syscall_semantics();
     test_monotonic_progress_under_yield();
