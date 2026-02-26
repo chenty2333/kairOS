@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/futex.h>
+#include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -50,6 +51,49 @@ struct futex_waker_ctx {
     vaddr_t uaddr;
     volatile int started;
     int wake_ret;
+};
+
+#define KH_STRESS_PRODUCERS 4U
+#define KH_STRESS_CONSUMERS 3U
+#define KH_STRESS_MSGS_PER_PRODUCER 48U
+#define KH_STRESS_TOTAL_MSGS \
+    (KH_STRESS_PRODUCERS * KH_STRESS_MSGS_PER_PRODUCER)
+#define KH_STRESS_RUN_TIMEOUT_NS (20ULL * TEST_NS_PER_SEC)
+#define KH_STRESS_WAIT_SLICE_NS (50ULL * 1000ULL * 1000ULL)
+#define KH_STRESS_ACK_TIMEOUT_NS (2ULL * TEST_NS_PER_SEC)
+#define KH_STRESS_TAG 0x4B485354U
+
+struct kh_stress_msg {
+    uint32_t producer_id;
+    uint32_t seq;
+    uint32_t tag;
+};
+
+struct kh_stress_ack {
+    uint32_t producer_id;
+    uint32_t seq;
+};
+
+struct kh_stress_suite {
+    atomic_t sent;
+    atomic_t received;
+    atomic_t acked;
+    atomic_t producers_done;
+    atomic_t errors;
+};
+
+struct kh_stress_producer_ctx {
+    struct kh_stress_suite *suite;
+    int32_t h_send;
+    int32_t h_ack_send;
+    int32_t h_ack_recv;
+    uint32_t producer_id;
+};
+
+struct kh_stress_consumer_ctx {
+    struct kh_stress_suite *suite;
+    int32_t h_recv;
+    int32_t h_port;
 };
 
 static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
@@ -142,6 +186,212 @@ static int futex_waitv_waker_worker(void *arg) {
         }
         proc_yield();
     }
+    proc_exit(0);
+}
+
+static void kh_stress_mark_error(struct kh_stress_suite *suite) {
+    if (suite)
+        atomic_inc(&suite->errors);
+}
+
+static bool kh_wait_pid_bounded(pid_t pid, uint64_t timeout_ns) {
+    int status = 0;
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    while (time_now_ns() < deadline) {
+        pid_t got = proc_wait(pid, &status, WNOHANG);
+        if (got == pid)
+            return true;
+        if (got < 0)
+            return false;
+        proc_yield();
+    }
+    return proc_wait(pid, &status, WNOHANG) == pid;
+}
+
+static int kh_stress_producer_worker(void *arg) {
+    struct kh_stress_producer_ctx *ctx = (struct kh_stress_producer_ctx *)arg;
+    struct process *p = proc_current();
+    if (!ctx || !ctx->suite || !p)
+        proc_exit(1);
+
+    struct kobj *send_obj = NULL;
+    struct kobj *ack_recv_obj = NULL;
+
+    if (khandle_get(p, ctx->h_send, KRIGHT_WRITE, &send_obj, NULL) < 0) {
+        kh_stress_mark_error(ctx->suite);
+        proc_exit(1);
+    }
+    if (khandle_get(p, ctx->h_ack_recv, KRIGHT_READ, &ack_recv_obj, NULL) < 0) {
+        kh_stress_mark_error(ctx->suite);
+        kobj_put(send_obj);
+        proc_exit(1);
+    }
+
+    for (uint32_t seq = 0; seq < KH_STRESS_MSGS_PER_PRODUCER; seq++) {
+        int32_t dup_h = -1;
+        if (khandle_duplicate(p, ctx->h_ack_send, KRIGHT_CHANNEL_DEFAULT, &dup_h) <
+            0) {
+            kh_stress_mark_error(ctx->suite);
+            break;
+        }
+
+        struct kobj *xfer_obj = NULL;
+        uint32_t xfer_rights = 0;
+        if (khandle_take(p, dup_h, KRIGHT_TRANSFER, &xfer_obj, &xfer_rights) < 0) {
+            kh_stress_mark_error(ctx->suite);
+            (void)khandle_close(p, dup_h);
+            break;
+        }
+
+        struct kh_stress_msg msg = {
+            .producer_id = ctx->producer_id,
+            .seq = seq,
+            .tag = KH_STRESS_TAG,
+        };
+        struct khandle_transfer tx = {
+            .obj = xfer_obj,
+            .rights = xfer_rights,
+        };
+        int rc = kchannel_send(send_obj, &msg, sizeof(msg), &tx, 1, 0);
+        if (rc < 0) {
+            int rr = khandle_restore(p, dup_h, xfer_obj, xfer_rights);
+            if (rr < 0)
+                khandle_transfer_drop(xfer_obj);
+            kh_stress_mark_error(ctx->suite);
+            break;
+        }
+        atomic_inc(&ctx->suite->sent);
+
+        struct kh_stress_ack ack = {0};
+        size_t got_bytes = 0;
+        size_t got_handles = 0;
+        bool trunc = false;
+        uint64_t ack_deadline = time_now_ns() + KH_STRESS_ACK_TIMEOUT_NS;
+        while (1) {
+            rc = kchannel_recv(ack_recv_obj, &ack, sizeof(ack), &got_bytes, NULL, 0,
+                               &got_handles, &trunc, KCHANNEL_OPT_NONBLOCK);
+            if (rc == 0)
+                break;
+            if (rc != -EAGAIN || time_now_ns() >= ack_deadline) {
+                kh_stress_mark_error(ctx->suite);
+                goto out;
+            }
+            proc_yield();
+        }
+        if (got_bytes != sizeof(ack) || got_handles != 0 || trunc ||
+            ack.producer_id != ctx->producer_id || ack.seq != seq) {
+            kh_stress_mark_error(ctx->suite);
+            break;
+        }
+        atomic_inc(&ctx->suite->acked);
+    }
+
+out:
+    kobj_put(ack_recv_obj);
+    kobj_put(send_obj);
+    atomic_inc(&ctx->suite->producers_done);
+    proc_exit(0);
+}
+
+static int kh_stress_consumer_worker(void *arg) {
+    struct kh_stress_consumer_ctx *ctx = (struct kh_stress_consumer_ctx *)arg;
+    struct process *p = proc_current();
+    if (!ctx || !ctx->suite || !p)
+        proc_exit(1);
+
+    struct kobj *recv_obj = NULL;
+    struct kobj *port_obj = NULL;
+    if (khandle_get(p, ctx->h_recv, KRIGHT_READ, &recv_obj, NULL) < 0) {
+        kh_stress_mark_error(ctx->suite);
+        proc_exit(1);
+    }
+    if (khandle_get(p, ctx->h_port, KRIGHT_WAIT, &port_obj, NULL) < 0) {
+        kh_stress_mark_error(ctx->suite);
+        kobj_put(recv_obj);
+        proc_exit(1);
+    }
+
+    uint64_t deadline = time_now_ns() + KH_STRESS_RUN_TIMEOUT_NS;
+    while (1) {
+        if (atomic_read(&ctx->suite->received) >= KH_STRESS_TOTAL_MSGS &&
+            atomic_read(&ctx->suite->producers_done) >= KH_STRESS_PRODUCERS)
+            break;
+
+        struct kairos_port_packet_user pkt = {0};
+        int rc = kport_wait(port_obj, &pkt, KH_STRESS_WAIT_SLICE_NS, 0);
+        if (rc == -ETIMEDOUT) {
+            if (time_now_ns() >= deadline) {
+                kh_stress_mark_error(ctx->suite);
+                break;
+            }
+            continue;
+        }
+        if (rc < 0) {
+            kh_stress_mark_error(ctx->suite);
+            break;
+        }
+        if ((pkt.observed & KPORT_BIND_READABLE) == 0)
+            continue;
+
+        while (1) {
+            struct kh_stress_msg msg = {0};
+            struct khandle_transfer rx[1] = {0};
+            size_t got_bytes = 0;
+            size_t got_handles = 0;
+            bool trunc = false;
+            rc = kchannel_recv(recv_obj, &msg, sizeof(msg), &got_bytes, rx, 1,
+                               &got_handles, &trunc, KCHANNEL_OPT_NONBLOCK);
+            if (rc == -EAGAIN)
+                break;
+            if (rc < 0) {
+                kh_stress_mark_error(ctx->suite);
+                goto out;
+            }
+            if (got_bytes == 0 && got_handles == 0)
+                break;
+            if (got_bytes != sizeof(msg) || got_handles != 1 || trunc ||
+                !rx[0].obj || msg.tag != KH_STRESS_TAG ||
+                msg.producer_id >= KH_STRESS_PRODUCERS) {
+                if (rx[0].obj)
+                    khandle_transfer_drop(rx[0].obj);
+                kh_stress_mark_error(ctx->suite);
+                goto out;
+            }
+
+            int32_t ack_h = khandle_alloc(p, rx[0].obj, rx[0].rights);
+            khandle_transfer_drop(rx[0].obj);
+            if (ack_h < 0) {
+                kh_stress_mark_error(ctx->suite);
+                goto out;
+            }
+
+            struct kobj *ack_obj = NULL;
+            rc = khandle_get(p, ack_h, KRIGHT_WRITE, &ack_obj, NULL);
+            if (rc < 0) {
+                (void)khandle_close(p, ack_h);
+                kh_stress_mark_error(ctx->suite);
+                goto out;
+            }
+
+            struct kh_stress_ack ack = {
+                .producer_id = msg.producer_id,
+                .seq = msg.seq,
+            };
+            rc = kchannel_send(ack_obj, &ack, sizeof(ack), NULL, 0, 0);
+            kobj_put(ack_obj);
+            (void)khandle_close(p, ack_h);
+            if (rc < 0) {
+                kh_stress_mark_error(ctx->suite);
+                goto out;
+            }
+
+            atomic_inc(&ctx->suite->received);
+        }
+    }
+
+out:
+    kobj_put(port_obj);
+    kobj_put(recv_obj);
     proc_exit(0);
 }
 
@@ -1723,6 +1973,386 @@ static void test_get_current_trapframe_process_fallback(void) {
     cpu->current_tf = saved_cpu_tf;
 }
 
+static void test_kairos_channel_port_syscalls(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int32_t h0 = -1;
+    int32_t h1 = -1;
+    int32_t h2a = -1;
+    int32_t h2b = -1;
+    int32_t port = -1;
+    int32_t recv_h = -1;
+    int32_t dup_h = -1;
+
+    int ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(ret == 0, "kh user map");
+    if (ret < 0)
+        return;
+    mapped = true;
+
+    int32_t *u_h0 = (int32_t *)user_map_ptr(&um, 0x000);
+    int32_t *u_h1 = (int32_t *)user_map_ptr(&um, 0x008);
+    int32_t *u_hout = (int32_t *)user_map_ptr(&um, 0x010);
+    int32_t *u_send_handles = (int32_t *)user_map_ptr(&um, 0x020);
+    int32_t *u_recv_handles = (int32_t *)user_map_ptr(&um, 0x040);
+    struct kairos_channel_msg_user *u_send_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x080);
+    struct kairos_channel_msg_user *u_recv_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x0C0);
+    struct kairos_port_packet_user *u_pkt =
+        (struct kairos_port_packet_user *)user_map_ptr(&um, 0x100);
+    char *u_send_bytes = (char *)user_map_ptr(&um, 0x180);
+    char *u_recv_bytes = (char *)user_map_ptr(&um, 0x200);
+    test_check(u_h0 && u_h1 && u_hout && u_send_handles && u_recv_handles &&
+                   u_send_msg && u_recv_msg && u_pkt && u_send_bytes &&
+                   u_recv_bytes,
+               "kh user ptr");
+    if (!u_h0 || !u_h1 || !u_hout || !u_send_handles || !u_recv_handles ||
+        !u_send_msg || !u_recv_msg || !u_pkt || !u_send_bytes || !u_recv_bytes)
+        goto out;
+
+    int64_t ret64 =
+        sys_kairos_channel_create((uint64_t)u_h0, (uint64_t)u_h1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channel_create");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&h0, u_h0, sizeof(h0));
+    test_check(ret == 0, "kh read h0");
+    ret = copy_from_user(&h1, u_h1, sizeof(h1));
+    test_check(ret == 0, "kh read h1");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_channel_create((uint64_t)u_h0, (uint64_t)u_h1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channel_create transfer_pair");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&h2a, u_h0, sizeof(h2a));
+    test_check(ret == 0, "kh read h2a");
+    ret = copy_from_user(&h2b, u_h1, sizeof(h2b));
+    test_check(ret == 0, "kh read h2b");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_port_create((uint64_t)u_hout, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh port_create");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&port, u_hout, sizeof(port));
+    test_check(ret == 0, "kh read port");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_port_bind((uint64_t)port, (uint64_t)h1, 0x55,
+                                 KPORT_BIND_READABLE | KPORT_BIND_PEER_CLOSED, 0,
+                                 0);
+    test_check(ret64 == 0, "kh port_bind");
+    if (ret64 < 0)
+        goto out;
+
+    struct kairos_channel_msg_user send_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+        .handles = (uint64_t)(uintptr_t)u_send_handles,
+        .num_bytes = 4,
+        .num_handles = 1,
+    };
+    ret = copy_to_user(u_send_bytes, "PING", 4);
+    test_check(ret == 0, "kh copy send bytes");
+    ret = copy_to_user(u_send_handles, &h2b, sizeof(h2b));
+    test_check(ret == 0, "kh copy send handle");
+    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(ret == 0, "kh copy send msg");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channel_send transfer");
+    if (ret64 < 0)
+        goto out;
+
+    ret64 = sys_kairos_handle_close((uint64_t)h2b, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "kh transfer moved source handle");
+    h2b = -1;
+
+    ret64 = sys_kairos_port_wait((uint64_t)port, (uint64_t)u_pkt, 500000000ULL, 0,
+                                 0, 0);
+    test_check(ret64 == 0, "kh port_wait readable");
+    if (ret64 == 0) {
+        struct kairos_port_packet_user pkt = {0};
+        ret = copy_from_user(&pkt, u_pkt, sizeof(pkt));
+        test_check(ret == 0, "kh read pkt readable");
+        if (ret == 0) {
+            test_check(pkt.key == 0x55, "kh pkt key readable");
+            test_check((pkt.observed & KPORT_BIND_READABLE) != 0,
+                       "kh pkt readable signal");
+        }
+    }
+
+    struct kairos_channel_msg_user recv_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+        .handles = (uint64_t)(uintptr_t)u_recv_handles,
+        .num_bytes = 16,
+        .num_handles = 4,
+    };
+    ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(ret == 0, "kh copy recv msg");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_channel_recv((uint64_t)h1, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channel_recv transfer");
+    if (ret64 == 0) {
+        struct kairos_channel_msg_user got = {0};
+        char got_bytes[4] = {0};
+        ret = copy_from_user(&got, u_recv_msg, sizeof(got));
+        test_check(ret == 0, "kh read recv msg");
+        ret = copy_from_user(got_bytes, u_recv_bytes, 4);
+        test_check(ret == 0, "kh read recv bytes");
+        ret = copy_from_user(&recv_h, u_recv_handles, sizeof(recv_h));
+        test_check(ret == 0, "kh read recv handle");
+        if (ret == 0) {
+            test_check(got.num_bytes == 4, "kh recv num_bytes");
+            test_check(got.num_handles == 1, "kh recv num_handles");
+            test_check(memcmp(got_bytes, "PING", 4) == 0, "kh recv payload");
+        }
+    }
+
+    if (recv_h >= 0) {
+        send_msg.bytes = (uint64_t)(uintptr_t)u_send_bytes;
+        send_msg.handles = 0;
+        send_msg.num_bytes = 1;
+        send_msg.num_handles = 0;
+        ret = copy_to_user(u_send_bytes, "X", 1);
+        test_check(ret == 0, "kh copy send x");
+        ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+        test_check(ret == 0, "kh copy send x msg");
+        if (ret == 0) {
+            ret64 = sys_kairos_channel_send((uint64_t)recv_h, (uint64_t)u_send_msg, 0,
+                                            0, 0, 0);
+            test_check(ret64 == 0, "kh send received handle");
+        }
+
+        recv_msg.bytes = (uint64_t)(uintptr_t)u_recv_bytes;
+        recv_msg.handles = (uint64_t)(uintptr_t)u_recv_handles;
+        recv_msg.num_bytes = 4;
+        recv_msg.num_handles = 1;
+        ret = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+        test_check(ret == 0, "kh copy recv via peer");
+        if (ret == 0) {
+            ret64 = sys_kairos_channel_recv((uint64_t)h2a, (uint64_t)u_recv_msg, 0, 0,
+                                            0, 0);
+            test_check(ret64 == 0, "kh recv via transferred endpoint");
+            if (ret64 == 0) {
+                char x = 0;
+                ret = copy_from_user(&x, u_recv_bytes, 1);
+                test_check(ret == 0, "kh read x");
+                if (ret == 0)
+                    test_check(x == 'X', "kh payload x");
+            }
+        }
+    }
+
+    ret64 = sys_kairos_handle_duplicate((uint64_t)h0, KRIGHT_READ,
+                                        (uint64_t)u_hout, 0, 0, 0);
+    test_check(ret64 == 0, "kh duplicate read_only");
+    if (ret64 == 0) {
+        ret = copy_from_user(&dup_h, u_hout, sizeof(dup_h));
+        test_check(ret == 0, "kh read dup");
+    }
+
+    if (dup_h >= 0) {
+        send_msg.bytes = (uint64_t)(uintptr_t)u_send_bytes;
+        send_msg.handles = 0;
+        send_msg.num_bytes = 1;
+        send_msg.num_handles = 0;
+        ret = copy_to_user(u_send_bytes, "Z", 1);
+        test_check(ret == 0, "kh copy z");
+        ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+        test_check(ret == 0, "kh copy z msg");
+        if (ret == 0) {
+            ret64 = sys_kairos_channel_send((uint64_t)dup_h, (uint64_t)u_send_msg, 0,
+                                            0, 0, 0);
+            test_check(ret64 == -EACCES, "kh read_only send denied");
+        }
+
+        ret64 = sys_kairos_handle_close((uint64_t)dup_h, 0, 0, 0, 0, 0);
+        test_check(ret64 == 0, "kh close dup");
+        if (ret64 == 0)
+            dup_h = -1;
+    }
+
+    ret64 = sys_kairos_handle_close((uint64_t)h0, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh close h0");
+    if (ret64 == 0)
+        h0 = -1;
+
+    ret64 = sys_kairos_port_wait((uint64_t)port, (uint64_t)u_pkt, 500000000ULL, 0,
+                                 0, 0);
+    test_check(ret64 == 0, "kh port_wait peer_closed");
+    if (ret64 == 0) {
+        struct kairos_port_packet_user pkt = {0};
+        ret = copy_from_user(&pkt, u_pkt, sizeof(pkt));
+        test_check(ret == 0, "kh read pkt peer_closed");
+        if (ret == 0) {
+            test_check(pkt.key == 0x55, "kh pkt key peer_closed");
+            test_check((pkt.observed & KPORT_BIND_PEER_CLOSED) != 0,
+                       "kh pkt peer_closed signal");
+        }
+    }
+
+out:
+    if (dup_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)dup_h, 0, 0, 0, 0, 0);
+    if (recv_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)recv_h, 0, 0, 0, 0, 0);
+    if (port >= 0)
+        (void)sys_kairos_handle_close((uint64_t)port, 0, 0, 0, 0, 0);
+    if (h2a >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h2a, 0, 0, 0, 0, 0);
+    if (h2b >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h2b, 0, 0, 0, 0, 0);
+    if (h1 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h1, 0, 0, 0, 0, 0);
+    if (h0 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h0, 0, 0, 0, 0, 0);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_kairos_channel_port_stress_mpmc(void) {
+    struct kh_stress_suite suite;
+    atomic_init(&suite.sent, 0);
+    atomic_init(&suite.received, 0);
+    atomic_init(&suite.acked, 0);
+    atomic_init(&suite.producers_done, 0);
+    atomic_init(&suite.errors, 0);
+
+    struct kobj *tx_obj = NULL;
+    struct kobj *rx_obj = NULL;
+    struct kobj *port_obj = NULL;
+    struct kobj *ack_tx[KH_STRESS_PRODUCERS] = {0};
+    struct kobj *ack_rx[KH_STRESS_PRODUCERS] = {0};
+
+    struct kh_stress_producer_ctx pctx[KH_STRESS_PRODUCERS];
+    struct kh_stress_consumer_ctx cctx[KH_STRESS_CONSUMERS];
+    struct process *prod_proc[KH_STRESS_PRODUCERS] = {0};
+    struct process *cons_proc[KH_STRESS_CONSUMERS] = {0};
+    uint32_t started_prod = 0;
+    uint32_t started_cons = 0;
+
+    memset(pctx, 0, sizeof(pctx));
+    memset(cctx, 0, sizeof(cctx));
+
+    int rc = kchannel_create_pair(&tx_obj, &rx_obj);
+    test_check(rc == 0, "kh stress create main pair");
+    if (rc < 0)
+        goto out;
+
+    rc = kport_create(&port_obj);
+    test_check(rc == 0, "kh stress create port");
+    if (rc < 0)
+        goto out;
+
+    rc = kport_bind_channel(port_obj, rx_obj, 0xCAFE,
+                            KPORT_BIND_READABLE | KPORT_BIND_PEER_CLOSED);
+    test_check(rc == 0, "kh stress bind port");
+    if (rc < 0)
+        goto out;
+
+    for (uint32_t i = 0; i < KH_STRESS_PRODUCERS; i++) {
+        rc = kchannel_create_pair(&ack_rx[i], &ack_tx[i]);
+        test_check(rc == 0, "kh stress create ack pair");
+        if (rc < 0)
+            goto out;
+    }
+
+    for (uint32_t i = 0; i < KH_STRESS_CONSUMERS; i++) {
+        cons_proc[i] =
+            kthread_create_joinable(kh_stress_consumer_worker, &cctx[i], "khcsmr");
+        test_check(cons_proc[i] != NULL, "kh stress create consumer");
+        if (!cons_proc[i])
+            goto out;
+
+        cctx[i].suite = &suite;
+        cctx[i].h_recv = khandle_alloc(cons_proc[i], rx_obj, KRIGHT_CHANNEL_DEFAULT);
+        cctx[i].h_port = khandle_alloc(cons_proc[i], port_obj, KRIGHT_PORT_DEFAULT);
+        if (cctx[i].h_recv < 0 || cctx[i].h_port < 0) {
+            test_check(false, "kh stress consumer handle alloc");
+            goto out;
+        }
+        sched_enqueue(cons_proc[i]);
+        started_cons++;
+    }
+
+    for (uint32_t i = 0; i < KH_STRESS_PRODUCERS; i++) {
+        prod_proc[i] =
+            kthread_create_joinable(kh_stress_producer_worker, &pctx[i], "khprod");
+        test_check(prod_proc[i] != NULL, "kh stress create producer");
+        if (!prod_proc[i])
+            goto out;
+
+        pctx[i].suite = &suite;
+        pctx[i].producer_id = i;
+        pctx[i].h_send = khandle_alloc(prod_proc[i], tx_obj, KRIGHT_CHANNEL_DEFAULT);
+        pctx[i].h_ack_send =
+            khandle_alloc(prod_proc[i], ack_tx[i], KRIGHT_CHANNEL_DEFAULT);
+        pctx[i].h_ack_recv =
+            khandle_alloc(prod_proc[i], ack_rx[i], KRIGHT_CHANNEL_DEFAULT);
+        if (pctx[i].h_send < 0 || pctx[i].h_ack_send < 0 || pctx[i].h_ack_recv < 0) {
+            test_check(false, "kh stress producer handle alloc");
+            goto out;
+        }
+        sched_enqueue(prod_proc[i]);
+        started_prod++;
+    }
+
+    for (uint32_t i = 0; i < KH_STRESS_PRODUCERS; i++) {
+        bool done = kh_wait_pid_bounded(prod_proc[i]->pid, KH_STRESS_RUN_TIMEOUT_NS);
+        test_check(done, "kh stress producer reaped");
+        prod_proc[i] = NULL;
+    }
+
+    if (tx_obj) {
+        kobj_put(tx_obj);
+        tx_obj = NULL;
+    }
+
+    for (uint32_t i = 0; i < KH_STRESS_CONSUMERS; i++) {
+        bool done = kh_wait_pid_bounded(cons_proc[i]->pid, KH_STRESS_RUN_TIMEOUT_NS);
+        test_check(done, "kh stress consumer reaped");
+        cons_proc[i] = NULL;
+    }
+
+    test_check(atomic_read(&suite.errors) == 0, "kh stress no internal errors");
+    test_check(atomic_read(&suite.sent) == KH_STRESS_TOTAL_MSGS, "kh stress sent");
+    test_check(atomic_read(&suite.received) == KH_STRESS_TOTAL_MSGS,
+               "kh stress received");
+    test_check(atomic_read(&suite.acked) == KH_STRESS_TOTAL_MSGS, "kh stress acked");
+
+out:
+    for (uint32_t i = 0; i < started_prod; i++) {
+        if (prod_proc[i])
+            (void)kh_wait_pid_bounded(prod_proc[i]->pid, KH_STRESS_RUN_TIMEOUT_NS);
+    }
+    for (uint32_t i = 0; i < started_cons; i++) {
+        if (cons_proc[i])
+            (void)kh_wait_pid_bounded(cons_proc[i]->pid, KH_STRESS_RUN_TIMEOUT_NS);
+    }
+    if (tx_obj)
+        kobj_put(tx_obj);
+    if (rx_obj)
+        kobj_put(rx_obj);
+    if (port_obj)
+        kobj_put(port_obj);
+    for (uint32_t i = 0; i < KH_STRESS_PRODUCERS; i++) {
+        if (ack_tx[i])
+            kobj_put(ack_tx[i]);
+        if (ack_rx[i])
+            kobj_put(ack_rx[i]);
+    }
+}
+
 int run_syscall_trap_tests(void) {
     tests_failed = 0;
     pr_info("Running syscall/trap tests...\n");
@@ -1748,6 +2378,8 @@ int run_syscall_trap_tests(void) {
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();
     test_get_current_trapframe_process_fallback();
+    test_kairos_channel_port_syscalls();
+    test_kairos_channel_port_stress_mpmc();
     test_syscall_user_e2e();
 
     if (tests_failed == 0)
