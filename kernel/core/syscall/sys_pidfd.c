@@ -3,6 +3,7 @@
  */
 
 #include <kairos/list.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/pidfd.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
@@ -358,24 +359,10 @@ int64_t sys_pidfd_getfd(uint64_t pidfd, uint64_t targetfd, uint64_t flags,
         return -EPERM;
     }
 
-    struct file *target_file = NULL;
-    rc = fd_get_required(target, ktargetfd, FD_RIGHT_DUP, &target_file);
-    if (rc < 0) {
-        file_put(pidfd_file);
-        return rc;
-    }
-
-    uint32_t target_rights = 0;
-    rc = fd_get_rights(target, ktargetfd, &target_rights);
-    if (rc < 0) {
-        file_put(target_file);
-        file_put(pidfd_file);
-        return rc;
-    }
-
-    int newfd = fd_alloc_rights(self, target_file, FD_CLOEXEC, target_rights);
-    if (newfd < 0)
-        file_put(target_file);
+    int newfd = -1;
+    rc = handle_bridge_dup_fd(target, ktargetfd, self, FD_CLOEXEC, &newfd);
     file_put(pidfd_file);
+    if (rc < 0)
+        return rc;
     return (int64_t)newfd;
 }

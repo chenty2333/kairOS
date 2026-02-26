@@ -4,6 +4,7 @@
 
 #include <kairos/config.h>
 #include <kairos/arch.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/process.h>
@@ -173,15 +174,10 @@ static int socket_parse_send_control(const struct socket_msghdr *msg,
                     goto fail;
                 }
                 struct file *f = NULL;
-                int fr = fd_get_required(curr, ufd, FD_RIGHT_DUP, &f);
-                if (fr < 0) {
-                    rc = fr;
-                    goto fail;
-                }
                 uint32_t rights = 0;
-                fr = fd_get_rights(curr, ufd, &rights);
+                int fr =
+                    handle_bridge_pin_fd(curr, ufd, FD_RIGHT_DUP, &f, &rights);
                 if (fr < 0) {
-                    file_put(f);
                     rc = fr;
                     goto fail;
                 }

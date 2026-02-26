@@ -91,11 +91,39 @@ int handle_bridge_fd_from_kobj(struct process *p, struct kobj *obj,
     }
 
     int fd = fd_alloc_rights(p, file, fd_flags, fd_rights);
-    file_put(file);
+    if (fd < 0)
+        file_put(file);
     if (fd < 0)
         return fd;
 
     *out_fd = fd;
+    return 0;
+}
+
+int handle_bridge_pin_fd(struct process *p, int fd, uint32_t required_rights,
+                         struct file **out_file, uint32_t *out_rights) {
+    if (out_file)
+        *out_file = NULL;
+    if (out_rights)
+        *out_rights = 0;
+    if (!p || !out_file)
+        return -EINVAL;
+
+    struct file *file = NULL;
+    int rc = fd_get_required(p, fd, required_rights, &file);
+    if (rc < 0)
+        return rc;
+
+    uint32_t rights = 0;
+    rc = fd_get_rights(p, fd, &rights);
+    if (rc < 0) {
+        file_put(file);
+        return rc;
+    }
+
+    *out_file = file;
+    if (out_rights)
+        *out_rights = rights;
     return 0;
 }
 
@@ -107,16 +135,11 @@ int handle_bridge_dup_fd(struct process *src, int src_fd, struct process *dst,
         return -EINVAL;
 
     struct file *src_file = NULL;
-    int rc = fd_get_required(src, src_fd, FD_RIGHT_DUP, &src_file);
+    uint32_t src_rights = 0;
+    int rc =
+        handle_bridge_pin_fd(src, src_fd, FD_RIGHT_DUP, &src_file, &src_rights);
     if (rc < 0)
         return rc;
-
-    uint32_t src_rights = 0;
-    rc = fd_get_rights(src, src_fd, &src_rights);
-    if (rc < 0) {
-        file_put(src_file);
-        return rc;
-    }
 
     int new_fd = fd_alloc_rights(dst, src_file, fd_flags, src_rights);
     if (new_fd < 0) {

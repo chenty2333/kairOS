@@ -3442,12 +3442,39 @@ static void test_pidfd_getfd_syscall_functional(void) {
     ret64 = sys_pidfd_getfd((uint64_t)pidfd, (uint64_t)-1, 0, 0, 0, 0);
     test_check(ret64 == -EBADF, "pidfd_getfd bad target ebadf");
 
+    ret = fd_limit_rights(self, rfd, FD_RIGHT_READ | FD_RIGHT_DUP, NULL);
+    test_check(ret == 0, "pidfd_getfd limit target rights");
+    if (ret == 0) {
+        uint32_t limited_rights = 0;
+        ret = fd_get_rights(self, rfd, &limited_rights);
+        test_check(ret == 0, "pidfd_getfd read limited rights");
+        if (ret == 0)
+            test_check(limited_rights == (FD_RIGHT_READ | FD_RIGHT_DUP),
+                       "pidfd_getfd limited rights exact");
+    }
+
     ret64 = sys_pidfd_getfd((uint64_t)pidfd, (uint64_t)(uint32_t)rfd, 0, 0, 0, 0);
     test_check(ret64 >= 0, "pidfd_getfd dup read end");
     if (ret64 < 0)
         goto out;
     dupfd = (int)ret64;
     test_check(fd_has_cloexec(dupfd), "pidfd_getfd cloexec set");
+    {
+        uint32_t dup_rights = 0;
+        ret = fd_get_rights(self, dupfd, &dup_rights);
+        test_check(ret == 0, "pidfd_getfd dup rights read");
+        if (ret == 0)
+            test_check(dup_rights == (FD_RIGHT_READ | FD_RIGHT_DUP),
+                       "pidfd_getfd dup rights preserved");
+    }
+
+    ret = fd_limit_rights(self, rfd, FD_RIGHT_READ, NULL);
+    test_check(ret == 0, "pidfd_getfd drop dup right");
+    if (ret == 0) {
+        ret64 = sys_pidfd_getfd((uint64_t)pidfd, (uint64_t)(uint32_t)rfd, 0, 0, 0,
+                                0);
+        test_check(ret64 == -EBADF, "pidfd_getfd without dup right denied");
+    }
 
     ssize_t wr = fd_write_once(wfd, "Z", 1);
     test_check(wr == 1, "pidfd_getfd seed pipe");
