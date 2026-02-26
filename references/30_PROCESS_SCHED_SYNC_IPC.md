@@ -114,6 +114,7 @@ pollwait.c:
 - `eventfd`/`timerfd`/`inotify`/`signalfd` blocking waits are routed through wait-core helpers instead of direct `proc_sleep_on*` call sites
 - `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
+- tracepoint ring snapshot uses release/acquire `seq` stabilization (double-sample verify) to avoid torn entries under concurrent writers
 
 lockdep.c (when CONFIG_LOCKDEP enabled):
 - Lightweight lock dependency checker, bit matrix records lock acquisition order, detects potential deadlocks

@@ -30,13 +30,13 @@ void tracepoint_emit(enum tracepoint_event event, uint32_t flags,
     struct process *curr = proc_current();
     struct tracepoint_entry *entry = &buf->entries[idx];
     entry->ticks = arch_timer_get_ticks();
-    entry->seq = seq;
     entry->cpu = (uint16_t)cpu;
     entry->event = (uint16_t)event;
     entry->pid = curr ? curr->pid : -1;
     entry->flags = flags;
     entry->arg0 = arg0;
     entry->arg1 = arg1;
+    __atomic_store_n(&entry->seq, seq, __ATOMIC_RELEASE);
 #else
     (void)event;
     (void)flags;
@@ -67,7 +67,18 @@ size_t tracepoint_snapshot_cpu(int cpu, struct tracepoint_entry *out,
                          : 0;
     for (size_t i = 0; i < available; i++) {
         uint32_t pos = (start + (uint32_t)i) % CONFIG_TRACEPOINT_PER_CPU;
-        out[i] = buf->entries[pos];
+        const struct tracepoint_entry *src = &buf->entries[pos];
+        while (1) {
+            uint32_t seq0 = __atomic_load_n(&src->seq, __ATOMIC_ACQUIRE);
+            if (seq0 == 0) {
+                memset(&out[i], 0, sizeof(out[i]));
+                break;
+            }
+            out[i] = *src;
+            uint32_t seq1 = __atomic_load_n(&src->seq, __ATOMIC_ACQUIRE);
+            if (seq0 == seq1 && seq0 == out[i].seq)
+                break;
+        }
     }
     return available;
 #else
