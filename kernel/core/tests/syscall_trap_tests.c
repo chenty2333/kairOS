@@ -319,12 +319,13 @@ static int kh_stress_consumer_worker(void *arg) {
             break;
 
         struct kairos_port_packet_user pkt = {0};
-        int rc = kport_wait(port_obj, &pkt, KH_STRESS_WAIT_SLICE_NS, 0);
-        if (rc == -ETIMEDOUT) {
+        int rc = kport_wait(port_obj, &pkt, 0, KPORT_WAIT_NONBLOCK);
+        if (rc == -EAGAIN) {
             if (time_now_ns() >= deadline) {
                 kh_stress_mark_error(ctx->suite);
                 break;
             }
+            proc_yield();
             continue;
         }
         if (rc < 0) {
