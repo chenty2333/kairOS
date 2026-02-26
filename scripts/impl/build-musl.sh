@@ -122,8 +122,13 @@ if [[ ! -f "$BUILD_DIR/Makefile" ]]; then
   # Nuke any build artifacts that may have leaked into the source tree
   make -C "$BUILD_DIR" distclean >/dev/null 2>&1 || true
 elif [[ "$MUSL_STATIC_ONLY" != "1" ]]; then
+  # Keep build tree in sync with source updates (no --delete to preserve objs).
+  rsync -a --checksum "$MUSL_SRC"/ "$BUILD_DIR"/
   # Force re-configure so LIBCC picks up compiler-rt via -resource-dir
   rm -f "$BUILD_DIR/config.mak"
+else
+  # Static-only incremental builds still need source sync for local musl patches.
+  rsync -a --checksum "$MUSL_SRC"/ "$BUILD_DIR"/
 fi
 
 # Keep local build warning-free by replacing musl's getcwd implementation
