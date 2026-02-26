@@ -244,9 +244,9 @@ static int virtio_pci_setup_vq(struct virtio_device *vdev, uint32_t index,
             return -EIO;
     }
 
-    paddr_t desc_pa = virt_to_phys(vq->desc);
-    paddr_t avail_pa = virt_to_phys(vq->avail);
-    paddr_t used_pa = virt_to_phys(vq->used);
+    dma_addr_t desc_pa = vq->desc_dma;
+    dma_addr_t avail_pa = vq->avail_dma;
+    dma_addr_t used_pa = vq->used_dma;
 
     writeq(desc_pa, (uint8_t *)base + VIRTIO_PCI_COMMON_QUEUE_DESC);
     writeq(avail_pa, (uint8_t *)base + VIRTIO_PCI_COMMON_QUEUE_DRIVER);

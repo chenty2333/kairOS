@@ -6,6 +6,7 @@
 #define _KAIROS_VIRTIO_H
 
 #include <kairos/device.h>
+#include <kairos/dma.h>
 #include <kairos/io.h>
 #include <kairos/types.h>
 #include <kairos/list.h>
@@ -49,8 +50,14 @@ struct virtqueue {
     uint32_t index;
     uint32_t num;
     struct virtq_desc *desc;
+    dma_addr_t desc_dma;
+    size_t desc_size;
     struct virtq_avail *avail;
+    dma_addr_t avail_dma;
+    size_t avail_size;
     struct virtq_used *used;
+    dma_addr_t used_dma;
+    size_t used_size;
     uint16_t last_used_idx;
     uint16_t free_head;
     uint16_t free_count;

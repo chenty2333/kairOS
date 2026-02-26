@@ -77,9 +77,9 @@ static int mmio_setup_vq(struct virtio_device *vdev, uint32_t index, struct virt
 
     writel(vq->num, base + VIRTIO_MMIO_QUEUE_NUM);
     
-    paddr_t desc_pa = virt_to_phys(vq->desc);
-    paddr_t avail_pa = virt_to_phys(vq->avail);
-    paddr_t used_pa = virt_to_phys(vq->used);
+    dma_addr_t desc_pa = vq->desc_dma;
+    dma_addr_t avail_pa = vq->avail_dma;
+    dma_addr_t used_pa = vq->used_dma;
 
     writel((uint32_t)desc_pa, base + VIRTIO_MMIO_QUEUE_DESC_LOW);
     writel((uint32_t)(desc_pa >> 32), base + VIRTIO_MMIO_QUEUE_DESC_HIGH);

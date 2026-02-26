@@ -18,6 +18,9 @@ static void virtqueue_init_free_list(struct virtqueue *vq) {
 
 struct virtqueue *virtqueue_alloc(struct virtio_device *vdev, uint32_t index,
                                   uint32_t num) {
+    if (!vdev || num == 0)
+        return NULL;
+
     struct virtqueue *vq = kzalloc(sizeof(*vq));
     if (!vq)
         return NULL;
@@ -34,16 +37,22 @@ struct virtqueue *virtqueue_alloc(struct virtio_device *vdev, uint32_t index,
                                   num * sizeof(struct virtq_used_elem),
                               CONFIG_PAGE_SIZE);
 
-    vq->desc = kzalloc(desc_sz);
-    vq->avail = kzalloc(avail_sz);
-    vq->used = kzalloc(used_sz);
+    vq->desc_size = desc_sz;
+    vq->avail_size = avail_sz;
+    vq->used_size = used_sz;
+    vq->desc = dma_alloc_coherent(&vdev->dev, desc_sz, &vq->desc_dma);
+    vq->avail = dma_alloc_coherent(&vdev->dev, avail_sz, &vq->avail_dma);
+    vq->used = dma_alloc_coherent(&vdev->dev, used_sz, &vq->used_dma);
     vq->free_next = kzalloc(num * sizeof(uint16_t));
     vq->cookies = kzalloc(num * sizeof(void *));
 
     if (!vq->desc || !vq->avail || !vq->used || !vq->free_next || !vq->cookies) {
-        kfree(vq->desc);
-        kfree(vq->avail);
-        kfree(vq->used);
+        if (vq->desc)
+            dma_free_coherent(&vdev->dev, vq->desc, desc_sz, vq->desc_dma);
+        if (vq->avail)
+            dma_free_coherent(&vdev->dev, vq->avail, avail_sz, vq->avail_dma);
+        if (vq->used)
+            dma_free_coherent(&vdev->dev, vq->used, used_sz, vq->used_dma);
         kfree(vq->free_next);
         kfree(vq->cookies);
         kfree(vq);
@@ -60,9 +69,9 @@ struct virtqueue *virtqueue_alloc(struct virtio_device *vdev, uint32_t index,
 void virtqueue_free(struct virtqueue *vq) {
     if (!vq)
         return;
-    kfree(vq->desc);
-    kfree(vq->avail);
-    kfree(vq->used);
+    dma_free_coherent(&vq->vdev->dev, vq->desc, vq->desc_size, vq->desc_dma);
+    dma_free_coherent(&vq->vdev->dev, vq->avail, vq->avail_size, vq->avail_dma);
+    dma_free_coherent(&vq->vdev->dev, vq->used, vq->used_size, vq->used_dma);
     kfree(vq->free_next);
     kfree(vq->cookies);
     kfree(vq);

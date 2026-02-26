@@ -180,6 +180,50 @@ static void test_virtqueue(void) {
     virtqueue_free(vq);
 }
 
+static void test_virtqueue_dma_addresses(void) {
+    struct virtio_device vdev = {0};
+    struct virtqueue *vq = virtqueue_alloc(&vdev, 0, 8);
+    test_check(vq != NULL, "virtqueue dma alloc");
+    if (vq) {
+        test_check(vq->desc_dma != 0, "virtqueue desc dma");
+        test_check(vq->avail_dma != 0, "virtqueue avail dma");
+        test_check(vq->used_dma != 0, "virtqueue used dma");
+        virtqueue_free(vq);
+    }
+
+    struct iommu_domain *domain =
+        iommu_domain_create(IOMMU_DOMAIN_DMA, 0x10000ULL, 0x40000ULL);
+    test_check(domain != NULL, "virtqueue iommu domain create");
+    if (!domain)
+        return;
+
+    struct virtio_device iommu_vdev = {0};
+    int ret = iommu_attach_device(domain, &iommu_vdev.dev);
+    test_check(ret == 0, "virtqueue iommu attach");
+    if (ret < 0) {
+        iommu_domain_destroy(domain);
+        return;
+    }
+
+    vq = virtqueue_alloc(&iommu_vdev, 1, 8);
+    test_check(vq != NULL, "virtqueue iommu alloc");
+    if (vq) {
+        dma_addr_t desc_phys = (dma_addr_t)virt_to_phys(vq->desc);
+        test_check(vq->desc_dma != desc_phys,
+                   "virtqueue iommu desc translated");
+        test_check(vq->desc_dma >= 0x10000ULL && vq->desc_dma < 0x50000ULL,
+                   "virtqueue iommu desc range");
+        test_check(vq->avail_dma >= 0x10000ULL && vq->avail_dma < 0x50000ULL,
+                   "virtqueue iommu avail range");
+        test_check(vq->used_dma >= 0x10000ULL && vq->used_dma < 0x50000ULL,
+                   "virtqueue iommu used range");
+        virtqueue_free(vq);
+    }
+
+    iommu_detach_device(&iommu_vdev.dev);
+    iommu_domain_destroy(domain);
+}
+
 static void test_blkdev_registry(void) {
     struct blkdev_ops ops = {
         .read = dummy_blk_read,
@@ -688,6 +732,8 @@ struct irq_mock_state {
     int last_affinity_irq;
     uint32_t last_type;
     uint32_t last_affinity_mask;
+    int set_type_ret;
+    int set_affinity_ret;
 };
 
 static struct irq_mock_state irq_mock_state;
@@ -1548,14 +1594,14 @@ static int irq_mock_set_type(int irq, uint32_t type) {
     irq_mock_state.set_type_hits++;
     irq_mock_state.last_type_irq = irq;
     irq_mock_state.last_type = type;
-    return 0;
+    return irq_mock_state.set_type_ret;
 }
 
 static int irq_mock_set_affinity(int irq, uint32_t cpu_mask) {
     irq_mock_state.set_affinity_hits++;
     irq_mock_state.last_affinity_irq = irq;
     irq_mock_state.last_affinity_mask = cpu_mask;
-    return 0;
+    return irq_mock_state.set_affinity_ret;
 }
 
 static void irq_parent_mock_enable(int irq) {
@@ -1707,7 +1753,8 @@ static void test_irq_domain_programming(void) {
 
     arch_irq_register_ex(virq, test_irq_mock_handler, NULL,
                          IRQ_FLAG_TRIGGER_EDGE | IRQ_FLAG_NO_AUTO_ENABLE);
-    arch_irq_set_affinity(virq, 0x3);
+    ret = arch_irq_set_affinity(virq, 0x3);
+    test_check(ret == 0, "irq domain set_affinity api success");
     arch_irq_enable_nr(virq);
 
 #if CONFIG_MAX_CPUS >= 32
@@ -1742,6 +1789,54 @@ static void test_irq_domain_programming(void) {
     test_check(ret == 0, "irq domain unregister");
     ret = platform_irq_domain_remove(virq_base);
     test_check(ret == 0, "irq domain remove");
+}
+
+static void test_irq_setter_error_propagation(void) {
+    memset(&irq_mock_state, 0, sizeof(irq_mock_state));
+    irq_mock_state.last_enable_irq = -1;
+    irq_mock_state.last_disable_irq = -1;
+    irq_mock_state.last_type_irq = -1;
+    irq_mock_state.last_affinity_irq = -1;
+
+    const uint32_t fwnode = 0xD00D0012U;
+    uint32_t virq_base = 0;
+    int ret = platform_irq_domain_alloc_linear_fwnode("test-setter-errors",
+                                                      &test_irq_mock_ops,
+                                                      fwnode, 96, 4,
+                                                      &virq_base);
+    test_check(ret == 0, "irq setter error domain alloc");
+    if (ret < 0)
+        return;
+
+    int virq = (int)(virq_base + 1);
+    arch_irq_register_ex(virq, test_irq_mock_handler, NULL,
+                         IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_AUTO_ENABLE);
+    arch_irq_enable_nr(virq);
+
+    ret = arch_irq_set_type(virq, IRQ_FLAG_TRIGGER_NONE);
+    test_check(ret == -EINVAL, "irq set_type rejects empty trigger");
+
+    irq_mock_state.set_type_ret = -EOPNOTSUPP;
+    ret = arch_irq_set_type(virq, IRQ_FLAG_TRIGGER_EDGE);
+    test_check(ret == -EOPNOTSUPP, "irq set_type propagates chip error");
+
+    irq_mock_state.set_affinity_ret = -EOPNOTSUPP;
+    ret = arch_irq_set_affinity(virq, 0x3);
+    test_check(ret == -EOPNOTSUPP,
+               "irq set_affinity propagates chip error");
+
+    irq_mock_state.set_type_ret = 0;
+    irq_mock_state.set_affinity_ret = 0;
+    ret = arch_irq_set_type(virq, IRQ_FLAG_TRIGGER_LEVEL);
+    test_check(ret == 0, "irq set_type success return");
+    ret = arch_irq_set_affinity(virq, 0x1);
+    test_check(ret == 0, "irq set_affinity success return");
+
+    arch_irq_disable_nr(virq);
+    ret = platform_irq_unregister_ex(virq, test_irq_mock_handler, NULL);
+    test_check(ret == 0, "irq setter error unregister");
+    ret = platform_irq_domain_remove_fwnode(fwnode);
+    test_check(ret == 0, "irq setter error domain remove");
 }
 
 static void test_irq_domain_custom_mapping(void) {
@@ -2272,6 +2367,7 @@ static void test_vfs_umount_busy_with_child_mount(void) {
 static void run_driver_suite_once(void) {
     test_ringbuf();
     test_virtqueue();
+    test_virtqueue_dma_addresses();
     test_blkdev_registry();
     test_blkdev_partition_children();
     test_blkdev_gpt_partition_bounds();
@@ -2300,6 +2396,7 @@ static void run_driver_suite_once(void) {
     test_irq_cookie_sync_waits_deferred_handler();
     test_irq_cookie_sync_waits_after_async_free();
     test_irq_domain_programming();
+    test_irq_setter_error_propagation();
     test_irq_domain_custom_mapping();
     test_irq_domain_cascade();
     test_irq_domain_cascade_generic();
