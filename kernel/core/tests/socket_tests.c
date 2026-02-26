@@ -1313,6 +1313,7 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
     int txfd = -1;
     int rxfd = -1;
     int rights_src_fd = -1;
+    int rights_nodup_fd = -1;
     struct user_map_ctx um = {0};
     bool mapped = false;
 
@@ -1412,6 +1413,39 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
     };
     struct test_socket_ucred cred = {0};
     if (phases & SOCKMSG_STREAM_PHASE_BASIC) {
+        rights_nodup_fd = fd_dup(proc_current(), txfd);
+        test_check(rights_nodup_fd >= 0, "sockmsg_stream dup no-dup source");
+        if (rights_nodup_fd >= 0) {
+            ret = fd_limit_rights(proc_current(), rights_nodup_fd, FD_RIGHT_READ, NULL);
+            test_check(ret == 0, "sockmsg_stream limit no-dup source");
+            if (ret == 0) {
+                int32_t denied_fd = rights_nodup_fd;
+                ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
+                test_check(ret == 0, "sockmsg_stream copy denied rights hdr");
+                if (ret == 0)
+                    ret = copy_to_user((uint8_t *)u_ctrl + sizeof(ctrl_rights),
+                                       &denied_fd, sizeof(denied_fd));
+                test_check(ret == 0, "sockmsg_stream copy denied rights payload");
+                if (ret == 0) {
+                    ret = copy_to_user(u_send_buf, "SDNY", 4);
+                    test_check(ret == 0, "sockmsg_stream copy denied send buf");
+                }
+                if (ret == 0) {
+                    send_msg.msg_control = u_ctrl;
+                    send_msg.msg_controllen =
+                        test_socket_cmsg_align(ctrl_rights.cmsg_len);
+                    ret = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+                    test_check(ret == 0, "sockmsg_stream copy denied send msg");
+                }
+                if (ret == 0) {
+                    int64_t denied_ret =
+                        sys_sendmsg((uint64_t)txfd, (uint64_t)u_send_msg, 0, 0, 0, 0);
+                    test_check(denied_ret == -EBADF,
+                               "sockmsg_stream sendmsg rights requires dup");
+                }
+            }
+        }
+
         ret = copy_to_user(u_ctrl, &ctrl_rights, sizeof(ctrl_rights));
         test_check(ret == 0, "sockmsg_stream copy rights hdr");
         if (ret == 0) {
@@ -1939,6 +1973,7 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
     }
 
 out:
+    close_fd_if_open(&rights_nodup_fd);
     close_fd_if_open(&rights_src_fd);
     close_fd_if_open(&txfd);
     close_fd_if_open(&rxfd);
