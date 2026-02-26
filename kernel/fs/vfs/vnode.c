@@ -16,6 +16,7 @@
 
 struct vnode_kobj_bridge {
     struct kobj obj;
+    struct vnode *owner;
 };
 
 static void vnode_kobj_release(struct kobj *obj) {
@@ -51,6 +52,7 @@ void vnode_kobj_init(struct vnode *vn) {
                     atomic_set(&vn->kobj_state, VNODE_KOBJ_STATE_FAILED);
                     return;
                 }
+                bridge->owner = vn;
                 kobj_init(&bridge->obj, VFS_KOBJ_TYPE_VNODE, &vnode_kobj_ops);
                 vn->kobj = &bridge->obj;
                 uint32_t refs = atomic_read(&vn->refcount);
@@ -79,6 +81,13 @@ struct kobj *vnode_kobj(struct vnode *vn) {
     if (!vnode_kobj_is_ready(vn))
         return NULL;
     return vn->kobj;
+}
+
+struct vnode *vnode_from_kobj(struct kobj *obj) {
+    if (!obj || obj->type != VFS_KOBJ_TYPE_VNODE)
+        return NULL;
+    struct vnode_kobj_bridge *bridge = (struct vnode_kobj_bridge *)obj;
+    return bridge->owner;
 }
 
 ssize_t vfs_readlink_vnode(struct vnode *vn, char *buf, size_t bufsz,

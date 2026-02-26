@@ -305,6 +305,7 @@ void vnode_put(struct vnode *vn);
 void vnode_set_parent(struct vnode *vn, struct vnode *parent, const char *name);
 void vnode_kobj_init(struct vnode *vn);
 struct kobj *vnode_kobj(struct vnode *vn);
+struct vnode *vnode_from_kobj(struct kobj *obj);
 ssize_t vfs_readlink_vnode(struct vnode *vn, char *buf, size_t bufsz,
                            bool require_full);
 

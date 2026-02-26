@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/dentry.h>
 #include <kairos/handle.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
@@ -96,18 +97,40 @@ struct kfile {
 };
 
 struct ipc_registry_entry {
-    struct list_head node;
+    struct list_head type_node;
+    struct list_head all_node;
     struct kobj *obj;
+    struct sysfs_node *sysfs_dir;
+    struct sysfs_attribute summary_attr;
+    struct sysfs_attribute transfers_attr;
 };
 
+static LIST_HEAD(ipc_registry_all);
 static LIST_HEAD(ipc_channel_registry);
 static LIST_HEAD(ipc_port_registry);
+static LIST_HEAD(ipc_file_registry);
+static LIST_HEAD(ipc_vnode_registry);
+static LIST_HEAD(ipc_dentry_registry);
 static struct mutex ipc_registry_lock;
 static bool ipc_registry_lock_ready;
 static spinlock_t ipc_registry_init_lock = SPINLOCK_INIT;
 static struct sysfs_node *ipc_sysfs_root;
+static struct sysfs_node *ipc_sysfs_objects_dir;
 static bool ipc_sysfs_ready;
 static atomic_t kobj_id_next = ATOMIC_INIT(0);
+
+#define IPC_SYSFS_PAGE_SIZE_DEFAULT 64U
+#define IPC_SYSFS_PAGE_SIZE_MAX     512U
+
+struct ipc_sysfs_page_state {
+    uint32_t cursor;
+    uint32_t page_size;
+};
+
+static struct ipc_sysfs_page_state ipc_sysfs_page = {
+    .cursor = 0,
+    .page_size = IPC_SYSFS_PAGE_SIZE_DEFAULT,
+};
 
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
@@ -138,6 +161,8 @@ static bool kchannel_try_rendezvous_raw_locked(
 static void ipc_registry_register_obj(struct kobj *obj);
 static void ipc_registry_unregister_obj(struct kobj *obj);
 static void ipc_sysfs_ensure_ready(void);
+static void ipc_sysfs_create_object_dir_locked(struct ipc_registry_entry *ent);
+static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent);
 
 static const struct kobj_ops kchannel_ops = {
     .release = kchannel_release_obj,
@@ -184,7 +209,7 @@ static inline struct kfile *kfile_from_obj(struct kobj *obj) {
     return (struct kfile *)obj;
 }
 
-static const char *kobj_type_name(uint32_t type) {
+const char *kobj_type_name(uint32_t type) {
     switch (type) {
     case KOBJ_TYPE_CHANNEL:
         return "channel";
@@ -192,6 +217,31 @@ static const char *kobj_type_name(uint32_t type) {
         return "port";
     case KOBJ_TYPE_FILE:
         return "file";
+    case VFS_KOBJ_TYPE_VNODE:
+        return "vnode";
+    case VFS_KOBJ_TYPE_DENTRY:
+        return "dentry";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *vnode_type_name(enum vnode_type type) {
+    switch (type) {
+    case VNODE_FILE:
+        return "file";
+    case VNODE_DIR:
+        return "dir";
+    case VNODE_DEVICE:
+        return "device";
+    case VNODE_PIPE:
+        return "pipe";
+    case VNODE_SOCKET:
+        return "socket";
+    case VNODE_SYMLINK:
+        return "symlink";
+    case VNODE_EPOLL:
+        return "epoll";
     default:
         return "unknown";
     }
@@ -235,57 +285,440 @@ static struct list_head *ipc_registry_list_for_type(uint32_t type) {
         return &ipc_channel_registry;
     case KOBJ_TYPE_PORT:
         return &ipc_port_registry;
+    case KOBJ_TYPE_FILE:
+        return &ipc_file_registry;
+    case VFS_KOBJ_TYPE_VNODE:
+        return &ipc_vnode_registry;
+    case VFS_KOBJ_TYPE_DENTRY:
+        return &ipc_dentry_registry;
     default:
         return NULL;
     }
 }
 
-static ssize_t ipc_sysfs_show_objects(void *priv __attribute__((unused)),
-                                      char *buf, size_t bufsz) {
+static bool ipc_char_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static int ipc_parse_u32(const char *buf, size_t len, uint32_t *out) {
+    if (!buf || !out)
+        return -EINVAL;
+
+    size_t i = 0;
+    while (i < len && ipc_char_is_space(buf[i]))
+        i++;
+    if (i >= len)
+        return -EINVAL;
+
+    bool seen_digit = false;
+    uint64_t value = 0;
+    for (; i < len; i++) {
+        char c = buf[i];
+        if (c >= '0' && c <= '9') {
+            seen_digit = true;
+            value = (value * 10ULL) + (uint64_t)(c - '0');
+            if (value > 0xffffffffULL)
+                return -ERANGE;
+            continue;
+        }
+        if (!ipc_char_is_space(c))
+            return -EINVAL;
+        while (i < len && ipc_char_is_space(buf[i]))
+            i++;
+        if (i != len)
+            return -EINVAL;
+        break;
+    }
+    if (!seen_digit)
+        return -EINVAL;
+
+    *out = (uint32_t)value;
+    return 0;
+}
+
+static int ipc_sysfs_append_object_row(struct kobj *obj, char *buf, size_t bufsz,
+                                       size_t *out_len) {
+    if (!obj || !buf || !out_len || *out_len >= bufsz)
+        return -EINVAL;
+
+    size_t len = *out_len;
+    int n = 0;
+    struct kchannel *ch = kchannel_from_obj(obj);
+    if (ch) {
+        size_t rxq_len = 0;
+        bool peer_closed = false;
+        bool endpoint_closed = false;
+        mutex_lock(&ch->lock);
+        rxq_len = ch->rxq_len;
+        peer_closed = ch->peer_closed;
+        endpoint_closed = ch->endpoint_closed;
+        mutex_unlock(&ch->lock);
+
+        n = snprintf(buf + len, bufsz - len,
+                     "%u %s %u handle_refs=%u rxq_len=%zu peer_closed=%u "
+                     "endpoint_closed=%u\n",
+                     obj->id, kobj_type_name(obj->type),
+                     atomic_read(&obj->refcount), atomic_read(&ch->handle_refs),
+                     rxq_len, peer_closed ? 1U : 0U, endpoint_closed ? 1U : 0U);
+    } else {
+        struct kport *port = kport_from_obj(obj);
+        if (port) {
+            size_t queue_len = 0;
+            mutex_lock(&port->lock);
+            queue_len = port->queue_len;
+            mutex_unlock(&port->lock);
+
+            n = snprintf(buf + len, bufsz - len, "%u %s %u queue_len=%zu\n",
+                         obj->id, kobj_type_name(obj->type),
+                         atomic_read(&obj->refcount), queue_len);
+        } else {
+            struct kfile *kfile = kfile_from_obj(obj);
+            if (kfile && kfile->file && kfile->file->vnode) {
+                const char *path = kfile->file->path[0] ? kfile->file->path : "-";
+                n = snprintf(buf + len, bufsz - len,
+                             "%u %s %u ino=%lu path=%s\n",
+                             obj->id, kobj_type_name(obj->type),
+                             atomic_read(&obj->refcount),
+                             (unsigned long)kfile->file->vnode->ino, path);
+            } else {
+                struct vnode *vn = vnode_from_kobj(obj);
+                if (vn) {
+                    const char *mnt = "-";
+                    if (vn->mount && vn->mount->mountpoint &&
+                        vn->mount->mountpoint[0]) {
+                        mnt = vn->mount->mountpoint;
+                    }
+                    const char *name = vn->name[0] ? vn->name : "-";
+                    n = snprintf(buf + len, bufsz - len,
+                                 "%u %s %u ino=%lu vnode_type=%s mode=0%o size=%llu name=%s mnt=%s\n",
+                                 obj->id, kobj_type_name(obj->type),
+                                 atomic_read(&obj->refcount),
+                                 (unsigned long)vn->ino, vnode_type_name(vn->type),
+                                 (unsigned int)vn->mode,
+                                 (unsigned long long)vn->size, name, mnt);
+                } else {
+                    struct dentry *d = dentry_from_kobj(obj);
+                    if (d) {
+                        const char *mnt = "-";
+                        if (d->mnt && d->mnt->mountpoint &&
+                            d->mnt->mountpoint[0]) {
+                            mnt = d->mnt->mountpoint;
+                        }
+                        char path[CONFIG_PATH_MAX];
+                        const char *path_out = d->name[0] ? d->name : "/";
+                        if (vfs_build_path_dentry(d, path, sizeof(path)) >= 0 &&
+                            path[0]) {
+                            path_out = path;
+                        }
+                        n = snprintf(buf + len, bufsz - len,
+                                     "%u %s %u flags=0x%x path=%s mnt=%s\n",
+                                     obj->id, kobj_type_name(obj->type),
+                                     atomic_read(&obj->refcount),
+                                     d->flags, path_out, mnt);
+                    } else {
+                        n = snprintf(buf + len, bufsz - len, "%u %s %u\n",
+                                     obj->id, kobj_type_name(obj->type),
+                                     atomic_read(&obj->refcount));
+                    }
+                }
+            }
+        }
+    }
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - len)
+        return -ENOSPC;
+    *out_len = len + (size_t)n;
+    return 0;
+}
+
+static ssize_t ipc_sysfs_show_objects_page(void *priv __attribute__((unused)),
+                                           char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
         return -EINVAL;
 
     size_t len = 0;
-    int n = snprintf(buf, bufsz, "id type refcount\n");
-    if (n < 0)
-        return -EINVAL;
-    if ((size_t)n >= bufsz)
-        return (ssize_t)(bufsz - 1);
-    len = (size_t)n;
+    int n = 0;
 
     ipc_registry_ensure_lock();
     mutex_lock(&ipc_registry_lock);
 
+    uint32_t cursor = ipc_sysfs_page.cursor;
+    uint32_t page_size = ipc_sysfs_page.page_size;
+    if (page_size == 0)
+        page_size = IPC_SYSFS_PAGE_SIZE_DEFAULT;
+
+    n = snprintf(buf + len, bufsz - len, "cursor=%u page_size=%u\n", cursor,
+                 page_size);
+    if (n < 0)
+        goto out_err;
+    if ((size_t)n >= bufsz - len)
+        goto out_trunc;
+    len += (size_t)n;
+
+    n = snprintf(buf + len, bufsz - len, "id type refcount state\n");
+    if (n < 0)
+        goto out_err;
+    if ((size_t)n >= bufsz - len)
+        goto out_trunc;
+    len += (size_t)n;
+
+    size_t emitted = 0;
+    uint32_t last_id = cursor;
+    bool has_more = false;
     struct ipc_registry_entry *ent;
-    list_for_each_entry(ent, &ipc_channel_registry, node) {
+    list_for_each_entry(ent, &ipc_registry_all, all_node) {
         struct kobj *obj = ent->obj;
-        if (!obj)
+        if (!obj || obj->id <= cursor)
             continue;
-        n = snprintf(buf + len, bufsz - len, "%u %s %u\n", obj->id,
-                     kobj_type_name(obj->type), atomic_read(&obj->refcount));
-        if (n < 0 || (size_t)n >= bufsz - len) {
-            len = bufsz;
+        if (emitted >= page_size) {
+            has_more = true;
             break;
         }
-        len += (size_t)n;
-    }
-    if (len < bufsz) {
-        list_for_each_entry(ent, &ipc_port_registry, node) {
-            struct kobj *obj = ent->obj;
-            if (!obj)
-                continue;
-            n = snprintf(buf + len, bufsz - len, "%u %s %u\n", obj->id,
-                         kobj_type_name(obj->type), atomic_read(&obj->refcount));
-            if (n < 0 || (size_t)n >= bufsz - len) {
-                len = bufsz;
-                break;
-            }
-            len += (size_t)n;
-        }
+        if (ipc_sysfs_append_object_row(obj, buf, bufsz, &len) < 0)
+            goto out_trunc;
+        last_id = obj->id;
+        emitted++;
     }
 
+    uint32_t next_cursor = has_more ? last_id : 0U;
+    n = snprintf(buf + len, bufsz - len, "next_cursor=%u has_more=%u\n",
+                 next_cursor, has_more ? 1U : 0U);
+    if (n < 0)
+        goto out_err;
+    if ((size_t)n >= bufsz - len)
+        goto out_trunc;
+    len += (size_t)n;
+
     mutex_unlock(&ipc_registry_lock);
-    return (ssize_t)((len < bufsz) ? len : bufsz);
+    return (ssize_t)len;
+
+out_trunc:
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)bufsz;
+out_err:
+    mutex_unlock(&ipc_registry_lock);
+    return -EINVAL;
+}
+
+static ssize_t ipc_sysfs_show_objects_cursor(void *priv __attribute__((unused)),
+                                             char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    uint32_t cursor = ipc_sysfs_page.cursor;
+    mutex_unlock(&ipc_registry_lock);
+
+    int n = snprintf(buf, bufsz, "%u\n", cursor);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)bufsz;
+    return (ssize_t)n;
+}
+
+static ssize_t ipc_sysfs_store_objects_cursor(
+    void *priv __attribute__((unused)), const char *buf, size_t len) {
+    uint32_t value = 0;
+    int rc = ipc_parse_u32(buf, len, &value);
+    if (rc < 0)
+        return rc;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    ipc_sysfs_page.cursor = value;
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)len;
+}
+
+static ssize_t ipc_sysfs_show_objects_page_size(
+    void *priv __attribute__((unused)), char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    uint32_t page_size = ipc_sysfs_page.page_size;
+    mutex_unlock(&ipc_registry_lock);
+
+    int n = snprintf(buf, bufsz, "%u\n", page_size);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)bufsz;
+    return (ssize_t)n;
+}
+
+static ssize_t ipc_sysfs_store_objects_page_size(
+    void *priv __attribute__((unused)), const char *buf, size_t len) {
+    uint32_t value = 0;
+    int rc = ipc_parse_u32(buf, len, &value);
+    if (rc < 0)
+        return rc;
+    if (value == 0 || value > IPC_SYSFS_PAGE_SIZE_MAX)
+        return -EINVAL;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    ipc_sysfs_page.page_size = value;
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)len;
+}
+
+static ssize_t ipc_sysfs_show_object_summary(void *priv, char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0 || !priv)
+        return -EINVAL;
+
+    struct ipc_registry_entry *ent = priv;
+    struct kobj *obj = ent->obj;
+    if (!obj)
+        return -ENODEV;
+
+    size_t len = 0;
+    int n = snprintf(buf + len, bufsz - len, "id=%u\ntype=%s\nrefcount=%u\n",
+                     obj->id, kobj_type_name(obj->type),
+                     atomic_read(&obj->refcount));
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - len)
+        return (ssize_t)bufsz;
+    len += (size_t)n;
+
+    struct kchannel *ch = kchannel_from_obj(obj);
+    if (ch) {
+        size_t rxq_len = 0;
+        bool peer_closed = false;
+        bool endpoint_closed = false;
+        mutex_lock(&ch->lock);
+        rxq_len = ch->rxq_len;
+        peer_closed = ch->peer_closed;
+        endpoint_closed = ch->endpoint_closed;
+        mutex_unlock(&ch->lock);
+        n = snprintf(buf + len, bufsz - len,
+                     "handle_refs=%u\nrxq_len=%zu\npeer_closed=%u\n"
+                     "endpoint_closed=%u\n",
+                     atomic_read(&ch->handle_refs), rxq_len,
+                     peer_closed ? 1U : 0U, endpoint_closed ? 1U : 0U);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+        return (ssize_t)len;
+    }
+
+    struct kport *port = kport_from_obj(obj);
+    if (port) {
+        size_t queue_len = 0;
+        mutex_lock(&port->lock);
+        queue_len = port->queue_len;
+        mutex_unlock(&port->lock);
+        n = snprintf(buf + len, bufsz - len, "queue_len=%zu\n", queue_len);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+        return (ssize_t)len;
+    }
+
+    struct kfile *kfile = kfile_from_obj(obj);
+    if (kfile) {
+        const char *path = "-";
+        unsigned long ino = 0;
+        if (kfile->file) {
+            if (kfile->file->path[0])
+                path = kfile->file->path;
+            if (kfile->file->vnode)
+                ino = (unsigned long)kfile->file->vnode->ino;
+        }
+        n = snprintf(buf + len, bufsz - len, "ino=%lu\npath=%s\n", ino, path);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+        return (ssize_t)len;
+    }
+
+    struct vnode *vn = vnode_from_kobj(obj);
+    if (vn) {
+        const char *mnt = "-";
+        if (vn->mount && vn->mount->mountpoint && vn->mount->mountpoint[0])
+            mnt = vn->mount->mountpoint;
+        const char *name = vn->name[0] ? vn->name : "-";
+        n = snprintf(buf + len, bufsz - len,
+                     "ino=%lu\nvnode_type=%s\nmode=0%o\nsize=%llu\nname=%s\nmnt=%s\n",
+                     (unsigned long)vn->ino, vnode_type_name(vn->type),
+                     (unsigned int)vn->mode, (unsigned long long)vn->size, name,
+                     mnt);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+        return (ssize_t)len;
+    }
+
+    struct dentry *d = dentry_from_kobj(obj);
+    if (d) {
+        const char *mnt = "-";
+        if (d->mnt && d->mnt->mountpoint && d->mnt->mountpoint[0])
+            mnt = d->mnt->mountpoint;
+        char path[CONFIG_PATH_MAX];
+        const char *path_out = d->name[0] ? d->name : "/";
+        if (vfs_build_path_dentry(d, path, sizeof(path)) >= 0 && path[0])
+            path_out = path;
+        n = snprintf(buf + len, bufsz - len, "flags=0x%x\npath=%s\nmnt=%s\n",
+                     d->flags, path_out, mnt);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+    }
+
+    return (ssize_t)len;
+}
+
+static ssize_t ipc_sysfs_show_object_transfers(void *priv, char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0 || !priv)
+        return -EINVAL;
+
+    struct ipc_registry_entry *ent = priv;
+    struct kobj *obj = ent->obj;
+    if (!obj)
+        return -ENODEV;
+
+    size_t len = 0;
+    int n = snprintf(buf + len, bufsz - len,
+                     "seq event from_pid to_pid rights cpu ticks\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - len)
+        return (ssize_t)bufsz;
+    len += (size_t)n;
+
+    struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+    size_t count =
+        kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+    for (size_t i = 0; i < count; i++) {
+        if (hist[i].seq == 0)
+            continue;
+        n = snprintf(buf + len, bufsz - len, "%u %s %d %d 0x%x %u %llu\n",
+                     hist[i].seq, kobj_transfer_event_name(hist[i].event),
+                     hist[i].from_pid, hist[i].to_pid, hist[i].rights,
+                     hist[i].cpu, (unsigned long long)hist[i].ticks);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - len)
+            return (ssize_t)bufsz;
+        len += (size_t)n;
+    }
+
+    return (ssize_t)len;
 }
 
 static ssize_t ipc_sysfs_show_channels(void *priv __attribute__((unused)),
@@ -306,7 +739,7 @@ static ssize_t ipc_sysfs_show_channels(void *priv __attribute__((unused)),
     mutex_lock(&ipc_registry_lock);
 
     struct ipc_registry_entry *ent;
-    list_for_each_entry(ent, &ipc_channel_registry, node) {
+    list_for_each_entry(ent, &ipc_channel_registry, type_node) {
         struct kobj *obj = ent->obj;
         struct kchannel *ch = kchannel_from_obj(obj);
         if (!obj || !ch)
@@ -352,7 +785,7 @@ static ssize_t ipc_sysfs_show_ports(void *priv __attribute__((unused)), char *bu
     mutex_lock(&ipc_registry_lock);
 
     struct ipc_registry_entry *ent;
-    list_for_each_entry(ent, &ipc_port_registry, node) {
+    list_for_each_entry(ent, &ipc_port_registry, type_node) {
         struct kobj *obj = ent->obj;
         struct kport *port = kport_from_obj(obj);
         if (!obj || !port)
@@ -365,6 +798,138 @@ static ssize_t ipc_sysfs_show_ports(void *priv __attribute__((unused)), char *bu
 
         n = snprintf(buf + len, bufsz - len, "%u %u %zu\n", obj->id,
                      atomic_read(&obj->refcount), queue_len);
+        if (n < 0 || (size_t)n >= bufsz - len) {
+            len = bufsz;
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_files(void *priv __attribute__((unused)), char *buf,
+                                    size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz, "id refcount ino path\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_file_registry, type_node) {
+        struct kobj *obj = ent->obj;
+        struct kfile *kfile = kfile_from_obj(obj);
+        if (!obj || !kfile)
+            continue;
+
+        unsigned long ino = 0;
+        const char *path = "-";
+        if (kfile->file) {
+            if (kfile->file->vnode)
+                ino = (unsigned long)kfile->file->vnode->ino;
+            if (kfile->file->path[0])
+                path = kfile->file->path;
+        }
+
+        n = snprintf(buf + len, bufsz - len, "%u %u %lu %s\n", obj->id,
+                     atomic_read(&obj->refcount), ino, path);
+        if (n < 0 || (size_t)n >= bufsz - len) {
+            len = bufsz;
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_vnodes(void *priv __attribute__((unused)), char *buf,
+                                     size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz, "id refcount ino vnode_type mode size name mnt\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_vnode_registry, type_node) {
+        struct kobj *obj = ent->obj;
+        struct vnode *vn = vnode_from_kobj(obj);
+        if (!obj || !vn)
+            continue;
+
+        const char *mnt = "-";
+        if (vn->mount && vn->mount->mountpoint && vn->mount->mountpoint[0])
+            mnt = vn->mount->mountpoint;
+        const char *name = vn->name[0] ? vn->name : "-";
+
+        n = snprintf(buf + len, bufsz - len, "%u %u %lu %s 0%o %llu %s %s\n",
+                     obj->id, atomic_read(&obj->refcount), (unsigned long)vn->ino,
+                     vnode_type_name(vn->type), (unsigned int)vn->mode,
+                     (unsigned long long)vn->size, name, mnt);
+        if (n < 0 || (size_t)n >= bufsz - len) {
+            len = bufsz;
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_dentries(void *priv __attribute__((unused)),
+                                       char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz, "id refcount flags path mnt\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_dentry_registry, type_node) {
+        struct kobj *obj = ent->obj;
+        struct dentry *d = dentry_from_kobj(obj);
+        if (!obj || !d)
+            continue;
+
+        const char *mnt = "-";
+        if (d->mnt && d->mnt->mountpoint && d->mnt->mountpoint[0])
+            mnt = d->mnt->mountpoint;
+        char path[CONFIG_PATH_MAX];
+        const char *path_out = d->name[0] ? d->name : "/";
+        if (vfs_build_path_dentry(d, path, sizeof(path)) >= 0 && path[0])
+            path_out = path;
+
+        n = snprintf(buf + len, bufsz - len, "%u %u 0x%x %s %s\n", obj->id,
+                     atomic_read(&obj->refcount), d->flags, path_out, mnt);
         if (n < 0 || (size_t)n >= bufsz - len) {
             len = bufsz;
             break;
@@ -395,29 +960,7 @@ static ssize_t ipc_sysfs_show_transfers(void *priv __attribute__((unused)),
 
     struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
     struct ipc_registry_entry *ent;
-    list_for_each_entry(ent, &ipc_channel_registry, node) {
-        struct kobj *obj = ent->obj;
-        if (!obj)
-            continue;
-        size_t count =
-            kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
-        for (size_t i = 0; i < count; i++) {
-            if (hist[i].seq == 0)
-                continue;
-            n = snprintf(buf + len, bufsz - len, "%u %u %s %d %d 0x%x %u %llu\n",
-                         obj->id, hist[i].seq,
-                         kobj_transfer_event_name(hist[i].event),
-                         hist[i].from_pid, hist[i].to_pid, hist[i].rights,
-                         hist[i].cpu, (unsigned long long)hist[i].ticks);
-            if (n < 0 || (size_t)n >= bufsz - len) {
-                len = bufsz;
-                goto out;
-            }
-            len += (size_t)n;
-        }
-    }
-
-    list_for_each_entry(ent, &ipc_port_registry, node) {
+    list_for_each_entry(ent, &ipc_registry_all, all_node) {
         struct kobj *obj = ent->obj;
         if (!obj)
             continue;
@@ -445,42 +988,117 @@ out:
 }
 
 static const struct sysfs_attribute ipc_sysfs_attrs[] = {
-    {.name = "objects", .mode = 0444, .show = ipc_sysfs_show_objects},
     {.name = "channels", .mode = 0444, .show = ipc_sysfs_show_channels},
     {.name = "ports", .mode = 0444, .show = ipc_sysfs_show_ports},
+    {.name = "files", .mode = 0444, .show = ipc_sysfs_show_files},
+    {.name = "vnodes", .mode = 0444, .show = ipc_sysfs_show_vnodes},
+    {.name = "dentries", .mode = 0444, .show = ipc_sysfs_show_dentries},
     {.name = "transfers", .mode = 0444, .show = ipc_sysfs_show_transfers},
 };
 
+static const struct sysfs_attribute ipc_sysfs_objects_attrs[] = {
+    {.name = "page", .mode = 0444, .show = ipc_sysfs_show_objects_page},
+    {
+        .name = "cursor",
+        .mode = 0644,
+        .show = ipc_sysfs_show_objects_cursor,
+        .store = ipc_sysfs_store_objects_cursor,
+    },
+    {
+        .name = "page_size",
+        .mode = 0644,
+        .show = ipc_sysfs_show_objects_page_size,
+        .store = ipc_sysfs_store_objects_page_size,
+    },
+};
+
+static void ipc_sysfs_create_object_dir_locked(struct ipc_registry_entry *ent) {
+    if (!ent || !ent->obj || !ipc_sysfs_objects_dir || ent->sysfs_dir)
+        return;
+
+    char name[16] = {0};
+    int n = snprintf(name, sizeof(name), "%u", ent->obj->id);
+    if (n < 0 || (size_t)n >= sizeof(name))
+        return;
+
+    struct sysfs_node *dir = sysfs_mkdir(ipc_sysfs_objects_dir, name);
+    if (!dir)
+        return;
+
+    memset(&ent->summary_attr, 0, sizeof(ent->summary_attr));
+    ent->summary_attr.name = "summary";
+    ent->summary_attr.mode = 0444;
+    ent->summary_attr.show = ipc_sysfs_show_object_summary;
+    ent->summary_attr.priv = ent;
+
+    memset(&ent->transfers_attr, 0, sizeof(ent->transfers_attr));
+    ent->transfers_attr.name = "transfers";
+    ent->transfers_attr.mode = 0444;
+    ent->transfers_attr.show = ipc_sysfs_show_object_transfers;
+    ent->transfers_attr.priv = ent;
+
+    if (!sysfs_create_file(dir, &ent->summary_attr) ||
+        !sysfs_create_file(dir, &ent->transfers_attr)) {
+        sysfs_rmdir(dir);
+        return;
+    }
+
+    ent->sysfs_dir = dir;
+}
+
+static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent) {
+    if (!ent || !ent->sysfs_dir)
+        return;
+    sysfs_rmdir(ent->sysfs_dir);
+    ent->sysfs_dir = NULL;
+}
+
 static void ipc_sysfs_ensure_ready(void) {
     ipc_registry_ensure_lock();
-    if (__atomic_load_n(&ipc_sysfs_ready, __ATOMIC_ACQUIRE))
-        return;
     mutex_lock(&ipc_registry_lock);
-    if (ipc_sysfs_ready) {
-        mutex_unlock(&ipc_registry_lock);
-        return;
+
+    if (!ipc_sysfs_ready) {
+        struct sysfs_node *root = sysfs_root();
+        if (!root) {
+            mutex_unlock(&ipc_registry_lock);
+            return;
+        }
+
+        ipc_sysfs_root = sysfs_mkdir(root, "ipc");
+        if (!ipc_sysfs_root) {
+            mutex_unlock(&ipc_registry_lock);
+            return;
+        }
+
+        if (sysfs_create_files(ipc_sysfs_root, ipc_sysfs_attrs,
+                               ARRAY_SIZE(ipc_sysfs_attrs)) < 0) {
+            pr_warn("ipc: failed to create /sys/ipc attributes\n");
+            mutex_unlock(&ipc_registry_lock);
+            return;
+        }
+
+        ipc_sysfs_objects_dir = sysfs_mkdir(ipc_sysfs_root, "objects");
+        if (!ipc_sysfs_objects_dir) {
+            pr_warn("ipc: failed to create /sys/ipc/objects\n");
+            mutex_unlock(&ipc_registry_lock);
+            return;
+        }
+
+        if (sysfs_create_files(ipc_sysfs_objects_dir, ipc_sysfs_objects_attrs,
+                               ARRAY_SIZE(ipc_sysfs_objects_attrs)) < 0) {
+            pr_warn("ipc: failed to create /sys/ipc/objects attributes\n");
+            mutex_unlock(&ipc_registry_lock);
+            return;
+        }
+
+        ipc_sysfs_page.cursor = 0;
+        ipc_sysfs_page.page_size = IPC_SYSFS_PAGE_SIZE_DEFAULT;
+        __atomic_store_n(&ipc_sysfs_ready, true, __ATOMIC_RELEASE);
     }
 
-    struct sysfs_node *root = sysfs_root();
-    if (!root) {
-        mutex_unlock(&ipc_registry_lock);
-        return;
-    }
-
-    ipc_sysfs_root = sysfs_mkdir(root, "ipc");
-    if (!ipc_sysfs_root) {
-        mutex_unlock(&ipc_registry_lock);
-        return;
-    }
-
-    if (sysfs_create_files(ipc_sysfs_root, ipc_sysfs_attrs,
-                           ARRAY_SIZE(ipc_sysfs_attrs)) < 0) {
-        pr_warn("ipc: failed to create /sys/ipc attributes\n");
-        mutex_unlock(&ipc_registry_lock);
-        return;
-    }
-
-    __atomic_store_n(&ipc_sysfs_ready, true, __ATOMIC_RELEASE);
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_registry_all, all_node)
+        ipc_sysfs_create_object_dir_locked(ent);
     mutex_unlock(&ipc_registry_lock);
 }
 
@@ -496,10 +1114,15 @@ static void ipc_registry_register_obj(struct kobj *obj) {
     if (!ent)
         return;
     ent->obj = obj;
-    INIT_LIST_HEAD(&ent->node);
+    ent->sysfs_dir = NULL;
+    memset(&ent->summary_attr, 0, sizeof(ent->summary_attr));
+    memset(&ent->transfers_attr, 0, sizeof(ent->transfers_attr));
+    INIT_LIST_HEAD(&ent->type_node);
+    INIT_LIST_HEAD(&ent->all_node);
 
     mutex_lock(&ipc_registry_lock);
-    list_add_tail(&ent->node, list);
+    list_add_tail(&ent->type_node, list);
+    list_add_tail(&ent->all_node, &ipc_registry_all);
     mutex_unlock(&ipc_registry_lock);
 
     ipc_sysfs_ensure_ready();
@@ -515,10 +1138,12 @@ static void ipc_registry_unregister_obj(struct kobj *obj) {
     ipc_registry_ensure_lock();
     mutex_lock(&ipc_registry_lock);
     struct ipc_registry_entry *ent, *tmp;
-    list_for_each_entry_safe(ent, tmp, list, node) {
+    list_for_each_entry_safe(ent, tmp, list, type_node) {
         if (ent->obj != obj)
             continue;
-        list_del(&ent->node);
+        ipc_sysfs_remove_object_dir_locked(ent);
+        list_del(&ent->type_node);
+        list_del(&ent->all_node);
         mutex_unlock(&ipc_registry_lock);
         kfree(ent);
         return;
@@ -737,8 +1362,11 @@ void kobj_put(struct kobj *obj) {
         kobj_refcount_record(obj, KOBJ_REFCOUNT_LAST_PUT, 0);
     else
         kobj_refcount_record(obj, KOBJ_REFCOUNT_PUT, refcount);
-    if (refcount == 0 && obj->ops && obj->ops->release)
-        obj->ops->release(obj);
+    if (refcount == 0) {
+        ipc_registry_unregister_obj(obj);
+        if (obj->ops && obj->ops->release)
+            obj->ops->release(obj);
+    }
 }
 
 uint32_t kobj_id(const struct kobj *obj) {
@@ -2545,7 +3173,6 @@ static void kchannel_release_obj(struct kobj *obj) {
     struct kchannel *ch = kchannel_from_obj(obj);
     if (!ch)
         return;
-    ipc_registry_unregister_obj(obj);
 
     struct kchannel *peer = NULL;
     struct kport *bound = NULL;
@@ -2617,7 +3244,6 @@ static void kport_release_obj(struct kobj *obj) {
     struct kport *port = kport_from_obj(obj);
     if (!port)
         return;
-    ipc_registry_unregister_obj(obj);
 
     LIST_HEAD(reap);
     LIST_HEAD(poll_reap);

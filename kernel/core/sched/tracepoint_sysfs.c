@@ -10,6 +10,8 @@
 #include <kairos/sysfs.h>
 #include <kairos/tracepoint.h>
 
+struct sysfs_node *sysfs_kernel_dir(void);
+
 static struct sysfs_node *tracepoint_sysfs_dir;
 
 static const char *tracepoint_event_name(uint16_t event) {

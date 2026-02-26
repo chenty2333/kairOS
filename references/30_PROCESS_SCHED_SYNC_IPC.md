@@ -183,7 +183,8 @@ Current IPC mechanisms:
 - `kobj` now also records bounded transfer-history events (`TAKE/ENQUEUE/DELIVER/INSTALL/RESTORE/DROP`) with snapshot API (`kobj_transfer_history_snapshot`) for capability movement auditing
 - transfer install/drop helpers (`khandle_install_transferred`, `khandle_transfer_drop_with_rights`) keep transfer lifecycle bookkeeping in one internal entrypoint without changing Linux fd syscall ABI
 - transfer metadata now carries `cap_id`; transfer install/restore prefers rebinding the same capability node, and transfer drop paths prune detached lineage nodes
-- sysfs exports IPC observability at `/sys/ipc/{objects,channels,ports,transfers}` (read-only aggregated views over live channel/port objects and transfer-history traces)
+- sysfs exports IPC observability at `/sys/ipc`: aggregated views are `/sys/ipc/{channels,ports,transfers}`, and `/sys/ipc/objects/` exposes v2 paging controls (`page`, `cursor`, `page_size`) plus per-object dirs (`/sys/ipc/objects/<id>/{summary,transfers}`) for registered channel/port objects
+- procfs exports per-process handle table view at `/proc/<pid>/handles` (`handle/cap_id/obj_id/type/rights/refcount`) for handle-to-kobj correlation
 - Kairos extension syscalls (custom Linux ABI numbers): `kairos_handle_close`(4600), `kairos_handle_duplicate`(4601), `kairos_channel_create/send/recv`(4602-4604), `kairos_port_create/bind/wait`(4605-4607), `kairos_cap_rights_get`(4608), `kairos_cap_rights_limit`(4609), `kairos_handle_from_fd`(4610), `kairos_fd_from_handle`(4611)
 
 Related references:

@@ -58,6 +58,7 @@ void dentry_drop(struct dentry *d);
 void dentry_move(struct dentry *d, struct dentry *new_parent,
                  const char *new_name);
 struct kobj *dentry_kobj(struct dentry *d);
+struct dentry *dentry_from_kobj(struct kobj *obj);
 
 static inline void path_init(struct path *path) {
     if (path) {

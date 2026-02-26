@@ -169,6 +169,7 @@ void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops);
 void kobj_get(struct kobj *obj);
 void kobj_put(struct kobj *obj);
 uint32_t kobj_id(const struct kobj *obj);
+const char *kobj_type_name(uint32_t type);
 int kobj_read(struct kobj *obj, void *buf, size_t len, size_t *out_len,
               uint32_t options);
 int kobj_write(struct kobj *obj, const void *buf, size_t len, size_t *out_len,

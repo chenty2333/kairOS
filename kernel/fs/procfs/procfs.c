@@ -8,6 +8,7 @@
 
 #include <kairos/config.h>
 #include <kairos/boot.h>
+#include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/platform_core.h>
@@ -123,6 +124,7 @@ static int gen_pid_stat(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_status(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz);
+static int gen_pid_handles(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_control(struct procfs_entry *ent, char *buf, size_t bufsz);
 
 static size_t procfs_self_target(char *buf, size_t bufsz) {
@@ -504,6 +506,52 @@ static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz) {
                         (unsigned long)vma->start, (unsigned long)vma->end,
                         r, w, x, s, (unsigned long)vma->offset);
     }
+    return len;
+}
+
+static int gen_pid_handles(pid_t pid, char *buf, size_t bufsz) {
+    struct process *p = pid_to_proc(pid);
+    if (!p)
+        return -ENOENT;
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    int len = snprintf(buf, bufsz, "handle cap_id obj_id type rights refcount\n");
+    if (len < 0)
+        return -EINVAL;
+    if ((size_t)len >= bufsz)
+        return (int)bufsz - 1;
+
+    struct handletable *ht = p->handletable;
+    if (!ht)
+        return len;
+
+    mutex_lock(&ht->lock);
+    for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
+        if ((size_t)len >= bufsz - 1)
+            break;
+
+        struct kobj *obj = ht->entries[i].obj;
+        if (!obj)
+            continue;
+
+        int n = snprintf(buf + len, bufsz - (size_t)len,
+                         "%d %llu %u %s 0x%x %u\n", i,
+                         (unsigned long long)ht->entries[i].cap_id, obj->id,
+                         kobj_type_name(obj->type), ht->entries[i].rights,
+                         atomic_read(&obj->refcount));
+        if (n < 0) {
+            mutex_unlock(&ht->lock);
+            return -EINVAL;
+        }
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            break;
+        }
+        len += n;
+    }
+    mutex_unlock(&ht->lock);
+
     return len;
 }
 
@@ -900,6 +948,7 @@ static const struct pid_entry_def pid_entries[] = {
     {"cmdline", gen_pid_cmdline, S_IFREG | 0444},
     {"mounts",  gen_mounts,      S_IFREG | 0444},
     {"maps",    gen_pid_maps,    S_IFREG | 0444},
+    {"handles", gen_pid_handles, S_IFREG | 0444},
     {"control", NULL,            S_IFREG | 0600},
 };
 

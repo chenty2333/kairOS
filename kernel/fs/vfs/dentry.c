@@ -28,6 +28,7 @@ static inline bool dentry_kobj_is_ready(struct dentry *d);
 
 struct dentry_kobj_bridge {
     struct kobj obj;
+    struct dentry *owner;
 };
 
 static void dentry_kobj_release(struct kobj *obj) {
@@ -99,6 +100,7 @@ static void dentry_kobj_init(struct dentry *d) {
                     atomic_set(&d->kobj_state, DENTRY_KOBJ_STATE_FAILED);
                     return;
                 }
+                bridge->owner = d;
                 kobj_init(&bridge->obj, VFS_KOBJ_TYPE_DENTRY, &dentry_kobj_ops);
                 d->kobj = &bridge->obj;
                 uint32_t refs = atomic_read(&d->refcount);
@@ -124,6 +126,13 @@ struct kobj *dentry_kobj(struct dentry *d) {
     if (!dentry_kobj_is_ready(d))
         return NULL;
     return d->kobj;
+}
+
+struct dentry *dentry_from_kobj(struct kobj *obj) {
+    if (!obj || obj->type != VFS_KOBJ_TYPE_DENTRY)
+        return NULL;
+    struct dentry_kobj_bridge *bridge = (struct dentry_kobj_bridge *)obj;
+    return bridge->owner;
 }
 
 struct dentry *dentry_alloc(struct dentry *parent, const char *name) {

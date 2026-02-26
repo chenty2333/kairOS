@@ -101,9 +101,10 @@ Pseudo filesystems:
 - devfs (fs/devfs/): device filesystem
 - procfs (fs/procfs/): process information filesystem
   - exposes `/proc/mounts` and `/proc/<pid>/mounts`
+  - exposes `/proc/<pid>/handles` for per-process handle-to-kobj table snapshots
   - `/proc/self` symlink target is generated per lookup from current task pid
 - sysfs (fs/sysfs/): device model filesystem
-  - exposes `/sys/ipc` aggregated IPC observability files (`objects`, `channels`, `ports`, `transfers`) populated from live channel/port registries
+  - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers}`)
 - tmpfs (fs/tmpfs/): in-memory filesystem
 
 Special:
