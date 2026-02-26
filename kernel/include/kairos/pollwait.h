@@ -46,6 +46,9 @@ struct poll_sleep {
 
 int poll_timeout_to_deadline_ms(int timeout_ms, uint64_t *deadline_out);
 bool poll_deadline_expired(uint64_t deadline);
+int poll_block_current_ex(struct wait_queue *wq, uint64_t deadline,
+                          void *channel, struct mutex *mtx,
+                          bool interruptible);
 int poll_block_current(uint64_t deadline, void *channel);
 int poll_block_current_mutex(struct wait_queue *wq, uint64_t deadline,
                              void *channel, struct mutex *mtx);

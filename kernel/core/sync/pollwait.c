@@ -39,12 +39,9 @@ bool poll_deadline_expired(uint64_t deadline) {
     return deadline != 0 && arch_timer_get_ticks() >= deadline;
 }
 
-int poll_block_current(uint64_t deadline, void *channel) {
-    return poll_block_current_mutex(NULL, deadline, channel, NULL);
-}
-
-int poll_block_current_mutex(struct wait_queue *wq, uint64_t deadline,
-                             void *channel, struct mutex *mtx) {
+int poll_block_current_ex(struct wait_queue *wq, uint64_t deadline,
+                          void *channel, struct mutex *mtx,
+                          bool interruptible) {
     struct process *curr = proc_current();
     if (!curr)
         return -EINVAL;
@@ -64,13 +61,13 @@ int poll_block_current_mutex(struct wait_queue *wq, uint64_t deadline,
     int rc = 0;
     if (deadline) {
         if (use_poll_sleep)
-            rc = proc_sleep_on(NULL, channel, true);
+            rc = proc_sleep_on(NULL, channel, interruptible);
         else
-            rc = proc_sleep_on_mutex_timeout(wq, channel, mtx, true, deadline);
+            rc = proc_sleep_on_mutex_timeout(wq, channel, mtx, interruptible, deadline);
     } else if (mtx) {
-        rc = proc_sleep_on_mutex(wq, channel, mtx, true);
+        rc = proc_sleep_on_mutex(wq, channel, mtx, interruptible);
     } else {
-        rc = proc_sleep_on(wq, channel, true);
+        rc = proc_sleep_on(wq, channel, interruptible);
     }
 
     if (use_poll_sleep)
@@ -81,6 +78,15 @@ int poll_block_current_mutex(struct wait_queue *wq, uint64_t deadline,
     if (poll_deadline_expired(deadline))
         return -ETIMEDOUT;
     return 0;
+}
+
+int poll_block_current(uint64_t deadline, void *channel) {
+    return poll_block_current_ex(NULL, deadline, channel, NULL, true);
+}
+
+int poll_block_current_mutex(struct wait_queue *wq, uint64_t deadline,
+                             void *channel, struct mutex *mtx) {
+    return poll_block_current_ex(wq, deadline, channel, mtx, true);
 }
 
 void poll_ready_wake_one(struct wait_queue *wq, struct vnode *vn,
