@@ -6,6 +6,7 @@
 #include <kairos/clone.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
+#include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -82,11 +83,21 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
         fdtable_put(child->fdtable);
         fdtable_get(parent->fdtable);
         child->fdtable = parent->fdtable;
+        handletable_put(child->handletable);
+        handletable_get(parent->handletable);
+        child->handletable = parent->handletable;
     } else {
         struct fdtable *old_fdt = child->fdtable;
         child->fdtable = fdtable_copy(parent->fdtable);
         fdtable_put(old_fdt);
         if (!child->fdtable) {
+            proc_free(child);
+            return NULL;
+        }
+        struct handletable *old_ht = child->handletable;
+        child->handletable = handletable_copy(parent->handletable);
+        handletable_put(old_ht);
+        if (!child->handletable) {
             proc_free(child);
             return NULL;
         }

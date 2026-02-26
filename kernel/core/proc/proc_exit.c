@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/futex.h>
+#include <kairos/handle.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -78,6 +79,10 @@ noreturn void proc_exit(int status) {
     if (p->fdtable) {
         fdtable_put(p->fdtable);
         p->fdtable = NULL;
+    }
+    if (p->handletable) {
+        handletable_put(p->handletable);
+        p->handletable = NULL;
     }
     if (p->sighand) {
         sighand_put(p->sighand);

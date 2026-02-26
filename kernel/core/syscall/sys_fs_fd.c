@@ -178,6 +178,7 @@ int64_t sys_close_range(uint64_t first, uint64_t last, uint64_t flags,
             continue;
         fdt->files[fd] = NULL;
         fdt->fd_flags[fd] = 0;
+        fdt->fd_rights[fd] = 0;
         to_close[close_count++] = f;
     }
     mutex_unlock(&fdt->lock);

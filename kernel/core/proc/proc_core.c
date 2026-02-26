@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
+#include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -118,6 +119,13 @@ struct process *proc_alloc(void) {
         p->state = PROC_UNUSED;
         return NULL;
     }
+    p->handletable = handletable_alloc();
+    if (!p->handletable) {
+        fdtable_put(p->fdtable);
+        p->fdtable = NULL;
+        p->state = PROC_UNUSED;
+        return NULL;
+    }
     strcpy(p->cwd, "/");
     p->cwd_vnode = NULL;
     p->cwd_dentry = NULL;
@@ -160,6 +168,8 @@ struct process *proc_alloc(void) {
     p->group_leader = p;
 
     if (!(p->context = arch_context_alloc())) {
+        handletable_put(p->handletable);
+        p->handletable = NULL;
         fdtable_put(p->fdtable);
         p->fdtable = NULL;
         p->state = PROC_UNUSED;
@@ -214,6 +224,10 @@ void proc_free_internal(struct process *p) {
     if (p && p->fdtable) {
         fdtable_put(p->fdtable);
         p->fdtable = NULL;
+    }
+    if (p && p->handletable) {
+        handletable_put(p->handletable);
+        p->handletable = NULL;
     }
     if (p) {
         if (!list_empty(&p->thread_group)) {

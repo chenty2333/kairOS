@@ -22,6 +22,7 @@ struct vnode;
 struct dentry;
 struct mount_ns;
 struct tty_struct;
+struct handletable;
 
 /* Process exit callback */
 typedef void (*proc_exit_callback_t)(struct process *p);
@@ -31,9 +32,17 @@ typedef void (*proc_exit_callback_t)(struct process *p);
 void proc_register_exit_callback(proc_exit_callback_t callback);
 
 /* Shared file descriptor table */
+#define FD_RIGHT_READ   (1U << 0)
+#define FD_RIGHT_WRITE  (1U << 1)
+#define FD_RIGHT_IOCTL  (1U << 2)
+#define FD_RIGHT_DUP    (1U << 3)
+#define FD_RIGHTS_ALL \
+    (FD_RIGHT_READ | FD_RIGHT_WRITE | FD_RIGHT_IOCTL | FD_RIGHT_DUP)
+
 struct fdtable {
     struct file *files[CONFIG_MAX_FILES_PER_PROC];
     uint32_t fd_flags[CONFIG_MAX_FILES_PER_PROC];
+    uint32_t fd_rights[CONFIG_MAX_FILES_PER_PROC];
     struct mutex lock;
     atomic_t refcount;
 };
@@ -111,6 +120,7 @@ struct process {
     struct mm_struct *mm;
     void *active_tf; /* trap frame while running in trap/syscall context */
     struct fdtable *fdtable;
+    struct handletable *handletable;
     char cwd[CONFIG_PATH_MAX];
     struct vnode *cwd_vnode;
     struct dentry *cwd_dentry;
@@ -411,6 +421,11 @@ struct process *kthread_create_joinable(int (*fn)(void *), void *arg,
 int fd_alloc(struct process *p, struct file *file);
 int fd_alloc_flags(struct process *p, struct file *file, uint32_t fd_flags);
 struct file *fd_get(struct process *p, int fd);
+int fd_get_required(struct process *p, int fd, uint32_t required_rights,
+                    struct file **out_file);
+int fd_get_rights(struct process *p, int fd, uint32_t *out_rights);
+int fd_limit_rights(struct process *p, int fd, uint32_t rights_mask,
+                    uint32_t *out_rights);
 int fd_close(struct process *p, int fd);
 int fd_dup(struct process *p, int oldfd);
 int fd_dup2(struct process *p, int oldfd, int newfd);

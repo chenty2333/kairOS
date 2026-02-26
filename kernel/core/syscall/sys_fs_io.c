@@ -19,6 +19,17 @@ static inline int sysfs_abi_int32(uint64_t v) {
     return (int32_t)(uint32_t)v;
 }
 
+static bool sysfs_console_fallback_allowed(int fd) {
+    if (fd != 1 && fd != 2)
+        return false;
+    struct file *probe = fd_get(proc_current(), fd);
+    if (probe) {
+        file_put(probe);
+        return false;
+    }
+    return true;
+}
+
 /**
  * sys_read_write_file - perform IO on an already-resolved file pointer.
  * Caller holds a reference on @f; this function does NOT release it.
@@ -70,11 +81,13 @@ static int64_t sys_read_write_file(struct file *f, uint64_t buf, uint64_t count,
 static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
                               bool is_write) {
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
+    uint32_t req_rights = is_write ? FD_RIGHT_WRITE : FD_RIGHT_READ;
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), kfd, req_rights, &f);
 
-    if (!f) {
+    if (fr < 0) {
         /* Fallback: early console for stdout/stderr without file */
-        if (is_write && (kfd == 1 || kfd == 2)) {
+        if (is_write && sysfs_console_fallback_allowed(kfd)) {
             uint8_t kbuf[512];
             size_t done = 0;
             while (done < count) {
@@ -89,7 +102,7 @@ static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
             }
             return (int64_t)done;
         }
-        return -EBADF;
+        return fr;
     }
 
     int64_t ret = sys_read_write_file(f, buf, count, is_write);
@@ -138,9 +151,11 @@ static int64_t sys_pread_write(uint64_t fd, uint64_t buf, uint64_t count,
         return -EINVAL;
 
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    uint32_t req_rights = is_write ? FD_RIGHT_WRITE : FD_RIGHT_READ;
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), kfd, req_rights, &f);
+    if (fr < 0)
+        return fr;
     if (!f->vnode || f->vnode->type == VNODE_PIPE) {
         file_put(f);
         return -ESPIPE;
@@ -249,11 +264,12 @@ int64_t sys_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
         return -EINVAL;
 
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f) {
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), kfd, FD_RIGHT_WRITE, &f);
+    if (fr < 0) {
         /* Fallback for stdout/stderr without file — delegate per-iov */
-        if (kfd != 1 && kfd != 2)
-            return -EBADF;
+        if (!sysfs_console_fallback_allowed(kfd))
+            return fr;
         size_t total = 0;
         for (size_t i = 0; i < iovcnt; i++) {
             struct iovec iov;
@@ -307,9 +323,10 @@ int64_t sys_readv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
         return -EINVAL;
 
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), kfd, FD_RIGHT_READ, &f);
+    if (fr < 0)
+        return fr;
 
     size_t total = 0;
     for (size_t i = 0; i < iovcnt; i++) {
@@ -345,9 +362,11 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
         return -EINVAL;
 
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    uint32_t req_rights = is_write ? FD_RIGHT_WRITE : FD_RIGHT_READ;
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), kfd, req_rights, &f);
+    if (fr < 0)
+        return fr;
     if (!f->vnode || f->vnode->type == VNODE_PIPE) {
         file_put(f);
         return -ESPIPE;
@@ -500,13 +519,15 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
     struct process *p = proc_current();
     int kfd_in = sysfs_abi_int32(fd_in);
     int kfd_out = sysfs_abi_int32(fd_out);
-    struct file *fin = fd_get(p, kfd_in);
-    if (!fin)
-        return -EBADF;
-    struct file *fout = fd_get(p, kfd_out);
-    if (!fout) {
+    struct file *fin = NULL;
+    int fr = fd_get_required(p, kfd_in, FD_RIGHT_READ, &fin);
+    if (fr < 0)
+        return fr;
+    struct file *fout = NULL;
+    fr = fd_get_required(p, kfd_out, FD_RIGHT_WRITE, &fout);
+    if (fr < 0) {
         file_put(fin);
-        return -EBADF;
+        return fr;
     }
 
     int in_accmode = (int)(fin->flags & O_ACCMODE);

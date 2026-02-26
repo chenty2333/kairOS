@@ -82,6 +82,51 @@ int64_t sys_kairos_handle_duplicate(uint64_t handle, uint64_t rights_mask,
     return 0;
 }
 
+int64_t sys_kairos_cap_rights_get(uint64_t fd, uint64_t out_rights_ptr,
+                                  uint64_t a2, uint64_t a3, uint64_t a4,
+                                  uint64_t a5) {
+    (void)a2;
+    (void)a3;
+    (void)a4;
+    (void)a5;
+
+    if (!out_rights_ptr)
+        return -EFAULT;
+
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+
+    uint32_t rights = 0;
+    int rc = fd_get_rights(p, syshandle_abi_i32(fd), &rights);
+    if (rc < 0)
+        return rc;
+
+    uint64_t out = (uint64_t)rights;
+    if (copy_to_user((void *)out_rights_ptr, &out, sizeof(out)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+int64_t sys_kairos_cap_rights_limit(uint64_t fd, uint64_t rights_mask,
+                                    uint64_t flags, uint64_t a3, uint64_t a4,
+                                    uint64_t a5) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+
+    if ((uint32_t)flags != 0)
+        return -EINVAL;
+    if (rights_mask & ~(uint64_t)FD_RIGHTS_ALL)
+        return -EINVAL;
+
+    struct process *p = proc_current();
+    if (!p)
+        return -EINVAL;
+
+    return fd_limit_rights(p, syshandle_abi_i32(fd), (uint32_t)rights_mask, NULL);
+}
+
 int64_t sys_kairos_channel_create(uint64_t out0_ptr, uint64_t out1_ptr,
                                   uint64_t flags, uint64_t a3, uint64_t a4,
                                   uint64_t a5) {

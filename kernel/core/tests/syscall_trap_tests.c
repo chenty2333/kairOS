@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/futex.h>
 #include <kairos/handle.h>
+#include <kairos/ioctl.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -1973,6 +1974,105 @@ static void test_get_current_trapframe_process_fallback(void) {
     cpu->current_tf = saved_cpu_tf;
 }
 
+static void test_kairos_cap_rights_fd_syscalls(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "cap_rights_fd user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    int32_t *u_fds = (int32_t *)user_map_ptr(&um, 0x40);
+    uint64_t *u_rights = (uint64_t *)user_map_ptr(&um, 0x80);
+    int *u_on = (int *)user_map_ptr(&um, 0xC0);
+    uint8_t *u_dummy = (uint8_t *)user_map_ptr(&um, 0x100);
+    test_check(u_fds && u_rights && u_on && u_dummy, "cap_rights_fd user ptrs");
+    if (!u_fds || !u_rights || !u_on || !u_dummy)
+        goto out;
+
+    int32_t fds[2] = {-1, -1};
+    int64_t ret64 = sys_pipe2((uint64_t)u_fds, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "cap_rights_fd pipe2");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(fds, u_fds, sizeof(fds));
+    test_check(rc == 0, "cap_rights_fd copy pipe fds");
+    if (rc < 0)
+        goto out_close;
+
+    int on = 1;
+    rc = copy_to_user(u_on, &on, sizeof(on));
+    test_check(rc == 0, "cap_rights_fd copy ioctl arg");
+    if (rc < 0)
+        goto out_close;
+
+    ret64 = sys_kairos_cap_rights_get((uint64_t)fds[1], (uint64_t)u_rights, 0, 0,
+                                      0, 0);
+    test_check(ret64 == 0, "cap_rights_fd get write_end rights");
+    uint64_t wr_rights = 0;
+    if (ret64 == 0) {
+        rc = copy_from_user(&wr_rights, u_rights, sizeof(wr_rights));
+        test_check(rc == 0, "cap_rights_fd read write_end rights");
+        if (rc == 0) {
+            test_check((wr_rights & FD_RIGHT_WRITE) != 0,
+                       "cap_rights_fd write_end has write");
+            test_check((wr_rights & FD_RIGHT_IOCTL) != 0,
+                       "cap_rights_fd write_end has ioctl");
+        }
+    }
+
+    ret64 = sys_kairos_cap_rights_limit((uint64_t)fds[1], FD_RIGHT_IOCTL, 0, 0, 0,
+                                        0);
+    test_check(ret64 == 0, "cap_rights_fd limit write_end ioctl_only");
+
+    ret64 = sys_kairos_cap_rights_get((uint64_t)fds[1], (uint64_t)u_rights, 0, 0,
+                                      0, 0);
+    test_check(ret64 == 0, "cap_rights_fd get write_end rights limited");
+    if (ret64 == 0) {
+        rc = copy_from_user(&wr_rights, u_rights, sizeof(wr_rights));
+        test_check(rc == 0, "cap_rights_fd read write_end rights limited");
+        if (rc == 0) {
+            test_check((wr_rights & FD_RIGHT_WRITE) == 0,
+                       "cap_rights_fd write_end write removed");
+            test_check((wr_rights & FD_RIGHT_IOCTL) != 0,
+                       "cap_rights_fd write_end ioctl kept");
+        }
+    }
+
+    ret64 = sys_ioctl((uint64_t)fds[1], (uint64_t)FIONBIO, (uint64_t)u_on, 0, 0,
+                      0);
+    test_check(ret64 == 0, "cap_rights_fd ioctl allowed");
+
+    ret64 = sys_write((uint64_t)fds[1], (uint64_t)u_dummy, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "cap_rights_fd write denied after limit");
+
+    ret64 = sys_kairos_cap_rights_limit((uint64_t)fds[0], FD_RIGHT_IOCTL, 0, 0, 0,
+                                        0);
+    test_check(ret64 == 0, "cap_rights_fd limit read_end ioctl_only");
+
+    ret64 = sys_read((uint64_t)fds[0], (uint64_t)u_dummy, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "cap_rights_fd read denied after limit");
+
+    ret64 = sys_ioctl((uint64_t)fds[0], (uint64_t)FIONBIO, (uint64_t)u_on, 0, 0,
+                      0);
+    test_check(ret64 == 0, "cap_rights_fd read_end ioctl allowed");
+
+    ret64 = sys_kairos_cap_rights_limit((uint64_t)fds[0], (1ULL << 20), 0, 0, 0,
+                                        0);
+    test_check(ret64 == -EINVAL, "cap_rights_fd limit rejects unknown bits");
+
+out_close:
+    if (fds[0] >= 0)
+        (void)sys_close((uint64_t)fds[0], 0, 0, 0, 0, 0);
+    if (fds[1] >= 0)
+        (void)sys_close((uint64_t)fds[1], 0, 0, 0, 0, 0);
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_kairos_channel_port_syscalls(void) {
     struct user_map_ctx um = {0};
     bool mapped = false;
@@ -2378,6 +2478,7 @@ int run_syscall_trap_tests(void) {
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();
     test_get_current_trapframe_process_fallback();
+    test_kairos_cap_rights_fd_syscalls();
     test_kairos_channel_port_syscalls();
     test_kairos_channel_port_stress_mpmc();
     test_syscall_user_e2e();

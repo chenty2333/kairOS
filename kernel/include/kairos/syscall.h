@@ -380,5 +380,25 @@ int64_t sys_epoll_pwait2(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 int64_t sys_epoll_create1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_epoll_ctl(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 int64_t sys_epoll_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+int64_t sys_kairos_handle_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                uint64_t);
+int64_t sys_kairos_handle_duplicate(uint64_t, uint64_t, uint64_t, uint64_t,
+                                    uint64_t, uint64_t);
+int64_t sys_kairos_channel_create(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t);
+int64_t sys_kairos_channel_send(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                uint64_t);
+int64_t sys_kairos_channel_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                uint64_t);
+int64_t sys_kairos_port_create(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                               uint64_t);
+int64_t sys_kairos_port_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                             uint64_t);
+int64_t sys_kairos_port_wait(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                             uint64_t);
+int64_t sys_kairos_cap_rights_get(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t);
+int64_t sys_kairos_cap_rights_limit(uint64_t, uint64_t, uint64_t, uint64_t,
+                                    uint64_t, uint64_t);
 
 #endif
