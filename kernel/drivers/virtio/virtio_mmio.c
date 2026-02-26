@@ -156,7 +156,8 @@ static int virtio_mmio_probe(struct device *dev) {
     (void)platform_device_request_irq(dev, 0, virtio_mmio_intr, mdev,
                                       IRQ_FLAG_TRIGGER_LEVEL);
 
-    pr_info("virtio-mmio: found device %d at %p, irq %d\n", virtio_id, base, mdev->irq);
+    pr_debug("virtio-mmio: found device %d at %p, irq %d\n", virtio_id, base,
+             mdev->irq);
 
     int ret = virtio_device_register(&mdev->vdev);
     if (ret < 0) {

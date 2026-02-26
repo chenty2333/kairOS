@@ -21,7 +21,7 @@ int fw_register_desc(struct fw_device_desc *desc) {
     spin_lock(&fw_lock);
     list_add_tail(&desc->list, &fw_desc_list);
     spin_unlock(&fw_lock);
-    pr_info("fw: registered %s (%s)\n", desc->name, desc->compatible);
+    pr_debug("fw: registered %s (%s)\n", desc->name, desc->compatible);
     return 0;
 }
 

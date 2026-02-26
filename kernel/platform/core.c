@@ -927,9 +927,9 @@ int platform_irq_domain_add_mapped_fwnode(const char *name,
     }
 
     if (inserted) {
-        pr_info("irq: domain '%s' fwnode=0x%x virq[%u..%u] mapped\n",
-                name ? name : "unnamed", fwnode, resolved_virq_base,
-                resolved_virq_base + nr_irqs - 1);
+        pr_debug("irq: domain '%s' fwnode=0x%x virq[%u..%u] mapped\n",
+                 name ? name : "unnamed", fwnode, resolved_virq_base,
+                 resolved_virq_base + nr_irqs - 1);
     }
     return 0;
 }

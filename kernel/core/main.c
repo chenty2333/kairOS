@@ -48,7 +48,7 @@ void secondary_cpu_main(unsigned long cpu_id) {
         secondary_cpu_online_map[cpu_id] = 1;
     __sync_fetch_and_add(&secondary_cpus_online, 1);
 #if !defined(ARCH_aarch64)
-    pr_info("CPU %lu: online and ready\n", cpu_id);
+    pr_debug("CPU %lu: online and ready\n", cpu_id);
 #endif
     arch_irq_enable();
     while (1) {
@@ -85,7 +85,7 @@ static void smp_init(void) {
         if (rc == 0) {
             started++;
             requested[cpu] = true;
-            pr_info("SMP: cpu%d start requested\n", cpu);
+            pr_debug("SMP: cpu%d start requested\n", cpu);
         } else {
             start_fail++;
             pr_warn("SMP: cpu%d start failed rc=%d\n", cpu, rc);
@@ -160,59 +160,57 @@ static void log_limine_boot_markers(void) {
     const struct boot_info *bi = boot_info_get();
     if (!bi)
         return;
-    const char *exec_path = bi->limine_executable_path ? bi->limine_executable_path : "-";
-    const char *exec_string = bi->limine_executable_string ? bi->limine_executable_string : "-";
-
-    pr_info("boot: limine firmware type=%llu rev=%llu\n",
-            (unsigned long long)bi->limine_firmware_type,
-            (unsigned long long)bi->limine_firmware_type_revision);
+    pr_debug("boot: limine firmware type=%llu rev=%llu\n",
+             (unsigned long long)bi->limine_firmware_type,
+             (unsigned long long)bi->limine_firmware_type_revision);
     if (bi->limine_loaded_base_revision_valid) {
-        pr_info("boot: limine loaded base revision=%llu\n",
-                (unsigned long long)bi->limine_loaded_base_revision);
+        pr_debug("boot: limine loaded base revision=%llu\n",
+                 (unsigned long long)bi->limine_loaded_base_revision);
     }
-    pr_info("boot: limine paging mode=%llu rev=%llu\n",
-            (unsigned long long)bi->limine_paging_mode,
-            (unsigned long long)bi->limine_paging_mode_revision);
-    pr_info("boot: limine mp rev=%llu flags=0x%llx\n",
-            (unsigned long long)bi->limine_mp_revision,
-            (unsigned long long)bi->limine_mp_flags);
+    pr_debug("boot: limine paging mode=%llu rev=%llu\n",
+             (unsigned long long)bi->limine_paging_mode,
+             (unsigned long long)bi->limine_paging_mode_revision);
+    pr_debug("boot: limine mp rev=%llu flags=0x%llx\n",
+             (unsigned long long)bi->limine_mp_revision,
+             (unsigned long long)bi->limine_mp_flags);
     if (bi->limine_executable_revision || bi->limine_executable_path ||
         bi->limine_executable_string) {
-        pr_info("boot: limine executable media=%llu part=%llu path=%s string=%s rev=%llu\n",
-                (unsigned long long)bi->limine_executable_media_type,
-                (unsigned long long)bi->limine_executable_partition_index,
-                exec_path, exec_string,
-                (unsigned long long)bi->limine_executable_revision);
+        pr_debug("boot: limine executable media=%llu part=%llu path=%s string=%s rev=%llu\n",
+                 (unsigned long long)bi->limine_executable_media_type,
+                 (unsigned long long)bi->limine_executable_partition_index,
+                 bi->limine_executable_path ? bi->limine_executable_path : "-",
+                 bi->limine_executable_string ? bi->limine_executable_string : "-",
+                 (unsigned long long)bi->limine_executable_revision);
     }
     if (bi->boot_timestamp_revision) {
-        pr_info("boot: limine date_at_boot=%lld rev=%llu\n",
-                (long long)bi->boot_timestamp,
-                (unsigned long long)bi->boot_timestamp_revision);
+        pr_debug("boot: limine date_at_boot=%lld rev=%llu\n",
+                 (long long)bi->boot_timestamp,
+                 (unsigned long long)bi->boot_timestamp_revision);
     }
     if (bi->bootloader_perf_revision) {
-        pr_info("boot: limine perf reset=%lluus init=%lluus exec=%lluus rev=%llu\n",
-                (unsigned long long)bi->bootloader_reset_usec,
-                (unsigned long long)bi->bootloader_init_usec,
-                (unsigned long long)bi->bootloader_exec_usec,
-                (unsigned long long)bi->bootloader_perf_revision);
+        pr_debug("boot: limine perf reset=%lluus init=%lluus exec=%lluus rev=%llu\n",
+                 (unsigned long long)bi->bootloader_reset_usec,
+                 (unsigned long long)bi->bootloader_init_usec,
+                 (unsigned long long)bi->bootloader_exec_usec,
+                 (unsigned long long)bi->bootloader_perf_revision);
     }
     if (bi->smbios_revision || bi->smbios_entry_32 || bi->smbios_entry_64) {
-        pr_info("boot: limine smbios rev=%llu entry32=%p entry64=%p\n",
-                (unsigned long long)bi->smbios_revision,
-                bi->smbios_entry_32,
-                bi->smbios_entry_64);
+        pr_debug("boot: limine smbios rev=%llu entry32=%p entry64=%p\n",
+                 (unsigned long long)bi->smbios_revision,
+                 bi->smbios_entry_32,
+                 bi->smbios_entry_64);
     }
     if (bi->efi_memmap_revision || bi->efi_memmap || bi->efi_memmap_size) {
-        pr_info("boot: limine efi memmap rev=%llu size=%llu desc_size=%llu desc_ver=%llu\n",
-                (unsigned long long)bi->efi_memmap_revision,
-                (unsigned long long)bi->efi_memmap_size,
-                (unsigned long long)bi->efi_memmap_desc_size,
-                (unsigned long long)bi->efi_memmap_desc_version);
+        pr_debug("boot: limine efi memmap rev=%llu size=%llu desc_size=%llu desc_ver=%llu\n",
+                 (unsigned long long)bi->efi_memmap_revision,
+                 (unsigned long long)bi->efi_memmap_size,
+                 (unsigned long long)bi->efi_memmap_desc_size,
+                 (unsigned long long)bi->efi_memmap_desc_version);
     }
     if (bi->limine_riscv_bsp_hartid_valid) {
-        pr_info("boot: limine riscv bsp hartid=%llu rev=%llu\n",
-                (unsigned long long)bi->limine_riscv_bsp_hartid,
-                (unsigned long long)bi->limine_riscv_bsp_hartid_revision);
+        pr_debug("boot: limine riscv bsp hartid=%llu rev=%llu\n",
+                 (unsigned long long)bi->limine_riscv_bsp_hartid,
+                 (unsigned long long)bi->limine_riscv_bsp_hartid_revision);
     }
 }
 

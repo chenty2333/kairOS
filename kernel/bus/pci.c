@@ -4,6 +4,7 @@
 
 #include <kairos/pci.h>
 #include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/iommu.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>
@@ -748,6 +749,7 @@ static void pci_decode_bars(struct pci_host *host, struct pci_device *pdev,
 /*  PCI class name helper                                              */
 /* ------------------------------------------------------------------ */
 
+#if CONFIG_DEBUG
 static const char *pci_class_name(uint8_t base_class, uint8_t sub_class)
 {
     if (base_class == 0x06 && sub_class == 0x00)
@@ -766,6 +768,7 @@ static const char *pci_class_name(uint8_t base_class, uint8_t sub_class)
         return "serial-bus";
     return "device";
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  pci_scan_bus — enumerate all devices on the PCI bus                */
@@ -799,8 +802,6 @@ int pci_scan_bus(struct pci_host *host)
                 if (f == 0 && (hdr_type & PCI_HEADER_MULTI_FUNC))
                     max_func = 8;
 
-                uint8_t base_class = (uint8_t)(class_rev >> 24);
-                uint8_t sub_class = (uint8_t)(class_rev >> 16);
                 uint8_t irq_pin = pci_read_config_8(
                     host, (uint8_t)b, (uint8_t)s, (uint8_t)f, PCI_IRQ_PIN);
 
@@ -867,9 +868,14 @@ int pci_scan_bus(struct pci_host *host)
                     pr_warn("pci: iommu attach failed (%d) for %02x:%02x.%x\n",
                             iommu_ret, b, s, f);
 
-                pr_info("pci: %02x:%02x.%x %04x:%04x class %06x (%s)\n",
-                        b, s, f, vendor, device,
-                        pdev->class_code, pci_class_name(base_class, sub_class));
+#if CONFIG_DEBUG
+                uint8_t base_class = (uint8_t)(class_rev >> 24);
+                uint8_t sub_class = (uint8_t)(class_rev >> 16);
+                pr_debug("pci: %02x:%02x.%x %04x:%04x class %06x (%s)\n",
+                         b, s, f, vendor, device,
+                         pdev->class_code,
+                         pci_class_name(base_class, sub_class));
+#endif
 
                 device_register(&pdev->dev);
                 count++;

@@ -1270,8 +1270,8 @@ static void fdt_handle_virtio_mmio(
         desc->num_resources = num_res;
         desc->fw_data = info;
 
-        pr_info("fdt: found virtio-mmio @ %p (irq %d)\n",
-                (void *)base, irq);
+        pr_debug("fdt: found virtio-mmio @ %p (irq %d)\n",
+                 (void *)base, irq);
         fw_register_desc(desc);
     } else {
         kfree(desc);
@@ -1330,8 +1330,8 @@ static void fdt_handle_pci_ecam(
     desc->resources = res;
     desc->num_resources = 2;
 
-    pr_info("fdt: found pci-host-ecam-generic @ %p size 0x%lx irq_base %u\n",
-            (void *)base, (unsigned long)size, irq_base);
+    pr_debug("fdt: found pci-host-ecam-generic @ %p size 0x%lx irq_base %u\n",
+             (void *)base, (unsigned long)size, irq_base);
     fw_register_desc(desc);
 }
 
@@ -1400,8 +1400,8 @@ static void fdt_handle_irq_controller(
     desc->num_resources = num_res;
     desc->fw_data = info;
 
-    pr_info("fdt: found cascaded irq controller %s fwnode=0x%x parent_irq=%d\n",
-            first_compat, ctx->phandle, parent_irq);
+    pr_debug("fdt: found cascaded irq controller %s fwnode=0x%x parent_irq=%d\n",
+             first_compat, ctx->phandle, parent_irq);
     fw_register_desc(desc);
 }
 
