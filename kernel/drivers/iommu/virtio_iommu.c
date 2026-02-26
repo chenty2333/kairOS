@@ -123,6 +123,7 @@ struct virtio_iommu_state {
     size_t granule;
     bool map_unmap;
     bool input_range;
+    bool faulted;
     bool ready;
     spinlock_t req_lock;
     spinlock_t domain_lock;
@@ -130,6 +131,7 @@ struct virtio_iommu_state {
 };
 
 static struct virtio_iommu_state virtio_iommu_state;
+static const struct iommu_hw_ops virtio_iommu_hw_ops;
 
 struct virtio_iommu_rebind_ctx {
     struct virtio_iommu_state *state;
@@ -174,6 +176,18 @@ static int virtio_iommu_status_to_errno(uint8_t status) {
     default:
         return -EIO;
     }
+}
+
+static void virtio_iommu_mark_faulted(struct virtio_iommu_state *state,
+                                      uint8_t req_type, int ret) {
+    if (!state)
+        return;
+    if (__atomic_exchange_n(&state->faulted, true, __ATOMIC_ACQ_REL))
+        return;
+
+    iommu_unregister_hw_ops(&virtio_iommu_hw_ops);
+    pr_warn("virtio-iommu: backend faulted req_type=%u ret=%d, provider disabled\n",
+            req_type, ret);
 }
 
 static int virtio_iommu_endpoint_from_dev(struct device *dev, uint32_t *endpoint) {
@@ -256,8 +270,8 @@ static void virtio_iommu_drain_used_locked(struct virtio_iommu_state *state) {
 static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
                                    size_t req_size, size_t write_desc_offset,
                                    uint8_t *status_out) {
-    if (!state || !state->ready || !state->vdev || !state->req_vq || !req ||
-        !req_size || write_desc_offset >= req_size) {
+    if (!state || !state->ready || state->faulted || !state->vdev ||
+        !state->req_vq || !req || !req_size || write_desc_offset >= req_size) {
         return -EINVAL;
     }
 
@@ -329,6 +343,7 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
     if (wait_ret < 0) {
         pr_warn("virtio-iommu: request timeout type=%u\n",
                 *((uint8_t *)cookie->req_buf));
+        virtio_iommu_mark_faulted(state, *((uint8_t *)cookie->req_buf), wait_ret);
         virtio_iommu_req_cookie_put(cookie);
         return wait_ret;
     }
@@ -433,7 +448,7 @@ static void virtio_iommu_domain_release(struct iommu_domain *domain) {
     if (!ctx)
         return;
 
-    if (ctx->state && ctx->state->ready) {
+    if (ctx->state && ctx->state->ready && !ctx->state->faulted) {
         int ret = virtio_iommu_send_detach(ctx);
         if (ret < 0) {
             pr_warn("virtio-iommu: detach failed domain=%u endpoint=0x%x ret=%d\n",
@@ -464,7 +479,8 @@ static const struct iommu_domain_ops virtio_iommu_domain_ops = {
 
 static int virtio_iommu_provider_match(struct device *dev, void *priv) {
     struct virtio_iommu_state *state = priv;
-    if (!state || !state->ready || !state->map_unmap || !state->vdev || !dev)
+    if (!state || !state->ready || state->faulted || !state->map_unmap ||
+        !state->vdev || !dev)
         return 0;
 
     if (dev == &state->vdev->dev)
@@ -478,7 +494,7 @@ static struct iommu_domain *virtio_iommu_provider_alloc(struct device *dev,
                                                          bool *owned,
                                                          void *priv) {
     struct virtio_iommu_state *state = priv;
-    if (!state || !state->ready || !state->map_unmap || !dev)
+    if (!state || !state->ready || state->faulted || !state->map_unmap || !dev)
         return NULL;
 
     uint32_t endpoint = 0;
@@ -550,7 +566,7 @@ static const struct iommu_hw_ops virtio_iommu_hw_ops = {
 
 static int virtio_iommu_rebind_pci_dev(struct device *dev, void *arg) {
     struct virtio_iommu_rebind_ctx *ctx = arg;
-    if (!ctx || !ctx->state || !ctx->state->ready || !dev)
+    if (!ctx || !ctx->state || !ctx->state->ready || ctx->state->faulted || !dev)
         return 0;
     if (dev->bus != &pci_bus_type)
         return 0;
@@ -675,6 +691,7 @@ static int virtio_iommu_probe(struct virtio_device *vdev) {
     state->granule = granule;
     state->map_unmap = true;
     state->input_range = input_range;
+    state->faulted = false;
     spin_init(&state->req_lock);
     spin_init(&state->domain_lock);
     INIT_LIST_HEAD(&state->domains);
@@ -721,6 +738,7 @@ static void virtio_iommu_remove(struct virtio_device *vdev) {
         return;
 
     iommu_unregister_hw_ops(&virtio_iommu_hw_ops);
+    state->faulted = true;
     state->ready = false;
 
     bool irq_flags;
