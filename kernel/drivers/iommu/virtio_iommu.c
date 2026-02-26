@@ -362,6 +362,10 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
     while ((ret = virtqueue_add_buf(state->req_vq, desc, ARRAY_SIZE(desc),
                                     cookie)) == -ENOSPC) {
         virtio_iommu_drain_used_locked(state);
+        if ((arch_timer_ticks() - wait_start) > timeout_ticks) {
+            ret = -ETIMEDOUT;
+            break;
+        }
         arch_cpu_relax();
     }
 
@@ -379,24 +383,25 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
     }
 
     spin_unlock_irqrestore(&state->req_lock, irq_flags);
+    if (ret == -ETIMEDOUT || wait_ret == -ETIMEDOUT) {
+        int timeout_ret = -ETIMEDOUT;
+        __atomic_add_fetch(&state->req_timeout_count, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&state->req_error_count, 1, __ATOMIC_RELAXED);
+        pr_warn("virtio-iommu: request timeout type=%u phase=%s\n", req_type,
+                (ret == -ETIMEDOUT) ? "enqueue" : "complete");
+        __atomic_store_n(&state->last_req_type, req_type, __ATOMIC_RELAXED);
+        __atomic_store_n(&state->last_req_ret, timeout_ret, __ATOMIC_RELAXED);
+        virtio_iommu_mark_faulted(state, req_type, timeout_ret);
+        virtio_iommu_req_cookie_put(cookie);
+        return timeout_ret;
+    }
+
     if (ret < 0) {
         __atomic_add_fetch(&state->req_error_count, 1, __ATOMIC_RELAXED);
         __atomic_store_n(&state->last_req_type, req_type, __ATOMIC_RELAXED);
         __atomic_store_n(&state->last_req_ret, ret, __ATOMIC_RELAXED);
         virtio_iommu_req_cookie_put(cookie);
         return ret;
-    }
-
-    if (wait_ret < 0) {
-        __atomic_add_fetch(&state->req_timeout_count, 1, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&state->req_error_count, 1, __ATOMIC_RELAXED);
-        pr_warn("virtio-iommu: request timeout type=%u\n",
-                *((uint8_t *)cookie->req_buf));
-        __atomic_store_n(&state->last_req_type, req_type, __ATOMIC_RELAXED);
-        __atomic_store_n(&state->last_req_ret, wait_ret, __ATOMIC_RELAXED);
-        virtio_iommu_mark_faulted(state, req_type, wait_ret);
-        virtio_iommu_req_cookie_put(cookie);
-        return wait_ret;
     }
 
     uint8_t status = *((uint8_t *)cookie->req_buf + req_size -
@@ -499,6 +504,8 @@ static void virtio_iommu_domain_unmap(struct iommu_domain *domain, dma_addr_t io
 
 static int virtio_iommu_domain_set_fault_policy(
     struct iommu_domain *domain __unused, enum iommu_fault_policy policy) {
+    if (policy == IOMMU_FAULT_POLICY_REPORT)
+        return 0;
     if (policy == IOMMU_FAULT_POLICY_DISABLE)
         return 0;
     return -EOPNOTSUPP;
