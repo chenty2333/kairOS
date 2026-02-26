@@ -421,6 +421,8 @@ struct process *kthread_create_joinable(int (*fn)(void *), void *arg,
 /* FD management */
 int fd_alloc(struct process *p, struct file *file);
 int fd_alloc_flags(struct process *p, struct file *file, uint32_t fd_flags);
+int fd_alloc_rights(struct process *p, struct file *file, uint32_t fd_flags,
+                    uint32_t fd_rights);
 struct file *fd_get(struct process *p, int fd);
 int fd_get_required(struct process *p, int fd, uint32_t required_rights,
                     struct file **out_file);

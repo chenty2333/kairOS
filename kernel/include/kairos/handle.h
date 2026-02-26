@@ -10,6 +10,8 @@
 #include <kairos/types.h>
 
 struct process;
+struct file;
+struct vnode;
 
 #ifndef CONFIG_MAX_HANDLES_PER_PROC
 #define CONFIG_MAX_HANDLES_PER_PROC 256
@@ -17,6 +19,7 @@ struct process;
 
 #define KOBJ_TYPE_CHANNEL 1U
 #define KOBJ_TYPE_PORT    2U
+#define KOBJ_TYPE_FILE    3U
 
 #define KRIGHT_READ      (1U << 0)
 #define KRIGHT_WRITE     (1U << 1)
@@ -28,6 +31,8 @@ struct process;
 #define KRIGHT_CHANNEL_DEFAULT \
     (KRIGHT_READ | KRIGHT_WRITE | KRIGHT_TRANSFER | KRIGHT_DUPLICATE)
 #define KRIGHT_PORT_DEFAULT (KRIGHT_WAIT | KRIGHT_MANAGE | KRIGHT_DUPLICATE)
+#define KRIGHT_FILE_DEFAULT \
+    (KRIGHT_READ | KRIGHT_WRITE | KRIGHT_TRANSFER | KRIGHT_DUPLICATE)
 
 #define KCHANNEL_OPT_NONBLOCK (1U << 0)
 
@@ -118,5 +123,11 @@ int kport_bind_channel(struct kobj *port_obj, struct kobj *channel_obj,
                        uint64_t key, uint32_t signals);
 int kport_wait(struct kobj *port_obj, struct kairos_port_packet_user *out,
                uint64_t timeout_ns, uint32_t options);
+int kport_poll_ready(struct kobj *port_obj, bool *out_ready);
+int kport_poll_attach_vnode(struct kobj *port_obj, struct vnode *vn);
+int kport_poll_detach_vnode(struct kobj *port_obj, struct vnode *vn);
+
+int kfile_create(struct file *file, struct kobj **out);
+int kfile_get_file(struct kobj *obj, struct file **out_file);
 
 #endif

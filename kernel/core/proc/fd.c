@@ -86,8 +86,24 @@ int fd_alloc(struct process *p, struct file *file) {
 }
 
 int fd_alloc_flags(struct process *p, struct file *file, uint32_t fd_flags) {
+    return fd_alloc_rights(p, file, fd_flags, 0);
+}
+
+int fd_alloc_rights(struct process *p, struct file *file, uint32_t fd_flags,
+                    uint32_t fd_rights) {
     if (!p || !file || !p->fdtable)
         return -EINVAL;
+
+    uint32_t rights = fd_rights;
+    if (rights == 0) {
+        rights = fd_rights_default_from_file(file);
+    } else {
+        if (rights & ~FD_RIGHTS_ALL)
+            return -EINVAL;
+        rights &= fd_rights_default_from_file(file);
+        if (rights == 0)
+            return -EACCES;
+    }
 
     struct fdtable *fdt = p->fdtable;
     mutex_lock(&fdt->lock);
@@ -95,7 +111,7 @@ int fd_alloc_flags(struct process *p, struct file *file, uint32_t fd_flags) {
         if (!fdt->files[fd]) {
             fdt->files[fd] = file;
             fdt->fd_flags[fd] = fd_flags;
-            fdt->fd_rights[fd] = fd_rights_default_from_file(file);
+            fdt->fd_rights[fd] = rights;
             mutex_unlock(&fdt->lock);
             return fd;
         }

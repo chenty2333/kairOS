@@ -7,6 +7,7 @@
 #include <kairos/handle.h>
 #include <kairos/ioctl.h>
 #include <kairos/mm.h>
+#include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -2101,6 +2102,7 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t h2a = -1;
     int32_t h2b = -1;
     int32_t port = -1;
+    int32_t port_fd = -1;
     int32_t recv_h = -1;
     int32_t dup_h = -1;
 
@@ -2123,12 +2125,14 @@ static void test_kairos_channel_port_syscalls(void) {
         (struct kairos_port_packet_user *)user_map_ptr(&um, 0x100);
     char *u_send_bytes = (char *)user_map_ptr(&um, 0x180);
     char *u_recv_bytes = (char *)user_map_ptr(&um, 0x200);
+    struct pollfd *u_pollfd = (struct pollfd *)user_map_ptr(&um, 0x240);
     test_check(u_h0 && u_h1 && u_hout && u_send_handles && u_recv_handles &&
                    u_send_msg && u_recv_msg && u_pkt && u_send_bytes &&
-                   u_recv_bytes,
+                   u_recv_bytes && u_pollfd,
                "kh user ptr");
     if (!u_h0 || !u_h1 || !u_hout || !u_send_handles || !u_recv_handles ||
-        !u_send_msg || !u_recv_msg || !u_pkt || !u_send_bytes || !u_recv_bytes)
+        !u_send_msg || !u_recv_msg || !u_pkt || !u_send_bytes || !u_recv_bytes ||
+        !u_pollfd)
         goto out;
 
     int64_t ret64 =
@@ -2170,6 +2174,30 @@ static void test_kairos_channel_port_syscalls(void) {
     if (ret64 < 0)
         goto out;
 
+    ret64 = sys_kairos_fd_from_handle((uint64_t)port, (uint64_t)u_hout, 0, 0, 0,
+                                      0);
+    test_check(ret64 == 0, "kh fd_from_handle port");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&port_fd, u_hout, sizeof(port_fd));
+    test_check(ret == 0, "kh read port fd");
+    if (ret < 0)
+        goto out;
+
+    struct pollfd pfd = {
+        .fd = port_fd,
+        .events = POLLIN,
+        .revents = 0,
+    };
+    ret = copy_to_user(u_pollfd, &pfd, sizeof(pfd));
+    test_check(ret == 0, "kh copy pollfd idle");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh portfd poll idle");
+    if (ret64 < 0)
+        goto out;
+
     struct kairos_channel_msg_user send_msg = {
         .bytes = (uint64_t)(uintptr_t)u_send_bytes,
         .handles = (uint64_t)(uintptr_t)u_send_handles,
@@ -2194,10 +2222,26 @@ static void test_kairos_channel_port_syscalls(void) {
     test_check(ret64 == -EBADF, "kh transfer moved source handle");
     h2b = -1;
 
-    ret64 = sys_kairos_port_wait((uint64_t)port, (uint64_t)u_pkt, 500000000ULL, 0,
-                                 0, 0);
-    test_check(ret64 == 0, "kh port_wait readable");
-    if (ret64 == 0) {
+    pfd.fd = port_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    ret = copy_to_user(u_pollfd, &pfd, sizeof(pfd));
+    test_check(ret == 0, "kh copy pollfd readable");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+    test_check(ret64 == 1, "kh portfd poll readable");
+    if (ret64 == 1) {
+        ret = copy_from_user(&pfd, u_pollfd, sizeof(pfd));
+        test_check(ret == 0, "kh read pollfd readable");
+        if (ret == 0) {
+            test_check((pfd.revents & POLLIN) != 0, "kh portfd pollin");
+        }
+    }
+
+    ret64 = sys_read((uint64_t)port_fd, (uint64_t)u_pkt, sizeof(*u_pkt), 0, 0, 0);
+    test_check(ret64 == (int64_t)sizeof(*u_pkt), "kh portfd read packet");
+    if (ret64 == (int64_t)sizeof(*u_pkt)) {
         struct kairos_port_packet_user pkt = {0};
         ret = copy_from_user(&pkt, u_pkt, sizeof(pkt));
         test_check(ret == 0, "kh read pkt readable");
@@ -2321,6 +2365,8 @@ static void test_kairos_channel_port_syscalls(void) {
     }
 
 out:
+    if (port_fd >= 0)
+        (void)sys_close((uint64_t)port_fd, 0, 0, 0, 0, 0);
     if (dup_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)dup_h, 0, 0, 0, 0, 0);
     if (recv_h >= 0)
@@ -2472,6 +2518,167 @@ out:
     }
 }
 
+static void test_kairos_file_handle_bridge(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int32_t pfds[2] = {-1, -1};
+    int32_t ch0 = -1;
+    int32_t ch1 = -1;
+    int32_t tx_h = -1;
+    int32_t rx_h = -1;
+    int32_t bridged_fd = -1;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "kh_file_bridge user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    int32_t *u_pipefds = (int32_t *)user_map_ptr(&um, 0x000);
+    int32_t *u_ch0 = (int32_t *)user_map_ptr(&um, 0x020);
+    int32_t *u_ch1 = (int32_t *)user_map_ptr(&um, 0x028);
+    int32_t *u_scalar = (int32_t *)user_map_ptr(&um, 0x030);
+    int32_t *u_send_handles = (int32_t *)user_map_ptr(&um, 0x040);
+    int32_t *u_recv_handles = (int32_t *)user_map_ptr(&um, 0x048);
+    struct kairos_channel_msg_user *u_send_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x080);
+    struct kairos_channel_msg_user *u_recv_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x0C0);
+    char *u_buf = (char *)user_map_ptr(&um, 0x180);
+    test_check(u_pipefds && u_ch0 && u_ch1 && u_scalar && u_send_handles &&
+                   u_recv_handles && u_send_msg && u_recv_msg && u_buf,
+               "kh_file_bridge user_ptr");
+    if (!u_pipefds || !u_ch0 || !u_ch1 || !u_scalar || !u_send_handles ||
+        !u_recv_handles || !u_send_msg || !u_recv_msg || !u_buf)
+        goto out;
+
+    int64_t ret64 = sys_pipe2((uint64_t)u_pipefds, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh_file_bridge pipe2");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(pfds, u_pipefds, sizeof(pfds));
+    test_check(rc == 0, "kh_file_bridge read pipe fds");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_channel_create((uint64_t)u_ch0, (uint64_t)u_ch1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh_file_bridge channel_create");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&ch0, u_ch0, sizeof(ch0));
+    test_check(rc == 0, "kh_file_bridge read ch0");
+    rc = copy_from_user(&ch1, u_ch1, sizeof(ch1));
+    test_check(rc == 0, "kh_file_bridge read ch1");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_handle_from_fd((uint64_t)pfds[1], (uint64_t)u_scalar, 0, 0, 0,
+                                      0);
+    test_check(ret64 == 0, "kh_file_bridge handle_from_fd");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&tx_h, u_scalar, sizeof(tx_h));
+    test_check(rc == 0, "kh_file_bridge read tx_h");
+    if (rc < 0)
+        goto out;
+
+    struct kairos_channel_msg_user send_msg = {
+        .bytes = 0,
+        .handles = (uint64_t)(uintptr_t)u_send_handles,
+        .num_bytes = 0,
+        .num_handles = 1,
+    };
+    rc = copy_to_user(u_send_handles, &tx_h, sizeof(tx_h));
+    test_check(rc == 0, "kh_file_bridge copy tx_h");
+    rc = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(rc == 0, "kh_file_bridge copy send msg");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_channel_send((uint64_t)ch0, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh_file_bridge send handle");
+    if (ret64 < 0)
+        goto out;
+
+    ret64 = sys_kairos_handle_close((uint64_t)tx_h, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "kh_file_bridge handle moved");
+    tx_h = -1;
+
+    struct kairos_channel_msg_user recv_msg = {
+        .bytes = 0,
+        .handles = (uint64_t)(uintptr_t)u_recv_handles,
+        .num_bytes = 0,
+        .num_handles = 1,
+    };
+    rc = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(rc == 0, "kh_file_bridge copy recv msg");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_channel_recv((uint64_t)ch1, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh_file_bridge recv handle");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&rx_h, u_recv_handles, sizeof(rx_h));
+    test_check(rc == 0, "kh_file_bridge read rx_h");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)rx_h, (uint64_t)u_scalar, 0, 0, 0,
+                                      0);
+    test_check(ret64 == 0, "kh_file_bridge fd_from_handle");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&bridged_fd, u_scalar, sizeof(bridged_fd));
+    test_check(rc == 0, "kh_file_bridge read bridged fd");
+    if (rc < 0)
+        goto out;
+
+    char one = 'H';
+    rc = copy_to_user(u_buf, &one, sizeof(one));
+    test_check(rc == 0, "kh_file_bridge copy write byte");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_write((uint64_t)bridged_fd, (uint64_t)u_buf, 1, 0, 0, 0);
+    test_check(ret64 == 1, "kh_file_bridge write through bridged fd");
+    if (ret64 != 1)
+        goto out;
+
+    ret64 = sys_read((uint64_t)pfds[0], (uint64_t)u_buf, 1, 0, 0, 0);
+    test_check(ret64 == 1, "kh_file_bridge read through pipe");
+    if (ret64 == 1) {
+        char got = 0;
+        rc = copy_from_user(&got, u_buf, sizeof(got));
+        test_check(rc == 0, "kh_file_bridge read byte");
+        if (rc == 0)
+            test_check(got == 'H', "kh_file_bridge payload match");
+    }
+
+out:
+    if (bridged_fd >= 0)
+        (void)sys_close((uint64_t)bridged_fd, 0, 0, 0, 0, 0);
+    if (rx_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)rx_h, 0, 0, 0, 0, 0);
+    if (tx_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)tx_h, 0, 0, 0, 0, 0);
+    if (ch1 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)ch1, 0, 0, 0, 0, 0);
+    if (ch0 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)ch0, 0, 0, 0, 0, 0);
+    if (pfds[0] >= 0)
+        (void)sys_close((uint64_t)pfds[0], 0, 0, 0, 0, 0);
+    if (pfds[1] >= 0)
+        (void)sys_close((uint64_t)pfds[1], 0, 0, 0, 0, 0);
+    if (mapped)
+        user_map_end(&um);
+}
+
 int run_syscall_trap_tests(void) {
     tests_failed = 0;
     pr_info("Running syscall/trap tests...\n");
@@ -2500,6 +2707,7 @@ int run_syscall_trap_tests(void) {
     test_kairos_cap_rights_fd_syscalls();
     test_kairos_channel_port_syscalls();
     test_kairos_channel_port_stress_mpmc();
+    test_kairos_file_handle_bridge();
     test_syscall_user_e2e();
 
     if (tests_failed == 0)

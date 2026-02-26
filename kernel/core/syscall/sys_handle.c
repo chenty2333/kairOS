@@ -5,11 +5,20 @@
 #include <kairos/handle.h>
 #include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
+
+#define PORTFD_MAGIC 0x706f7266U
+
+struct portfd_ctx {
+    uint32_t magic;
+    struct kobj *port_obj;
+    struct vnode *vnode;
+};
 
 static inline int32_t syshandle_abi_i32(uint64_t raw) {
     return (int32_t)(uint32_t)raw;
@@ -40,6 +49,121 @@ static void syshandle_close_installed(struct process *p, const int32_t *handles,
         if (handles[i] >= 0)
             (void)khandle_close(p, handles[i]);
     }
+}
+
+static int portfd_close(struct vnode *vn) {
+    if (!vn)
+        return 0;
+
+    struct portfd_ctx *ctx = (struct portfd_ctx *)vn->fs_data;
+    if (ctx && ctx->magic == PORTFD_MAGIC) {
+        if (ctx->port_obj && ctx->vnode)
+            (void)kport_poll_detach_vnode(ctx->port_obj, ctx->vnode);
+        if (ctx->port_obj)
+            kobj_put(ctx->port_obj);
+        ctx->magic = 0;
+        kfree(ctx);
+    }
+
+    kfree(vn);
+    return 0;
+}
+
+static int portfd_poll(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+
+    struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
+        return POLLNVAL;
+
+    bool ready = false;
+    int rc = kport_poll_ready(ctx->port_obj, &ready);
+    if (rc < 0)
+        return POLLERR;
+    if (!ready)
+        return 0;
+    return (int)(POLLIN & events);
+}
+
+static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {
+    if (!file || !file->vnode || !buf)
+        return -EINVAL;
+    if (len < sizeof(struct kairos_port_packet_user))
+        return -EINVAL;
+
+    struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
+        return -EINVAL;
+
+    struct kairos_port_packet_user pkt = {0};
+    uint32_t opts = (file->flags & O_NONBLOCK) ? KPORT_WAIT_NONBLOCK : 0;
+    int rc = kport_wait(ctx->port_obj, &pkt, UINT64_MAX, opts);
+    if (rc < 0)
+        return rc;
+
+    memcpy(buf, &pkt, sizeof(pkt));
+    return (ssize_t)sizeof(pkt);
+}
+
+static struct file_ops portfd_file_ops = {
+    .close = portfd_close,
+    .fread = portfd_fread,
+    .poll = portfd_poll,
+};
+
+static int portfd_create_file(struct kobj *obj, uint32_t rights, struct file **out) {
+    if (!obj || !out)
+        return -EINVAL;
+    *out = NULL;
+
+    if (obj->type != KOBJ_TYPE_PORT)
+        return -ENOTSUP;
+    if ((rights & KRIGHT_WAIT) == 0)
+        return -EACCES;
+
+    struct portfd_ctx *ctx = kzalloc(sizeof(*ctx));
+    struct vnode *vn = kzalloc(sizeof(*vn));
+    struct file *file = vfs_file_alloc();
+    if (!ctx || !vn || !file) {
+        kfree(ctx);
+        kfree(vn);
+        if (file)
+            vfs_file_free(file);
+        return -ENOMEM;
+    }
+
+    ctx->magic = PORTFD_MAGIC;
+    ctx->port_obj = obj;
+    ctx->vnode = vn;
+    kobj_get(obj);
+
+    vn->type = VNODE_FILE;
+    vn->mode = S_IFREG | 0;
+    vn->ops = &portfd_file_ops;
+    vn->fs_data = ctx;
+    vn->size = 0;
+    atomic_init(&vn->refcount, 1);
+    rwlock_init(&vn->lock, "portfd_vnode");
+    poll_wait_head_init(&vn->pollers);
+
+    file->vnode = vn;
+    file->dentry = NULL;
+    file->offset = 0;
+    file->flags = O_RDONLY;
+    file->path[0] = '\0';
+
+    int rc = kport_poll_attach_vnode(obj, vn);
+    if (rc < 0) {
+        kobj_put(obj);
+        vfs_file_free(file);
+        kfree(vn);
+        kfree(ctx);
+        return rc;
+    }
+
+    *out = file;
+    return 0;
 }
 
 int64_t sys_kairos_handle_close(uint64_t handle, uint64_t a1, uint64_t a2,
@@ -193,7 +317,27 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
 
     uint32_t fd_flags = ((uint32_t)flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
     int new_fd = -1;
-    rc = handle_bridge_fd_from_kobj(p, obj, rights, fd_flags, &new_fd);
+    if (obj->type == KOBJ_TYPE_FILE) {
+        rc = handle_bridge_fd_from_kobj(p, obj, rights, fd_flags, &new_fd);
+    } else if (obj->type == KOBJ_TYPE_PORT) {
+        struct file *file = NULL;
+        rc = portfd_create_file(obj, rights, &file);
+        if (rc >= 0) {
+            uint32_t fd_rights = FD_RIGHT_READ;
+            if (rights & KRIGHT_DUPLICATE)
+                fd_rights |= FD_RIGHT_DUP;
+            int fd = fd_alloc_rights(p, file, fd_flags, fd_rights);
+            if (fd < 0) {
+                vfs_close(file);
+                rc = fd;
+            } else {
+                new_fd = fd;
+                rc = 0;
+            }
+        }
+    } else {
+        rc = -ENOTSUP;
+    }
     kobj_put(obj);
     if (rc < 0)
         return rc;

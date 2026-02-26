@@ -6,8 +6,10 @@
 #include <kairos/handle.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
+#include <kairos/vfs.h>
 #include <kairos/wait.h>
 
 struct kchannel;
@@ -48,16 +50,28 @@ struct kport_packet {
     uint32_t observed;
 };
 
+struct kport_watch {
+    struct list_head node;
+    struct vnode *vn;
+};
+
 struct kport {
     struct kobj obj;
     struct mutex lock;
     struct wait_queue waitq;
     struct list_head queue;
+    struct list_head poll_vnodes;
     size_t queue_len;
+};
+
+struct kfile {
+    struct kobj obj;
+    struct file *file;
 };
 
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
+static void kfile_release_obj(struct kobj *obj);
 
 static const struct kobj_ops kchannel_ops = {
     .release = kchannel_release_obj,
@@ -65,6 +79,10 @@ static const struct kobj_ops kchannel_ops = {
 
 static const struct kobj_ops kport_ops = {
     .release = kport_release_obj,
+};
+
+static const struct kobj_ops kfile_ops = {
+    .release = kfile_release_obj,
 };
 
 static inline struct handletable *proc_handletable(struct process *p) {
@@ -81,6 +99,12 @@ static inline struct kport *kport_from_obj(struct kobj *obj) {
     if (!obj || obj->type != KOBJ_TYPE_PORT)
         return NULL;
     return (struct kport *)obj;
+}
+
+static inline struct kfile *kfile_from_obj(struct kobj *obj) {
+    if (!obj || obj->type != KOBJ_TYPE_FILE)
+        return NULL;
+    return (struct kfile *)obj;
 }
 
 static void kchannel_emit_locked(struct kchannel *ch, uint32_t signal);
@@ -451,6 +475,11 @@ static void kport_enqueue_locked(struct kport *port, uint64_t key,
     list_add_tail(&pkt->node, &port->queue);
     port->queue_len++;
     wait_queue_wakeup_one(&port->waitq);
+    struct kport_watch *watch;
+    list_for_each_entry(watch, &port->poll_vnodes, node) {
+        if (watch->vn)
+            vfs_poll_wake(watch->vn, POLLIN);
+    }
 }
 
 static void kchannel_emit_locked(struct kchannel *ch, uint32_t signal) {
@@ -690,6 +719,7 @@ int kport_create(struct kobj **out) {
     mutex_init(&port->lock, "kport");
     wait_queue_init(&port->waitq);
     INIT_LIST_HEAD(&port->queue);
+    INIT_LIST_HEAD(&port->poll_vnodes);
     port->queue_len = 0;
 
     *out = &port->obj;
@@ -788,6 +818,107 @@ int kport_wait(struct kobj *port_obj, struct kairos_port_packet_user *out,
     return 0;
 }
 
+int kport_poll_ready(struct kobj *port_obj, bool *out_ready) {
+    struct kport *port = kport_from_obj(port_obj);
+    if (!port || !out_ready)
+        return -EINVAL;
+
+    if (!mutex_trylock(&port->lock)) {
+        /*
+         * Poll wake callbacks can race with enqueue while enqueue still holds
+         * port->lock. Report readable conservatively to avoid lock inversion
+         * in that callback path.
+         */
+        *out_ready = true;
+        return 0;
+    }
+
+    *out_ready = !list_empty(&port->queue);
+    mutex_unlock(&port->lock);
+    return 0;
+}
+
+int kport_poll_attach_vnode(struct kobj *port_obj, struct vnode *vn) {
+    struct kport *port = kport_from_obj(port_obj);
+    if (!port || !vn)
+        return -EINVAL;
+
+    struct kport_watch *watch = kzalloc(sizeof(*watch));
+    if (!watch)
+        return -ENOMEM;
+    watch->vn = vn;
+    INIT_LIST_HEAD(&watch->node);
+
+    bool ready = false;
+    mutex_lock(&port->lock);
+    struct kport_watch *iter;
+    list_for_each_entry(iter, &port->poll_vnodes, node) {
+        if (iter->vn == vn) {
+            ready = !list_empty(&port->queue);
+            mutex_unlock(&port->lock);
+            kfree(watch);
+            if (ready)
+                vfs_poll_wake(vn, POLLIN);
+            return 0;
+        }
+    }
+    list_add_tail(&watch->node, &port->poll_vnodes);
+    ready = !list_empty(&port->queue);
+    mutex_unlock(&port->lock);
+
+    if (ready)
+        vfs_poll_wake(vn, POLLIN);
+    return 0;
+}
+
+int kport_poll_detach_vnode(struct kobj *port_obj, struct vnode *vn) {
+    struct kport *port = kport_from_obj(port_obj);
+    if (!port || !vn)
+        return -EINVAL;
+
+    mutex_lock(&port->lock);
+    struct kport_watch *iter, *tmp;
+    list_for_each_entry_safe(iter, tmp, &port->poll_vnodes, node) {
+        if (iter->vn != vn)
+            continue;
+        list_del(&iter->node);
+        mutex_unlock(&port->lock);
+        kfree(iter);
+        return 0;
+    }
+    mutex_unlock(&port->lock);
+    return -ENOENT;
+}
+
+int kfile_create(struct file *file, struct kobj **out) {
+    if (!file || !out)
+        return -EINVAL;
+    *out = NULL;
+
+    struct kfile *kfile = kzalloc(sizeof(*kfile));
+    if (!kfile)
+        return -ENOMEM;
+    file_get(file);
+    kobj_init(&kfile->obj, KOBJ_TYPE_FILE, &kfile_ops);
+    kfile->file = file;
+    *out = &kfile->obj;
+    return 0;
+}
+
+int kfile_get_file(struct kobj *obj, struct file **out_file) {
+    if (!out_file)
+        return -EINVAL;
+    *out_file = NULL;
+
+    struct kfile *kfile = kfile_from_obj(obj);
+    if (!kfile || !kfile->file)
+        return -ENOTSUP;
+
+    file_get(kfile->file);
+    *out_file = kfile->file;
+    return 0;
+}
+
 static void kchannel_release_obj(struct kobj *obj) {
     struct kchannel *ch = kchannel_from_obj(obj);
     if (!ch)
@@ -847,6 +978,7 @@ static void kport_release_obj(struct kobj *obj) {
         return;
 
     LIST_HEAD(reap);
+    LIST_HEAD(poll_reap);
 
     mutex_lock(&port->lock);
     while (!list_empty(&port->queue)) {
@@ -854,6 +986,12 @@ static void kport_release_obj(struct kobj *obj) {
             list_first_entry(&port->queue, struct kport_packet, node);
         list_del(&pkt->node);
         list_add_tail(&pkt->node, &reap);
+    }
+    while (!list_empty(&port->poll_vnodes)) {
+        struct kport_watch *watch =
+            list_first_entry(&port->poll_vnodes, struct kport_watch, node);
+        list_del(&watch->node);
+        list_add_tail(&watch->node, &poll_reap);
     }
     port->queue_len = 0;
     mutex_unlock(&port->lock);
@@ -864,6 +1002,21 @@ static void kport_release_obj(struct kobj *obj) {
         list_del(&pkt->node);
         kfree(pkt);
     }
+    while (!list_empty(&poll_reap)) {
+        struct kport_watch *watch =
+            list_first_entry(&poll_reap, struct kport_watch, node);
+        list_del(&watch->node);
+        kfree(watch);
+    }
 
     kfree(port);
+}
+
+static void kfile_release_obj(struct kobj *obj) {
+    struct kfile *kfile = kfile_from_obj(obj);
+    if (!kfile)
+        return;
+    if (kfile->file)
+        file_put(kfile->file);
+    kfree(kfile);
 }
