@@ -2138,6 +2138,10 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t port_manage_from_fd_h = -1;
     int32_t ch_fd = -1;
     int32_t ch_nb_fd = -1;
+    int32_t ch_ro_h = -1;
+    int32_t ch_ro_fd = -1;
+    int32_t ch_wo_h = -1;
+    int32_t ch_wo_fd = -1;
     int32_t ch_from_fd_h = -1;
     int32_t recv_h = -1;
     int32_t dup_h = -1;
@@ -2371,6 +2375,137 @@ static void test_kairos_channel_port_syscalls(void) {
     test_check(ret == 0, "kh read channel fd");
     if (ret < 0)
         goto out;
+
+    ret64 = sys_kairos_handle_duplicate((uint64_t)h1,
+                                        KRIGHT_READ | KRIGHT_DUPLICATE,
+                                        (uint64_t)u_hout, 0, 0, 0);
+    test_check(ret64 == 0, "kh duplicate channel read_only");
+    if (ret64 == 0) {
+        ret = copy_from_user(&ch_ro_h, u_hout, sizeof(ch_ro_h));
+        test_check(ret == 0, "kh read channel read_only handle");
+        if (ret < 0)
+            goto out;
+    }
+
+    if (ch_ro_h >= 0) {
+        ret64 = sys_kairos_fd_from_handle((uint64_t)ch_ro_h, (uint64_t)u_hout, 0, 0,
+                                          0, 0);
+        test_check(ret64 == 0, "kh fd_from_handle channel read_only");
+        if (ret64 == 0) {
+            ret = copy_from_user(&ch_ro_fd, u_hout, sizeof(ch_ro_fd));
+            test_check(ret == 0, "kh read channel read_only fd");
+            if (ret < 0)
+                goto out;
+        }
+    }
+
+    if (ch_ro_fd >= 0) {
+        struct pollfd ropfd = {
+            .fd = ch_ro_fd,
+            .events = POLLOUT,
+            .revents = 0,
+        };
+        ret = copy_to_user(u_pollfd, &ropfd, sizeof(ropfd));
+        test_check(ret == 0, "kh copy read_only channelfd pollout");
+        if (ret < 0)
+            goto out;
+        ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+        test_check(ret64 == 0, "kh read_only channelfd suppress pollout");
+
+        ret = copy_to_user(u_send_bytes, "RO", 2);
+        test_check(ret == 0, "kh copy read_only channelfd write bytes");
+        if (ret < 0)
+            goto out;
+        ret64 = sys_write((uint64_t)ch_ro_fd, (uint64_t)u_send_bytes, 2, 0, 0, 0);
+        test_check(ret64 == -EBADF, "kh read_only channelfd write denied");
+    }
+
+    ret64 = sys_kairos_handle_duplicate((uint64_t)h1,
+                                        KRIGHT_WRITE | KRIGHT_DUPLICATE,
+                                        (uint64_t)u_hout, 0, 0, 0);
+    test_check(ret64 == 0, "kh duplicate channel write_only");
+    if (ret64 == 0) {
+        ret = copy_from_user(&ch_wo_h, u_hout, sizeof(ch_wo_h));
+        test_check(ret == 0, "kh read channel write_only handle");
+        if (ret < 0)
+            goto out;
+    }
+
+    if (ch_wo_h >= 0) {
+        ret64 = sys_kairos_fd_from_handle((uint64_t)ch_wo_h, (uint64_t)u_hout, 0, 0,
+                                          0, 0);
+        test_check(ret64 == 0, "kh fd_from_handle channel write_only");
+        if (ret64 == 0) {
+            ret = copy_from_user(&ch_wo_fd, u_hout, sizeof(ch_wo_fd));
+            test_check(ret == 0, "kh read channel write_only fd");
+            if (ret < 0)
+                goto out;
+        }
+    }
+
+    if (ch_wo_fd >= 0) {
+        struct kairos_channel_msg_user wo_send = {
+            .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+            .handles = 0,
+            .num_bytes = 2,
+            .num_handles = 0,
+        };
+        ret = copy_to_user(u_send_bytes, "WO", 2);
+        test_check(ret == 0, "kh copy write_only channelfd send bytes");
+        ret = copy_to_user(u_send_msg, &wo_send, sizeof(wo_send));
+        test_check(ret == 0, "kh copy write_only channelfd send msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg, 0, 0, 0,
+                                        0);
+        test_check(ret64 == 0, "kh channel_send for write_only channelfd poll");
+        if (ret64 < 0)
+            goto out;
+
+        struct pollfd wopfd = {
+            .fd = ch_wo_fd,
+            .events = POLLIN,
+            .revents = 0,
+        };
+        ret = copy_to_user(u_pollfd, &wopfd, sizeof(wopfd));
+        test_check(ret == 0, "kh copy write_only channelfd pollin");
+        if (ret < 0)
+            goto out;
+        ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+        test_check(ret64 == 0, "kh write_only channelfd suppress pollin");
+
+        ret64 = sys_read((uint64_t)ch_wo_fd, (uint64_t)u_recv_bytes, 8, 0, 0, 0);
+        test_check(ret64 == -EBADF, "kh write_only channelfd read denied");
+
+        struct kairos_channel_msg_user wo_recv = {
+            .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+            .handles = 0,
+            .num_bytes = 8,
+            .num_handles = 0,
+        };
+        ret = copy_to_user(u_recv_msg, &wo_recv, sizeof(wo_recv));
+        test_check(ret == 0, "kh copy write_only channelfd recv msg");
+        if (ret < 0)
+            goto out;
+        ret64 = sys_kairos_channel_recv((uint64_t)h1, (uint64_t)u_recv_msg, 0, 0, 0,
+                                        0);
+        test_check(ret64 == 0, "kh recv write_only channelfd queued payload");
+        if (ret64 == 0) {
+            struct kairos_channel_msg_user got = {0};
+            char got_bytes[2] = {0};
+            ret = copy_from_user(&got, u_recv_msg, sizeof(got));
+            test_check(ret == 0, "kh read write_only channelfd recv meta");
+            ret = copy_from_user(got_bytes, u_recv_bytes, sizeof(got_bytes));
+            test_check(ret == 0, "kh read write_only channelfd recv bytes");
+            if (ret == 0) {
+                test_check(got.num_bytes == 2,
+                           "kh write_only channelfd recv num_bytes");
+                test_check(memcmp(got_bytes, "WO", 2) == 0,
+                           "kh write_only channelfd payload");
+            }
+        }
+    }
 
     ret64 = sys_kairos_handle_from_fd((uint64_t)ch_fd, (uint64_t)u_hout, 0, 0, 0,
                                       0);
@@ -2886,6 +3021,10 @@ out:
         (void)sys_kairos_handle_close((uint64_t)port_from_fd_h, 0, 0, 0, 0, 0);
     if (port_manage_fd >= 0)
         (void)sys_close((uint64_t)port_manage_fd, 0, 0, 0, 0, 0);
+    if (ch_wo_fd >= 0)
+        (void)sys_close((uint64_t)ch_wo_fd, 0, 0, 0, 0, 0);
+    if (ch_ro_fd >= 0)
+        (void)sys_close((uint64_t)ch_ro_fd, 0, 0, 0, 0, 0);
     if (ch_nb_fd >= 0)
         (void)sys_close((uint64_t)ch_nb_fd, 0, 0, 0, 0, 0);
     if (ch_fd >= 0)
@@ -2900,6 +3039,10 @@ out:
         (void)sys_kairos_handle_close((uint64_t)drop_h, 0, 0, 0, 0, 0);
     if (recv_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)recv_h, 0, 0, 0, 0, 0);
+    if (ch_wo_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)ch_wo_h, 0, 0, 0, 0, 0);
+    if (ch_ro_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)ch_ro_h, 0, 0, 0, 0, 0);
     if (port >= 0)
         (void)sys_kairos_handle_close((uint64_t)port, 0, 0, 0, 0, 0);
     if (h2a >= 0)

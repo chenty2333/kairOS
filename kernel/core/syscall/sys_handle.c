@@ -253,11 +253,17 @@ static int channelfd_poll(struct file *file, uint32_t events) {
     if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj)
         return POLLNVAL;
 
+    uint32_t allowed_events = POLLHUP | POLLERR;
+    if (ctx->rights & KRIGHT_READ)
+        allowed_events |= POLLIN;
+    if (ctx->rights & KRIGHT_WRITE)
+        allowed_events |= POLLOUT;
+
     uint32_t revents = 0;
     int rc = kobj_poll_revents(ctx->channel_obj, events, &revents);
     if (rc < 0)
         return POLLERR;
-    return (int)revents;
+    return (int)(revents & allowed_events);
 }
 
 static ssize_t channelfd_fread(struct file *file, void *buf, size_t len) {
