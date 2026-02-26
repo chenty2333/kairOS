@@ -1557,6 +1557,18 @@ static bool irq_action_cookie_matches(const struct irq_action *action,
     return action->cookie == cookie;
 }
 
+static int irq_action_prepare_sync_wait_locked(struct irq_action *action)
+{
+    if (!action)
+        return -EINVAL;
+    if (action->refs == UINT32_MAX)
+        return -ERANGE;
+    reinit_completion(&action->sync_wait);
+    action->sync_waiting = true;
+    action->refs++;
+    return 0;
+}
+
 static int irq_action_detach_locked(struct irq_desc *desc,
                                     struct irq_action *action,
                                     bool *managed_enable_out, bool sync_wait,
@@ -1597,9 +1609,9 @@ static int irq_action_detach_locked(struct irq_desc *desc,
     }
 
     if (sync_wait) {
-        reinit_completion(&action->sync_wait);
-        action->sync_waiting = true;
-        action->refs++;
+        int ret = irq_action_prepare_sync_wait_locked(action);
+        if (ret < 0)
+            return ret;
         *need_wait_out = true;
     } else {
         *reclaim_now_out = irq_action_try_reclaim_locked(desc, action);
@@ -1735,8 +1747,15 @@ static int platform_irq_unregister_action(int irq, irq_handler_fn handler,
         list_for_each(pos, &desc->retired_actions) {
             struct irq_action *cur = list_entry(pos, struct irq_action, node);
             if (irq_action_matches(cur, handler, handler_ev, arg)) {
+                if (!sync_wait) {
+                    spin_unlock_irqrestore(&desc->lock, irq_state);
+                    return 0;
+                }
+                int ret = irq_action_prepare_sync_wait_locked(cur);
                 spin_unlock_irqrestore(&desc->lock, irq_state);
-                return 0;
+                if (ret < 0)
+                    return ret;
+                return irq_action_wait_sync(desc, cur);
             }
         }
         spin_unlock_irqrestore(&desc->lock, irq_state);
@@ -1790,8 +1809,15 @@ static int platform_irq_unregister_cookie(uint64_t cookie,
                 struct irq_action *cur =
                     list_entry(pos, struct irq_action, node);
                 if (irq_action_cookie_matches(cur, cookie)) {
+                    if (!sync_wait) {
+                        spin_unlock_irqrestore(&desc->lock, irq_state);
+                        return 0;
+                    }
+                    int ret = irq_action_prepare_sync_wait_locked(cur);
                     spin_unlock_irqrestore(&desc->lock, irq_state);
-                    return 0;
+                    if (ret < 0)
+                        return ret;
+                    return irq_action_wait_sync(desc, cur);
                 }
             }
             spin_unlock_irqrestore(&desc->lock, irq_state);

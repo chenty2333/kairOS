@@ -853,6 +853,77 @@ static void test_irq_free_sync_waits_handler(void) {
     test_check(ret == 0, "irq syncfree idempotent");
 }
 
+static void test_irq_free_sync_waits_after_async_free(void) {
+    const int irq = 964;
+    irq_blocking_entered = 0;
+    irq_blocking_release = 0;
+    irq_blocking_hits = 0;
+
+    int ret = arch_request_irq_ex(irq, test_irq_blocking_handler, NULL,
+                                  IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq syncfree retired request");
+    if (ret < 0)
+        return;
+
+    struct process *dispatch_worker = kthread_create_joinable(
+        irq_dispatch_once_thread, (void *)&irq, "irqsyncretireddisp");
+    test_check(dispatch_worker != NULL, "irq syncfree retired dispatch create");
+    if (!dispatch_worker) {
+        (void)arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+        return;
+    }
+    sched_enqueue(dispatch_worker);
+
+    for (int i = 0; i < 200; i++) {
+        if (__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED))
+            break;
+        proc_yield();
+    }
+    test_check(__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED) == 1,
+               "irq syncfree retired entered");
+
+    ret = arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+    test_check(ret == 0, "irq syncfree retired async free");
+
+    struct irq_free_sync_ctx sync_ctx = {
+        .irq = irq,
+        .done = 0,
+        .ret = -1,
+    };
+    struct process *sync_worker = kthread_create_joinable(
+        irq_free_sync_thread, &sync_ctx, "irqsyncretiredfree");
+    test_check(sync_worker != NULL, "irq syncfree retired sync worker create");
+    if (!sync_worker) {
+        __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+        (void)test_reap_children_bounded(1, "irq_syncfree_retired_dispatch");
+        (void)arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+        return;
+    }
+    sched_enqueue(sync_worker);
+
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&sync_ctx.done, __ATOMIC_RELAXED) == 0,
+               "irq syncfree retired waits in-flight");
+
+    __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+    int reaped = test_reap_children_bounded(2, "irq_syncfree_retired");
+    test_check(reaped == 2, "irq syncfree retired workers reaped");
+    test_check(sync_ctx.ret == 0 &&
+                   __atomic_load_n(&sync_ctx.done, __ATOMIC_RELAXED) == 1,
+               "irq syncfree retired completed");
+
+    ret = arch_free_irq_ex(irq, test_irq_blocking_handler, NULL);
+    test_check(ret == 0, "irq syncfree retired idempotent");
+    uint32_t hits_before = __atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED) ==
+                   hits_before,
+               "irq syncfree retired removed");
+}
+
 static void test_irq_cookie_lifecycle(void) {
     const int irq = 962;
     irq_request_hits = 0;
@@ -941,6 +1012,82 @@ static void test_irq_cookie_sync_waits_deferred_handler(void) {
     test_check(__atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED) ==
                    hits_before,
                "irq cookie sync deferred removed");
+}
+
+static void test_irq_cookie_sync_waits_after_async_free(void) {
+    const int irq = 965;
+    irq_blocking_entered = 0;
+    irq_blocking_release = 0;
+    irq_blocking_hits = 0;
+    uint64_t cookie = 0;
+
+    int ret = arch_request_irq_ex_cookie(
+        irq, test_irq_blocking_handler, NULL,
+        IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP, &cookie);
+    test_check(ret == 0 && cookie != 0, "irq cookie sync retired request");
+    if (ret < 0 || cookie == 0)
+        return;
+
+    struct process *dispatch_worker = kthread_create_joinable(
+        irq_dispatch_once_thread, (void *)&irq, "irqcookiesyncretireddisp");
+    test_check(dispatch_worker != NULL,
+               "irq cookie sync retired dispatch create");
+    if (!dispatch_worker) {
+        (void)arch_free_irq_cookie(cookie);
+        return;
+    }
+    sched_enqueue(dispatch_worker);
+
+    for (int i = 0; i < 200; i++) {
+        if (__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED))
+            break;
+        proc_yield();
+    }
+    test_check(__atomic_load_n(&irq_blocking_entered, __ATOMIC_RELAXED) == 1,
+               "irq cookie sync retired entered");
+
+    ret = arch_free_irq_cookie(cookie);
+    test_check(ret == 0, "irq cookie sync retired async free");
+
+    struct irq_free_cookie_sync_ctx sync_ctx = {
+        .cookie = cookie,
+        .done = 0,
+        .ret = -1,
+    };
+    struct process *sync_worker = kthread_create_joinable(
+        irq_free_cookie_sync_thread, &sync_ctx, "irqcookiesyncretiredfree");
+    test_check(sync_worker != NULL,
+               "irq cookie sync retired sync worker create");
+    if (!sync_worker) {
+        __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+        (void)test_reap_children_bounded(1,
+                                         "irq_cookie_sync_retired_dispatch");
+        (void)arch_free_irq_cookie(cookie);
+        return;
+    }
+    sched_enqueue(sync_worker);
+
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&sync_ctx.done, __ATOMIC_RELAXED) == 0,
+               "irq cookie sync retired waits in-flight");
+
+    __atomic_store_n(&irq_blocking_release, 1, __ATOMIC_RELAXED);
+    int reaped = test_reap_children_bounded(2, "irq_cookie_sync_retired");
+    test_check(reaped == 2, "irq cookie sync retired workers reaped");
+    test_check(sync_ctx.ret == 0 &&
+                   __atomic_load_n(&sync_ctx.done, __ATOMIC_RELAXED) == 1,
+               "irq cookie sync retired completed");
+
+    ret = arch_free_irq_cookie(cookie);
+    test_check(ret == 0, "irq cookie sync retired idempotent");
+    uint32_t hits_before = __atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED);
+    platform_irq_dispatch_nr((uint32_t)irq);
+    for (int i = 0; i < 50; i++)
+        proc_yield();
+    test_check(__atomic_load_n(&irq_blocking_hits, __ATOMIC_RELAXED) ==
+                   hits_before,
+               "irq cookie sync retired removed");
 }
 
 static void irq_mock_enable(int irq) {
@@ -1695,8 +1842,10 @@ static void run_driver_suite_once(void) {
     test_irq_unregister_dispatch_concurrency();
     test_irq_domain_remove_waits_reclaim();
     test_irq_free_sync_waits_handler();
+    test_irq_free_sync_waits_after_async_free();
     test_irq_cookie_lifecycle();
     test_irq_cookie_sync_waits_deferred_handler();
+    test_irq_cookie_sync_waits_after_async_free();
     test_irq_domain_programming();
     test_irq_domain_custom_mapping();
     test_irq_domain_cascade();
