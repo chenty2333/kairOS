@@ -14,6 +14,7 @@ struct device;
 struct driver;
 struct sysfs_node;
 struct dma_ops;
+struct iommu_domain;
 
 /* 
  * Bus Type: Describes how to match devices on this bus.
@@ -37,6 +38,7 @@ struct device {
     struct resource *resources; /* Resource array */
     size_t num_resources;
     const struct dma_ops *dma_ops; /* DMA backend (NULL => direct mapping) */
+    struct iommu_domain *iommu_domain; /* Attached IOMMU domain */
     void *driver_data;          /* Driver private data */
     struct sysfs_node *sysfs_node; /* sysfs directory for this device */
     struct list_head list;      /* Global device list node */

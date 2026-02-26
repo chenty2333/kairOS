@@ -89,6 +89,10 @@ static const struct dma_ops dma_direct_ops = {
     .free_coherent = dma_direct_free_coherent,
 };
 
+const struct dma_ops *dma_get_direct_ops(void) {
+    return &dma_direct_ops;
+}
+
 void dma_set_ops(struct device *dev, const struct dma_ops *ops) {
     if (!dev)
         return;
@@ -98,7 +102,7 @@ void dma_set_ops(struct device *dev, const struct dma_ops *ops) {
 const struct dma_ops *dma_get_ops(struct device *dev) {
     if (dev && dev->dma_ops)
         return dev->dma_ops;
-    return &dma_direct_ops;
+    return dma_get_direct_ops();
 }
 
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, int direction) {

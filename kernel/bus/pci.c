@@ -4,6 +4,7 @@
 
 #include <kairos/pci.h>
 #include <kairos/arch.h>
+#include <kairos/iommu.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>
 #include <kairos/platform_core.h>
@@ -856,6 +857,7 @@ int pci_scan_bus(struct pci_host *host)
                 snprintf(pdev->dev.name, sizeof(pdev->dev.name),
                          "pci-%02x:%02x.%x", b, s, f);
                 pdev->dev.bus = &pci_bus_type;
+                iommu_attach_device(iommu_get_passthrough_domain(), &pdev->dev);
 
                 pr_info("pci: %02x:%02x.%x %04x:%04x class %06x (%s)\n",
                         b, s, f, vendor, device,

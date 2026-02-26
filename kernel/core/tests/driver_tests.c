@@ -6,6 +6,7 @@
 #include <kairos/blkdev.h>
 #include <kairos/config.h>
 #include <kairos/dma.h>
+#include <kairos/iommu.h>
 #include <kairos/net.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
@@ -356,6 +357,48 @@ static void test_dma_coherent_alloc_free(void) {
     test_check(dma == (dma_addr_t)virt_to_phys(buf), "dma coherent addr mapping");
     test_check(buf[0] == 0 && buf[sz - 1] == 0, "dma coherent zeroed");
     dma_free_coherent(NULL, buf, sz, dma);
+}
+
+static void test_iommu_domain_dma_ops(void) {
+    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    test_check(domain != NULL, "iommu domain create");
+    if (!domain)
+        return;
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    int ret = iommu_attach_device(domain, &dev);
+    test_check(ret == 0, "iommu attach device");
+    if (ret < 0) {
+        iommu_domain_destroy(domain);
+        return;
+    }
+
+    uint8_t *buf = kmalloc(CONFIG_PAGE_SIZE + 96);
+    test_check(buf != NULL, "iommu dma map alloc");
+    if (buf) {
+        dma_addr_t mapped = dma_map_single(&dev, buf + 32, 128, DMA_TO_DEVICE);
+        test_check(mapped != 0, "iommu dma map single");
+        if (mapped) {
+            dma_addr_t phys = (dma_addr_t)virt_to_phys(buf + 32);
+            test_check(mapped != phys, "iommu dma map translated iova");
+            dma_unmap_single(&dev, mapped, 128, DMA_TO_DEVICE);
+        }
+        kfree(buf);
+    }
+
+    dma_addr_t coh_dma = 0;
+    void *coh = dma_alloc_coherent(&dev, CONFIG_PAGE_SIZE + 64, &coh_dma);
+    test_check(coh != NULL, "iommu dma coherent alloc");
+    if (coh) {
+        dma_addr_t coh_phys = (dma_addr_t)virt_to_phys(coh);
+        test_check(coh_dma != 0 && coh_dma != coh_phys,
+                   "iommu dma coherent translated handle");
+        dma_free_coherent(&dev, coh, CONFIG_PAGE_SIZE + 64, coh_dma);
+    }
+
+    iommu_detach_device(&dev);
+    iommu_domain_destroy(domain);
 }
 
 static volatile uint32_t irq_deferred_hits;
@@ -1914,6 +1957,7 @@ static void run_driver_suite_once(void) {
     test_blkdev_gpt_partition_bounds();
     test_netdev_registry();
     test_dma_coherent_alloc_free();
+    test_iommu_domain_dma_ops();
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
     test_irq_unregister_actions();

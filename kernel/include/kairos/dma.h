@@ -78,6 +78,7 @@ static inline void dma_cache_inval_range(void *ptr, size_t size) {
 
 void dma_set_ops(struct device *dev, const struct dma_ops *ops);
 const struct dma_ops *dma_get_ops(struct device *dev);
+const struct dma_ops *dma_get_direct_ops(void);
 
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, int direction);
 void dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size, int direction);

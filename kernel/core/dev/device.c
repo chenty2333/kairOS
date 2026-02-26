@@ -5,6 +5,7 @@
 #include <kairos/device.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
+#include <kairos/iommu.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
@@ -92,6 +93,7 @@ void device_unregister(struct device *dev) {
     if (dev->driver && dev->driver->remove) {
         dev->driver->remove(dev);
     }
+    iommu_detach_device(dev);
     list_del(&dev->list);
     dev->driver = NULL;
     spin_unlock(&device_model_lock);
