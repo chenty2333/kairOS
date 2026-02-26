@@ -107,7 +107,8 @@ futex.c:
 - syslog syscall decodes `type`/`len` using Linux ABI `int` width (32-bit)
 - futex waits now block through `poll_wait_source_block` (single-wait path holds futex bucket mutex across sleep handoff to avoid enqueue->sleep wake races)
 - futex wakeups now route through waiter-bound `poll_wait_source_wake_one` instead of direct `proc_wakeup`, sharing the wait-core wake surface
-- futex wake path now snapshots/removes matched waiters under bucket lock, then performs `poll_wait_source_wake_one` outside the bucket lock (reduces lock-hold cross-layer wake coupling)
+- futex wake path removes/wakes matched waiters under bucket lock, avoiding waiter-lifetime races with timeout/signal dequeue paths
+- futex_waitv sleep now uses a shared wait gate mutex across wake-index check + sleep handoff; futex_wake synchronizes on that gate for waitv waiters to close wake-index-vs-sleep lost-wake windows
 - Used for userspace fast locks (pthread mutex, etc.)
 
 pollwait.c:
@@ -128,6 +129,7 @@ pollwait.c:
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
 - wait-core epoll/fd-event paths now expose dedicated observability: `TRACE_WAIT_EPOLL` / `TRACE_WAIT_FD_EVENT`, plus unified wait-core counters (`poll_wait_stat_*`) for epoll wait cycles and fd-event block/wake hot paths
 - wait-core counters also include `poll_wait_wake` head-level metrics (`poll_head_wake_calls`, `poll_head_direct_switch`) for single-waiter fastpath regression/telemetry
+- wait-core counters include futex wait/waitv block/wake/timeout/interrupt telemetry and futex wake call/woken totals (`futex_wake_calls`, `futex_wake_woken`)
 - `/sys/kernel/tracepoint/wait_core_events` exports wait-core traces (including epoll/fd-event), and `/sys/kernel/tracepoint/wait_core_stats` exports wait-core counters; `reset` clears both trace rings and wait-core counters
 - `/sys/kernel/tracepoint/wait_events` keeps a legacy-compatible wait-only view (`TRACE_WAIT_BLOCK`/`TRACE_WAIT_WAKE`) for simpler tooling input
 - `scripts/impl/tracepoint-wait-report.py` summarizes exported wait events (`total/by-event/by-cpu`, wake-one vs wake-all, timeout-vs-nontimeout waits)
