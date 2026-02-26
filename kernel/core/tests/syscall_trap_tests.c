@@ -3419,6 +3419,10 @@ static void test_kobj_ops_refcount_history(void) {
     struct kobj *tx_obj = NULL;
     struct kobj *rx_obj = NULL;
     struct kobj *port_obj = NULL;
+    int32_t src_handle = -1;
+    bool src_handle_live = false;
+    struct kobj *moved_obj = NULL;
+    uint32_t moved_rights = 0;
     int32_t moved_handle = -1;
 
     int rc = kchannel_create_pair(&tx_obj, &rx_obj);
@@ -3487,10 +3491,6 @@ static void test_kobj_ops_refcount_history(void) {
     test_check(saw_put, "kobj_refhist put");
 
     struct process *p = proc_current();
-    int32_t src_handle = -1;
-    bool src_handle_live = false;
-    struct kobj *moved_obj = NULL;
-    uint32_t moved_rights = 0;
     if (p) {
         src_handle = khandle_alloc(p, rx_obj, KRIGHT_CHANNEL_DEFAULT);
         src_handle_live = (src_handle >= 0);
