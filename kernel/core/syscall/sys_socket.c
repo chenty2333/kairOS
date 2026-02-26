@@ -324,6 +324,41 @@ static int socket_copyout_recv_control(struct socket_msghdr *msg,
     return 0;
 }
 
+static int socket_copyout_recvmsg_meta(uint64_t msg_ptr,
+                                       const struct socket_msghdr *msg) {
+    if (!msg)
+        return -EINVAL;
+
+    uint64_t field_ptr = 0;
+    if (__builtin_add_overflow(msg_ptr,
+                               (uint64_t)offsetof(struct socket_msghdr,
+                                                  msg_namelen),
+                               &field_ptr) ||
+        copy_to_user((void *)field_ptr, &msg->msg_namelen,
+                     sizeof(msg->msg_namelen)) < 0) {
+        return -EFAULT;
+    }
+
+    if (__builtin_add_overflow(msg_ptr,
+                               (uint64_t)offsetof(struct socket_msghdr,
+                                                  msg_controllen),
+                               &field_ptr) ||
+        copy_to_user((void *)field_ptr, &msg->msg_controllen,
+                     sizeof(msg->msg_controllen)) < 0) {
+        return -EFAULT;
+    }
+
+    if (__builtin_add_overflow(msg_ptr,
+                               (uint64_t)offsetof(struct socket_msghdr,
+                                                  msg_flags),
+                               &field_ptr) ||
+        copy_to_user((void *)field_ptr, &msg->msg_flags,
+                     sizeof(msg->msg_flags)) < 0) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
 static uint64_t socket_ns_to_sched_ticks(uint64_t ns) {
     if (ns == 0)
         return 0;
@@ -1127,10 +1162,12 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
     }
     uint32_t uflags = socket_effective_msg_flags(sock_file, syssock_abi_u32(flags));
     int64_t ret = socket_recvmsg(sock, &msg, uflags, NULL);
-    if (ret >= 0 &&
-        copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0) {
-        file_put(sock_file);
-        return -EFAULT;
+    if (ret >= 0) {
+        int rc = socket_copyout_recvmsg_meta(msg_ptr, &msg);
+        if (rc < 0) {
+            file_put(sock_file);
+            return rc;
+        }
     }
     file_put(sock_file);
     return ret;
@@ -1266,8 +1303,8 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
             file_put(sock_file);
             return recved ? recved : ret;
         }
-        if (copy_to_user((void *)ent_ptr, &msg.msg_hdr,
-                         sizeof(msg.msg_hdr)) < 0 ||
+        int rc = socket_copyout_recvmsg_meta(ent_ptr, &msg.msg_hdr);
+        if (rc < 0 ||
             copy_to_user((void *)(ent_ptr + offsetof(struct socket_mmsghdr,
                                                      msg_len)),
                          &msg.msg_len, sizeof(msg.msg_len)) < 0) {
