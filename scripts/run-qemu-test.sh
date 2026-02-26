@@ -45,7 +45,7 @@ if [[ "${TEST_REQUIRE_STRUCTURED}" == "auto" ]]; then
 fi
 
 if [[ "${TEST_REQUIRE_MARKERS}" == "1" ]] && [[ -z "${TEST_OPTIONAL_MARKERS_IF_PRESENT}" ]]; then
-    TEST_OPTIONAL_MARKERS_IF_PRESENT=$'boot: limine loaded base revision=.*\tboot: limine loaded base revision=[0-9]+\nboot: limine executable .*\tboot: limine executable media=[0-9]+ part=[0-9]+ path=.* string=.* rev=[0-9]+\nboot: limine date_at_boot=.*\tboot: limine date_at_boot=-?[0-9]+ rev=[0-9]+\nboot: limine perf .*\tboot: limine perf reset=[0-9]+us init=[0-9]+us exec=[0-9]+us rev=[0-9]+\nboot: limine smbios .*\tboot: limine smbios rev=[0-9]+ entry32=.* entry64=.*\nboot: limine efi memmap .*\tboot: limine efi memmap rev=[0-9]+ size=[0-9]+ desc_size=[0-9]+ desc_ver=[0-9]+\nboot: limine riscv bsp hartid=.*\tboot: limine riscv bsp hartid=[0-9]+ rev=[0-9]+'
+    TEST_OPTIONAL_MARKERS_IF_PRESENT=$'boot: limine loaded base revision=.*\tboot: limine loaded base revision=[0-9]+\nboot: limine executable .*\t(boot: limine executable media=[0-9]+ part=[0-9]+ path=.* string=.* rev=[0-9]+|boot: limine executable media=[^[:space:]]+[(][0-9]+[)] part=[0-9]+ rev=[0-9]+)\nboot: limine date_at_boot=.*\tboot: limine date_at_boot=-?[0-9]+ rev=[0-9]+\nboot: limine perf .*\tboot: limine perf reset=[0-9]+us init=[0-9]+us exec=[0-9]+us rev=[0-9]+\nboot: limine smbios .*\tboot: limine smbios rev=[0-9]+ entry32=.* entry64=.*\nboot: limine efi memmap .*\tboot: limine efi memmap rev=[0-9]+ size=[0-9]+ desc_size=[0-9]+ desc_ver=[0-9]+\nboot: limine riscv bsp hartid=.*\tboot: limine riscv bsp hartid=[0-9]+ rev=[0-9]+'
 fi
 
 json_quote() {
