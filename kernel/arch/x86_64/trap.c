@@ -4,6 +4,7 @@
 
 #include <asm/arch.h>
 #include <kairos/arch.h>
+#include <kairos/clone.h>
 #include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/platform_core.h>
@@ -19,6 +20,8 @@
 #define IRQ_BASE 32
 #define SYSCALL_VEC 0x80
 #define X86_NR_ARCH_PRCTL 158
+#define X86_NR_FORK 57
+#define X86_NR_VFORK 58
 #define X86_NR_MKDIR 83
 #define X86_NR_RMDIR 84
 #define ARCH_SET_GS 0x1001
@@ -275,6 +278,17 @@ static void handle_syscall(struct trap_frame *tf) {
     uint64_t nr = tf->rax;
     if (nr == X86_NR_ARCH_PRCTL) {
         tf->rax = x86_sys_arch_prctl(tf->rdi, tf->rsi);
+        return;
+    }
+    if (nr == X86_NR_FORK) {
+        tf->rax = syscall_dispatch(LINUX_NR_clone, (uint64_t)SIGCHLD, 0, 0, 0, 0,
+                                   0);
+        return;
+    }
+    if (nr == X86_NR_VFORK) {
+        tf->rax = syscall_dispatch(LINUX_NR_clone,
+                                   (uint64_t)(CLONE_VFORK | CLONE_VM | SIGCHLD), 0,
+                                   0, 0, 0, 0);
         return;
     }
     if (nr == X86_NR_MKDIR) {
