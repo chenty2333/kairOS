@@ -34,6 +34,7 @@
 
 #define VIRTIO_IOMMU_REQ_VQ    0U
 #define VIRTIO_IOMMU_REQ_DEPTH 16U
+#define VIRTIO_IOMMU_REQ_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 
 struct virtio_iommu_config {
     uint64_t page_size_mask;
@@ -92,6 +93,11 @@ struct virtio_iommu_req_unmap {
 } __packed;
 
 struct virtio_iommu_req_cookie {
+    struct device *dma_dev;
+    void *req_buf;
+    dma_addr_t req_dma;
+    size_t req_size;
+    uint32_t refs;
     volatile uint32_t done;
     uint32_t used_len;
 };
@@ -140,6 +146,18 @@ static size_t virtio_iommu_pick_granule(uint64_t page_size_mask) {
             break;
     }
     return 0;
+}
+
+static void virtio_iommu_req_cookie_put(struct virtio_iommu_req_cookie *cookie) {
+    if (!cookie)
+        return;
+    if (__atomic_sub_fetch(&cookie->refs, 1, __ATOMIC_ACQ_REL) != 0)
+        return;
+    if (cookie->dma_dev && cookie->req_dma && cookie->req_size)
+        dma_unmap_single(cookie->dma_dev, cookie->req_dma, cookie->req_size,
+                         DMA_BIDIRECTIONAL);
+    kfree(cookie->req_buf);
+    kfree(cookie);
 }
 
 static int virtio_iommu_status_to_errno(uint8_t status) {
@@ -231,6 +249,7 @@ static void virtio_iommu_drain_used_locked(struct virtio_iommu_state *state) {
     while ((cookie = virtqueue_get_buf(state->req_vq, &len)) != NULL) {
         cookie->used_len = len;
         __atomic_store_n(&cookie->done, 1, __ATOMIC_RELEASE);
+        virtio_iommu_req_cookie_put(cookie);
     }
 }
 
@@ -242,52 +261,83 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
         return -EINVAL;
     }
 
-    dma_addr_t req_dma = dma_map_single(&state->vdev->dev, req, req_size,
-                                        DMA_BIDIRECTIONAL);
-    if (!req_dma)
+    struct virtio_iommu_req_cookie *cookie = kzalloc(sizeof(*cookie));
+    if (!cookie)
+        return -ENOMEM;
+    cookie->dma_dev = &state->vdev->dev;
+    cookie->req_buf = kmalloc(req_size);
+    if (!cookie->req_buf) {
+        kfree(cookie);
+        return -ENOMEM;
+    }
+    cookie->req_size = req_size;
+    cookie->refs = 1;
+    memcpy(cookie->req_buf, req, req_size);
+
+    cookie->req_dma = dma_map_single(cookie->dma_dev, cookie->req_buf, req_size,
+                                     DMA_BIDIRECTIONAL);
+    if (!cookie->req_dma) {
+        virtio_iommu_req_cookie_put(cookie);
         return -EIO;
+    }
 
     struct virtq_desc desc[2];
     memset(desc, 0, sizeof(desc));
-    desc[0].addr = req_dma;
+    desc[0].addr = cookie->req_dma;
     desc[0].len = (uint32_t)write_desc_offset;
     desc[0].flags = VIRTQ_DESC_F_NEXT;
 
-    desc[1].addr = req_dma + (dma_addr_t)write_desc_offset;
+    desc[1].addr = cookie->req_dma + (dma_addr_t)write_desc_offset;
     desc[1].len = (uint32_t)(req_size - write_desc_offset);
     desc[1].flags = VIRTQ_DESC_F_WRITE;
 
-    struct virtio_iommu_req_cookie cookie = {0};
-
     int ret;
+    int wait_ret = 0;
+    uint64_t wait_start = arch_timer_ticks();
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(VIRTIO_IOMMU_REQ_TIMEOUT_NS);
+    if (timeout_ticks == 0)
+        timeout_ticks = 1;
     bool irq_flags;
     spin_lock_irqsave(&state->req_lock, &irq_flags);
 
     virtio_iommu_drain_used_locked(state);
     while ((ret = virtqueue_add_buf(state->req_vq, desc, ARRAY_SIZE(desc),
-                                    &cookie)) == -ENOSPC) {
+                                    cookie)) == -ENOSPC) {
         virtio_iommu_drain_used_locked(state);
         arch_cpu_relax();
     }
 
     if (ret == 0) {
+        __atomic_add_fetch(&cookie->refs, 1, __ATOMIC_ACQ_REL);
         virtqueue_kick(state->req_vq);
-        while (!__atomic_load_n(&cookie.done, __ATOMIC_ACQUIRE)) {
+        while (!__atomic_load_n(&cookie->done, __ATOMIC_ACQUIRE)) {
             virtio_iommu_drain_used_locked(state);
+            if ((arch_timer_ticks() - wait_start) > timeout_ticks) {
+                wait_ret = -ETIMEDOUT;
+                break;
+            }
             arch_cpu_relax();
         }
     }
 
     spin_unlock_irqrestore(&state->req_lock, irq_flags);
-
-    dma_unmap_single(&state->vdev->dev, req_dma, req_size, DMA_BIDIRECTIONAL);
-    if (ret < 0)
+    if (ret < 0) {
+        virtio_iommu_req_cookie_put(cookie);
         return ret;
+    }
 
-    uint8_t status =
-        *((uint8_t *)req + req_size - sizeof(struct virtio_iommu_req_tail));
+    if (wait_ret < 0) {
+        pr_warn("virtio-iommu: request timeout type=%u\n",
+                *((uint8_t *)cookie->req_buf));
+        virtio_iommu_req_cookie_put(cookie);
+        return wait_ret;
+    }
+
+    uint8_t status = *((uint8_t *)cookie->req_buf + req_size -
+                       sizeof(struct virtio_iommu_req_tail));
     if (status_out)
         *status_out = status;
+    virtio_iommu_req_cookie_put(cookie);
     return virtio_iommu_status_to_errno(status);
 }
 

@@ -268,13 +268,19 @@ static ssize_t channelfd_fread(struct file *file, void *buf, size_t len) {
     size_t got_bytes = 0;
     size_t got_handles = 0;
     bool handles_truncated = false;
+    struct khandle_transfer dropped[KCHANNEL_MAX_MSG_HANDLES] = {0};
     uint32_t opts = (file->flags & O_NONBLOCK) ? KCHANNEL_OPT_NONBLOCK : 0;
-    int rc = kchannel_recv(ctx->channel_obj, buf, len, &got_bytes, NULL, 0,
-                           &got_handles, &handles_truncated, opts);
-    if (rc == -EMSGSIZE && got_handles > 0)
-        return -EOPNOTSUPP;
+    int rc = kchannel_recv(ctx->channel_obj, buf, len, &got_bytes, dropped,
+                           KCHANNEL_MAX_MSG_HANDLES, &got_handles,
+                           &handles_truncated, opts);
     if (rc < 0)
         return rc;
+    for (size_t i = 0; i < got_handles; i++) {
+        if (dropped[i].obj) {
+            khandle_transfer_drop(dropped[i].obj);
+            dropped[i].obj = NULL;
+        }
+    }
     return (ssize_t)got_bytes;
 }
 

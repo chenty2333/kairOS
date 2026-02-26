@@ -155,7 +155,7 @@ Current IPC mechanisms:
 - Channel/port internal sleep+wake paths now share `poll_wait_source` for waiter blocking and wakeup; port fd poll fanout to multiple vnodes remains unchanged
 - `kobj` now carries a base `wait_queue`, and channel/port objects expose unified poll/wait callbacks through `kobj_ops` (`kobj_wait`, `kobj_poll_*` dispatch)
 - `port_wait` blocking now sleeps on object-level `kobj.waitq` (wake source remains channel/port enqueue/close paths), keeping fd-poll fanout unchanged
-- Channel fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_CHANNEL`; resulting fd supports `poll` (`POLLIN|POLLOUT|POLLHUP`) plus byte `read()`/`write()` on channel payload path
+- Channel fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_CHANNEL`; resulting fd supports `poll` (`POLLIN|POLLOUT|POLLHUP`) plus byte `read()`/`write()` on channel payload path (any transferred handles on `read()` are consumed and dropped)
 - Port fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_PORT`; resulting fd is pollable (`POLLIN`) and `read()` consumes one `kairos_port_packet_user`
 - `file_ops` adds optional `to_kobj` export hook for typed fd endpoints; channel/port bridge vnodes implement it so `kairos_handle_from_fd` no longer needs syscall-local special-fd branching
 - Reverse bridge for channel/port fd: `kairos_handle_from_fd` recognizes bridge fds and recreates typed handles (`KOBJ_TYPE_CHANNEL` / `KOBJ_TYPE_PORT`) with rights derived from fd rights attenuation (`FD_RIGHT_READ`/`FD_RIGHT_IOCTL`/`FD_RIGHT_DUP` map to `KRIGHT_WAIT`/`KRIGHT_MANAGE`/`KRIGHT_DUPLICATE` on port handles; no implicit `KRIGHT_TRANSFER` escalation on port roundtrip)

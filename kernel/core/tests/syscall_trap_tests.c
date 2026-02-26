@@ -2138,6 +2138,7 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t ch_from_fd_h = -1;
     int32_t recv_h = -1;
     int32_t dup_h = -1;
+    int32_t drop_h = -1;
 
     int ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
     test_check(ret == 0, "kh user map");
@@ -2427,6 +2428,53 @@ static void test_kairos_channel_port_syscalls(void) {
         test_check(ret == 0, "kh read channelfd bytes");
         if (ret == 0)
             test_check(memcmp(got, "FD", 2) == 0, "kh channelfd payload");
+    }
+
+    ret64 =
+        sys_kairos_handle_duplicate((uint64_t)h2b, 0, (uint64_t)u_hout, 0, 0, 0);
+    test_check(ret64 == 0, "kh duplicate for channelfd drop");
+    if (ret64 == 0) {
+        ret = copy_from_user(&drop_h, u_hout, sizeof(drop_h));
+        test_check(ret == 0, "kh read duplicate for channelfd drop");
+    }
+
+    if (drop_h >= 0) {
+        struct kairos_channel_msg_user ch_drop_msg = {
+            .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+            .handles = (uint64_t)(uintptr_t)u_send_handles,
+            .num_bytes = 2,
+            .num_handles = 1,
+        };
+        ret = copy_to_user(u_send_bytes, "HC", 2);
+        test_check(ret == 0, "kh copy channelfd drop bytes");
+        ret = copy_to_user(u_send_handles, &drop_h, sizeof(drop_h));
+        test_check(ret == 0, "kh copy channelfd drop handle");
+        ret = copy_to_user(u_send_msg, &ch_drop_msg, sizeof(ch_drop_msg));
+        test_check(ret == 0, "kh copy channelfd drop msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg, 0, 0, 0,
+                                        0);
+        test_check(ret64 == 0, "kh send channelfd drop msg");
+        if (ret64 < 0)
+            goto out;
+
+        ret64 = sys_kairos_handle_close((uint64_t)drop_h, 0, 0, 0, 0, 0);
+        test_check(ret64 == -EBADF, "kh channelfd drop moved source");
+        drop_h = -1;
+
+        ret64 = sys_read((uint64_t)ch_fd, (uint64_t)u_recv_bytes, 8, 0, 0, 0);
+        test_check(ret64 == 2, "kh channelfd read with dropped handles");
+        if (ret64 == 2) {
+            char got[2] = {0};
+            ret = copy_from_user(got, u_recv_bytes, sizeof(got));
+            test_check(ret == 0, "kh read channelfd dropped bytes");
+            if (ret == 0) {
+                test_check(memcmp(got, "HC", 2) == 0,
+                           "kh channelfd dropped payload");
+            }
+        }
     }
 
     ret = copy_to_user(u_send_bytes, "WR", 2);
@@ -2767,6 +2815,8 @@ out:
         (void)sys_close((uint64_t)port_fd, 0, 0, 0, 0, 0);
     if (dup_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)dup_h, 0, 0, 0, 0, 0);
+    if (drop_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)drop_h, 0, 0, 0, 0, 0);
     if (recv_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)recv_h, 0, 0, 0, 0, 0);
     if (port >= 0)
