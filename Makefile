@@ -19,6 +19,7 @@
 ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
 EXTRA_CFLAGS ?=
+KERNEL_TESTS ?= 1
 
 # Auto-detect parallelism: use all available cores
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
@@ -142,6 +143,7 @@ CFLAGS += -I kernel/arch/$(ARCH)/include
 CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 CFLAGS += -DCONFIG_EMBEDDED_INIT=$(EMBEDDED_INIT)
 CFLAGS += -DCONFIG_DRM_LITE=$(CONFIG_DRM_LITE)
+CFLAGS += -DCONFIG_KERNEL_TESTS=$(KERNEL_TESTS)
 CFLAGS += $(EXTRA_CFLAGS)
 
 # lwIP include paths
@@ -185,6 +187,10 @@ CORE_SRCS += kernel/boot/boot.c kernel/boot/limine.c
 
 ifeq ($(CONFIG_DRM_LITE),0)
 CORE_SRCS := $(filter-out kernel/drivers/gpu/drm_lite.c,$(CORE_SRCS))
+endif
+
+ifeq ($(KERNEL_TESTS),0)
+CORE_SRCS := $(filter-out kernel/core/tests/%,$(CORE_SRCS))
 endif
 
 # Architecture-specific sources (auto-discovered)
@@ -958,19 +964,95 @@ test-device-virtio:
 		case_name="$$1"; \
 		extra_flags="$$2"; \
 		required_regex="$$3"; \
-		required_all="$$4"; \
+		required_all="$$(printf '%b' "$$4")"; \
 		forbidden_regex="$$5"; \
+		extra_make_vars="$${6:-}"; \
 		log_path="$(BUILD_DIR)/test-device-virtio-$$case_name.log"; \
 		echo "test-device-virtio: case=$$case_name log=$$log_path"; \
-		$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
-			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOG="$$log_path" \
-			KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
-			KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL="$$required_all" \
-			KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
-			TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200 $$extra_flags" test; \
+		if [ -n "$$extra_make_vars" ]; then \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOG="$$log_path" \
+				KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
+				KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL="$$required_all" \
+				KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
+				TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200 $$extra_flags" \
+				$$extra_make_vars test; \
+		else \
+			$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+				TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOG="$$log_path" \
+				KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
+				KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL="$$required_all" \
+				KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
+				TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200 $$extra_flags" test; \
+		fi; \
 	}; \
-	if [ "$(ARCH)" != "aarch64" ]; then \
-		echo "test-device-virtio: ARCH=$(ARCH) uses module-only coverage (virtio-pci IRQ matrix is aarch64-only today)"; \
+	run_case_riscv() { \
+		case_name="$$1"; \
+		extra_flags="$$2"; \
+		required_regex="$$3"; \
+		required_all="$$(printf '%b' "$$4")"; \
+		forbidden_regex="$$5"; \
+		extra_make_vars="$${6:-}"; \
+		optional_rules="$$(printf '%b' "$${7:-}")"; \
+		log_path="$(BUILD_DIR)/test-device-virtio-$$case_name.log"; \
+		echo "test-device-virtio: case=$$case_name log=$$log_path"; \
+		qemu_cmd="make --no-print-directory -j1 ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) KERNEL_TESTS=0 EXTRA_CFLAGS='$$extra_flags' RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) $$extra_make_vars run-direct"; \
+		QEMU_CMD="$$qemu_cmd" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$$log_path" \
+			TEST_REQUIRE_MARKERS=1 TEST_EXPECT_TIMEOUT=1 TEST_REQUIRE_STRUCTURED=0 \
+			TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
+			TEST_REQUIRED_MARKERS_ALL="$$required_all" \
+			TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
+			TEST_OPTIONAL_MARKERS_IF_PRESENT="$$optional_rules" \
+			TEST_BUILD_ROOT="$(BUILD_ROOT)" TEST_ARCH="$(ARCH)" TEST_RUN_ID="$(RUN_ID)" \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOCK_FILE="$(BUILD_DIR)/.locks/test.lock" \
+			./scripts/run-qemu-test.sh; \
+	}; \
+	if [ "$(ARCH)" = "riscv64" ]; then \
+		common_make_vars="QEMU_VIRTIO_BLK_DEV=virtio-blk-pci"; \
+		run_case_riscv "aia0-msix2" "-DCONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK=0x2" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"RISCV_IRQ_BACKEND:plic\nVIRTIO_IRQ_MSI_STATE:no_cap" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|disabled|unsupported|skipped_msix|failed)|VIRTIO_IRQ_AFFINITY:(ok|fail)" \
+			"$$common_make_vars RISCV_AIA=0"; \
+		run_case_riscv "aia0-msix1" "-DCONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS=1 -DCONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK=0x2" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"RISCV_IRQ_BACKEND:plic\nVIRTIO_IRQ_MSI_STATE:no_cap" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|disabled|unsupported|skipped_msix|failed)|VIRTIO_IRQ_AFFINITY:(ok|fail)" \
+			"$$common_make_vars RISCV_AIA=0"; \
+		run_case_riscv "aia0-msi" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"RISCV_IRQ_BACKEND:plic\nVIRTIO_IRQ_MSI_STATE:no_cap" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|disabled|unsupported|skipped_msix|failed)|VIRTIO_IRQ_AFFINITY:(ok|fail)" \
+			"$$common_make_vars RISCV_AIA=0"; \
+		run_case_riscv "aia0-intx" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1 -DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSI=1" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"RISCV_IRQ_BACKEND:plic\nVIRTIO_IRQ_MSI_STATE:disabled" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|unsupported|no_cap|skipped_msix|failed)|VIRTIO_IRQ_AFFINITY:(ok|fail)" \
+			"$$common_make_vars RISCV_AIA=0"; \
+		run_case_riscv "aia1-msix2" "-DCONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK=0x2" \
+			"RISCV_IRQ_BACKEND:(imsic|none)" \
+			"" \
+			"VIRTIO_IRQ_AFFINITY:fail" \
+			"$$common_make_vars RISCV_AIA=1" \
+			"RISCV_IRQ_BACKEND:imsic\tVIRTIO_IRQ_MODE:msix:2\nRISCV_IRQ_BACKEND:imsic\tVIRTIO_IRQ_AFFINITY:ok:1:0x2\nRISCV_IRQ_BACKEND:none\tVIRTIO_IRQ_MODE:intx:1\nRISCV_IRQ_BACKEND:none\tVIRTIO_IRQ_MSI_STATE:no_cap"; \
+		run_case_riscv "aia1-msix1" "-DCONFIG_VIRTIO_PCI_TEST_MSIX_REQ_VECTORS=1 -DCONFIG_VIRTIO_PCI_TEST_AFFINITY_MASK=0x2" \
+			"RISCV_IRQ_BACKEND:(imsic|none)" \
+			"" \
+			"VIRTIO_IRQ_AFFINITY:fail" \
+			"$$common_make_vars RISCV_AIA=1" \
+			"RISCV_IRQ_BACKEND:imsic\tVIRTIO_IRQ_MODE:msix:1\nRISCV_IRQ_BACKEND:imsic\tVIRTIO_IRQ_AFFINITY:ok:0:0x2\nRISCV_IRQ_BACKEND:none\tVIRTIO_IRQ_MODE:intx:1\nRISCV_IRQ_BACKEND:none\tVIRTIO_IRQ_MSI_STATE:no_cap"; \
+		run_case_riscv "aia1-msi" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"RISCV_IRQ_BACKEND:(imsic|none)\nVIRTIO_IRQ_MSI_STATE:no_cap" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(disabled|enabled|unsupported|skipped_msix|failed)|VIRTIO_IRQ_AFFINITY:(ok|fail)" \
+			"$$common_make_vars RISCV_AIA=1"; \
+		run_case_riscv "aia1-intx" "-DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSIX=1 -DCONFIG_VIRTIO_PCI_TEST_DISABLE_MSI=1" \
+			"VIRTIO_IRQ_MODE:intx:1" \
+			"RISCV_IRQ_BACKEND:(imsic|none)\nVIRTIO_IRQ_MSI_STATE:disabled" \
+			"VIRTIO_IRQ_MODE:msix:[0-9]+|VIRTIO_IRQ_MODE:msi:1|VIRTIO_IRQ_MSI_STATE:(enabled|unsupported|no_cap|skipped_msix|failed)|VIRTIO_IRQ_AFFINITY:(ok|fail)" \
+			"$$common_make_vars RISCV_AIA=1"; \
+	elif [ "$(ARCH)" != "aarch64" ]; then \
+		echo "test-device-virtio: ARCH=$(ARCH) uses module-only coverage"; \
 		$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
 			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200" test; \
 	else \
@@ -1141,7 +1223,7 @@ help:
 	@echo "  test-mm  - Run memory test module only"
 	@echo "  test-sched - Run scheduler test module only"
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
-	@echo "  test-device-virtio - Run device model + virtio probe-path module only"
+	@echo "  test-device-virtio - Run device model + virtio probe-path tests (IRQ matrix on aarch64/riscv64)"
 	@echo "  test-concurrent-vfs-ipc - Concurrent smoke preset for test-vfs-ipc"
 	@echo "  print-config - Show effective build/run/test configuration"
 	@echo "  gc-runs  - Keep only latest N isolated runs"
@@ -1205,7 +1287,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-syscall - Alias of test-syscall-trap"
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
 	@echo "  test-socket - Run socket module only (AF_UNIX/AF_INET)"
-	@echo "  test-device-virtio - Run device model + virtio probe-path module only"
+	@echo "  test-device-virtio - Run device model + virtio probe-path tests (IRQ matrix on aarch64/riscv64)"
 	@echo "  test-devmodel - Alias of test-device-virtio"
 	@echo "  test-tty - Run tty stack module only (tty_core/n_tty/pty)"
 	@echo "  test-soak-pr - Run PR soak + low-rate fault injection module only"

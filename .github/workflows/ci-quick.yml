@@ -90,6 +90,11 @@ jobs:
           fi
           python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
+      - name: Run riscv64 virtio IRQ matrix gate (AIA on/off)
+        run: |
+          set -euo pipefail
+          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=420 test-device-virtio
+
       - name: Run riscv64 tcc smoke gate
         run: |
           set -euo pipefail
@@ -132,6 +137,7 @@ jobs:
             build/runs/*/riscv64/logs/*.log
             build/runs/*/riscv64/*.log
             build/riscv64/test.log
+            build/riscv64/test-device-virtio-*.log
             build/riscv64/tcc-smoke.log
             build/riscv64/run.log
 
