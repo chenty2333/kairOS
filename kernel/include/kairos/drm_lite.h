@@ -13,6 +13,9 @@
 #define DRM_LITE_IOC_PRESENT        0xF004
 #define DRM_LITE_IOC_DESTROY_BUFFER 0xF005
 #define DRM_LITE_IOC_LIST_BUFFERS   0xF006
+#define DRM_LITE_IOC_EXPORT_HANDLE  0xF007
+#define DRM_LITE_IOC_IMPORT_HANDLE  0xF008
+#define DRM_LITE_IOC_DAMAGE         0xF009
 
 #define DRM_LITE_MAX_BUFFERS        16
 
@@ -57,6 +60,27 @@ struct drm_lite_destroy {
 struct drm_lite_buffer_list {
     uint32_t count;
     uint32_t handles[DRM_LITE_MAX_BUFFERS];
+};
+
+struct drm_lite_export {
+    uint32_t handle;
+    int32_t  khandle;
+};
+
+struct drm_lite_import {
+    int32_t  khandle;
+    uint32_t handle;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t format;
+    uint64_t size;
+};
+
+struct drm_lite_damage {
+    int32_t  khandle;
+    uint32_t x, y;
+    uint32_t width, height;
 };
 
 #endif /* _KAIROS_DRM_LITE_H */

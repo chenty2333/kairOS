@@ -9,9 +9,11 @@
 #include <kairos/devfs.h>
 #include <kairos/device.h>
 #include <kairos/drm_lite.h>
+#include <kairos/handle.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
 #include <kairos/platform.h>
+#include <kairos/poll.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
@@ -38,6 +40,22 @@ struct drm_lite_buffer {
     struct mutex lock;              /* protects mappings */
     struct list_head mappings;
     struct list_head list;
+};
+
+struct drm_buffer_watch {
+    struct list_head node;
+    struct vnode *vn;
+};
+
+struct drm_buffer_kobj {
+    struct kobj obj;
+    struct drm_lite_buffer *buf;
+    struct drm_lite_device *ldev;
+    struct mutex damage_lock;
+    bool damage_pending;
+    uint32_t damage_x, damage_y;
+    uint32_t damage_w, damage_h;
+    struct list_head poll_vnodes;
 };
 
 struct drm_lite_device;
@@ -79,6 +97,132 @@ static void drm_lite_buffer_put(struct drm_lite_buffer *buf)
         drm_lite_buffer_free(buf);
     }
 }
+
+static inline struct drm_buffer_kobj *drm_buffer_kobj_from_obj(struct kobj *obj)
+{
+    if (!obj || obj->type != KOBJ_TYPE_BUFFER) {
+        return NULL;
+    }
+    return (struct drm_buffer_kobj *)obj;
+}
+
+static void drm_buffer_kobj_release(struct kobj *obj)
+{
+    struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+    if (!bkobj) {
+        return;
+    }
+
+    struct drm_buffer_watch *watch, *tmp;
+    list_for_each_entry_safe(watch, tmp, &bkobj->poll_vnodes, node) {
+        list_del(&watch->node);
+        kfree(watch);
+    }
+
+    drm_lite_buffer_put(bkobj->buf);
+    kfree(bkobj);
+}
+
+static int drm_buffer_kobj_poll(struct kobj *obj, uint32_t events,
+                                uint32_t *out_revents)
+{
+    struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+    if (!bkobj) {
+        return -EINVAL;
+    }
+
+    uint32_t revents = 0;
+    mutex_lock(&bkobj->damage_lock);
+    if (bkobj->damage_pending) {
+        revents |= POLLIN;
+    }
+    revents |= POLLOUT;
+    mutex_unlock(&bkobj->damage_lock);
+
+    *out_revents = revents & events;
+    return 0;
+}
+
+static int drm_buffer_kobj_read(struct kobj *obj, void *buf, size_t len,
+                                size_t *out_len, uint32_t options)
+{
+    struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+    if (!bkobj) {
+        return -EINVAL;
+    }
+
+    if (len < sizeof(struct drm_lite_damage)) {
+        return -EINVAL;
+    }
+
+    struct drm_lite_damage dmg;
+    mutex_lock(&bkobj->damage_lock);
+    if (!bkobj->damage_pending) {
+        mutex_unlock(&bkobj->damage_lock);
+        return -EAGAIN;
+    }
+
+    dmg.khandle = 0;
+    dmg.x = bkobj->damage_x;
+    dmg.y = bkobj->damage_y;
+    dmg.width = bkobj->damage_w;
+    dmg.height = bkobj->damage_h;
+    bkobj->damage_pending = false;
+    mutex_unlock(&bkobj->damage_lock);
+
+    memcpy(buf, &dmg, sizeof(dmg));
+    *out_len = sizeof(dmg);
+    return 0;
+}
+
+static int drm_buffer_kobj_poll_attach(struct kobj *obj, struct vnode *vn)
+{
+    struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+    if (!bkobj) {
+        return -EINVAL;
+    }
+
+    struct drm_buffer_watch *watch = kzalloc(sizeof(*watch));
+    if (!watch) {
+        return -ENOMEM;
+    }
+
+    watch->vn = vn;
+    mutex_lock(&bkobj->damage_lock);
+    list_add_tail(&watch->node, &bkobj->poll_vnodes);
+    mutex_unlock(&bkobj->damage_lock);
+
+    return 0;
+}
+
+static int drm_buffer_kobj_poll_detach(struct kobj *obj, struct vnode *vn)
+{
+    struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+    if (!bkobj) {
+        return -EINVAL;
+    }
+
+    struct drm_buffer_watch *watch, *tmp;
+    mutex_lock(&bkobj->damage_lock);
+    list_for_each_entry_safe(watch, tmp, &bkobj->poll_vnodes, node) {
+        if (watch->vn == vn) {
+            list_del(&watch->node);
+            kfree(watch);
+            break;
+        }
+    }
+    mutex_unlock(&bkobj->damage_lock);
+
+    return 0;
+}
+
+static const struct kobj_ops drm_buffer_kobj_ops = {
+    .release           = drm_buffer_kobj_release,
+    .read              = drm_buffer_kobj_read,
+    .poll              = drm_buffer_kobj_poll,
+    .poll_attach_vnode = drm_buffer_kobj_poll_attach,
+    .poll_detach_vnode = drm_buffer_kobj_poll_detach,
+};
 
 static void drm_lite_buffer_free(struct drm_lite_buffer *buf)
 {
@@ -501,6 +645,187 @@ static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
         if (copy_to_user((void *)arg, &blist, sizeof(blist)) < 0) {
             return -EFAULT;
         }
+        return 0;
+    }
+    case DRM_LITE_IOC_EXPORT_HANDLE: {
+        if (!arg) {
+            return -EFAULT;
+        }
+        struct drm_lite_export req;
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
+            return -EFAULT;
+        }
+
+        mutex_lock(&ldev->lock);
+        struct drm_lite_buffer *buf = drm_lite_find_buffer(ldev, req.handle);
+        if (!buf) {
+            mutex_unlock(&ldev->lock);
+            return -ENOENT;
+        }
+
+        struct drm_buffer_kobj *bkobj = kzalloc(sizeof(*bkobj));
+        if (!bkobj) {
+            mutex_unlock(&ldev->lock);
+            return -ENOMEM;
+        }
+
+        drm_lite_buffer_get(buf);
+        bkobj->buf = buf;
+        bkobj->ldev = ldev;
+        mutex_init(&bkobj->damage_lock, "drm_damage_lock");
+        bkobj->damage_pending = false;
+        INIT_LIST_HEAD(&bkobj->poll_vnodes);
+        kobj_init(&bkobj->obj, KOBJ_TYPE_BUFFER, &drm_buffer_kobj_ops);
+
+        mutex_unlock(&ldev->lock);
+
+        struct process *p = proc_current();
+        int khandle = khandle_alloc(p, &bkobj->obj, KRIGHT_BUFFER_DEFAULT);
+        if (khandle < 0) {
+            kobj_put(&bkobj->obj);
+            return khandle;
+        }
+
+        req.khandle = khandle;
+        if (copy_to_user((void *)arg, &req, sizeof(req)) < 0) {
+            khandle_close(p, khandle);
+            return -EFAULT;
+        }
+        return 0;
+    }
+    case DRM_LITE_IOC_IMPORT_HANDLE: {
+        if (!arg) {
+            return -EFAULT;
+        }
+        struct drm_lite_import req;
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
+            return -EFAULT;
+        }
+
+        struct process *p = proc_current();
+        struct kobj *obj;
+        uint32_t rights;
+        int ret = khandle_get(p, req.khandle, KRIGHT_READ, &obj, &rights);
+        if (ret < 0) {
+            return ret;
+        }
+
+        if (obj->type != KOBJ_TYPE_BUFFER) {
+            kobj_put(obj);
+            return -EINVAL;
+        }
+
+        struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+        if (bkobj->ldev != ldev) {
+            kobj_put(obj);
+            return -EINVAL;
+        }
+
+        mutex_lock(&ldev->lock);
+        struct drm_lite_buffer *existing = NULL;
+        struct drm_lite_buffer *buf;
+        list_for_each_entry(buf, &ldev->buffers, list) {
+            if (buf == bkobj->buf) {
+                existing = buf;
+                break;
+            }
+        }
+
+        if (existing) {
+            req.handle = existing->handle;
+        } else {
+            if (ldev->buffer_count >= DRM_LITE_MAX_BUFFERS) {
+                mutex_unlock(&ldev->lock);
+                kobj_put(obj);
+                return -ENOSPC;
+            }
+            drm_lite_buffer_get(bkobj->buf);
+            list_add_tail(&bkobj->buf->list, &ldev->buffers);
+            ldev->buffer_count++;
+            req.handle = bkobj->buf->handle;
+        }
+
+        req.width = bkobj->buf->width;
+        req.height = bkobj->buf->height;
+        req.pitch = bkobj->buf->pitch;
+        req.format = bkobj->buf->format;
+        req.size = bkobj->buf->size;
+        mutex_unlock(&ldev->lock);
+
+        kobj_put(obj);
+
+        if (copy_to_user((void *)arg, &req, sizeof(req)) < 0) {
+            return -EFAULT;
+        }
+        return 0;
+    }
+    case DRM_LITE_IOC_DAMAGE: {
+        if (!arg) {
+            return -EFAULT;
+        }
+        struct drm_lite_damage req;
+        if (copy_from_user(&req, (void *)arg, sizeof(req)) < 0) {
+            return -EFAULT;
+        }
+
+        struct process *p = proc_current();
+        struct kobj *obj;
+        uint32_t rights;
+        int ret = khandle_get(p, req.khandle, KRIGHT_WRITE, &obj, &rights);
+        if (ret < 0) {
+            return ret;
+        }
+
+        if (obj->type != KOBJ_TYPE_BUFFER) {
+            kobj_put(obj);
+            return -EINVAL;
+        }
+
+        struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
+        uint32_t max_x = bkobj->buf->width;
+        uint32_t max_y = bkobj->buf->height;
+
+        if (req.x >= max_x) {
+            req.x = max_x - 1;
+        }
+        if (req.y >= max_y) {
+            req.y = max_y - 1;
+        }
+        if (req.x + req.width > max_x) {
+            req.width = max_x - req.x;
+        }
+        if (req.y + req.height > max_y) {
+            req.height = max_y - req.y;
+        }
+
+        mutex_lock(&bkobj->damage_lock);
+        if (bkobj->damage_pending) {
+            uint32_t x1 = MIN(bkobj->damage_x, req.x);
+            uint32_t y1 = MIN(bkobj->damage_y, req.y);
+            uint32_t x2 = MAX(bkobj->damage_x + bkobj->damage_w,
+                              req.x + req.width);
+            uint32_t y2 = MAX(bkobj->damage_y + bkobj->damage_h,
+                              req.y + req.height);
+            bkobj->damage_x = x1;
+            bkobj->damage_y = y1;
+            bkobj->damage_w = x2 - x1;
+            bkobj->damage_h = y2 - y1;
+        } else {
+            bkobj->damage_x = req.x;
+            bkobj->damage_y = req.y;
+            bkobj->damage_w = req.width;
+            bkobj->damage_h = req.height;
+            bkobj->damage_pending = true;
+        }
+
+        struct drm_buffer_watch *watch;
+        list_for_each_entry(watch, &bkobj->poll_vnodes, node) {
+            vfs_poll_wake(watch->vn, POLLIN);
+        }
+        mutex_unlock(&bkobj->damage_lock);
+
+        wait_queue_wakeup_all(&obj->waitq);
+        kobj_put(obj);
         return 0;
     }
     default:

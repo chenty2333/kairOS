@@ -36,6 +36,15 @@ Backend-private data goes in `ldev->backend_data`. Limine backend uses `ldev->fb
 
 `DRM_LITE_IOC_GET_INFO`, `CREATE_BUFFER`, `MAP_BUFFER`, `PRESENT`, `DESTROY_BUFFER`, `LIST_BUFFERS`.
 
+Shared buffer transfer (compositor support):
+- `EXPORT_HANDLE`: wraps device-local buffer handle in kobj (type `KOBJ_TYPE_BUFFER`), returns process handle (khandle). Each export creates new kobj with independent damage state.
+- `IMPORT_HANDLE`: accepts khandle (from IPC transfer), validates same-device, returns device-local handle. Reuses existing handle if buffer already in device list.
+- `DAMAGE`: marks rect dirty, merges into bounding box, wakes pollers (POLLIN) and waiters.
+
+Buffer kobj ops: poll (POLLIN when damage pending, POLLOUT always), read (returns damage rect, clears pending), poll_attach/detach (epoll).
+
+Flow: app CREATE_BUFFER → EXPORT_HANDLE → kchannel_send → compositor kchannel_recv → IMPORT_HANDLE → app DAMAGE → compositor poll/read → PRESENT.
+
 ## Current Limitations
 
 - XRGB8888 only, 32bpp
