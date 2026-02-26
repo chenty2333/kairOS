@@ -494,8 +494,24 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
     enum { P_ALL = 0, P_PID = 1, P_PGID = 2, P_PIDFD = 3 };
     int32_t ktype = sysproc_abi_i32(type);
     uint32_t uoptions = (uint32_t)options;
-    if (uoptions & ~(WNOHANG | WEXITED))
+    uint32_t allowed = WNOHANG | WEXITED | WSTOPPED | WCONTINUED | WNOWAIT;
+    uint32_t requested = uoptions & (WEXITED | WSTOPPED | WCONTINUED);
+    if (uoptions & ~allowed)
         return -EINVAL;
+    if (requested == 0)
+        return -EINVAL;
+    if ((uoptions & WEXITED) == 0) {
+        if (uoptions & WNOHANG) {
+            if (info_ptr) {
+                siginfo_t info = {0};
+                if (copy_to_user((void *)info_ptr, &info, sizeof(info)) < 0)
+                    return -EFAULT;
+            }
+            return 0;
+        }
+        return -EOPNOTSUPP;
+    }
+
     pid_t pid = -1;
     if (ktype == P_PID) {
         pid = sysproc_abi_pid(id);
@@ -518,7 +534,7 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
     }
 
     int status = 0;
-    pid_t ret = proc_wait(pid, &status, (int)uoptions);
+    pid_t ret = proc_waitid(pid, &status, (int)uoptions, NULL);
     if (ret == 0 && (uoptions & WNOHANG)) {
         if (info_ptr) {
             siginfo_t info = {0};
@@ -536,7 +552,7 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
         info.si_signo = SIGCHLD;
         info.si_code = CLD_EXITED;
         info.si_pid = ret;
-        info.si_status = status >> 8;
+        info.si_status = (status >> 8) & 0xff;
         if (copy_to_user((void *)info_ptr, &info, sizeof(info)) < 0)
             return -EFAULT;
     }

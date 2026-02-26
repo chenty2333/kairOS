@@ -4,53 +4,74 @@
 
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/string.h>
 #include <kairos/types.h>
 
 #include "proc_internal.h"
 
-static bool proc_wait_find_reapable(struct process *parent, pid_t pid,
-                                    struct process **out_reap) {
-    bool found = false;
+struct proc_wait_scan {
+    bool found_child;
+    pid_t ready_pid;
+    int ready_status;
+    struct process *reap;
+};
+
+static void proc_wait_scan_children(struct process *parent, pid_t pid,
+                                    bool consume, struct proc_wait_scan *scan) {
+    if (!scan)
+        return;
+
+    memset(scan, 0, sizeof(*scan));
+
     bool flags;
     struct process *child, *tmp;
-    struct process *reap = NULL;
-
     spin_lock_irqsave(&proc_table_lock, &flags);
     list_for_each_entry_safe(child, tmp, &parent->children, sibling) {
-        found = true;
         if (pid > 0 && child->pid != pid)
             continue;
-        if (child->state == PROC_ZOMBIE) {
+
+        scan->found_child = true;
+        if (child->state != PROC_ZOMBIE)
+            continue;
+
+        if (consume) {
             if (sched_is_on_cpu(child))
                 continue;
             if (se_is_on_rq(&child->se))
                 continue;
             child->state = PROC_REAPING;
             list_del(&child->sibling);
-            reap = child;
-            break;
+            scan->reap = child;
         }
+
+        scan->ready_pid = child->pid;
+        scan->ready_status = child->exit_code;
+        break;
     }
     spin_unlock_irqrestore(&proc_table_lock, flags);
-
-    if (out_reap)
-        *out_reap = reap;
-    return found;
 }
 
-pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
+static pid_t proc_wait_common(pid_t pid, int *status, int options, bool consume,
+                              bool *reaped_out) {
+    if (reaped_out)
+        *reaped_out = false;
+
     struct process *p = proc_current();
     while (1) {
-        struct process *reap = NULL;
-        bool found = proc_wait_find_reapable(p, pid, &reap);
-        if (reap) {
-            pid_t cpid = reap->pid;
+        struct proc_wait_scan scan;
+        proc_wait_scan_children(p, pid, consume, &scan);
+        if (scan.ready_pid > 0) {
+            pid_t cpid = scan.ready_pid;
             if (status)
-                *status = reap->exit_code;
-            proc_free(reap);
+                *status = scan.ready_status;
+            if (scan.reap) {
+                proc_free(scan.reap);
+                if (reaped_out)
+                    *reaped_out = true;
+            }
             return cpid;
         }
-        if (!found)
+        if (!scan.found_child)
             return -ECHILD;
         if (options & WNOHANG)
             return 0;
@@ -58,17 +79,20 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
         /* Arm waiter first, then re-check children to close wait race. */
         wait_queue_add(&p->exit_wait, p);
 
-        reap = NULL;
-        found = proc_wait_find_reapable(p, pid, &reap);
-        if (reap) {
+        proc_wait_scan_children(p, pid, consume, &scan);
+        if (scan.ready_pid > 0) {
             wait_queue_remove(&p->exit_wait, p);
-            pid_t cpid = reap->pid;
+            pid_t cpid = scan.ready_pid;
             if (status)
-                *status = reap->exit_code;
-            proc_free(reap);
+                *status = scan.ready_status;
+            if (scan.reap) {
+                proc_free(scan.reap);
+                if (reaped_out)
+                    *reaped_out = true;
+            }
             return cpid;
         }
-        if (!found) {
+        if (!scan.found_child) {
             wait_queue_remove(&p->exit_wait, p);
             return -ECHILD;
         }
@@ -107,6 +131,15 @@ pid_t proc_wait(pid_t pid, int *status, int options __attribute__((unused))) {
         if (interrupted)
             return -EINTR;
     }
+}
+
+pid_t proc_wait(pid_t pid, int *status, int options) {
+    return proc_wait_common(pid, status, options, true, NULL);
+}
+
+pid_t proc_waitid(pid_t pid, int *status, int options, bool *reaped_out) {
+    bool consume = (options & WNOWAIT) == 0;
+    return proc_wait_common(pid, status, options, consume, reaped_out);
 }
 
 void proc_yield(void) {

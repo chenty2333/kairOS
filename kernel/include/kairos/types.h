@@ -87,7 +87,11 @@ struct rlimit {
 #define SEEK_END 2
 
 #define WNOHANG 1
+#define WUNTRACED 2
+#define WSTOPPED WUNTRACED
 #define WEXITED 4
+#define WCONTINUED 8
+#define WNOWAIT 0x01000000
 
 /* Error codes */
 #define EPERM 1

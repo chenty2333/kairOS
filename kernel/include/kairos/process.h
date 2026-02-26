@@ -380,6 +380,7 @@ struct proc_fork_opts {
 struct process *proc_fork_ex(const struct proc_fork_opts *opts);
 noreturn void proc_exit(int status);
 pid_t proc_wait(pid_t pid, int *status, int options);
+pid_t proc_waitid(pid_t pid, int *status, int options, bool *reaped_out);
 struct process *proc_find(pid_t pid);
 pid_t proc_get_nth_pid(int n);
 struct process *proc_current(void);

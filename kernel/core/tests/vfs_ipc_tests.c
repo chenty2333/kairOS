@@ -3174,6 +3174,8 @@ static void test_pidfd_syscall_semantics(void) {
         return;
 
     int pidfd = -1;
+    struct user_map_ctx um = {0};
+    bool um_active = false;
 
     int64_t ret64 = sys_pidfd_open(0, 0, 0, 0, 0, 0);
     test_check(ret64 == -EINVAL, "pidfd_open pid 0 einval");
@@ -3198,7 +3200,23 @@ static void test_pidfd_syscall_semantics(void) {
     test_check(ret64 == -EINVAL, "pidfd_send_signal bad sig einval");
 
     ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0, 1, 0, 0, 0);
-    test_check(ret64 == -EOPNOTSUPP, "pidfd_send_signal info unsupported");
+    test_check(ret64 == -EFAULT, "pidfd_send_signal info bad ptr efault");
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "pidfd_send_signal info user_map");
+    if (rc == 0) {
+        um_active = true;
+        siginfo_t info = {0};
+        info.si_signo = SIGUSR1;
+        siginfo_t *u_info = (siginfo_t *)user_map_ptr(&um, 0);
+        rc = copy_to_user(u_info, &info, sizeof(info));
+        test_check(rc == 0, "pidfd_send_signal info copy_to_user");
+        if (rc == 0) {
+            ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0,
+                                          (uint64_t)(uintptr_t)u_info, 0, 0, 0);
+            test_check(ret64 == 0, "pidfd_send_signal info accepted");
+        }
+    }
 
     ret64 = sys_pidfd_send_signal((uint64_t)-1, 0, 0, 0, 0, 0);
     test_check(ret64 == -EBADF, "pidfd_send_signal bad fd ebadf");
@@ -3207,6 +3225,8 @@ static void test_pidfd_syscall_semantics(void) {
     test_check(ret64 == 0, "pidfd_send_signal sig0 alive");
 
 out:
+    if (um_active)
+        user_map_end(&um);
     close_fd_if_open(&pidfd);
 }
 
@@ -3278,12 +3298,18 @@ static void test_waitid_pidfd_functional(void) {
     enum { P_PIDFD = 3 };
     int pidfd = -1;
     bool child_reaped = false;
+    pid_t child_pid = 0;
+    struct user_map_ctx um = {0};
+    bool um_active = false;
+    siginfo_t *u_info = NULL;
+    siginfo_t info = {0};
     struct pidfd_worker_ctx ctx = {0};
     struct process *child =
         kthread_create_joinable(pidfd_controlled_exit_worker, &ctx, "pidfdwait");
     test_check(child != NULL, "waitid pidfd create child");
     if (!child)
         return;
+    child_pid = child->pid;
 
     sched_enqueue(child);
     for (int spins = 0; spins < 2000 && !ctx.started; spins++)
@@ -3300,29 +3326,73 @@ static void test_waitid_pidfd_functional(void) {
     }
     pidfd = (int)ret64;
 
-    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd, 0, WEXITED | WNOHANG,
-                       0, 0);
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "waitid pidfd user_map");
+    if (rc < 0)
+        goto out;
+    um_active = true;
+    u_info = (siginfo_t *)user_map_ptr(&um, 0);
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd,
+                       (uint64_t)(uintptr_t)u_info,
+                       WEXITED | WSTOPPED | WCONTINUED | WNOHANG, 0, 0);
     test_check(ret64 == 0, "waitid pidfd wnohang before exit");
+    if (ret64 == 0) {
+        rc = copy_from_user(&info, u_info, sizeof(info));
+        test_check(rc == 0, "waitid pidfd wnohang before exit copy");
+        if (rc == 0)
+            test_check(info.si_pid == 0, "waitid pidfd wnohang before exit none");
+    }
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd,
+                       (uint64_t)(uintptr_t)u_info,
+                       WSTOPPED | WCONTINUED | WNOHANG, 0, 0);
+    test_check(ret64 == 0, "waitid pidfd stopped continued wnohang");
+    if (ret64 == 0) {
+        rc = copy_from_user(&info, u_info, sizeof(info));
+        test_check(rc == 0, "waitid pidfd stopped continued copy");
+        if (rc == 0)
+            test_check(info.si_pid == 0, "waitid pidfd stopped continued none");
+    }
 
     ctx.exit_now = 1;
-    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd, 0, WEXITED, 0, 0);
-    test_check(ret64 == 0, "waitid pidfd reap child");
-    if (ret64 == 0)
-        child_reaped = true;
 
-    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd, 0, WEXITED | WNOHANG,
-                       0, 0);
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd,
+                       (uint64_t)(uintptr_t)u_info, WEXITED | WNOWAIT, 0, 0);
+    test_check(ret64 == 0, "waitid pidfd wnowait observe child");
+    if (ret64 == 0) {
+        rc = copy_from_user(&info, u_info, sizeof(info));
+        test_check(rc == 0, "waitid pidfd wnowait copy");
+        if (rc == 0)
+            test_check(info.si_pid == child_pid, "waitid pidfd wnowait pid");
+    }
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd,
+                       (uint64_t)(uintptr_t)u_info, WEXITED | WNOHANG, 0, 0);
+    test_check(ret64 == 0, "waitid pidfd reap child");
+    if (ret64 == 0) {
+        rc = copy_from_user(&info, u_info, sizeof(info));
+        test_check(rc == 0, "waitid pidfd reap child copy");
+        if (rc == 0)
+            test_check(info.si_pid == child_pid, "waitid pidfd reap child pid");
+        child_reaped = true;
+    }
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd,
+                       (uint64_t)(uintptr_t)u_info, WEXITED | WNOHANG, 0, 0);
     test_check(ret64 == -ECHILD, "waitid pidfd after reap echid");
 
     ret64 = sys_waitid(P_PIDFD, (uint64_t)-1, 0, WEXITED | WNOHANG, 0, 0);
     test_check(ret64 == -EBADF, "waitid pidfd bad fd");
 
 out:
+    if (um_active)
+        user_map_end(&um);
     close_fd_if_open(&pidfd);
     if (!child_reaped) {
         ctx.exit_now = 1;
         int ignored = 0;
-        (void)wait_pid_exit_bounded(child->pid, 2ULL * TEST_NS_PER_SEC, &ignored);
+        (void)wait_pid_exit_bounded(child_pid, 2ULL * TEST_NS_PER_SEC, &ignored);
     }
 }
 

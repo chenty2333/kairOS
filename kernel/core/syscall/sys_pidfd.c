@@ -11,6 +11,7 @@
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
+#include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 #define PIDFD_MAGIC 0x70666466U
@@ -262,8 +263,11 @@ int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t info,
         return -EINVAL;
     if (ksig < 0 || ksig > NSIG)
         return -EINVAL;
-    if (info != 0)
-        return -EOPNOTSUPP;
+    if (info != 0) {
+        siginfo_t kinfo;
+        if (copy_from_user(&kinfo, (const void *)info, sizeof(kinfo)) < 0)
+            return -EFAULT;
+    }
 
     struct file *file = NULL;
     int frc = fd_get_required(proc_current(), kfd, FD_RIGHT_IOCTL, &file);
