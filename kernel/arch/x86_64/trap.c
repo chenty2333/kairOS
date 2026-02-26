@@ -221,13 +221,24 @@ static void handle_exception(struct trap_frame *tf) {
     }
 
     if (trapno == 13) {
-        void *ra = NULL;
-        if (tf->rsp)
-            ra = *(void **)(tf->rsp + sizeof(void *));
-        pr_err("x86_64 #GP rip=%p err=%p rsp=%p ra=%p rdi=%p rsi=%p rcx=%p rdx=%p rax=%p\n",
-               (void *)tf->rip, (void *)tf->err, (void *)tf->rsp, ra,
+        pr_err("x86_64 #GP rip=%p err=%p rsp=%p rbp=%p cs=%p ss=%p rflags=%p tf=%p from_user=%d rdi=%p rsi=%p rcx=%p rdx=%p rax=%p\n",
+               (void *)tf->rip, (void *)tf->err, (void *)tf->rsp,
+               (void *)tf->rbp, (void *)tf->cs, (void *)tf->ss,
+               (void *)tf->rflags, (void *)tf, from_user ? 1 : 0,
                (void *)tf->rdi, (void *)tf->rsi, (void *)tf->rcx,
                (void *)tf->rdx, (void *)tf->rax);
+        if (cur && cur->kstack_top) {
+            uint64_t kstack_top = cur->kstack_top;
+            uint64_t kstack_bottom =
+                kstack_top + sizeof(uint64_t) - (2ULL * CONFIG_PAGE_SIZE);
+            bool rsp_in_kstack =
+                (tf->rsp >= kstack_bottom) && (tf->rsp <= kstack_top);
+            bool tf_in_kstack = x86_tf_on_current_kstack(cur, tf);
+            pr_err("x86_64 #GP proc pid=%d active_tf=%p kstack=%p..%p rsp_in_kstack=%d tf_in_kstack=%d\n",
+                   cur->pid, (void *)cur->active_tf, (void *)kstack_bottom,
+                   (void *)kstack_top, rsp_in_kstack ? 1 : 0,
+                   tf_in_kstack ? 1 : 0);
+        }
     } else if (trapno == 14) {
         pr_err("x86_64 #PF rip=%p err=%p cr2=%p rsp=%p rbp=%p cs=%p tf=%p from_user=%d\n",
                (void *)tf->rip, (void *)tf->err, (void *)cr2, (void *)tf->rsp,
