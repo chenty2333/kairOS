@@ -342,6 +342,7 @@ run_test_main() {
     local pre_qemu_reason
     local status reason exit_code verdict_source
     local allow_signal_override
+    local had_errexit_timeout
 
     mkdir -p "${TEST_BUILD_ROOT}" \
         "$(dirname "${TEST_LOG}")" \
@@ -378,11 +379,17 @@ run_test_main() {
     wrapped_qemu_cmd=""
     printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${TEST_QEMU_PID_FILE}" "${QEMU_CMD}"
 
-    set +e
+    had_errexit_timeout=0
+    if [[ $- == *e* ]]; then
+        had_errexit_timeout=1
+        set +e
+    fi
     timeout --signal=TERM --kill-after=5s "${TEST_TIMEOUT}s" \
         bash -lc "${wrapped_qemu_cmd}" >"${TEST_LOG}" 2>&1
     qemu_rc=$?
-    set -e
+    if [[ "${had_errexit_timeout}" -eq 1 ]]; then
+        set -e
+    fi
     rm -f "${TEST_QEMU_PID_FILE}"
 
     has_boot_marker=0

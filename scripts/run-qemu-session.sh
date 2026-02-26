@@ -193,7 +193,9 @@ run_session_main() {
     local start_ms start_time_utc end_ms end_time_utc duration_ms
     local old_pid wrapped_qemu_cmd qemu_rc has_boot_marker has_fail_markers
     local qemu_exit_signal qemu_term_signal qemu_term_sender_pid
+    local effective_qemu_signal
     local status reason exit_code
+    local had_errexit_timeout
 
     rm -f "${SESSION_LOG}"
     start_ms="$(date +%s%3N)"
@@ -234,7 +236,11 @@ run_session_main() {
     printf -v wrapped_qemu_cmd 'echo "$$" > %q; exec %s' "${SESSION_QEMU_PID_FILE}" "${QEMU_CMD}"
 
     prepare_interactive_tty
-    set +e
+    had_errexit_timeout=0
+    if [[ $- == *e* ]]; then
+        had_errexit_timeout=1
+        set +e
+    fi
     if [[ "${SESSION_TIMEOUT}" -gt 0 ]]; then
         if [[ -n "${SESSION_FILTER_CMD}" ]]; then
             timeout --signal=TERM --kill-after=5s "${SESSION_TIMEOUT}s" \
@@ -254,7 +260,9 @@ run_session_main() {
             qemu_rc=${PIPESTATUS[0]}
         fi
     fi
-    set -e
+    if [[ "${had_errexit_timeout}" -eq 1 ]]; then
+        set -e
+    fi
 
     has_boot_marker=0
     has_fail_markers=0
@@ -271,6 +279,12 @@ run_session_main() {
         qemu_exit_signal="$((qemu_rc - 128))"
     fi
     read -r qemu_term_signal qemu_term_sender_pid < <(extract_qemu_signal_meta "${SESSION_LOG}")
+    effective_qemu_signal="${qemu_exit_signal}"
+    if [[ ${effective_qemu_signal} -le 0 ]] &&
+        [[ ${qemu_term_signal} -gt 0 ]] &&
+        [[ ${qemu_rc} -ne 124 ]]; then
+        effective_qemu_signal="${qemu_term_signal}"
+    fi
 
     status="fail"
     reason="unexpected_exit"
@@ -313,12 +327,12 @@ run_session_main() {
         fi
     fi
 
-    if [[ ${has_fail_markers} -eq 0 ]] && [[ "${status}" != "pass" ]] && [[ ${qemu_exit_signal} -gt 0 ]] && [[ ${qemu_rc} -ne 124 ]]; then
+    if [[ ${has_fail_markers} -eq 0 ]] && [[ "${status}" != "pass" ]] && [[ ${effective_qemu_signal} -gt 0 ]] && [[ ${qemu_rc} -ne 124 ]]; then
         status="error"
         exit_code=2
-        if [[ ${qemu_exit_signal} -eq 15 ]]; then
+        if [[ ${effective_qemu_signal} -eq 15 ]]; then
             reason="external_sigterm"
-        elif [[ ${qemu_exit_signal} -eq 9 ]]; then
+        elif [[ ${effective_qemu_signal} -eq 9 ]]; then
             reason="external_sigkill"
         else
             reason="external_signal"

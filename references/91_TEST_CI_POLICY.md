@@ -90,8 +90,10 @@ Run retention:
 - Required-marker assertions are enforced on the structured-pass path; when structured `failed > 0`, smoke failure reasons (`SMOKE_FAIL:*`) are preserved as primary verdict reasons.
 - `run-qemu-session.sh` / `run-qemu-test.sh` emit signal telemetry in `result.json` under `signals`:
   `qemu_exit_signal`, `qemu_term_signal`, `qemu_term_sender_pid` (nullable when unavailable)
-- When no kernel failure markers are present and the runner exits by signal (`qemu_rc` in 128+N, non-timeout),
+- Signal-based infra classification uses either runner exit signal (`qemu_rc` in 128+N) or parsed QEMU log termination signal (`terminating on signal N`) when non-timeout.
+- When no kernel failure markers are present and the runner exits by signal (effective signal, non-timeout),
   verdict is treated as infrastructure interruption (`external_sigterm` / `external_sigkill` / `external_signal`).
+- `run-qemu-test.sh` supports `TEST_INFRA_SIGNAL_RETRIES` (default `1`) to auto-retry transient `external_sigterm` / `external_sigkill` / `external_signal` infra failures.
 - `run-qemu-test.sh` also supports optional log assertions (diagnostic/extra constraints, not primary verdict source in structured mode):
   - `TEST_REQUIRED_MARKER_REGEX`: at least one required regex
   - `TEST_REQUIRED_MARKERS_ALL`: newline-delimited required regex list (all must match)
