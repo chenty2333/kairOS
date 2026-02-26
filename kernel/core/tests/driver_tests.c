@@ -465,6 +465,75 @@ static void test_iommu_hw_ops_default_attach(void) {
     iommu_unregister_hw_ops(&test_iommu_hw_ops);
 }
 
+static volatile uint32_t iommu_replace_map_calls;
+static volatile uint32_t iommu_replace_unmap_calls;
+
+static int test_iommu_replace_map(struct iommu_domain *domain __unused,
+                                  dma_addr_t iova __unused, paddr_t paddr __unused,
+                                  size_t size __unused, uint32_t prot __unused) {
+    __atomic_add_fetch(&iommu_replace_map_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static void test_iommu_replace_unmap(struct iommu_domain *domain __unused,
+                                     dma_addr_t iova __unused,
+                                     size_t size __unused) {
+    __atomic_add_fetch(&iommu_replace_unmap_calls, 1, __ATOMIC_RELAXED);
+}
+
+static const struct iommu_domain_ops test_iommu_replace_domain_ops = {
+    .map = test_iommu_replace_map,
+    .unmap = test_iommu_replace_unmap,
+};
+
+static struct iommu_domain *test_iommu_replace_alloc_default(struct device *dev __unused,
+                                                             bool *owned, void *priv __unused) {
+    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    if (!domain)
+        return NULL;
+    iommu_domain_set_ops(domain, &test_iommu_replace_domain_ops, NULL);
+    if (owned)
+        *owned = true;
+    return domain;
+}
+
+static const struct iommu_hw_ops test_iommu_replace_hw_ops = {
+    .alloc_default_domain = test_iommu_replace_alloc_default,
+};
+
+static void test_iommu_attach_replaces_owned_domain(void) {
+    iommu_unregister_hw_ops(&test_iommu_replace_hw_ops);
+    int ret = iommu_register_hw_ops(&test_iommu_replace_hw_ops, NULL);
+    test_check(ret == 0, "iommu replace register hw ops");
+    if (ret < 0)
+        return;
+
+    iommu_replace_map_calls = 0;
+    iommu_replace_unmap_calls = 0;
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    ret = iommu_attach_default_domain(&dev);
+    test_check(ret == 0, "iommu replace default attach");
+    if (ret == 0) {
+        uint8_t buf[256];
+        dma_addr_t dma = dma_map_single(&dev, buf, sizeof(buf), DMA_FROM_DEVICE);
+        test_check(dma != 0, "iommu replace map before reattach");
+        test_check(__atomic_load_n(&iommu_replace_map_calls, __ATOMIC_RELAXED) == 1,
+                   "iommu replace map callback");
+
+        ret = iommu_attach_device(iommu_get_passthrough_domain(), &dev);
+        test_check(ret == 0, "iommu replace attach passthrough");
+        test_check(iommu_get_domain(&dev) == iommu_get_passthrough_domain(),
+                   "iommu replace domain switched");
+        test_check(__atomic_load_n(&iommu_replace_unmap_calls, __ATOMIC_RELAXED) == 1,
+                   "iommu replace old mapping unmapped");
+    }
+
+    iommu_detach_device(&dev);
+    iommu_unregister_hw_ops(&test_iommu_replace_hw_ops);
+}
+
 static volatile uint32_t irq_deferred_hits;
 
 static void test_irq_deferred_handler(void *arg,
@@ -2024,6 +2093,7 @@ static void run_driver_suite_once(void) {
     test_iommu_domain_dma_ops();
     test_iommu_default_domain_attach();
     test_iommu_hw_ops_default_attach();
+    test_iommu_attach_replaces_owned_domain();
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
     test_irq_unregister_actions();

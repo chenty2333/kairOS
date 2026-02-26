@@ -17,6 +17,7 @@ struct iommu_mapping {
     paddr_t cpu_pa;
     size_t map_size;
     size_t req_size;
+    int direction;
 };
 
 static struct iommu_domain iommu_passthrough_domain;
@@ -38,6 +39,14 @@ static uint32_t iommu_dma_dir_to_prot(int direction) {
     return IOMMU_PROT_READ | IOMMU_PROT_WRITE;
 }
 
+static void iommu_direct_unmap_rollback(const struct dma_ops *direct,
+                                        struct device *dev, dma_addr_t phys_dma,
+                                        size_t size, int direction) {
+    if (!direct || !direct->unmap_single || !phys_dma)
+        return;
+    direct->unmap_single(dev, phys_dma, size, direction);
+}
+
 static bool iommu_iova_conflict_locked(struct iommu_domain *domain, dma_addr_t start,
                                        dma_addr_t end, dma_addr_t *next_start) {
     struct iommu_mapping *m;
@@ -46,6 +55,8 @@ static bool iommu_iova_conflict_locked(struct iommu_domain *domain, dma_addr_t s
     list_for_each_entry(m, &domain->mappings, list) {
         dma_addr_t ms = m->iova_base;
         dma_addr_t me = ms + (dma_addr_t)m->map_size;
+        if (me < ms)
+            me = ~(dma_addr_t)0;
         if (end <= ms || start >= me)
             continue;
         conflict = true;
@@ -78,6 +89,8 @@ static dma_addr_t iommu_iova_find_locked(struct iommu_domain *domain, size_t siz
             if ((size_t)(end_limit - cand) < size)
                 break;
             dma_addr_t cand_end = cand + (dma_addr_t)size;
+            if (cand_end < cand)
+                break;
             dma_addr_t next = cand + CONFIG_PAGE_SIZE;
             if (!iommu_iova_conflict_locked(domain, cand, cand_end, &next))
                 return cand;
@@ -104,11 +117,22 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
     paddr_t pa = (paddr_t)phys_dma;
     paddr_t pa_base = ALIGN_DOWN(pa, CONFIG_PAGE_SIZE);
     size_t offset = (size_t)(pa - pa_base);
-    size_t map_size = ALIGN_UP(size + offset, CONFIG_PAGE_SIZE);
+    if (offset > SIZE_MAX - size) {
+        iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
+        return 0;
+    }
+    size_t req_span = size + offset;
+    size_t map_size = ALIGN_UP(req_span, CONFIG_PAGE_SIZE);
+    if (!map_size || map_size < req_span) {
+        iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
+        return 0;
+    }
 
     struct iommu_mapping *mapping = kzalloc(sizeof(*mapping));
-    if (!mapping)
+    if (!mapping) {
+        iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
         return 0;
+    }
 
     bool irq_flags;
     spin_lock_irqsave(&domain->lock, &irq_flags);
@@ -116,6 +140,13 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
     if (!iova_base) {
         spin_unlock_irqrestore(&domain->lock, irq_flags);
         kfree(mapping);
+        iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
+        return 0;
+    }
+    if ((dma_addr_t)offset > (~(dma_addr_t)0 - iova_base)) {
+        spin_unlock_irqrestore(&domain->lock, irq_flags);
+        kfree(mapping);
+        iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
         return 0;
     }
 
@@ -125,6 +156,7 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
         if (ret < 0) {
             spin_unlock_irqrestore(&domain->lock, irq_flags);
             kfree(mapping);
+            iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
             return 0;
         }
     }
@@ -135,6 +167,7 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
     mapping->cpu_pa = pa;
     mapping->map_size = map_size;
     mapping->req_size = size;
+    mapping->direction = direction;
     list_add_tail(&mapping->list, &domain->mappings);
 
     domain->iova_cursor = iova_base + (dma_addr_t)map_size;
@@ -328,6 +361,13 @@ static int iommu_attach_device_internal(struct iommu_domain *domain,
                                         struct device *dev, bool owned) {
     if (!domain || !dev)
         return -EINVAL;
+    if (dev->iommu_domain == domain) {
+        dma_set_ops(dev, iommu_get_dma_ops());
+        return 0;
+    }
+    if (dev->iommu_domain)
+        iommu_detach_device(dev);
+
     dev->iommu_domain = domain;
     dev->iommu_domain_owned = owned;
     dma_set_ops(dev, iommu_get_dma_ops());
@@ -365,6 +405,37 @@ void iommu_detach_device(struct device *dev) {
         return;
     struct iommu_domain *domain = dev->iommu_domain;
     bool owned = dev->iommu_domain_owned;
+    const struct dma_ops *direct = dma_get_direct_ops();
+
+    if (domain && domain->type == IOMMU_DOMAIN_DMA) {
+        struct list_head reclaimed;
+        INIT_LIST_HEAD(&reclaimed);
+
+        bool irq_flags;
+        spin_lock_irqsave(&domain->lock, &irq_flags);
+        struct list_head *pos, *n;
+        list_for_each_safe(pos, n, &domain->mappings) {
+            struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
+            if (m->dev != dev)
+                continue;
+            list_del(&m->list);
+            list_add_tail(&m->list, &reclaimed);
+        }
+        spin_unlock_irqrestore(&domain->lock, irq_flags);
+
+        list_for_each_safe(pos, n, &reclaimed) {
+            struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
+            list_del(&m->list);
+            if (domain->ops && domain->ops->unmap)
+                domain->ops->unmap(domain, m->iova_base, m->map_size);
+            if (direct && direct->unmap_single) {
+                direct->unmap_single(dev, (dma_addr_t)m->cpu_pa, m->req_size,
+                                     m->direction);
+            }
+            kfree(m);
+        }
+    }
+
     dev->iommu_domain = NULL;
     dev->iommu_domain_owned = false;
     dma_set_ops(dev, NULL);

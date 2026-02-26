@@ -67,6 +67,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - Current implementation: virtio_blk (drivers/block/virtio_blk.c)
 - DMA mapping path is device-aware (`dma_map_single(dev, ...)/dma_unmap_single(dev, ...)`) and dispatched through `dma_ops`; default direct backend keeps current behavior, and aarch64 still performs cache clean/invalidate for non-coherent DMA directions (TO/FROM/BIDIRECTIONAL)
 - IOMMU core now provides `iommu_domain` + basic IOVA allocation and an IOMMU DMA backend (`iommu_get_dma_ops()`); PCI enumeration uses `iommu_attach_default_domain()`, which currently falls back to a global passthrough domain and can later be redirected by registering `iommu_hw_ops`
+- Re-attaching a device to another IOMMU domain now auto-detaches the previous domain attachment and reclaims any per-device DMA mappings from the old domain before switching
 - Device init now runs `iommu_init()` before PCI enumeration; architecture code can provide `arch_iommu_init()` to register hardware-backed domain allocation
 
 ## Driver Overview
