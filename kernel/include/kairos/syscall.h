@@ -406,5 +406,9 @@ int64_t sys_kairos_cap_rights_get(uint64_t, uint64_t, uint64_t, uint64_t,
                                   uint64_t, uint64_t);
 int64_t sys_kairos_cap_rights_limit(uint64_t, uint64_t, uint64_t, uint64_t,
                                     uint64_t, uint64_t);
+int64_t sys_kairos_handle_from_fd(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t);
+int64_t sys_kairos_fd_from_handle(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t);
 
 #endif
