@@ -34,7 +34,8 @@ struct vnode;
 #define KRIGHT_FILE_DEFAULT \
     (KRIGHT_READ | KRIGHT_WRITE | KRIGHT_TRANSFER | KRIGHT_DUPLICATE)
 
-#define KCHANNEL_OPT_NONBLOCK (1U << 0)
+#define KCHANNEL_OPT_NONBLOCK   (1U << 0)
+#define KCHANNEL_OPT_RENDEZVOUS (1U << 1)
 
 #define KPORT_BIND_READABLE    (1U << 0)
 #define KPORT_BIND_PEER_CLOSED (1U << 1)
@@ -51,12 +52,19 @@ struct kobj;
 
 struct kobj_ops {
     void (*release)(struct kobj *obj);
+    int (*wait)(struct kobj *obj, void *out, uint64_t timeout_ns,
+                uint32_t options);
+    int (*poll_revents)(struct kobj *obj, uint32_t events,
+                        uint32_t *out_revents);
+    int (*poll_attach_vnode)(struct kobj *obj, struct vnode *vn);
+    int (*poll_detach_vnode)(struct kobj *obj, struct vnode *vn);
 };
 
 struct kobj {
     atomic_t refcount;
     uint32_t type;
     const struct kobj_ops *ops;
+    struct wait_queue waitq;
 };
 
 struct khandle_entry {
@@ -91,6 +99,12 @@ struct khandle_transfer {
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops);
 void kobj_get(struct kobj *obj);
 void kobj_put(struct kobj *obj);
+int kobj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
+              uint32_t options);
+int kobj_poll_revents(struct kobj *obj, uint32_t events,
+                      uint32_t *out_revents);
+int kobj_poll_attach_vnode(struct kobj *obj, struct vnode *vn);
+int kobj_poll_detach_vnode(struct kobj *obj, struct vnode *vn);
 
 struct handletable *handletable_alloc(void);
 struct handletable *handletable_copy(struct handletable *src);

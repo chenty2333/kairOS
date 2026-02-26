@@ -66,7 +66,7 @@ static int portfd_close(struct vnode *vn) {
     struct portfd_ctx *ctx = (struct portfd_ctx *)vn->fs_data;
     if (ctx && ctx->magic == PORTFD_MAGIC) {
         if (ctx->port_obj && ctx->vnode)
-            (void)kport_poll_detach_vnode(ctx->port_obj, ctx->vnode);
+            (void)kobj_poll_detach_vnode(ctx->port_obj, ctx->vnode);
         if (ctx->port_obj)
             kobj_put(ctx->port_obj);
         ctx->magic = 0;
@@ -85,13 +85,11 @@ static int portfd_poll(struct file *file, uint32_t events) {
     if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
         return POLLNVAL;
 
-    bool ready = false;
-    int rc = kport_poll_ready(ctx->port_obj, &ready);
+    uint32_t revents = 0;
+    int rc = kobj_poll_revents(ctx->port_obj, events, &revents);
     if (rc < 0)
         return POLLERR;
-    if (!ready)
-        return 0;
-    return (int)(POLLIN & events);
+    return (int)revents;
 }
 
 static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {
@@ -106,7 +104,7 @@ static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {
 
     struct kairos_port_packet_user pkt = {0};
     uint32_t opts = (file->flags & O_NONBLOCK) ? KPORT_WAIT_NONBLOCK : 0;
-    int rc = kport_wait(ctx->port_obj, &pkt, UINT64_MAX, opts);
+    int rc = kobj_wait(ctx->port_obj, &pkt, UINT64_MAX, opts);
     if (rc < 0)
         return rc;
 
@@ -120,7 +118,8 @@ static struct file_ops portfd_file_ops = {
     .poll = portfd_poll,
 };
 
-static int portfd_create_file(struct kobj *obj, uint32_t rights, struct file **out) {
+static int portfd_create_file(struct kobj *obj, uint32_t rights,
+                              uint32_t open_flags, struct file **out) {
     if (!obj || !out)
         return -EINVAL;
     *out = NULL;
@@ -158,10 +157,10 @@ static int portfd_create_file(struct kobj *obj, uint32_t rights, struct file **o
     file->vnode = vn;
     file->dentry = NULL;
     file->offset = 0;
-    file->flags = O_RDONLY;
+    file->flags = O_RDONLY | (open_flags & O_NONBLOCK);
     file->path[0] = '\0';
 
-    int rc = kport_poll_attach_vnode(obj, vn);
+    int rc = kobj_poll_attach_vnode(obj, vn);
     if (rc < 0) {
         kobj_put(obj);
         vfs_file_free(file);
@@ -181,7 +180,7 @@ static int channelfd_close(struct vnode *vn) {
     struct channelfd_ctx *ctx = (struct channelfd_ctx *)vn->fs_data;
     if (ctx && ctx->magic == CHANFD_MAGIC) {
         if (ctx->channel_obj && ctx->vnode)
-            (void)kchannel_poll_detach_vnode(ctx->channel_obj, ctx->vnode);
+            (void)kobj_poll_detach_vnode(ctx->channel_obj, ctx->vnode);
         if (ctx->channel_obj)
             kobj_put(ctx->channel_obj);
         ctx->magic = 0;
@@ -201,7 +200,7 @@ static int channelfd_poll(struct file *file, uint32_t events) {
         return POLLNVAL;
 
     uint32_t revents = 0;
-    int rc = kchannel_poll_revents(ctx->channel_obj, events, &revents);
+    int rc = kobj_poll_revents(ctx->channel_obj, events, &revents);
     if (rc < 0)
         return POLLERR;
     return (int)revents;
@@ -258,8 +257,90 @@ static struct file_ops channelfd_file_ops = {
     .poll = channelfd_poll,
 };
 
+static uint32_t syshandle_channel_krights_from_fd(uint32_t fd_rights) {
+    uint32_t rights = 0;
+    if (fd_rights & FD_RIGHT_READ)
+        rights |= KRIGHT_READ;
+    if (fd_rights & FD_RIGHT_WRITE)
+        rights |= KRIGHT_WRITE;
+    if (fd_rights & FD_RIGHT_DUP)
+        rights |= (KRIGHT_DUPLICATE | KRIGHT_TRANSFER);
+    return rights;
+}
+
+static uint32_t syshandle_port_krights_from_fd(uint32_t fd_rights) {
+    uint32_t rights = 0;
+    if (fd_rights & FD_RIGHT_READ)
+        rights |= KRIGHT_WAIT;
+    if (fd_rights & FD_RIGHT_IOCTL)
+        rights |= KRIGHT_MANAGE;
+    if (fd_rights & FD_RIGHT_DUP)
+        rights |= (KRIGHT_DUPLICATE | KRIGHT_TRANSFER);
+    return rights;
+}
+
+static int syshandle_kobj_from_special_fd(struct process *p, int fd,
+                                          uint32_t rights_mask,
+                                          struct kobj **out_obj,
+                                          uint32_t *out_rights) {
+    if (out_obj)
+        *out_obj = NULL;
+    if (out_rights)
+        *out_rights = 0;
+    if (!p || !out_obj)
+        return -EINVAL;
+
+    struct file *file = NULL;
+    int rc = fd_get_required(p, fd, 0, &file);
+    if (rc < 0)
+        return rc;
+
+    uint32_t fd_rights = 0;
+    rc = fd_get_rights(p, fd, &fd_rights);
+    if (rc < 0) {
+        file_put(file);
+        return rc;
+    }
+
+    struct kobj *obj = NULL;
+    uint32_t allowed = 0;
+    if (file->vnode && file->vnode->ops == &channelfd_file_ops) {
+        struct channelfd_ctx *ctx = (struct channelfd_ctx *)file->vnode->fs_data;
+        if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj) {
+            file_put(file);
+            return -EINVAL;
+        }
+        obj = ctx->channel_obj;
+        allowed = syshandle_channel_krights_from_fd(fd_rights);
+    } else if (file->vnode && file->vnode->ops == &portfd_file_ops) {
+        struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
+        if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj) {
+            file_put(file);
+            return -EINVAL;
+        }
+        obj = ctx->port_obj;
+        allowed = syshandle_port_krights_from_fd(fd_rights);
+    } else {
+        file_put(file);
+        return -ENOTSUP;
+    }
+
+    uint32_t desired = rights_mask ? (allowed & rights_mask) : allowed;
+    if (desired == 0) {
+        file_put(file);
+        return -EACCES;
+    }
+
+    kobj_get(obj);
+    *out_obj = obj;
+    if (out_rights)
+        *out_rights = desired;
+    file_put(file);
+    return 0;
+}
+
 static int channelfd_create_file(struct kobj *obj, uint32_t rights,
-                                 struct file **out) {
+                                 uint32_t open_flags, struct file **out) {
     if (!obj || !out)
         return -EINVAL;
     *out = NULL;
@@ -307,9 +388,10 @@ static int channelfd_create_file(struct kobj *obj, uint32_t rights,
         file->flags = O_WRONLY;
     else
         file->flags = O_RDONLY;
+    file->flags |= (open_flags & O_NONBLOCK);
     file->path[0] = '\0';
 
-    int rc = kchannel_poll_attach_vnode(obj, vn);
+    int rc = kobj_poll_attach_vnode(obj, vn);
     if (rc < 0) {
         kobj_put(obj);
         vfs_file_free(file);
@@ -421,7 +503,8 @@ int64_t sys_kairos_handle_from_fd(uint64_t fd, uint64_t out_handle_ptr,
     if ((uint32_t)flags != 0)
         return -EINVAL;
     if (rights_mask & ~(uint64_t)(KRIGHT_READ | KRIGHT_WRITE | KRIGHT_TRANSFER |
-                                  KRIGHT_DUPLICATE | KRIGHT_MANAGE))
+                                  KRIGHT_DUPLICATE | KRIGHT_WAIT |
+                                  KRIGHT_MANAGE))
         return -EINVAL;
 
     struct process *p = proc_current();
@@ -430,9 +513,14 @@ int64_t sys_kairos_handle_from_fd(uint64_t fd, uint64_t out_handle_ptr,
 
     struct kobj *file_obj = NULL;
     uint32_t desired = 0;
-    int rc = handle_bridge_kobj_from_fd(p, syshandle_abi_i32(fd),
+    int rc = syshandle_kobj_from_special_fd(p, syshandle_abi_i32(fd),
+                                            (uint32_t)rights_mask, &file_obj,
+                                            &desired);
+    if (rc == -ENOTSUP) {
+        rc = handle_bridge_kobj_from_fd(p, syshandle_abi_i32(fd),
                                         (uint32_t)rights_mask, &file_obj,
                                         &desired);
+    }
     if (rc < 0)
         return rc;
 
@@ -457,7 +545,8 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
 
     if (!out_fd_ptr)
         return -EFAULT;
-    if ((uint32_t)flags & ~O_CLOEXEC)
+    uint32_t open_flags = (uint32_t)flags;
+    if (open_flags & ~(O_CLOEXEC | O_NONBLOCK))
         return -EINVAL;
 
     struct process *p = proc_current();
@@ -471,13 +560,17 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
     if (rc < 0)
         return rc;
 
-    uint32_t fd_flags = ((uint32_t)flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
+    uint32_t fd_flags = (open_flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
     int new_fd = -1;
     if (obj->type == KOBJ_TYPE_FILE) {
-        rc = handle_bridge_fd_from_kobj(p, obj, rights, fd_flags, &new_fd);
+        if (open_flags & O_NONBLOCK) {
+            rc = -EINVAL;
+        } else {
+            rc = handle_bridge_fd_from_kobj(p, obj, rights, fd_flags, &new_fd);
+        }
     } else if (obj->type == KOBJ_TYPE_CHANNEL) {
         struct file *file = NULL;
-        rc = channelfd_create_file(obj, rights, &file);
+        rc = channelfd_create_file(obj, rights, open_flags, &file);
         if (rc >= 0) {
             uint32_t fd_rights = 0;
             if (rights & KRIGHT_READ)
@@ -497,7 +590,7 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
         }
     } else if (obj->type == KOBJ_TYPE_PORT) {
         struct file *file = NULL;
-        rc = portfd_create_file(obj, rights, &file);
+        rc = portfd_create_file(obj, rights, open_flags, &file);
         if (rc >= 0) {
             uint32_t fd_rights = FD_RIGHT_READ;
             if (rights & KRIGHT_DUPLICATE)
@@ -583,7 +676,8 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     (void)a4;
     (void)a5;
 
-    if ((uint32_t)options & ~KCHANNEL_OPT_NONBLOCK)
+    if ((uint32_t)options &
+        ~(KCHANNEL_OPT_NONBLOCK | KCHANNEL_OPT_RENDEZVOUS))
         return -EINVAL;
     if (!msg_ptr)
         return -EFAULT;
@@ -677,7 +771,8 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
     (void)a4;
     (void)a5;
 
-    if ((uint32_t)options & ~KCHANNEL_OPT_NONBLOCK)
+    if ((uint32_t)options &
+        ~(KCHANNEL_OPT_NONBLOCK | KCHANNEL_OPT_RENDEZVOUS))
         return -EINVAL;
     if (!msg_ptr)
         return -EFAULT;
@@ -879,7 +974,7 @@ int64_t sys_kairos_port_wait(uint64_t port_handle, uint64_t packet_ptr,
         return rc;
 
     struct kairos_port_packet_user pkt = {0};
-    rc = kport_wait(port_obj, &pkt, timeout_ns, (uint32_t)options);
+    rc = kobj_wait(port_obj, &pkt, timeout_ns, (uint32_t)options);
     kobj_put(port_obj);
     if (rc < 0)
         return rc;

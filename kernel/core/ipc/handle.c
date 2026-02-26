@@ -30,6 +30,19 @@ struct kchannel_msg {
     struct khandle_transfer handles[KCHANNEL_MAX_MSG_HANDLES];
 };
 
+struct kchannel_rendezvous {
+    bool active;
+    bool completed;
+    void *bytes;
+    size_t bytes_cap;
+    struct khandle_transfer *handles;
+    size_t handles_cap;
+    size_t got_bytes;
+    size_t got_handles;
+    bool handles_truncated;
+    int status;
+};
+
 struct kchannel {
     struct kobj obj;
     atomic_t handle_refs;
@@ -42,6 +55,7 @@ struct kchannel {
     struct kchannel *peer;
     bool peer_closed;
     bool endpoint_closed;
+    struct kchannel_rendezvous *recv_waiter;
     struct kchannel_binding bind;
 };
 
@@ -78,13 +92,32 @@ struct kfile {
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
 static void kfile_release_obj(struct kobj *obj);
+static int kchannel_obj_poll_revents(struct kobj *obj, uint32_t events,
+                                     uint32_t *out_revents);
+static int kchannel_obj_poll_attach(struct kobj *obj, struct vnode *vn);
+static int kchannel_obj_poll_detach(struct kobj *obj, struct vnode *vn);
+static int kport_obj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
+                          uint32_t options);
+static int kport_obj_poll_revents(struct kobj *obj, uint32_t events,
+                                  uint32_t *out_revents);
+static int kport_obj_poll_attach(struct kobj *obj, struct vnode *vn);
+static int kport_obj_poll_detach(struct kobj *obj, struct vnode *vn);
+static bool kchannel_try_rendezvous_locked(struct kchannel *peer,
+                                           struct kchannel_msg *msg);
 
 static const struct kobj_ops kchannel_ops = {
     .release = kchannel_release_obj,
+    .poll_revents = kchannel_obj_poll_revents,
+    .poll_attach_vnode = kchannel_obj_poll_attach,
+    .poll_detach_vnode = kchannel_obj_poll_detach,
 };
 
 static const struct kobj_ops kport_ops = {
     .release = kport_release_obj,
+    .wait = kport_obj_wait,
+    .poll_revents = kport_obj_poll_revents,
+    .poll_attach_vnode = kport_obj_poll_attach,
+    .poll_detach_vnode = kport_obj_poll_detach,
 };
 
 static const struct kobj_ops kfile_ops = {
@@ -181,6 +214,7 @@ static void kchannel_on_last_handle_release(struct kchannel *ch) {
     peer->peer_closed = true;
     poll_wait_source_wake_all(&peer->rd_src, 0);
     poll_wait_source_wake_all(&peer->wr_src, 0);
+    wait_queue_wakeup_all(&peer->obj.waitq);
     kchannel_poll_wake_locked(peer, POLLHUP);
     kchannel_emit_locked(peer, KPORT_BIND_PEER_CLOSED);
     mutex_unlock(&peer->lock);
@@ -228,6 +262,7 @@ void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops) {
     atomic_init(&obj->refcount, 1);
     obj->type = type;
     obj->ops = ops;
+    wait_queue_init(&obj->waitq);
 }
 
 void kobj_get(struct kobj *obj) {
@@ -241,6 +276,38 @@ void kobj_put(struct kobj *obj) {
         return;
     if (atomic_dec_return(&obj->refcount) == 0 && obj->ops && obj->ops->release)
         obj->ops->release(obj);
+}
+
+int kobj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
+              uint32_t options) {
+    if (!obj || !obj->ops || !obj->ops->wait)
+        return -ENOTSUP;
+    return obj->ops->wait(obj, out, timeout_ns, options);
+}
+
+int kobj_poll_revents(struct kobj *obj, uint32_t events,
+                      uint32_t *out_revents) {
+    if (!obj || !out_revents)
+        return -EINVAL;
+    if (!obj->ops || !obj->ops->poll_revents)
+        return -ENOTSUP;
+    return obj->ops->poll_revents(obj, events, out_revents);
+}
+
+int kobj_poll_attach_vnode(struct kobj *obj, struct vnode *vn) {
+    if (!obj || !vn)
+        return -EINVAL;
+    if (!obj->ops || !obj->ops->poll_attach_vnode)
+        return -ENOTSUP;
+    return obj->ops->poll_attach_vnode(obj, vn);
+}
+
+int kobj_poll_detach_vnode(struct kobj *obj, struct vnode *vn) {
+    if (!obj || !vn)
+        return -EINVAL;
+    if (!obj->ops || !obj->ops->poll_detach_vnode)
+        return -ENOTSUP;
+    return obj->ops->poll_detach_vnode(obj, vn);
 }
 
 struct handletable *handletable_alloc(void) {
@@ -490,6 +557,7 @@ static void kport_enqueue_locked(struct kport *port, uint64_t key,
         if (tail && tail->key == key) {
             tail->observed |= observed;
             poll_wait_source_wake_one(&port->rd_src, 0);
+            wait_queue_wakeup_one(&port->obj.waitq);
             return;
         }
     }
@@ -511,6 +579,7 @@ static void kport_enqueue_locked(struct kport *port, uint64_t key,
     list_add_tail(&pkt->node, &port->queue);
     port->queue_len++;
     poll_wait_source_wake_one(&port->rd_src, 0);
+    wait_queue_wakeup_one(&port->obj.waitq);
     struct kport_watch *watch;
     list_for_each_entry(watch, &port->poll_vnodes, node) {
         if (watch->vn)
@@ -557,6 +626,7 @@ static struct kchannel *kchannel_alloc(void) {
     ch->peer = NULL;
     ch->peer_closed = false;
     ch->endpoint_closed = false;
+    ch->recv_waiter = NULL;
     ch->bind.port = NULL;
     ch->bind.key = 0;
     ch->bind.signals = 0;
@@ -592,13 +662,44 @@ int kchannel_create_pair(struct kobj **out0, struct kobj **out1) {
     return 0;
 }
 
+static bool kchannel_try_rendezvous_locked(struct kchannel *peer,
+                                           struct kchannel_msg *msg) {
+    if (!peer || !msg || peer->rxq_len != 0)
+        return false;
+
+    struct kchannel_rendezvous *rv = peer->recv_waiter;
+    if (!rv || !rv->active || rv->completed)
+        return false;
+
+    if (rv->bytes_cap < msg->num_bytes || rv->handles_cap < msg->num_handles)
+        return false;
+
+    if (msg->num_bytes > 0 && msg->bytes)
+        memcpy(rv->bytes, msg->bytes, msg->num_bytes);
+
+    for (size_t i = 0; i < msg->num_handles; i++) {
+        rv->handles[i] = msg->handles[i];
+        msg->handles[i].obj = NULL;
+    }
+
+    rv->got_bytes = msg->num_bytes;
+    rv->got_handles = msg->num_handles;
+    rv->handles_truncated = false;
+    rv->status = 0;
+    rv->completed = true;
+
+    poll_wait_source_wake_one(&peer->rd_src, 0);
+    wait_queue_wakeup_one(&peer->obj.waitq);
+    return true;
+}
+
 int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
                   const struct khandle_transfer *handles, size_t num_handles,
                   uint32_t options) {
     struct kchannel *self = kchannel_from_obj(obj);
     if (!self)
         return -ENOTSUP;
-    if (options & ~KCHANNEL_OPT_NONBLOCK)
+    if (options & ~(KCHANNEL_OPT_NONBLOCK | KCHANNEL_OPT_RENDEZVOUS))
         return -EINVAL;
     if (num_bytes > KCHANNEL_MAX_MSG_BYTES || num_handles > KCHANNEL_MAX_MSG_HANDLES)
         return -EMSGSIZE;
@@ -647,8 +748,12 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
 
     int ret = 0;
     bool nonblock = (options & KCHANNEL_OPT_NONBLOCK) != 0;
+    bool rendezvous = (options & KCHANNEL_OPT_RENDEZVOUS) != 0;
 
     mutex_lock(&peer->lock);
+    if (rendezvous && kchannel_try_rendezvous_locked(peer, msg))
+        goto out_unlock;
+
     while (peer->rxq_len >= KCHANNEL_MAX_QUEUE) {
         if (nonblock) {
             ret = -EAGAIN;
@@ -669,7 +774,9 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     list_add_tail(&msg->node, &peer->rxq);
     peer->rxq_len++;
     msg->owns_caps = true;
+    msg = NULL;
     poll_wait_source_wake_one(&peer->rd_src, 0);
+    wait_queue_wakeup_one(&peer->obj.waitq);
     kchannel_poll_wake_locked(peer, POLLIN);
     kchannel_emit_locked(peer, KPORT_BIND_READABLE);
     ret = 0;
@@ -677,7 +784,7 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
 out_unlock:
     mutex_unlock(&peer->lock);
     kobj_put(&peer->obj);
-    if (ret < 0)
+    if (msg)
         kchannel_msg_free(msg);
     return ret;
 }
@@ -689,7 +796,7 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     struct kchannel *ch = kchannel_from_obj(obj);
     if (!ch)
         return -ENOTSUP;
-    if (options & ~KCHANNEL_OPT_NONBLOCK)
+    if (options & ~(KCHANNEL_OPT_NONBLOCK | KCHANNEL_OPT_RENDEZVOUS))
         return -EINVAL;
     if (bytes_cap > 0 && !bytes)
         return -EFAULT;
@@ -702,25 +809,53 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     *out_handles_truncated = false;
 
     bool nonblock = (options & KCHANNEL_OPT_NONBLOCK) != 0;
+    bool rendezvous = (options & KCHANNEL_OPT_RENDEZVOUS) != 0;
     struct kchannel_msg *msg = NULL;
     struct kchannel *peer_for_write = NULL;
+    struct kchannel_rendezvous rv = {0};
 
     mutex_lock(&ch->lock);
     while (list_empty(&ch->rxq)) {
+        if (rv.completed)
+            break;
         if (ch->peer_closed) {
+            if (rv.active && ch->recv_waiter == &rv)
+                ch->recv_waiter = NULL;
             mutex_unlock(&ch->lock);
             return 0;
         }
         if (nonblock) {
+            if (rv.active && ch->recv_waiter == &rv)
+                ch->recv_waiter = NULL;
             mutex_unlock(&ch->lock);
             return -EAGAIN;
+        }
+        if (rendezvous && !rv.active && ch->recv_waiter == NULL) {
+            rv.active = true;
+            rv.bytes = bytes;
+            rv.bytes_cap = bytes_cap;
+            rv.handles = handles;
+            rv.handles_cap = handles_cap;
+            ch->recv_waiter = &rv;
         }
         int rc =
             poll_wait_source_block(&ch->rd_src, 0, &ch->rd_src, &ch->lock);
         if (rc < 0) {
+            if (rv.active && ch->recv_waiter == &rv)
+                ch->recv_waiter = NULL;
             mutex_unlock(&ch->lock);
             return rc;
         }
+    }
+
+    if (rv.active && ch->recv_waiter == &rv)
+        ch->recv_waiter = NULL;
+    if (rv.completed) {
+        *out_bytes = rv.got_bytes;
+        *out_handles = rv.got_handles;
+        *out_handles_truncated = rv.handles_truncated;
+        mutex_unlock(&ch->lock);
+        return rv.status;
     }
 
     msg = list_first_entry(&ch->rxq, struct kchannel_msg, node);
@@ -921,11 +1056,11 @@ int kport_wait(struct kobj *port_obj, struct kairos_port_packet_user *out,
 
         int rc = 0;
         if (infinite) {
-            rc = poll_wait_source_block(&port->rd_src, 0, &port->rd_src,
-                                        &port->lock);
+            rc = poll_block_current_mutex(&port->obj.waitq, 0, &port->obj.waitq,
+                                          &port->lock);
         } else {
-            rc = poll_wait_source_block(&port->rd_src, deadline,
-                                        &port->rd_src, &port->lock);
+            rc = poll_block_current_mutex(&port->obj.waitq, deadline,
+                                          &port->obj.waitq, &port->lock);
             if (rc == -ETIMEDOUT) {
                 mutex_unlock(&port->lock);
                 return -ETIMEDOUT;
@@ -1023,6 +1158,49 @@ int kport_poll_detach_vnode(struct kobj *port_obj, struct vnode *vn) {
     return -ENOENT;
 }
 
+static int kchannel_obj_poll_revents(struct kobj *obj, uint32_t events,
+                                     uint32_t *out_revents) {
+    return kchannel_poll_revents(obj, events, out_revents);
+}
+
+static int kchannel_obj_poll_attach(struct kobj *obj, struct vnode *vn) {
+    return kchannel_poll_attach_vnode(obj, vn);
+}
+
+static int kchannel_obj_poll_detach(struct kobj *obj, struct vnode *vn) {
+    return kchannel_poll_detach_vnode(obj, vn);
+}
+
+static int kport_obj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
+                          uint32_t options) {
+    if (!out)
+        return -EFAULT;
+    return kport_wait(obj, (struct kairos_port_packet_user *)out, timeout_ns,
+                      options);
+}
+
+static int kport_obj_poll_revents(struct kobj *obj, uint32_t events,
+                                  uint32_t *out_revents) {
+    if (!out_revents)
+        return -EINVAL;
+
+    bool ready = false;
+    int rc = kport_poll_ready(obj, &ready);
+    if (rc < 0)
+        return rc;
+
+    *out_revents = ready ? (events & POLLIN) : 0;
+    return 0;
+}
+
+static int kport_obj_poll_attach(struct kobj *obj, struct vnode *vn) {
+    return kport_poll_attach_vnode(obj, vn);
+}
+
+static int kport_obj_poll_detach(struct kobj *obj, struct vnode *vn) {
+    return kport_poll_detach_vnode(obj, vn);
+}
+
 int kfile_create(struct file *file, struct kobj **out) {
     if (!file || !out)
         return -EINVAL;
@@ -1083,7 +1261,9 @@ static void kchannel_release_obj(struct kobj *obj) {
         list_del(&watch->node);
         list_add_tail(&watch->node, &poll_reap);
     }
+    ch->recv_waiter = NULL;
     ch->rxq_len = 0;
+    wait_queue_wakeup_all(&ch->obj.waitq);
     mutex_unlock(&ch->lock);
 
     while (!list_empty(&reap)) {
@@ -1109,6 +1289,7 @@ static void kchannel_release_obj(struct kobj *obj) {
         peer->peer_closed = true;
         poll_wait_source_wake_all(&peer->rd_src, 0);
         poll_wait_source_wake_all(&peer->wr_src, 0);
+        wait_queue_wakeup_all(&peer->obj.waitq);
         kchannel_poll_wake_locked(peer, POLLHUP);
         kchannel_emit_locked(peer, KPORT_BIND_PEER_CLOSED);
         mutex_unlock(&peer->lock);
@@ -1141,6 +1322,7 @@ static void kport_release_obj(struct kobj *obj) {
         list_add_tail(&watch->node, &poll_reap);
     }
     port->queue_len = 0;
+    wait_queue_wakeup_all(&port->obj.waitq);
     mutex_unlock(&port->lock);
 
     while (!list_empty(&reap)) {

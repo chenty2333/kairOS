@@ -98,6 +98,16 @@ struct kh_stress_consumer_ctx {
     int32_t h_port;
 };
 
+struct kh_rendezvous_ctx {
+    struct kobj *recv_obj;
+    volatile int armed;
+    int rc;
+    size_t got_bytes;
+    size_t got_handles;
+    bool trunc;
+    char payload[8];
+};
+
 static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
     if (!ctx || len == 0)
         return -EINVAL;
@@ -188,6 +198,24 @@ static int futex_waitv_waker_worker(void *arg) {
         }
         proc_yield();
     }
+    proc_exit(0);
+}
+
+static int kh_rendezvous_recv_worker(void *arg) {
+    struct kh_rendezvous_ctx *ctx = (struct kh_rendezvous_ctx *)arg;
+    if (!ctx || !ctx->recv_obj)
+        proc_exit(1);
+
+    ctx->armed = 1;
+    size_t got_bytes = 0;
+    size_t got_handles = 0;
+    bool trunc = false;
+    ctx->rc = kchannel_recv(ctx->recv_obj, ctx->payload, sizeof(ctx->payload),
+                            &got_bytes, NULL, 0, &got_handles, &trunc,
+                            KCHANNEL_OPT_RENDEZVOUS);
+    ctx->got_bytes = got_bytes;
+    ctx->got_handles = got_handles;
+    ctx->trunc = trunc;
     proc_exit(0);
 }
 
@@ -2103,7 +2131,11 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t h2b = -1;
     int32_t port = -1;
     int32_t port_fd = -1;
+    int32_t port_nb_fd = -1;
+    int32_t port_from_fd_h = -1;
     int32_t ch_fd = -1;
+    int32_t ch_nb_fd = -1;
+    int32_t ch_from_fd_h = -1;
     int32_t recv_h = -1;
     int32_t dup_h = -1;
 
@@ -2185,6 +2217,40 @@ static void test_kairos_channel_port_syscalls(void) {
     if (ret < 0)
         goto out;
 
+    ret64 = sys_kairos_handle_from_fd((uint64_t)port_fd, (uint64_t)u_hout, 0, 0, 0,
+                                      0);
+    test_check(ret64 == 0, "kh handle_from_fd port");
+    if (ret64 == 0) {
+        ret = copy_from_user(&port_from_fd_h, u_hout, sizeof(port_from_fd_h));
+        test_check(ret == 0, "kh read port handle from fd");
+        if (ret < 0)
+            goto out;
+    }
+
+    ret64 = sys_kairos_handle_from_fd((uint64_t)port_fd, (uint64_t)u_hout,
+                                      (uint64_t)KRIGHT_READ, 0, 0, 0);
+    test_check(ret64 == -EACCES, "kh handle_from_fd port reject read mask");
+
+    if (port_from_fd_h >= 0) {
+        ret64 = sys_kairos_port_wait((uint64_t)port_from_fd_h, (uint64_t)u_pkt, 0,
+                                     KPORT_WAIT_NONBLOCK, 0, 0);
+        test_check(ret64 == -EAGAIN, "kh handle_from_fd port wait");
+    }
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)port, (uint64_t)u_hout,
+                                      (uint64_t)O_NONBLOCK, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd_from_handle port nonblock");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&port_nb_fd, u_hout, sizeof(port_nb_fd));
+    test_check(ret == 0, "kh read port nonblock fd");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_read((uint64_t)port_nb_fd, (uint64_t)u_pkt, sizeof(*u_pkt), 0, 0,
+                     0);
+    test_check(ret64 == -EAGAIN, "kh portfd nonblock read empty");
+
     struct pollfd pfd = {
         .fd = port_fd,
         .events = POLLIN,
@@ -2208,6 +2274,83 @@ static void test_kairos_channel_port_syscalls(void) {
     test_check(ret == 0, "kh read channel fd");
     if (ret < 0)
         goto out;
+
+    ret64 = sys_kairos_handle_from_fd((uint64_t)ch_fd, (uint64_t)u_hout, 0, 0, 0,
+                                      0);
+    test_check(ret64 == 0, "kh handle_from_fd channel");
+    if (ret64 == 0) {
+        ret = copy_from_user(&ch_from_fd_h, u_hout, sizeof(ch_from_fd_h));
+        test_check(ret == 0, "kh read channel handle from fd");
+        if (ret < 0)
+            goto out;
+    }
+
+    ret64 = sys_kairos_handle_from_fd((uint64_t)ch_fd, (uint64_t)u_hout,
+                                      (uint64_t)KRIGHT_WAIT, 0, 0, 0);
+    test_check(ret64 == -EACCES, "kh handle_from_fd channel reject wait mask");
+
+    if (ch_from_fd_h >= 0) {
+        struct kairos_channel_msg_user from_fd_send = {
+            .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+            .handles = 0,
+            .num_bytes = 2,
+            .num_handles = 0,
+        };
+        ret = copy_to_user(u_send_bytes, "HF", 2);
+        test_check(ret == 0, "kh copy channel handle-from-fd bytes");
+        ret = copy_to_user(u_send_msg, &from_fd_send, sizeof(from_fd_send));
+        test_check(ret == 0, "kh copy channel handle-from-fd send msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 = sys_kairos_channel_send((uint64_t)ch_from_fd_h, (uint64_t)u_send_msg,
+                                        0, 0, 0, 0);
+        test_check(ret64 == 0, "kh handle_from_fd channel send");
+        if (ret64 < 0)
+            goto out;
+
+        struct kairos_channel_msg_user from_fd_recv = {
+            .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+            .handles = 0,
+            .num_bytes = 8,
+            .num_handles = 0,
+        };
+        ret = copy_to_user(u_recv_msg, &from_fd_recv, sizeof(from_fd_recv));
+        test_check(ret == 0, "kh copy channel handle-from-fd recv msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 =
+            sys_kairos_channel_recv((uint64_t)h0, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+        test_check(ret64 == 0, "kh handle_from_fd channel recv");
+        if (ret64 == 0) {
+            struct kairos_channel_msg_user got = {0};
+            char got_bytes[2] = {0};
+            ret = copy_from_user(&got, u_recv_msg, sizeof(got));
+            test_check(ret == 0, "kh read channel handle-from-fd recv meta");
+            ret = copy_from_user(got_bytes, u_recv_bytes, sizeof(got_bytes));
+            test_check(ret == 0, "kh read channel handle-from-fd recv bytes");
+            if (ret == 0) {
+                test_check(got.num_bytes == 2,
+                           "kh channel handle-from-fd recv num_bytes");
+                test_check(memcmp(got_bytes, "HF", 2) == 0,
+                           "kh channel handle-from-fd payload");
+            }
+        }
+    }
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)h1, (uint64_t)u_hout,
+                                      (uint64_t)O_NONBLOCK, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd_from_handle channel nonblock");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&ch_nb_fd, u_hout, sizeof(ch_nb_fd));
+    test_check(ret == 0, "kh read channel nonblock fd");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_read((uint64_t)ch_nb_fd, (uint64_t)u_recv_bytes, 8, 0, 0, 0);
+    test_check(ret64 == -EAGAIN, "kh channelfd nonblock read empty");
 
     pfd.fd = ch_fd;
     pfd.events = POLLIN;
@@ -2296,6 +2439,109 @@ static void test_kairos_channel_port_syscalls(void) {
             test_check(got.num_bytes == 2, "kh recv num_bytes from channelfd");
             test_check(memcmp(got_bytes, "WR", 2) == 0,
                        "kh recv payload from channelfd");
+        }
+    }
+
+    {
+        struct process *self = proc_current();
+        struct kobj *rv_send_obj = NULL;
+        struct kobj *rv_recv_obj = NULL;
+        int krc = khandle_get(self, h0, KRIGHT_WRITE, &rv_send_obj, NULL);
+        test_check(krc == 0, "kh rendezvous get send");
+        if (krc < 0)
+            goto out;
+        krc = khandle_get(self, h1, KRIGHT_READ, &rv_recv_obj, NULL);
+        test_check(krc == 0, "kh rendezvous get recv");
+        if (krc < 0) {
+            kobj_put(rv_send_obj);
+            goto out;
+        }
+
+        struct kh_rendezvous_ctx rv_ctx;
+        memset(&rv_ctx, 0, sizeof(rv_ctx));
+        rv_ctx.recv_obj = rv_recv_obj;
+        struct process *rv_worker =
+            kthread_create_joinable(kh_rendezvous_recv_worker, &rv_ctx, "khrv");
+        test_check(rv_worker != NULL, "kh rendezvous worker create");
+        if (!rv_worker) {
+            kobj_put(rv_recv_obj);
+            kobj_put(rv_send_obj);
+            goto out;
+        }
+        pid_t rv_pid = rv_worker->pid;
+        sched_enqueue(rv_worker);
+
+        for (int spins = 0; spins < 5000 && rv_ctx.armed == 0; spins++)
+            proc_yield();
+        test_check(rv_ctx.armed != 0, "kh rendezvous worker armed");
+
+        const char rv_payload[] = {'R', 'V', 'Z'};
+        krc = kchannel_send(rv_send_obj, rv_payload, sizeof(rv_payload), NULL, 0,
+                            KCHANNEL_OPT_RENDEZVOUS);
+        test_check(krc == 0, "kh rendezvous send");
+
+        int status = 0;
+        pid_t wp = proc_wait(rv_pid, &status, 0);
+        test_check(wp == rv_pid, "kh rendezvous worker reaped");
+        test_check(rv_ctx.rc == 0, "kh rendezvous recv rc");
+        test_check(rv_ctx.got_bytes == sizeof(rv_payload),
+                   "kh rendezvous recv bytes");
+        test_check(rv_ctx.got_handles == 0, "kh rendezvous recv handles");
+        test_check(rv_ctx.trunc == false, "kh rendezvous recv trunc");
+        test_check(memcmp(rv_ctx.payload, rv_payload, sizeof(rv_payload)) == 0,
+                   "kh rendezvous payload");
+
+        kobj_put(rv_recv_obj);
+        kobj_put(rv_send_obj);
+    }
+
+    {
+        struct kairos_channel_msg_user rv_sys_send = {
+            .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+            .handles = 0,
+            .num_bytes = 3,
+            .num_handles = 0,
+        };
+        ret = copy_to_user(u_send_bytes, "RSY", 3);
+        test_check(ret == 0, "kh rendezvous syscall send bytes");
+        ret = copy_to_user(u_send_msg, &rv_sys_send, sizeof(rv_sys_send));
+        test_check(ret == 0, "kh rendezvous syscall send msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg,
+                                        KCHANNEL_OPT_RENDEZVOUS, 0, 0, 0);
+        test_check(ret64 == 0, "kh rendezvous syscall send");
+        if (ret64 < 0)
+            goto out;
+
+        struct kairos_channel_msg_user rv_sys_recv = {
+            .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+            .handles = 0,
+            .num_bytes = 8,
+            .num_handles = 0,
+        };
+        ret = copy_to_user(u_recv_msg, &rv_sys_recv, sizeof(rv_sys_recv));
+        test_check(ret == 0, "kh rendezvous syscall recv msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 = sys_kairos_channel_recv((uint64_t)h1, (uint64_t)u_recv_msg,
+                                        KCHANNEL_OPT_RENDEZVOUS, 0, 0, 0);
+        test_check(ret64 == 0, "kh rendezvous syscall recv");
+        if (ret64 == 0) {
+            struct kairos_channel_msg_user got = {0};
+            char got_bytes[3] = {0};
+            ret = copy_from_user(&got, u_recv_msg, sizeof(got));
+            test_check(ret == 0, "kh rendezvous syscall recv meta");
+            ret = copy_from_user(got_bytes, u_recv_bytes, sizeof(got_bytes));
+            test_check(ret == 0, "kh rendezvous syscall recv bytes");
+            if (ret == 0) {
+                test_check(got.num_bytes == 3,
+                           "kh rendezvous syscall recv num_bytes");
+                test_check(memcmp(got_bytes, "RSY", 3) == 0,
+                           "kh rendezvous syscall payload");
+            }
         }
     }
 
@@ -2485,8 +2731,16 @@ static void test_kairos_channel_port_syscalls(void) {
     }
 
 out:
+    if (ch_from_fd_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)ch_from_fd_h, 0, 0, 0, 0, 0);
+    if (port_from_fd_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)port_from_fd_h, 0, 0, 0, 0, 0);
+    if (ch_nb_fd >= 0)
+        (void)sys_close((uint64_t)ch_nb_fd, 0, 0, 0, 0, 0);
     if (ch_fd >= 0)
         (void)sys_close((uint64_t)ch_fd, 0, 0, 0, 0, 0);
+    if (port_nb_fd >= 0)
+        (void)sys_close((uint64_t)port_nb_fd, 0, 0, 0, 0, 0);
     if (port_fd >= 0)
         (void)sys_close((uint64_t)port_fd, 0, 0, 0, 0, 0);
     if (dup_h >= 0)
@@ -2755,6 +3009,10 @@ static void test_kairos_file_handle_bridge(void) {
     test_check(ret64 == 0, "kh_file_bridge fd_from_handle");
     if (ret64 < 0)
         goto out;
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)rx_h, (uint64_t)u_scalar,
+                                      (uint64_t)O_NONBLOCK, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "kh_file_bridge fd_from_handle nonblock denied");
 
     rc = copy_from_user(&bridged_fd, u_scalar, sizeof(bridged_fd));
     test_check(rc == 0, "kh_file_bridge read bridged fd");

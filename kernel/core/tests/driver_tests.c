@@ -836,6 +836,30 @@ static void test_iommu_attach_replaces_owned_domain(void) {
     iommu_unregister_hw_ops(&test_iommu_replace_hw_ops);
 }
 
+static volatile uint32_t iommu_release_calls;
+
+static void test_iommu_release_domain(struct iommu_domain *domain __unused) {
+    __atomic_add_fetch(&iommu_release_calls, 1, __ATOMIC_RELAXED);
+}
+
+static const struct iommu_domain_ops test_iommu_release_ops = {
+    .release = test_iommu_release_domain,
+};
+
+static void test_iommu_domain_release_callback(void) {
+    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    test_check(domain != NULL, "iommu release domain create");
+    if (!domain)
+        return;
+
+    iommu_release_calls = 0;
+    iommu_domain_set_ops(domain, &test_iommu_release_ops, NULL);
+    iommu_domain_destroy(domain);
+
+    test_check(__atomic_load_n(&iommu_release_calls, __ATOMIC_RELAXED) == 1,
+               "iommu release callback called");
+}
+
 static volatile uint32_t irq_deferred_hits;
 
 static void test_irq_deferred_handler(void *arg,
@@ -888,6 +912,24 @@ struct irq_concurrency_ctx {
     int irq;
     int loops;
     volatile uint32_t dispatch_calls;
+};
+
+struct irq_regfree_soak_ctx {
+    int irq;
+    int loops;
+    volatile uint32_t request_ok;
+    volatile uint32_t request_fail;
+    volatile uint32_t free_fail;
+};
+
+struct irq_domain_soak_ctx {
+    uint32_t hwirq_seed;
+    int loops;
+    volatile uint32_t alloc_ok;
+    volatile uint32_t alloc_fail;
+    volatile uint32_t remove_ok;
+    volatile uint32_t remove_fail;
+    volatile uint32_t map_fail;
 };
 
 struct irq_free_sync_ctx {
@@ -1005,6 +1047,65 @@ static int irq_free_cookie_sync_thread(void *arg) {
         return -EINVAL;
     ctx->ret = arch_free_irq_cookie_sync(ctx->cookie);
     __atomic_store_n(&ctx->done, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int irq_regfree_soak_thread(void *arg) {
+    struct irq_regfree_soak_ctx *ctx = arg;
+    if (!ctx)
+        return -EINVAL;
+
+    for (int i = 0; i < ctx->loops; i++) {
+        int ret = arch_request_irq_ex(
+            ctx->irq, test_irq_concurrent_handler, NULL,
+            IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+        if (ret < 0) {
+            __atomic_add_fetch(&ctx->request_fail, 1, __ATOMIC_RELAXED);
+            proc_yield();
+            continue;
+        }
+        __atomic_add_fetch(&ctx->request_ok, 1, __ATOMIC_RELAXED);
+        platform_irq_dispatch_nr((uint32_t)ctx->irq);
+
+        ret = arch_free_irq_ex(ctx->irq, test_irq_concurrent_handler, NULL);
+        if (ret < 0)
+            __atomic_add_fetch(&ctx->free_fail, 1, __ATOMIC_RELAXED);
+        proc_yield();
+    }
+
+    return 0;
+}
+
+static int irq_domain_soak_thread(void *arg) {
+    struct irq_domain_soak_ctx *ctx = arg;
+    if (!ctx)
+        return -EINVAL;
+
+    for (int i = 0; i < ctx->loops; i++) {
+        uint32_t hwirq = ctx->hwirq_seed + (uint32_t)i;
+        uint32_t virq_base = 0;
+        int ret = platform_irq_domain_alloc_linear("test-soak-domain",
+                                                   &test_irq_mock_ops, hwirq, 1,
+                                                   &virq_base);
+        if (ret < 0) {
+            __atomic_add_fetch(&ctx->alloc_fail, 1, __ATOMIC_RELAXED);
+            proc_yield();
+            continue;
+        }
+        __atomic_add_fetch(&ctx->alloc_ok, 1, __ATOMIC_RELAXED);
+
+        int mapped = platform_irq_domain_map(&test_irq_mock_ops, hwirq);
+        if (mapped != (int)virq_base)
+            __atomic_add_fetch(&ctx->map_fail, 1, __ATOMIC_RELAXED);
+
+        ret = platform_irq_domain_remove(virq_base);
+        if (ret < 0)
+            __atomic_add_fetch(&ctx->remove_fail, 1, __ATOMIC_RELAXED);
+        else
+            __atomic_add_fetch(&ctx->remove_ok, 1, __ATOMIC_RELAXED);
+        proc_yield();
+    }
+
     return 0;
 }
 
@@ -1326,6 +1427,98 @@ static void test_irq_unregister_dispatch_concurrency(void) {
     test_check(__atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED) ==
                    hits_before,
                "irq concurrent no hits after free");
+}
+
+static void test_irq_longrun_concurrency_soak(void) {
+    const int irq = 967;
+    irq_concurrent_hits = 0;
+
+    struct irq_concurrency_ctx dispatch_ctx = {
+        .irq = irq,
+        .loops = 2500,
+        .dispatch_calls = 0,
+    };
+    struct irq_regfree_soak_ctx regfree_ctx = {
+        .irq = irq,
+        .loops = 700,
+        .request_ok = 0,
+        .request_fail = 0,
+        .free_fail = 0,
+    };
+    struct irq_domain_soak_ctx domain_ctx = {
+        .hwirq_seed = 0x2200U,
+        .loops = 500,
+        .alloc_ok = 0,
+        .alloc_fail = 0,
+        .remove_ok = 0,
+        .remove_fail = 0,
+        .map_fail = 0,
+    };
+
+    struct process *dispatch_worker =
+        kthread_create_joinable(irq_dispatch_storm_thread, &dispatch_ctx, "irqsoakd");
+    test_check(dispatch_worker != NULL, "irq soak dispatch worker create");
+    if (!dispatch_worker)
+        return;
+
+    struct process *regfree_worker =
+        kthread_create_joinable(irq_regfree_soak_thread, &regfree_ctx, "irqsoakr");
+    test_check(regfree_worker != NULL, "irq soak regfree worker create");
+    if (!regfree_worker) {
+        sched_enqueue(dispatch_worker);
+        (void)test_reap_children_bounded(1, "irq_soak_dispatch_only");
+        return;
+    }
+
+    struct process *domain_worker =
+        kthread_create_joinable(irq_domain_soak_thread, &domain_ctx, "irqsoakm");
+    test_check(domain_worker != NULL, "irq soak domain worker create");
+    if (!domain_worker) {
+        sched_enqueue(dispatch_worker);
+        sched_enqueue(regfree_worker);
+        (void)test_reap_children_bounded(2, "irq_soak_no_domain");
+        (void)arch_free_irq_ex(irq, test_irq_concurrent_handler, NULL);
+        return;
+    }
+
+    sched_enqueue(dispatch_worker);
+    sched_enqueue(regfree_worker);
+    sched_enqueue(domain_worker);
+    int reaped = test_reap_children_bounded(3, "irq_soak_all");
+    test_check(reaped == 3, "irq soak workers reaped");
+
+    int ret = arch_free_irq_ex(irq, test_irq_concurrent_handler, NULL);
+    test_check(ret == 0, "irq soak cleanup free");
+
+    test_check(__atomic_load_n(&regfree_ctx.request_ok, __ATOMIC_RELAXED) > 0,
+               "irq soak request progress");
+    test_check(__atomic_load_n(&regfree_ctx.request_fail, __ATOMIC_RELAXED) == 0,
+               "irq soak request failures");
+    test_check(__atomic_load_n(&regfree_ctx.free_fail, __ATOMIC_RELAXED) == 0,
+               "irq soak free failures");
+    test_check(__atomic_load_n(&dispatch_ctx.dispatch_calls, __ATOMIC_RELAXED) > 0,
+               "irq soak dispatch progress");
+    test_check(__atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED) > 0,
+               "irq soak handler hits");
+
+    test_check(__atomic_load_n(&domain_ctx.alloc_ok, __ATOMIC_RELAXED) > 0,
+               "irq soak domain alloc progress");
+    test_check(__atomic_load_n(&domain_ctx.alloc_fail, __ATOMIC_RELAXED) == 0,
+               "irq soak domain alloc failures");
+    test_check(__atomic_load_n(&domain_ctx.map_fail, __ATOMIC_RELAXED) == 0,
+               "irq soak domain map stability");
+    test_check(__atomic_load_n(&domain_ctx.remove_fail, __ATOMIC_RELAXED) == 0,
+               "irq soak domain remove failures");
+    test_check(__atomic_load_n(&domain_ctx.remove_ok, __ATOMIC_RELAXED) ==
+                   __atomic_load_n(&domain_ctx.alloc_ok, __ATOMIC_RELAXED),
+               "irq soak domain remove parity");
+
+    uint32_t hits_before = __atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED);
+    for (int i = 0; i < 32; i++)
+        platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_concurrent_hits, __ATOMIC_RELAXED) ==
+                   hits_before,
+               "irq soak no residual handlers");
 }
 
 static void test_irq_domain_remove_waits_reclaim(void) {
@@ -2564,6 +2757,7 @@ static void run_driver_suite_once(void) {
     test_iommu_hw_ops_priority_match();
     test_iommu_hw_ops_default_attach();
     test_iommu_attach_replaces_owned_domain();
+    test_iommu_domain_release_callback();
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
     test_irq_unregister_actions();
@@ -2573,6 +2767,7 @@ static void run_driver_suite_once(void) {
     test_irq_stats_export();
     test_irq_stats_snapshot_and_procfs();
     test_irq_unregister_dispatch_concurrency();
+    test_irq_longrun_concurrency_soak();
     test_irq_domain_remove_waits_reclaim();
     test_irq_free_sync_waits_handler();
     test_irq_free_sync_waits_after_async_free();

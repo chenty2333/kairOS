@@ -103,7 +103,8 @@ futex.c:
 - futex_waitv: vectorized wait (`FUTEX_WAITV_MAX=128`), returns awakened waiter index
 - futex opcode/wake count/clockid are decoded using Linux ABI `int`/`unsigned int` widths (32-bit), and futex_waitv decodes `flags` as 32-bit
 - syslog syscall decodes `type`/`len` using Linux ABI `int` width (32-bit)
-- Supports timeout via unified wait helper (`poll_block_current`) over poll_sleep deadlines
+- futex waits now block through `poll_wait_source_block` (single-wait path holds futex bucket mutex across sleep handoff to avoid enqueue->sleep wake races)
+- futex wakeups now route through waiter-bound `poll_wait_source_wake_one` instead of direct `proc_wakeup`, sharing the wait-core wake surface
 - Used for userspace fast locks (pthread mutex, etc.)
 
 pollwait.c:
@@ -151,10 +152,13 @@ Current IPC mechanisms:
 - Channel IPC (Kairos extension): message-oriented pair endpoints with bounded queue (`KCHANNEL_MAX_QUEUE`), blocking/nonblocking send/recv, and handle transfer (`KRIGHT_TRANSFER`) with move semantics
 - Port wait queue (Kairos extension): channel endpoint can bind to a port key; events currently include `READABLE` and `PEER_CLOSED`, consumed through blocking/nonblocking `port_wait` with optional timeout
 - Channel/port internal sleep+wake paths now share `poll_wait_source` for waiter blocking and wakeup; port fd poll fanout to multiple vnodes remains unchanged
+- `kobj` now carries a base `wait_queue`, and channel/port objects expose unified poll/wait callbacks through `kobj_ops` (`kobj_wait`, `kobj_poll_*` dispatch)
+- `port_wait` blocking now sleeps on object-level `kobj.waitq` (wake source remains channel/port enqueue/close paths), keeping fd-poll fanout unchanged
 - Channel fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_CHANNEL`; resulting fd supports `poll` (`POLLIN|POLLOUT|POLLHUP`) plus byte `read()`/`write()` on channel payload path
 - Port fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_PORT`; resulting fd is pollable (`POLLIN`) and `read()` consumes one `kairos_port_packet_user`
 - Reverse bridge for channel/port fd: `kairos_handle_from_fd` recognizes bridge fds and recreates typed handles (`KOBJ_TYPE_CHANNEL` / `KOBJ_TYPE_PORT`) with rights derived from fd rights attenuation (`FD_RIGHT_READ` maps to `KRIGHT_WAIT` on port handles)
 - `kairos_fd_from_handle` accepts `O_NONBLOCK` for channel/port bridges (read path returns `-EAGAIN` when empty); `KOBJ_TYPE_FILE` bridge keeps existing semantics and rejects `O_NONBLOCK` at conversion time
+- Channel `send/recv` options add `KCHANNEL_OPT_RENDEZVOUS`: when sender/receiver both opt in and a blocking receiver is armed, payload/control can bypass queue enqueue for a synchronous handoff fastpath
 - Kairos extension syscalls (custom Linux ABI numbers): `kairos_handle_close`(4600), `kairos_handle_duplicate`(4601), `kairos_channel_create/send/recv`(4602-4604), `kairos_port_create/bind/wait`(4605-4607), `kairos_cap_rights_get`(4608), `kairos_cap_rights_limit`(4609), `kairos_handle_from_fd`(4610), `kairos_fd_from_handle`(4611)
 
 Related references:
