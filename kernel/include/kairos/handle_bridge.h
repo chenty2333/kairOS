@@ -16,6 +16,10 @@ uint32_t handle_bridge_krights_to_fd(uint32_t krights);
 
 int handle_bridge_kobj_from_fd(struct process *p, int fd, uint32_t rights_mask,
                                struct kobj **out_obj, uint32_t *out_rights);
+int handle_bridge_transfer_from_fd(struct process *p, int fd,
+                                   uint32_t rights_mask,
+                                   struct kobj **out_obj,
+                                   uint32_t *out_rights);
 int handle_bridge_fd_from_kobj(struct process *p, struct kobj *obj,
                                uint32_t krights, uint32_t fd_flags,
                                int *out_fd);

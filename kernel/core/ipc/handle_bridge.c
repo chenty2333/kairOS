@@ -71,6 +71,43 @@ int handle_bridge_kobj_from_fd(struct process *p, int fd, uint32_t rights_mask,
     return 0;
 }
 
+int handle_bridge_transfer_from_fd(struct process *p, int fd,
+                                   uint32_t rights_mask,
+                                   struct kobj **out_obj,
+                                   uint32_t *out_rights) {
+    if (out_obj)
+        *out_obj = NULL;
+    if (out_rights)
+        *out_rights = 0;
+    if (!p || !out_obj)
+        return -EINVAL;
+
+    struct file *file = NULL;
+    uint32_t fd_rights = 0;
+    int rc =
+        handle_bridge_pin_fd(p, fd, FD_RIGHT_DUP, &file, &fd_rights);
+    if (rc < 0)
+        return rc;
+
+    uint32_t allowed = handle_bridge_fd_to_krights(fd_rights);
+    uint32_t desired = rights_mask ? (allowed & rights_mask) : allowed;
+    if (desired == 0) {
+        file_put(file);
+        return -EACCES;
+    }
+
+    struct kobj *obj = NULL;
+    rc = kfile_create(file, &obj);
+    file_put(file);
+    if (rc < 0)
+        return rc;
+
+    *out_obj = obj;
+    if (out_rights)
+        *out_rights = desired;
+    return 0;
+}
+
 int handle_bridge_fd_from_kobj(struct process *p, struct kobj *obj,
                                uint32_t krights, uint32_t fd_flags,
                                int *out_fd) {

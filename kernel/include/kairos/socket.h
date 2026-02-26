@@ -93,13 +93,13 @@ struct socket_ucred {
     uint32_t gid;
 };
 
-struct file;
+struct kobj;
 struct socket_control {
     bool has_creds;
     struct socket_ucred creds;
     bool truncated;
     size_t rights_count;
-    struct file *rights[SOCKET_MAX_RIGHTS];
+    struct kobj *rights[SOCKET_MAX_RIGHTS];
     uint32_t rights_masks[SOCKET_MAX_RIGHTS];
 };
 

@@ -7,6 +7,7 @@
  */
 
 #include <kairos/atomic.h>
+#include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
@@ -46,7 +47,7 @@ struct unix_dgram_msg {
     bool has_creds;
     struct socket_ucred creds;
     size_t rights_count;
-    struct file *rights[SOCKET_MAX_RIGHTS];
+    struct kobj *rights[SOCKET_MAX_RIGHTS];
     uint32_t rights_masks[SOCKET_MAX_RIGHTS];
     uint8_t data[];
 };
@@ -58,7 +59,7 @@ struct unix_stream_ctrl {
     bool has_creds;
     struct socket_ucred creds;
     size_t rights_count;
-    struct file *rights[SOCKET_MAX_RIGHTS];
+    struct kobj *rights[SOCKET_MAX_RIGHTS];
     uint32_t rights_masks[SOCKET_MAX_RIGHTS];
 };
 
@@ -366,7 +367,7 @@ static void unix_stream_ctrl_release(struct unix_stream_ctrl *msg) {
         return;
     for (size_t i = 0; i < msg->rights_count && i < SOCKET_MAX_RIGHTS; i++) {
         if (msg->rights[i]) {
-            file_put(msg->rights[i]);
+            kobj_put(msg->rights[i]);
             msg->rights[i] = NULL;
         }
         msg->rights_masks[i] = 0;
@@ -399,7 +400,7 @@ static int unix_stream_ctrl_from_send(const struct socket_control *control,
             kfree(msg);
             return -EINVAL;
         }
-        file_get(control->rights[i]);
+        kobj_get(control->rights[i]);
         msg->rights[i] = control->rights[i];
         msg->rights_masks[i] = control->rights_masks[i];
     }
@@ -426,13 +427,13 @@ static void unix_stream_ctrl_merge_to_recv(struct socket_control *control,
         control->truncated = true;
 
     for (size_t i = 0; i < take; i++) {
-        struct file *f = msg->rights[i];
-        if (!f)
+        struct kobj *obj = msg->rights[i];
+        if (!obj)
             continue;
         if (!consume)
-            file_get(f);
+            kobj_get(obj);
         control->rights_masks[control->rights_count] = msg->rights_masks[i];
-        control->rights[control->rights_count++] = f;
+        control->rights[control->rights_count++] = obj;
         if (consume) {
             msg->rights[i] = NULL;
             msg->rights_masks[i] = 0;
@@ -949,7 +950,7 @@ static void unix_dgram_msg_release_control(struct unix_dgram_msg *msg) {
         return;
     for (size_t i = 0; i < msg->rights_count && i < SOCKET_MAX_RIGHTS; i++) {
         if (msg->rights[i]) {
-            file_put(msg->rights[i]);
+            kobj_put(msg->rights[i]);
             msg->rights[i] = NULL;
         }
         msg->rights_masks[i] = 0;
@@ -1011,7 +1012,7 @@ static ssize_t unix_dgram_sendmsg(struct socket *sock, const void *buf,
                 : control->rights_count;
         for (size_t i = 0; i < msg->rights_count; i++) {
             if (control->rights[i]) {
-                file_get(control->rights[i]);
+                kobj_get(control->rights[i]);
                 msg->rights[i] = control->rights[i];
                 msg->rights_masks[i] = control->rights_masks[i];
             }

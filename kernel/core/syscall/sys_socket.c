@@ -4,6 +4,7 @@
 
 #include <kairos/config.h>
 #include <kairos/arch.h>
+#include <kairos/handle.h>
 #include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
@@ -118,7 +119,7 @@ static void socket_control_release(struct socket_control *control) {
         return;
     for (size_t i = 0; i < control->rights_count && i < SOCKET_MAX_RIGHTS; i++) {
         if (control->rights[i]) {
-            file_put(control->rights[i]);
+            kobj_put(control->rights[i]);
             control->rights[i] = NULL;
         }
         control->rights_masks[i] = 0;
@@ -173,15 +174,15 @@ static int socket_parse_send_control(const struct socket_msghdr *msg,
                     rc = -EFAULT;
                     goto fail;
                 }
-                struct file *f = NULL;
+                struct kobj *obj = NULL;
                 uint32_t rights = 0;
-                int fr =
-                    handle_bridge_pin_fd(curr, ufd, FD_RIGHT_DUP, &f, &rights);
+                int fr = handle_bridge_transfer_from_fd(curr, ufd, 0,
+                                                        &obj, &rights);
                 if (fr < 0) {
                     rc = fr;
                     goto fail;
                 }
-                control->rights[control->rights_count++] = f;
+                control->rights[control->rights_count++] = obj;
                 control->rights_masks[control->rights_count - 1] = rights;
             }
         } else if (hdr.cmsg_level == SOL_SOCKET &&
@@ -282,12 +283,14 @@ static int socket_copyout_recv_control(struct socket_msghdr *msg,
                     socket_close_installed_fds(curr, installed, i);
                     return -EINVAL;
                 }
-                int fd = fd_alloc_rights(curr, control->rights[i],
-                                         cloexec ? FD_CLOEXEC : 0,
-                                         control->rights_masks[i]);
-                if (fd < 0) {
+                int fd = -1;
+                int rc = handle_bridge_fd_from_kobj(curr, control->rights[i],
+                                                    control->rights_masks[i],
+                                                    cloexec ? FD_CLOEXEC : 0,
+                                                    &fd);
+                if (rc < 0) {
                     socket_close_installed_fds(curr, installed, i);
-                    return fd;
+                    return rc;
                 }
                 installed[i] = fd;
                 rights_payload[i] = fd;
