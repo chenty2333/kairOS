@@ -174,6 +174,8 @@ struct sigcontext {
 
 struct process;
 int signal_send(pid_t pid, int sig);
+int signal_send_authorized(pid_t pid, int sig, uid_t sender_uid,
+                           bool sender_is_superuser);
 int signal_send_pgrp(pid_t pgrp, int sig);
 void signalfd_notify_pending_signal(struct process *p, int sig);
 void signal_deliver_pending(void);

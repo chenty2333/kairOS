@@ -75,12 +75,45 @@ static void signal_send_to(struct process *p, int sig) {
     }
 }
 
-int signal_send(pid_t pid, int sig) {
-    if (sig <= 0 || sig > NSIG) return -EINVAL;
-    struct process *p = proc_find(pid);
-    if (!p) return -ESRCH;
-    signal_send_to(p, sig);
+static int signal_send_core(pid_t pid, int sig, uid_t sender_uid,
+                            bool enforce_uid) {
+    if (sig <= 0 || sig > NSIG)
+        return -EINVAL;
+    if (pid <= 0)
+        return -ESRCH;
+
+    struct process *target = NULL;
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
+    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
+        struct process *p = &proc_table[i];
+        if (p->state == PROC_UNUSED || p->state == PROC_EMBRYO)
+            continue;
+        if (p->pid != pid)
+            continue;
+        if (enforce_uid && sender_uid != 0 && sender_uid != p->uid) {
+            spin_unlock_irqrestore(&proc_table_lock, flags);
+            return -EPERM;
+        }
+        target = p;
+        break;
+    }
+    spin_unlock_irqrestore(&proc_table_lock, flags);
+    if (!target)
+        return -ESRCH;
+
+    signal_send_to(target, sig);
     return 0;
+}
+
+int signal_send(pid_t pid, int sig) {
+    return signal_send_core(pid, sig, 0, false);
+}
+
+int signal_send_authorized(pid_t pid, int sig, uid_t sender_uid,
+                           bool sender_is_superuser) {
+    return signal_send_core(pid, sig,
+                            sender_is_superuser ? 0 : sender_uid, true);
 }
 
 int signal_send_pgrp(pid_t pgrp, int sig) {
@@ -164,6 +197,7 @@ void signal_deliver_pending(void) {
                     proc_sleep_on(NULL, p, true);
                 }
                 pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+                i = -1;
                 continue;
             }
             if (sig == SIGCONT) {

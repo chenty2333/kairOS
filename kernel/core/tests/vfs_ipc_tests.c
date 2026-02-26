@@ -3153,6 +3153,223 @@ out:
         user_map_end(&um);
 }
 
+struct proc_control_worker_ctx {
+    volatile int started;
+    volatile int exit_now;
+};
+
+static int proc_control_worker(void *arg) {
+    struct proc_control_worker_ctx *ctx = (struct proc_control_worker_ctx *)arg;
+    if (!ctx)
+        proc_exit(1);
+    ctx->started = 1;
+    while (!ctx->exit_now)
+        proc_yield();
+    proc_exit(0);
+}
+
+static void test_procfs_pid_control_write_semantics(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs control self present");
+    if (!self)
+        return;
+
+    struct proc_control_worker_ctx ctx = {0};
+    struct process *child =
+        kthread_create_joinable(proc_control_worker, &ctx, "prctrl");
+    test_check(child != NULL, "procfs control create child");
+    if (!child)
+        return;
+    sched_enqueue(child);
+    for (int spins = 0; spins < 2000 && !ctx.started; spins++)
+        proc_yield();
+    test_check(ctx.started != 0, "procfs control child started");
+    if (!ctx.started)
+        goto out;
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/control", child->pid);
+    struct file *f = NULL;
+    int rc = vfs_open(path, O_WRONLY, 0, &f);
+    test_check(rc == 0 && f != NULL, "procfs control open");
+    if (rc == 0 && f) {
+        const char cmd_term[] = "signal 15\n";
+        ssize_t wr = vfs_write(f, cmd_term, sizeof(cmd_term) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd_term) - 1),
+                   "procfs control signal term accepted");
+        uint64_t term_mask = (1ULL << (SIGTERM - 1));
+        test_check((__atomic_load_n(&child->sig_pending, __ATOMIC_ACQUIRE) &
+                    term_mask) != 0,
+                   "procfs control term pending set");
+        __atomic_fetch_and(&child->sig_pending, ~term_mask, __ATOMIC_RELEASE);
+
+        const char cmd_resume[] = "  resume \n";
+        wr = vfs_write(f, cmd_resume, sizeof(cmd_resume) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd_resume) - 1),
+                   "procfs control resume accepted");
+        uint64_t cont_mask = (1ULL << (SIGCONT - 1));
+        test_check((__atomic_load_n(&child->sig_pending, __ATOMIC_ACQUIRE) &
+                    cont_mask) != 0,
+                   "procfs control cont pending set");
+        __atomic_fetch_and(&child->sig_pending, ~cont_mask, __ATOMIC_RELEASE);
+
+        const char cmd_usr1[] = "sig 10";
+        wr = vfs_write(f, cmd_usr1, sizeof(cmd_usr1) - 1);
+        test_check(wr == (ssize_t)(sizeof(cmd_usr1) - 1),
+                   "procfs control sig numeric accepted");
+        uint64_t usr1_mask = (1ULL << (SIGUSR1 - 1));
+        test_check((__atomic_load_n(&child->sig_pending, __ATOMIC_ACQUIRE) &
+                    usr1_mask) != 0,
+                   "procfs control usr1 pending set");
+        __atomic_fetch_and(&child->sig_pending, ~usr1_mask, __ATOMIC_RELEASE);
+
+        const char cmd_bad_sig[] = "sig 0";
+        wr = vfs_write(f, cmd_bad_sig, sizeof(cmd_bad_sig) - 1);
+        test_check(wr == -EINVAL, "procfs control sig zero rejected");
+
+        char long_cmd[80];
+        memset(long_cmd, 'x', sizeof(long_cmd));
+        wr = vfs_write(f, long_cmd, sizeof(long_cmd));
+        test_check(wr == -E2BIG, "procfs control oversized write rejected");
+
+        uid_t saved_uid = self->uid;
+        uid_t saved_child_uid = child->uid;
+        self->uid = 1000;
+        child->uid = 2000;
+        wr = vfs_write(f, cmd_term, sizeof(cmd_term) - 1);
+        test_check(wr == -EPERM, "procfs control uid mismatch eperm");
+        self->uid = saved_uid;
+        child->uid = saved_child_uid;
+        close_file_if_open(&f);
+    }
+
+out:
+    ctx.exit_now = 1;
+    int status = 0;
+    bool reaped = wait_pid_exit_bounded(child->pid, 2ULL * TEST_NS_PER_SEC,
+                                        &status);
+    test_check(reaped, "procfs control child reaped");
+}
+
+struct stop_cont_timing_ctx {
+    volatile int entered;
+    volatile int returned;
+    volatile uint64_t pending_after;
+};
+
+static int stop_cont_timing_worker(void *arg) {
+    struct stop_cont_timing_ctx *ctx = (struct stop_cont_timing_ctx *)arg;
+    if (!ctx)
+        proc_exit(1);
+    struct process *p = proc_current();
+    struct mm_struct *tmp_mm = mm_create();
+    if (!p || !tmp_mm)
+        proc_exit(1);
+    struct mm_struct *saved_mm = p->mm;
+    void *saved_tf = p->active_tf;
+    struct trap_frame tf;
+    memset(&tf, 0, sizeof(tf));
+    p->mm = tmp_mm;
+    p->active_tf = &tf;
+    __atomic_store_n(&p->sig_blocked, 0, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&p->sig_pending, (1ULL << (SIGSTOP - 1)),
+                      __ATOMIC_RELEASE);
+    ctx->entered = 1;
+    signal_deliver_pending();
+    ctx->returned = 1;
+    ctx->pending_after = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+    p->active_tf = saved_tf;
+    p->mm = saved_mm;
+    mm_destroy(tmp_mm);
+    proc_exit(0);
+}
+
+struct stop_kill_timing_ctx {
+    volatile int entered;
+    volatile int first_returned;
+};
+
+static int stop_kill_timing_worker(void *arg) {
+    struct stop_kill_timing_ctx *ctx = (struct stop_kill_timing_ctx *)arg;
+    if (!ctx)
+        proc_exit(1);
+    struct process *p = proc_current();
+    struct mm_struct *tmp_mm = mm_create();
+    if (!p || !tmp_mm)
+        proc_exit(1);
+    struct mm_struct *saved_mm = p->mm;
+    void *saved_tf = p->active_tf;
+    struct trap_frame tf;
+    memset(&tf, 0, sizeof(tf));
+    p->mm = tmp_mm;
+    p->active_tf = &tf;
+    __atomic_store_n(&p->sig_blocked, 0, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&p->sig_pending, (1ULL << (SIGSTOP - 1)),
+                      __ATOMIC_RELEASE);
+    ctx->entered = 1;
+    signal_deliver_pending();
+    ctx->first_returned = 1;
+    signal_deliver_pending();
+    p->active_tf = saved_tf;
+    p->mm = saved_mm;
+    mm_destroy(tmp_mm);
+    proc_exit(0);
+}
+
+static void test_signal_stop_cont_kill_timing(void) {
+    struct stop_cont_timing_ctx cont_ctx = {0};
+    struct process *cont_child =
+        kthread_create_joinable(stop_cont_timing_worker, &cont_ctx, "sigstc");
+    test_check(cont_child != NULL, "signal timing cont child create");
+    if (!cont_child)
+        return;
+    sched_enqueue(cont_child);
+    for (int spins = 0; spins < 2000 && !cont_ctx.entered; spins++)
+        proc_yield();
+    test_check(cont_ctx.entered != 0, "signal timing cont child entered");
+    if (cont_ctx.entered) {
+        int rc = signal_send(cont_child->pid, SIGUSR1);
+        test_check(rc == 0, "signal timing send usr1");
+        rc = signal_send(cont_child->pid, SIGCONT);
+        test_check(rc == 0, "signal timing send cont");
+    }
+
+    int status = 0;
+    bool reaped = wait_pid_exit_bounded(cont_child->pid, 2ULL * TEST_NS_PER_SEC,
+                                        &status);
+    test_check(reaped, "signal timing cont child reaped");
+    if (reaped) {
+        test_check(cont_ctx.returned != 0, "signal timing cont worker returned");
+        uint64_t mask = (1ULL << (SIGSTOP - 1)) | (1ULL << (SIGCONT - 1)) |
+                        (1ULL << (SIGUSR1 - 1));
+        test_check((cont_ctx.pending_after & mask) == 0,
+                   "signal timing cont worker drained pending");
+    }
+
+    struct stop_kill_timing_ctx kill_ctx = {0};
+    struct process *kill_child =
+        kthread_create_joinable(stop_kill_timing_worker, &kill_ctx, "sigstk");
+    test_check(kill_child != NULL, "signal timing kill child create");
+    if (!kill_child)
+        return;
+    sched_enqueue(kill_child);
+    for (int spins = 0; spins < 2000 && !kill_ctx.entered; spins++)
+        proc_yield();
+    test_check(kill_ctx.entered != 0, "signal timing kill child entered");
+    if (kill_ctx.entered) {
+        int rc = signal_send(kill_child->pid, SIGKILL);
+        test_check(rc == 0, "signal timing send kill");
+    }
+
+    status = 0;
+    reaped = wait_pid_exit_bounded(kill_child->pid, 2ULL * TEST_NS_PER_SEC,
+                                   &status);
+    test_check(reaped, "signal timing kill child reaped");
+    if (reaped)
+        test_check(kill_ctx.first_returned == 0,
+                   "signal timing kill consumed in stop path");
+}
+
 struct pidfd_worker_ctx {
     volatile int started;
     volatile int exit_now;
@@ -3756,6 +3973,8 @@ int run_vfs_ipc_tests(void) {
     test_signalfd_syscall_semantics();
     test_signalfd_syscall_functional();
     test_signalfd_syscall_rebind();
+    test_procfs_pid_control_write_semantics();
+    test_signal_stop_cont_kill_timing();
     test_pidfd_syscall_semantics();
     test_pidfd_syscall_functional();
     test_waitid_pidfd_functional();

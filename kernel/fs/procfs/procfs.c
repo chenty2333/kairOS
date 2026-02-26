@@ -602,9 +602,9 @@ static ssize_t procfs_write(struct vnode *vn, const void *buf, size_t len,
         return 0;
 
     char cmd[64];
+    if (len >= sizeof(cmd))
+        return -E2BIG;
     size_t n = len;
-    if (n >= sizeof(cmd))
-        n = sizeof(cmd) - 1;
     memcpy(cmd, buf, n);
     cmd[n] = '\0';
     procfs_rstrip(cmd);
@@ -612,17 +612,13 @@ static ssize_t procfs_write(struct vnode *vn, const void *buf, size_t len,
     if (!*trim)
         return -EINVAL;
 
-    struct process *target = proc_find(ent->pid);
-    if (!target)
-        return -ESRCH;
     struct process *curr = proc_current();
-    if (curr && curr->uid != 0 && curr->uid != target->uid)
-        return -EPERM;
-
     int sig = procfs_control_signal_from_cmd(trim);
     if (sig < 0)
         return sig;
-    int rc = signal_send(ent->pid, sig);
+    int rc = signal_send_authorized(ent->pid, sig,
+                                    curr ? curr->uid : 0,
+                                    curr ? (curr->uid == 0) : false);
     if (rc < 0)
         return rc;
     return (ssize_t)len;
