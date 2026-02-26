@@ -74,6 +74,9 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `irqchip_ops` now includes `set_affinity(int irq, uint32_t cpu_mask)` and IRQ core stores per-IRQ CPU mask (default CPU0) for route programming hooks
   - IRQ action lifecycle now supports explicit unregister (`platform_irq_unregister_ex` / `platform_irq_unregister`) with safe detach from dispatch/deferred paths
   - driver-facing managed lifecycle is available via `arch_request_irq*` / `arch_free_irq*` (`platform_irq_request*` / `platform_irq_free*`): request path registers + optional auto-enable, free path unregisters + matched auto-disable by action ownership
+  - IRQ free/unregister is now idempotent and reclaim-safe under concurrency (action detaches immediately, object reclaim completes once in-flight refs drain)
+  - sync teardown variants are available (`arch_free_irq*_sync` / `platform_irq_free*_sync`) to wait for in-flight handler completion before returning
+  - cookie-based lifecycle is available (`arch_request_irq*_cookie`, `arch_free_irq_cookie*`; platform equivalents) so drivers can release by opaque handle instead of `(irq, handler, arg)` tuple matching
   - IRQ core now includes a linear `irq_domain` layer (`hwirq -> virq` mapping); trap paths dispatch by `platform_irq_dispatch_hwirq(chip, hwirq, ...)`, while drivers keep using virq
   - `irq_domain` manager now uses dynamic domain objects (linked list + parent/child links), removing the previous fixed-slot limit
   - `irq_domain` now supports auto-allocated virq ranges (`platform_irq_domain_alloc_linear` / `IRQ_DOMAIN_AUTO_VIRQ`) for child/cascaded controllers
@@ -89,7 +92,7 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
   - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions
   - `IRQ_FLAG_NO_CHIP` marks software/local IRQ lines that should use refcount gating without programming irqchip enable/disable paths
-  - IRQ observability now exports per-IRQ `enable/disable/dispatch` totals with current enable refcount/action count via `platform_irq_format_stats()`; procfs exposes this as `/proc/interrupts`
+  - IRQ observability now exports per-IRQ `enable/disable/dispatch` totals plus `in_flight`, `retired_pending`, and `last_cpu` alongside current enable refcount/action count via `platform_irq_format_stats()`; procfs exposes this as `/proc/interrupts`
 - affinity routing details:
   - riscv64 PLIC now supports `set_affinity`: it updates per-hart enable bits for each IRQ and reroutes already-enabled IRQs
   - aarch64 GICv3 routes SPIs using CPU `hw_id` (MPIDR affinity bits) in `GICD_IROUTER`

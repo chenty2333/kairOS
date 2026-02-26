@@ -158,13 +158,27 @@ int arch_request_irq_ex(int irq,
                         void (*handler)(void *arg,
                                         const struct trap_core_event *ev),
                         void *arg, uint32_t flags);
+int arch_request_irq_ex_cookie(int irq,
+                               void (*handler)(void *arg,
+                                               const struct trap_core_event *ev),
+                               void *arg, uint32_t flags,
+                               uint64_t *cookie_out);
 int arch_free_irq_ex(int irq,
                      void (*handler)(void *arg,
                                      const struct trap_core_event *ev),
                      void *arg);
+int arch_free_irq_ex_sync(int irq,
+                          void (*handler)(void *arg,
+                                          const struct trap_core_event *ev),
+                          void *arg);
 int arch_request_irq(int irq, void (*handler)(void *), void *arg,
                      uint32_t flags);
+int arch_request_irq_cookie(int irq, void (*handler)(void *), void *arg,
+                            uint32_t flags, uint64_t *cookie_out);
 int arch_free_irq(int irq, void (*handler)(void *), void *arg);
+int arch_free_irq_sync(int irq, void (*handler)(void *), void *arg);
+int arch_free_irq_cookie(uint64_t cookie);
+int arch_free_irq_cookie_sync(uint64_t cookie);
 void arch_irq_set_type(int irq, uint32_t flags);
 void arch_irq_set_affinity(int irq, uint32_t cpu_mask);
 

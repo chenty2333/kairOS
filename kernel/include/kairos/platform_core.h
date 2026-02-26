@@ -52,6 +52,9 @@ struct irq_stats_entry {
     uint32_t hwirq;
     uint32_t flags;
     uint32_t affinity_mask;
+    uint32_t in_flight;
+    uint32_t retired_pending;
+    int32_t last_cpu;
     int enable_count;
     uint32_t action_count;
     uint64_t enable_calls;
@@ -104,10 +107,19 @@ void platform_irq_register(int irq, irq_handler_fn handler, void *arg);
 int platform_irq_unregister(int irq, irq_handler_fn handler, void *arg);
 int platform_irq_request_ex(int irq, irq_handler_event_fn handler, void *arg,
                             uint32_t flags);
+int platform_irq_request_ex_cookie(int irq, irq_handler_event_fn handler,
+                                   void *arg, uint32_t flags,
+                                   uint64_t *cookie_out);
 int platform_irq_free_ex(int irq, irq_handler_event_fn handler, void *arg);
+int platform_irq_free_ex_sync(int irq, irq_handler_event_fn handler, void *arg);
 int platform_irq_request(int irq, irq_handler_fn handler, void *arg,
                          uint32_t flags);
+int platform_irq_request_cookie(int irq, irq_handler_fn handler, void *arg,
+                                uint32_t flags, uint64_t *cookie_out);
 int platform_irq_free(int irq, irq_handler_fn handler, void *arg);
+int platform_irq_free_sync(int irq, irq_handler_fn handler, void *arg);
+int platform_irq_free_cookie(uint64_t cookie);
+int platform_irq_free_cookie_sync(uint64_t cookie);
 void platform_irq_set_type(int irq, uint32_t flags);
 void platform_irq_set_affinity(int irq, uint32_t cpu_mask);
 int platform_irq_domain_add_linear(const char *name,
