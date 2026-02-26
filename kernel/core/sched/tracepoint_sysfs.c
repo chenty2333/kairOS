@@ -10,7 +10,9 @@
 #include <kairos/sysfs.h>
 #include <kairos/tracepoint.h>
 
-struct sysfs_node *sysfs_kernel_dir(void);
+__attribute__((weak)) struct sysfs_node *sysfs_kernel_dir(void) {
+    return sysfs_root();
+}
 
 static struct sysfs_node *tracepoint_sysfs_dir;
 
