@@ -165,6 +165,10 @@ static int virtio_iommu_endpoint_from_dev(struct device *dev, uint32_t *endpoint
         return -ENODEV;
 
     struct pci_device *pdev = to_pci_device(dev);
+    uint8_t base_class = (uint8_t)(pdev->class_code >> 16);
+    if (base_class == 0x06)
+        return -ENODEV;
+
     *endpoint = ((uint32_t)pdev->bus << 8) |
                 ((uint32_t)pdev->slot << 3) |
                 (uint32_t)pdev->func;

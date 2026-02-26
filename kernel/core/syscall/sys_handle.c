@@ -32,6 +32,28 @@ static inline int32_t syshandle_abi_i32(uint64_t raw) {
     return (int32_t)(uint32_t)raw;
 }
 
+static uint32_t channelfd_krights_from_fd(uint32_t fd_rights) {
+    uint32_t rights = 0;
+    if (fd_rights & FD_RIGHT_READ)
+        rights |= KRIGHT_READ;
+    if (fd_rights & FD_RIGHT_WRITE)
+        rights |= KRIGHT_WRITE;
+    if (fd_rights & FD_RIGHT_DUP)
+        rights |= (KRIGHT_DUPLICATE | KRIGHT_TRANSFER);
+    return rights;
+}
+
+static uint32_t portfd_krights_from_fd(uint32_t fd_rights) {
+    uint32_t rights = 0;
+    if (fd_rights & FD_RIGHT_READ)
+        rights |= KRIGHT_WAIT;
+    if (fd_rights & FD_RIGHT_IOCTL)
+        rights |= KRIGHT_MANAGE;
+    if (fd_rights & FD_RIGHT_DUP)
+        rights |= KRIGHT_DUPLICATE;
+    return rights;
+}
+
 static void syshandle_restore_taken(struct process *p, const int32_t *user_handles,
                                     struct khandle_transfer *transfers,
                                     size_t count) {
@@ -112,10 +134,35 @@ static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {
     return (ssize_t)sizeof(pkt);
 }
 
+static int portfd_to_kobj(struct file *file, uint32_t fd_rights,
+                          struct kobj **out_obj, uint32_t *out_rights) {
+    if (out_obj)
+        *out_obj = NULL;
+    if (out_rights)
+        *out_rights = 0;
+    if (!file || !file->vnode || !out_obj)
+        return -EINVAL;
+
+    struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
+        return -EINVAL;
+
+    uint32_t rights = portfd_krights_from_fd(fd_rights);
+    if (rights == 0)
+        return -EACCES;
+
+    kobj_get(ctx->port_obj);
+    *out_obj = ctx->port_obj;
+    if (out_rights)
+        *out_rights = rights;
+    return 0;
+}
+
 static struct file_ops portfd_file_ops = {
     .close = portfd_close,
     .fread = portfd_fread,
     .poll = portfd_poll,
+    .to_kobj = portfd_to_kobj,
 };
 
 static int portfd_create_file(struct kobj *obj, uint32_t rights,
@@ -250,94 +297,37 @@ static ssize_t channelfd_fwrite(struct file *file, const void *buf, size_t len) 
     return (ssize_t)len;
 }
 
+static int channelfd_to_kobj(struct file *file, uint32_t fd_rights,
+                             struct kobj **out_obj, uint32_t *out_rights) {
+    if (out_obj)
+        *out_obj = NULL;
+    if (out_rights)
+        *out_rights = 0;
+    if (!file || !file->vnode || !out_obj)
+        return -EINVAL;
+
+    struct channelfd_ctx *ctx = (struct channelfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj)
+        return -EINVAL;
+
+    uint32_t rights = channelfd_krights_from_fd(fd_rights);
+    if (rights == 0)
+        return -EACCES;
+
+    kobj_get(ctx->channel_obj);
+    *out_obj = ctx->channel_obj;
+    if (out_rights)
+        *out_rights = rights;
+    return 0;
+}
+
 static struct file_ops channelfd_file_ops = {
     .close = channelfd_close,
     .fread = channelfd_fread,
     .fwrite = channelfd_fwrite,
     .poll = channelfd_poll,
+    .to_kobj = channelfd_to_kobj,
 };
-
-static uint32_t syshandle_channel_krights_from_fd(uint32_t fd_rights) {
-    uint32_t rights = 0;
-    if (fd_rights & FD_RIGHT_READ)
-        rights |= KRIGHT_READ;
-    if (fd_rights & FD_RIGHT_WRITE)
-        rights |= KRIGHT_WRITE;
-    if (fd_rights & FD_RIGHT_DUP)
-        rights |= (KRIGHT_DUPLICATE | KRIGHT_TRANSFER);
-    return rights;
-}
-
-static uint32_t syshandle_port_krights_from_fd(uint32_t fd_rights) {
-    uint32_t rights = 0;
-    if (fd_rights & FD_RIGHT_READ)
-        rights |= KRIGHT_WAIT;
-    if (fd_rights & FD_RIGHT_IOCTL)
-        rights |= KRIGHT_MANAGE;
-    if (fd_rights & FD_RIGHT_DUP)
-        rights |= (KRIGHT_DUPLICATE | KRIGHT_TRANSFER);
-    return rights;
-}
-
-static int syshandle_kobj_from_special_fd(struct process *p, int fd,
-                                          uint32_t rights_mask,
-                                          struct kobj **out_obj,
-                                          uint32_t *out_rights) {
-    if (out_obj)
-        *out_obj = NULL;
-    if (out_rights)
-        *out_rights = 0;
-    if (!p || !out_obj)
-        return -EINVAL;
-
-    struct file *file = NULL;
-    int rc = fd_get_required(p, fd, 0, &file);
-    if (rc < 0)
-        return rc;
-
-    uint32_t fd_rights = 0;
-    rc = fd_get_rights(p, fd, &fd_rights);
-    if (rc < 0) {
-        file_put(file);
-        return rc;
-    }
-
-    struct kobj *obj = NULL;
-    uint32_t allowed = 0;
-    if (file->vnode && file->vnode->ops == &channelfd_file_ops) {
-        struct channelfd_ctx *ctx = (struct channelfd_ctx *)file->vnode->fs_data;
-        if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj) {
-            file_put(file);
-            return -EINVAL;
-        }
-        obj = ctx->channel_obj;
-        allowed = syshandle_channel_krights_from_fd(fd_rights);
-    } else if (file->vnode && file->vnode->ops == &portfd_file_ops) {
-        struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
-        if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj) {
-            file_put(file);
-            return -EINVAL;
-        }
-        obj = ctx->port_obj;
-        allowed = syshandle_port_krights_from_fd(fd_rights);
-    } else {
-        file_put(file);
-        return -ENOTSUP;
-    }
-
-    uint32_t desired = rights_mask ? (allowed & rights_mask) : allowed;
-    if (desired == 0) {
-        file_put(file);
-        return -EACCES;
-    }
-
-    kobj_get(obj);
-    *out_obj = obj;
-    if (out_rights)
-        *out_rights = desired;
-    file_put(file);
-    return 0;
-}
 
 static int channelfd_create_file(struct kobj *obj, uint32_t rights,
                                  uint32_t open_flags, struct file **out) {
@@ -513,14 +503,9 @@ int64_t sys_kairos_handle_from_fd(uint64_t fd, uint64_t out_handle_ptr,
 
     struct kobj *file_obj = NULL;
     uint32_t desired = 0;
-    int rc = syshandle_kobj_from_special_fd(p, syshandle_abi_i32(fd),
-                                            (uint32_t)rights_mask, &file_obj,
-                                            &desired);
-    if (rc == -ENOTSUP) {
-        rc = handle_bridge_kobj_from_fd(p, syshandle_abi_i32(fd),
+    int rc = handle_bridge_kobj_from_fd(p, syshandle_abi_i32(fd),
                                         (uint32_t)rights_mask, &file_obj,
                                         &desired);
-    }
     if (rc < 0)
         return rc;
 
@@ -593,6 +578,8 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
         rc = portfd_create_file(obj, rights, open_flags, &file);
         if (rc >= 0) {
             uint32_t fd_rights = FD_RIGHT_READ;
+            if (rights & KRIGHT_MANAGE)
+                fd_rights |= FD_RIGHT_IOCTL;
             if (rights & KRIGHT_DUPLICATE)
                 fd_rights |= FD_RIGHT_DUP;
             int fd = fd_alloc_rights(p, file, fd_flags, fd_rights);

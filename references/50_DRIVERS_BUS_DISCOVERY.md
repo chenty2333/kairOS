@@ -79,7 +79,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - IOMMU IOVA allocation also honors the same per-device DMA mask/aperture checks, so translated DMA addresses stay inside the declared device-visible window
 - Re-attaching a device to another IOMMU domain now auto-detaches the previous domain attachment and reclaims any per-device DMA mappings from the old domain before switching
 - Device init now runs `iommu_init()` before PCI enumeration; architecture code can provide `arch_iommu_init()` to register hardware-backed domain allocation
-- A `virtio-iommu` backend driver is wired as an `iommu_hw_ops` provider: it matches PCI endpoints, allocates per-device IOMMU domains (using device `input_range` when advertised), and issues ATTACH/MAP/UNMAP/DETACH requests through virtqueue 0
+- A `virtio-iommu` backend driver is wired as an `iommu_hw_ops` provider: it matches PCI translatable endpoints (bridge class excluded), allocates per-device IOMMU domains (using device `input_range` when advertised), and issues ATTACH/MAP/UNMAP/DETACH requests through virtqueue 0
 - When `virtio-iommu` comes online, it sweeps already-registered PCI devices and re-attaches passthrough-attached endpoints to backend-managed default domains, avoiding boot-order loss of IOMMU coverage
 
 ## Driver Overview

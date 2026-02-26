@@ -2235,6 +2235,28 @@ static void test_kairos_channel_port_syscalls(void) {
         ret64 = sys_kairos_port_wait((uint64_t)port_from_fd_h, (uint64_t)u_pkt, 0,
                                      KPORT_WAIT_NONBLOCK, 0, 0);
         test_check(ret64 == -EAGAIN, "kh handle_from_fd port wait");
+
+        ret64 = sys_kairos_port_bind((uint64_t)port_from_fd_h, (uint64_t)h1, 0x55,
+                                     KPORT_BIND_READABLE | KPORT_BIND_PEER_CLOSED,
+                                     0, 0);
+        test_check(ret64 == 0, "kh handle_from_fd port manage");
+
+        struct kairos_channel_msg_user xfer_port_msg = {
+            .bytes = 0,
+            .handles = (uint64_t)(uintptr_t)u_send_handles,
+            .num_bytes = 0,
+            .num_handles = 1,
+        };
+        ret = copy_to_user(u_send_handles, &port_from_fd_h, sizeof(port_from_fd_h));
+        test_check(ret == 0, "kh copy port handle for transfer");
+        ret = copy_to_user(u_send_msg, &xfer_port_msg, sizeof(xfer_port_msg));
+        test_check(ret == 0, "kh copy port transfer msg");
+        if (ret < 0)
+            goto out;
+
+        ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg, 0, 0, 0,
+                                        0);
+        test_check(ret64 == -EACCES, "kh handle_from_fd port transfer denied");
     }
 
     ret64 = sys_kairos_fd_from_handle((uint64_t)port, (uint64_t)u_hout,
