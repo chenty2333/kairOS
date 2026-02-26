@@ -376,6 +376,7 @@ jobs:
           scripts/impl/run-directed-loop.sh \
             --arch "${ARCH}" \
             --qemu-smp 2 \
+            --qemu-iommu virtio \
             --suite test-driver \
             --rounds "${AARCH64_DRIVER_SMP2_LOOP_ROUNDS}" \
             --timeout-sec "${AARCH64_DRIVER_SMP2_LOOP_TIMEOUT_SEC}" \
@@ -412,6 +413,7 @@ jobs:
           scripts/impl/run-directed-loop.sh \
             --arch "${ARCH}" \
             --qemu-smp 4 \
+            --qemu-iommu virtio \
             --suite test-driver \
             --rounds "${AARCH64_DRIVER_LOOP_ROUNDS}" \
             --timeout-sec "${AARCH64_DRIVER_LOOP_TIMEOUT_SEC}" \

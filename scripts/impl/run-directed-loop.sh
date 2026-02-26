@@ -10,6 +10,7 @@ Usage:
     --rounds <count> \
     --timeout-sec <seconds> \
     [--qemu-smp <count>] \
+    [--qemu-iommu <mode>] \
     [--expected-online <count>] \
     [--label <text>]
 EOF
@@ -20,6 +21,7 @@ suite=""
 rounds=""
 timeout_sec=""
 qemu_smp=""
+qemu_iommu=""
 expected_online=""
 label=""
 
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --qemu-smp)
       qemu_smp="${2:-}"
+      shift 2
+      ;;
+    --qemu-iommu)
+      qemu_iommu="${2:-}"
       shift 2
       ;;
     --expected-online)
@@ -83,6 +89,10 @@ if [[ -n "${qemu_smp}" ]] && ([[ ! "${qemu_smp}" =~ ${re_uint} ]] || (( qemu_smp
   echo "--qemu-smp must be an integer >= 1" >&2
   exit 2
 fi
+if [[ -n "${qemu_iommu}" ]] && [[ "${qemu_iommu}" != "auto" && "${qemu_iommu}" != "off" && "${qemu_iommu}" != "virtio" ]]; then
+  echo "--qemu-iommu must be one of: auto|off|virtio" >&2
+  exit 2
+fi
 if [[ -n "${expected_online}" ]] && ([[ ! "${expected_online}" =~ ${re_uint} ]] || (( expected_online < 1 ))); then
   echo "--expected-online must be an integer >= 1" >&2
   exit 2
@@ -100,6 +110,9 @@ for i in $(seq 1 "${rounds}"); do
   make_cmd=(make --no-print-directory "ARCH=${arch}")
   if [[ -n "${qemu_smp}" ]]; then
     make_cmd+=("QEMU_SMP=${qemu_smp}")
+  fi
+  if [[ -n "${qemu_iommu}" ]]; then
+    make_cmd+=("QEMU_IOMMU=${qemu_iommu}")
   fi
   make_cmd+=("TEST_TIMEOUT=${timeout_sec}" "${suite}")
   "${make_cmd[@]}"
