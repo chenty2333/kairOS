@@ -245,6 +245,12 @@ ifeq ($(CONFIG_VIRTIO_IOMMU),0)
 CORE_SRCS := $(filter-out kernel/drivers/iommu/virtio_iommu.c,$(CORE_SRCS))
 endif
 
+ifneq ($(ARCH),x86_64)
+CORE_SRCS := $(filter-out kernel/drivers/input/ps2_controller.c,$(CORE_SRCS))
+CORE_SRCS := $(filter-out kernel/drivers/input/ps2_kbd.c,$(CORE_SRCS))
+CORE_SRCS := $(filter-out kernel/drivers/input/ps2_mouse.c,$(CORE_SRCS))
+endif
+
 ifeq ($(KERNEL_TESTS),0)
 CORE_SRCS := $(filter-out kernel/core/tests/%,$(CORE_SRCS))
 endif
