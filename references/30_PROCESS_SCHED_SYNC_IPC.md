@@ -105,6 +105,7 @@ futex.c:
 - syslog syscall decodes `type`/`len` using Linux ABI `int` width (32-bit)
 - futex waits now block through `poll_wait_source_block` (single-wait path holds futex bucket mutex across sleep handoff to avoid enqueue->sleep wake races)
 - futex wakeups now route through waiter-bound `poll_wait_source_wake_one` instead of direct `proc_wakeup`, sharing the wait-core wake surface
+- futex wake path now snapshots/removes matched waiters under bucket lock, then performs `poll_wait_source_wake_one` outside the bucket lock (reduces lock-hold cross-layer wake coupling)
 - Used for userspace fast locks (pthread mutex, etc.)
 
 pollwait.c:

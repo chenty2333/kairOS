@@ -108,16 +108,20 @@ static int futex_abs_timeout_deadline(const struct timespec *ts, int clockid,
     return 0;
 }
 
+static inline void futex_waiter_dequeue_locked(struct futex_waiter *waiter) {
+    if (!waiter || !waiter->active)
+        return;
+    list_del(&waiter->node);
+    waiter->active = false;
+}
+
 static void futex_waiter_remove(struct futex_waiter *waiter) {
     if (!waiter || !waiter->active || !waiter->bucket)
         return;
 
     struct futex_bucket *bucket = waiter->bucket;
     mutex_lock(&bucket->lock);
-    if (waiter->active) {
-        list_del(&waiter->node);
-        waiter->active = false;
-    }
+    futex_waiter_dequeue_locked(waiter);
     mutex_unlock(&bucket->lock);
 }
 
@@ -183,10 +187,7 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
 
         rc = futex_read_u32(uaddr, &cur);
         if (rc < 0 || cur != val) {
-            if (waiter.active) {
-                list_del(&waiter.node);
-                waiter.active = false;
-            }
+            futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return (rc < 0) ? rc : -EAGAIN;
         }
@@ -195,37 +196,25 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
                                               &waiter.bucket->lock);
 
         if (waiter.woken) {
-            if (waiter.active) {
-                list_del(&waiter.node);
-                waiter.active = false;
-            }
+            futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return 0;
         }
 
         if (sleep_rc == -EINTR) {
-            if (waiter.active) {
-                list_del(&waiter.node);
-                waiter.active = false;
-            }
+            futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return -EINTR;
         }
 
         if (sleep_rc == -ETIMEDOUT ||
             (deadline && arch_timer_get_ticks() >= deadline)) {
-            if (waiter.active) {
-                list_del(&waiter.node);
-                waiter.active = false;
-            }
+            futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return -ETIMEDOUT;
         }
         if (sleep_rc < 0) {
-            if (waiter.active) {
-                list_del(&waiter.node);
-                waiter.active = false;
-            }
+            futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return sleep_rc;
         }
@@ -246,14 +235,14 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
     struct futex_bucket *bucket = futex_bucket_for(uaddr);
 
     int woken = 0;
+    LIST_HEAD(wake_list);
 
     mutex_lock(&bucket->lock);
     struct futex_waiter *waiter, *tmp;
     list_for_each_entry_safe(waiter, tmp, &bucket->waiters, node) {
         if (!waiter->active || waiter->uaddr != uaddr)
             continue;
-        list_del(&waiter->node);
-        waiter->active = false;
+        futex_waiter_dequeue_locked(waiter);
         waiter->woken = true;
         if (waiter->wake_index && waiter->index >= 0) {
             int expected = -1;
@@ -262,13 +251,19 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
                                               __ATOMIC_ACQ_REL,
                                               __ATOMIC_ACQUIRE);
         }
-        if (waiter->wait_src)
-            poll_wait_source_wake_one(waiter->wait_src, 0);
+        list_add_tail(&waiter->node, &wake_list);
         woken++;
         if (woken >= nr_wake)
             break;
     }
     mutex_unlock(&bucket->lock);
+
+    while (!list_empty(&wake_list)) {
+        waiter = list_first_entry(&wake_list, struct futex_waiter, node);
+        list_del(&waiter->node);
+        if (waiter->wait_src)
+            poll_wait_source_wake_one(waiter->wait_src, 0);
+    }
 
     return woken;
 }
