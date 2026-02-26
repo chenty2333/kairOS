@@ -5,6 +5,7 @@
 #include <kairos/virtio.h>
 #include <kairos/arch.h>
 #include <kairos/platform.h>
+#include <kairos/platform_irq.h>
 #include <kairos/platform_core.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>

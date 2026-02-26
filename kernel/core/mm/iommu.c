@@ -66,7 +66,8 @@ static bool iommu_iova_conflict_locked(struct iommu_domain *domain, dma_addr_t s
     return conflict;
 }
 
-static dma_addr_t iommu_iova_find_locked(struct iommu_domain *domain, size_t size) {
+static dma_addr_t iommu_iova_find_locked(struct iommu_domain *domain,
+                                         struct device *dev, size_t size) {
     if (!size || domain->iova_limit <= domain->iova_base)
         return 0;
     if (size > (size_t)(domain->iova_limit - domain->iova_base))
@@ -91,6 +92,13 @@ static dma_addr_t iommu_iova_find_locked(struct iommu_domain *domain, size_t siz
             dma_addr_t cand_end = cand + (dma_addr_t)size;
             if (cand_end < cand)
                 break;
+            if (!dma_addr_allowed(dev, cand, size)) {
+                dma_addr_t next = cand + CONFIG_PAGE_SIZE;
+                if (next < cand)
+                    break;
+                cand = ALIGN_UP(next, CONFIG_PAGE_SIZE);
+                continue;
+            }
             dma_addr_t next = cand + CONFIG_PAGE_SIZE;
             if (!iommu_iova_conflict_locked(domain, cand, cand_end, &next))
                 return cand;
@@ -136,7 +144,7 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
 
     bool irq_flags;
     spin_lock_irqsave(&domain->lock, &irq_flags);
-    dma_addr_t iova_base = iommu_iova_find_locked(domain, map_size);
+    dma_addr_t iova_base = iommu_iova_find_locked(domain, dev, map_size);
     if (!iova_base) {
         spin_unlock_irqrestore(&domain->lock, irq_flags);
         kfree(mapping);

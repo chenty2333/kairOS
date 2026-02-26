@@ -9,6 +9,7 @@
 #include <kairos/iommu.h>
 #include <kairos/net.h>
 #include <kairos/platform.h>
+#include <kairos/platform_irq.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -360,6 +361,38 @@ static void test_dma_coherent_alloc_free(void) {
     dma_free_coherent(NULL, buf, sz, dma);
 }
 
+static void test_dma_constraints_direct_backend(void) {
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+
+    uint8_t buf[128];
+    dma_addr_t phys = (dma_addr_t)virt_to_phys(buf);
+
+    dma_addr_t dma = dma_map_single(&dev, buf, sizeof(buf), DMA_TO_DEVICE);
+    test_check(dma != 0, "dma direct unconstrained map");
+    if (dma)
+        dma_unmap_single(&dev, dma, sizeof(buf), DMA_TO_DEVICE);
+
+    dma_set_mask(&dev, 0xFFFULL);
+    dma = dma_map_single(&dev, buf, sizeof(buf), DMA_TO_DEVICE);
+    test_check(dma == 0, "dma direct mask reject");
+
+    dma_set_mask(&dev, DMA_MASK_FULL);
+    int ret = dma_set_aperture(&dev, phys + CONFIG_PAGE_SIZE,
+                               phys + CONFIG_PAGE_SIZE * 2 - 1);
+    test_check(ret == 0, "dma direct aperture set");
+    dma = dma_map_single(&dev, buf, sizeof(buf), DMA_TO_DEVICE);
+    test_check(dma == 0, "dma direct aperture reject");
+
+    ret = dma_set_aperture(&dev, phys, phys + CONFIG_PAGE_SIZE - 1);
+    test_check(ret == 0, "dma direct aperture set allow");
+    dma = dma_map_single(&dev, buf, sizeof(buf), DMA_TO_DEVICE);
+    test_check(dma != 0, "dma direct aperture allow");
+    if (dma)
+        dma_unmap_single(&dev, dma, sizeof(buf), DMA_TO_DEVICE);
+    dma_clear_aperture(&dev);
+}
+
 static void test_iommu_domain_dma_ops(void) {
     struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
     test_check(domain != NULL, "iommu domain create");
@@ -396,6 +429,49 @@ static void test_iommu_domain_dma_ops(void) {
         test_check(coh_dma != 0 && coh_dma != coh_phys,
                    "iommu dma coherent translated handle");
         dma_free_coherent(&dev, coh, CONFIG_PAGE_SIZE + 64, coh_dma);
+    }
+
+    iommu_detach_device(&dev);
+    iommu_domain_destroy(domain);
+}
+
+static void test_dma_constraints_iommu_backend(void) {
+    struct iommu_domain *domain =
+        iommu_domain_create(IOMMU_DOMAIN_DMA, 0x10000ULL, 0x30000ULL);
+    test_check(domain != NULL, "dma iommu constraints domain create");
+    if (!domain)
+        return;
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    int ret = iommu_attach_device(domain, &dev);
+    test_check(ret == 0, "dma iommu constraints attach");
+    if (ret < 0) {
+        iommu_domain_destroy(domain);
+        return;
+    }
+
+    void *aligned = kmalloc_aligned(256, CONFIG_PAGE_SIZE);
+    test_check(aligned != NULL, "dma iommu constraints aligned alloc");
+    if (aligned) {
+        dma_set_mask(&dev, 0xFFFFULL);
+        dma_addr_t dma =
+            dma_map_single(&dev, aligned, 128, DMA_TO_DEVICE);
+        test_check(dma == 0, "dma iommu constraints mask reject");
+
+        dma_set_mask(&dev, DMA_MASK_FULL);
+        ret = dma_set_aperture(&dev, 0x18000ULL, 0x18FFFULL);
+        test_check(ret == 0, "dma iommu constraints aperture set");
+        dma = dma_map_single(&dev, aligned, 128, DMA_TO_DEVICE);
+        test_check(dma != 0, "dma iommu constraints aperture allow");
+        if (dma) {
+            test_check(dma >= 0x18000ULL && dma < 0x19000ULL,
+                       "dma iommu constraints aperture range");
+            dma_unmap_single(&dev, dma, 128, DMA_TO_DEVICE);
+        }
+
+        dma_clear_aperture(&dev);
+        kfree_aligned(aligned);
     }
 
     iommu_detach_device(&dev);
@@ -2201,7 +2277,9 @@ static void run_driver_suite_once(void) {
     test_blkdev_gpt_partition_bounds();
     test_netdev_registry();
     test_dma_coherent_alloc_free();
+    test_dma_constraints_direct_backend();
     test_iommu_domain_dma_ops();
+    test_dma_constraints_iommu_backend();
     test_iommu_default_domain_attach();
     test_iommu_hw_ops_default_attach();
     test_iommu_attach_replaces_owned_domain();
