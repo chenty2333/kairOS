@@ -9,6 +9,7 @@
 #include <kairos/pci.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
+#include <kairos/sched.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
 
@@ -37,6 +38,7 @@ enum riscv_irq_backend {
 
 static volatile enum riscv_irq_backend riscv_irq_backend_active =
     RISCV_IRQ_BACKEND_PLIC;
+static bool riscv_irq_backend_logged;
 #if CONFIG_RISCV_AIA
 static volatile int riscv_irq_backend_ready;
 static bool riscv_irq_backend_none_warned;
@@ -48,7 +50,6 @@ static uint32_t imsic_affinity[RISCV_IMSIC_MAX_ID + 1];
 static bool imsic_enabled[RISCV_IMSIC_MAX_ID + 1];
 static bool imsic_msi_used[RISCV_IMSIC_MAX_ID + 1];
 static uint16_t imsic_next_msi_id = RISCV_IMSIC_MSI_FIRST_ID;
-static bool imsic_remote_affinity_warned;
 
 static inline void imsic_select(unsigned long reg)
 {
@@ -91,7 +92,9 @@ static inline uint32_t imsic_claim_id(void)
 
 static uint32_t imsic_valid_cpu_mask(void)
 {
-    int cpu_count = arch_cpu_count();
+    int cpu_count = sched_cpu_count();
+    if (cpu_count <= 0)
+        cpu_count = arch_cpu_count();
     if (cpu_count <= 0)
         cpu_count = 1;
     if (cpu_count > CONFIG_MAX_CPUS)
@@ -125,8 +128,6 @@ static int imsic_local_set_enable(uint32_t id, bool enable)
 {
     if (id == 0 || id > RISCV_IMSIC_MAX_ID)
         return -EINVAL;
-    if (arch_cpu_id() != 0)
-        return 0;
 
     unsigned long isel = (unsigned long)(RISCV_IMSIC_EIE0 + (id / 32U));
     unsigned long bit = 1UL << (id % 32U);
@@ -149,6 +150,10 @@ static int imsic_apply_local_state(uint32_t id)
         affinity = 1U;
     imsic_affinity[id] = affinity;
 
+    /* MSI IDs are routed by MSI address target-hart selection. */
+    if (id >= RISCV_IMSIC_MSI_FIRST_ID)
+        return imsic_local_set_enable(id, enable);
+
     bool local_target = (cpu < 32U) && ((affinity & (1U << cpu)) != 0);
     return imsic_local_set_enable(id, enable && local_target);
 }
@@ -161,18 +166,15 @@ static void __attribute__((unused)) imsic_init(const struct platform_desc *plat)
         spin_init(&imsic_lock);
         for (uint32_t i = 0; i <= RISCV_IMSIC_MAX_ID; i++) {
             imsic_affinity[i] = 1U;
-            imsic_enabled[i] = false;
+            imsic_enabled[i] = (i >= RISCV_IMSIC_MSI_FIRST_ID);
             imsic_msi_used[i] = false;
         }
-        imsic_remote_affinity_warned = false;
         imsic_next_msi_id = RISCV_IMSIC_MSI_FIRST_ID;
         __sync_synchronize();
         imsic_state_ready = 2;
     }
     while (imsic_state_ready != 2)
         arch_cpu_relax();
-    if (arch_cpu_id() != 0)
-        return;
 
     imsic_write(RISCV_IMSIC_EITHRESHOLD, 0);
     imsic_write(RISCV_IMSIC_EIDELIVERY, 1);
@@ -268,15 +270,28 @@ static void riscv_irqchip_init(const struct platform_desc *plat)
         arch_cpu_relax();
 
     if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_IMSIC) {
+        if (!riscv_irq_backend_logged && arch_cpu_id() == 0) {
+            pr_info("RISCV_IRQ_BACKEND:imsic\n");
+            riscv_irq_backend_logged = true;
+        }
         imsic_init(plat);
         return;
     }
-    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE)
+    if (riscv_irq_backend_active == RISCV_IRQ_BACKEND_NONE) {
+        if (!riscv_irq_backend_logged && arch_cpu_id() == 0) {
+            pr_info("RISCV_IRQ_BACKEND:none\n");
+            riscv_irq_backend_logged = true;
+        }
         return;
+    }
 #else
     riscv_irq_backend_active = RISCV_IRQ_BACKEND_PLIC;
 #endif
 
+    if (!riscv_irq_backend_logged && arch_cpu_id() == 0) {
+        pr_info("RISCV_IRQ_BACKEND:plic\n");
+        riscv_irq_backend_logged = true;
+    }
     if (plic_ops.init)
         plic_ops.init(plat);
 }
@@ -380,14 +395,6 @@ static int imsic_pci_compose_msg(uint8_t irq, uint32_t cpu_mask,
         return -EINVAL;
 
     uint32_t target_cpu = imsic_pick_target_cpu(cpu_mask);
-    if (target_cpu != (uint32_t)arch_cpu_id()) {
-        if (!imsic_remote_affinity_warned) {
-            pr_warn("pci: riscv IMSIC remote affinity is not yet synchronized across harts; keeping local target\n");
-            imsic_remote_affinity_warned = true;
-        }
-        return -EOPNOTSUPP;
-    }
-
     uint64_t addr = imsic_cpu_page_pa(target_cpu);
     msg->address_lo = (uint32_t)addr;
     msg->address_hi = (uint32_t)(addr >> 32);
