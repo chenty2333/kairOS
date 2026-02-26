@@ -209,7 +209,7 @@ static int gen_stat(pid_t pid __attribute__((unused)),
 static int gen_interrupts(pid_t pid __attribute__((unused)),
                           char *buf, size_t bufsz)
 {
-    return platform_irq_format_stats(buf, bufsz, true);
+    return platform_irq_format_proc_interrupts(buf, bufsz, true);
 }
 
 static int gen_sched(pid_t pid __attribute__((unused)),

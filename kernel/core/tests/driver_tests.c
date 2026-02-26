@@ -1266,6 +1266,8 @@ static void test_irq_stats_snapshot_and_procfs(void) {
         test_check(n > 0, "irq proc interrupts read");
         if (n > 0) {
             buf[n] = '\0';
+            test_check(strstr(buf, "CPU0") != NULL,
+                       "irq proc interrupts per-cpu header");
             test_check(strstr(buf, "dispatch") != NULL,
                        "irq proc interrupts header");
             char needle[32];

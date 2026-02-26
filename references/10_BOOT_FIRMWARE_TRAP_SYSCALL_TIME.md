@@ -95,7 +95,8 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - `arch_irq_set_type()` / `arch_irq_set_affinity()` now return `int`: invalid input is reported to callers, and when IRQ is enabled the irqchip callback error is propagated instead of being silently ignored
   - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions
   - `IRQ_FLAG_NO_CHIP` marks software/local IRQ lines that should use refcount gating without programming irqchip enable/disable paths
-  - IRQ observability now exports per-IRQ `enable/disable/dispatch` totals plus `in_flight`, `retired_pending`, and `last_cpu` alongside current enable refcount/action count via `platform_irq_format_stats()`; procfs exposes this as `/proc/interrupts`
+  - IRQ observability now exports per-IRQ `enable/disable/dispatch` totals plus `in_flight`, `retired_pending`, and `last_cpu` alongside current enable refcount/action count via `platform_irq_format_stats()`
+  - `/proc/interrupts` now uses a per-CPU dispatch view (`CPU0..CPUn` columns) via `platform_irq_format_proc_interrupts()`, and still includes per-IRQ aggregate fields (dispatch total / enable-disable totals / flags / affinity / last_cpu)
 - affinity routing details:
   - riscv64 PLIC now supports `set_affinity`: it updates per-hart enable bits for each IRQ and reroutes already-enabled IRQs
   - aarch64 GICv3 routes SPIs using CPU `hw_id` (MPIDR affinity bits) in `GICD_IROUTER`
@@ -129,6 +130,7 @@ Two-layer structure:
   - x86_64: LAPIC timer (PIT-calibrated, configured as periodic mode)
   - aarch64: ARM generic physical timer (CNTP, cntp_tval_el0)
   - `platform_desc.timer` (`timer_ops`) is now wired in; timer registration/dispatch resolves timer virq via `platform_timer_irq()` and timer-trap paths use `platform_timer_dispatch()`
+  - `platform_timer_dispatch()` now normalizes trap event tagging to `TRAP_CORE_EVENT_TIMER`, so timer handlers observe a consistent event type across architectures even when arch trap front-ends initially classify IRQs generically
   - timer IRQs are registered into IRQ core and dispatched through the common IRQ action path (`platform_irq_dispatch`), then timer handlers call `tick_policy_on_timer_irq()`
 
 - Core layer:

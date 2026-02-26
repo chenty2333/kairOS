@@ -96,6 +96,7 @@ struct irq_desc {
     uint32_t hwirq;
     const struct irqchip_ops *chip;
     uint64_t dispatch_count;
+    uint64_t dispatch_count_per_cpu[CONFIG_MAX_CPUS];
     uint64_t enable_count_total;
     uint64_t disable_count_total;
     uint32_t in_flight;
@@ -398,6 +399,8 @@ static void platform_irq_table_init(void)
             irq_table[i].hwirq = (uint32_t)i;
             irq_table[i].chip = chip;
             irq_table[i].dispatch_count = 0;
+            for (int cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++)
+                irq_table[i].dispatch_count_per_cpu[cpu] = 0;
             irq_table[i].enable_count_total = 0;
             irq_table[i].disable_count_total = 0;
             irq_table[i].in_flight = 0;
@@ -744,6 +747,8 @@ static void irq_domain_reset_desc_range(uint32_t virq_base, uint32_t nr_irqs)
         desc->hwirq = virq_base + i;
         desc->chip = root_chip;
         desc->dispatch_count = 0;
+        for (int cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++)
+            desc->dispatch_count_per_cpu[cpu] = 0;
         desc->enable_count_total = 0;
         desc->disable_count_total = 0;
         desc->in_flight = 0;
@@ -1522,6 +1527,141 @@ int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only)
     return len;
 }
 
+int platform_irq_format_proc_interrupts(char *buf, size_t bufsz, bool active_only)
+{
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+    platform_irq_table_init();
+
+    int cpu_count = sched_cpu_count();
+    if (cpu_count < 1)
+        cpu_count = 1;
+    if (cpu_count > CONFIG_MAX_CPUS)
+        cpu_count = CONFIG_MAX_CPUS;
+
+    int len = snprintf(buf, bufsz, "irq");
+    if (len < 0)
+        return len;
+    if ((size_t)len >= bufsz)
+        return (int)(bufsz - 1);
+
+    for (int cpu = 0; cpu < cpu_count; cpu++) {
+        if ((size_t)len >= bufsz)
+            break;
+        char label[16];
+        int label_len = snprintf(label, sizeof(label), "CPU%d", cpu);
+        if (label_len < 0)
+            return len;
+        int n = snprintf(buf + len, bufsz - (size_t)len, " %10s", label);
+        if (n < 0)
+            return len;
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            return len;
+        }
+        len += n;
+    }
+
+    if ((size_t)len < bufsz) {
+        int n = snprintf(buf + len, bufsz - (size_t)len,
+                         "  dispatch  hwirq en_cur  en_total dis_total actions in_flight retired flags      affinity last_cpu\n");
+        if (n < 0)
+            return len;
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            return len;
+        }
+        len += n;
+    }
+
+    for (uint32_t irq = 0; irq < IRQCHIP_MAX_IRQS; irq++) {
+        struct irq_desc *desc = &irq_table[irq];
+        uint32_t action_count = 0;
+        uint32_t retired_count = 0;
+        uint32_t hwirq = 0;
+        uint32_t flags = 0;
+        uint32_t affinity = 0;
+        uint32_t in_flight = 0;
+        int32_t last_cpu = -1;
+        int enable_count = 0;
+        uint64_t enable_total = 0;
+        uint64_t disable_total = 0;
+        uint64_t dispatch_total = 0;
+        uint64_t dispatch_cpu[CONFIG_MAX_CPUS];
+
+        for (int cpu = 0; cpu < cpu_count; cpu++)
+            dispatch_cpu[cpu] = 0;
+
+        bool irq_state;
+        spin_lock_irqsave(&desc->lock, &irq_state);
+        struct list_head *pos;
+        list_for_each(pos, &desc->actions)
+            action_count++;
+        retired_count = desc->retired_pending;
+        hwirq = desc->hwirq;
+        flags = desc->flags;
+        affinity = desc->affinity_mask;
+        enable_count = desc->enable_count;
+        enable_total = desc->enable_count_total;
+        disable_total = desc->disable_count_total;
+        dispatch_total = desc->dispatch_count;
+        in_flight = desc->in_flight;
+        last_cpu = desc->last_cpu;
+        for (int cpu = 0; cpu < cpu_count; cpu++)
+            dispatch_cpu[cpu] = desc->dispatch_count_per_cpu[cpu];
+        spin_unlock_irqrestore(&desc->lock, irq_state);
+
+        bool active = action_count > 0 || enable_count > 0 || enable_total > 0 ||
+                      disable_total > 0 || dispatch_total > 0 ||
+                      retired_count > 0 || in_flight > 0;
+        if (active_only && !active)
+            continue;
+
+        if ((size_t)len >= bufsz)
+            break;
+        int n = snprintf(buf + len, bufsz - (size_t)len, "%3u", irq);
+        if (n < 0)
+            return len;
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            break;
+        }
+        len += n;
+
+        for (int cpu = 0; cpu < cpu_count; cpu++) {
+            if ((size_t)len >= bufsz)
+                break;
+            n = snprintf(buf + len, bufsz - (size_t)len, " %10llu",
+                         (unsigned long long)dispatch_cpu[cpu]);
+            if (n < 0)
+                return len;
+            if ((size_t)n >= bufsz - (size_t)len) {
+                len = (int)bufsz - 1;
+                break;
+            }
+            len += n;
+        }
+        if ((size_t)len >= bufsz)
+            break;
+
+        n = snprintf(buf + len, bufsz - (size_t)len,
+                     " %9llu %6u %6d %9llu %9llu %7u %9u %7u 0x%08x 0x%08x %8d\n",
+                     (unsigned long long)dispatch_total, hwirq, enable_count,
+                     (unsigned long long)enable_total,
+                     (unsigned long long)disable_total, action_count, in_flight,
+                     retired_count, flags, affinity, last_cpu);
+        if (n < 0)
+            return len;
+        if ((size_t)n >= bufsz - (size_t)len) {
+            len = (int)bufsz - 1;
+            break;
+        }
+        len += n;
+    }
+
+    return len;
+}
+
 static void irq_desc_recalc_flags_locked(struct irq_desc *desc)
 {
     if (!desc)
@@ -2124,8 +2264,11 @@ void platform_irq_dispatch(uint32_t irq, const struct trap_core_event *ev)
         spin_unlock_irqrestore(&desc->lock, irq_state);
         return;
     }
+    int cpu = arch_cpu_id_stable();
     desc->dispatch_count++;
-    desc->last_cpu = arch_cpu_id_stable();
+    desc->last_cpu = cpu;
+    if (cpu >= 0 && cpu < CONFIG_MAX_CPUS)
+        desc->dispatch_count_per_cpu[cpu]++;
     struct list_head *pos;
     list_for_each(pos, &desc->actions) {
         struct irq_action *action = list_entry(pos, struct irq_action, node);
@@ -2189,6 +2332,12 @@ void platform_timer_dispatch(const struct trap_core_event *ev)
     int irq = platform_timer_irq();
     if (irq < 0)
         return;
+    if (ev && ev->type != TRAP_CORE_EVENT_TIMER) {
+        struct trap_core_event timer_ev = *ev;
+        timer_ev.type = TRAP_CORE_EVENT_TIMER;
+        platform_irq_dispatch((uint32_t)irq, &timer_ev);
+        return;
+    }
     platform_irq_dispatch((uint32_t)irq, ev);
 }
 

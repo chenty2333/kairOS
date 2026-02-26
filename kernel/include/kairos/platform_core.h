@@ -220,6 +220,8 @@ int platform_irq_domain_map_fwnode(uint32_t fwnode, uint32_t hwirq);
 size_t platform_irq_snapshot(struct irq_stats_entry *entries, size_t capacity,
                              bool active_only);
 int platform_irq_format_stats(char *buf, size_t bufsz, bool active_only);
+int platform_irq_format_proc_interrupts(char *buf, size_t bufsz,
+                                        bool active_only);
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
                                  uint32_t hwirq,
                                  const struct trap_core_event *ev);
