@@ -215,15 +215,12 @@ void tick_policy_on_timer_irq(const struct trap_core_event *ev) {
         return;
     }
 
-    if (proc_current() == arch_get_percpu()->idle_proc) {
-        schedule();
-        return;
-    }
-
     /*
      * Defer kernel-thread preemption to explicit reschedule points.
      * Calling schedule() directly from a kernel-mode timer IRQ can switch
      * context while unwinding trap state and corrupt return control flow.
+     * This also covers the early-boot path where BSP still runs on the
+     * bootstrap stack before entering the normal idle loop.
      */
 }
 

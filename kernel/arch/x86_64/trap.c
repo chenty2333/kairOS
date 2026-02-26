@@ -89,6 +89,14 @@ extern void isr44(void);
 extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
+extern void isr48(void);
+extern void isr49(void);
+extern void isr50(void);
+extern void isr51(void);
+extern void isr52(void);
+extern void isr53(void);
+extern void isr54(void);
+extern void isr55(void);
 extern void isr128(void);
 extern void isr240(void);
 
@@ -393,6 +401,14 @@ void arch_trap_init(void) {
     idt_set_gate(45, isr45);
     idt_set_gate(46, isr46);
     idt_set_gate(47, isr47);
+    idt_set_gate(48, isr48);
+    idt_set_gate(49, isr49);
+    idt_set_gate(50, isr50);
+    idt_set_gate(51, isr51);
+    idt_set_gate(52, isr52);
+    idt_set_gate(53, isr53);
+    idt_set_gate(54, isr54);
+    idt_set_gate(55, isr55);
     idt_set_gate_dpl(SYSCALL_VEC, isr128, 3);
     idt_set_gate(0xF0, isr240);
 
