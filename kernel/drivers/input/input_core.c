@@ -21,6 +21,7 @@ static int input_dev_count = 0;
 /* Forward declaration for evdev integration */
 extern void evdev_notify_event(struct input_dev *dev, struct input_event *event);
 extern int evdev_register_device(struct input_dev *dev);
+extern void evdev_unregister_device(struct input_dev *dev);
 
 struct input_dev *input_dev_alloc(void) {
     struct input_dev *dev = kzalloc(sizeof(*dev));
@@ -56,7 +57,18 @@ int input_dev_register(struct input_dev *dev) {
     pr_info("input: registered device '%s' (bus=0x%x vendor=0x%x product=0x%x)\n",
             dev->name, dev->id_bus, dev->id_vendor, dev->id_product);
 
-    evdev_register_device(dev);
+    int ret = evdev_register_device(dev);
+    if (ret < 0) {
+        pr_warn("input: evdev registration failed for '%s' (err=%d)\n",
+                dev->name, ret);
+        irq_state = arch_irq_save();
+        spin_lock(&input_dev_lock);
+        list_del(&dev->node);
+        input_dev_count--;
+        spin_unlock(&input_dev_lock);
+        arch_irq_restore(irq_state);
+        return ret;
+    }
 
     return 0;
 }
@@ -64,6 +76,8 @@ int input_dev_register(struct input_dev *dev) {
 void input_dev_unregister(struct input_dev *dev) {
     if (!dev)
         return;
+
+    evdev_unregister_device(dev);
 
     bool irq_state = arch_irq_save();
     spin_lock(&input_dev_lock);

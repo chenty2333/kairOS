@@ -96,7 +96,9 @@ void init_devices(void) {
     extern int ps2_mouse_init(void);
 
     ps2_controller_init();
-    ps2_kbd_init();
-    ps2_mouse_init();
+    if (ps2_kbd_init() < 0)
+        pr_warn("ps2: keyboard init failed\n");
+    if (ps2_mouse_init() < 0)
+        pr_warn("ps2: mouse init failed\n");
 #endif
 }

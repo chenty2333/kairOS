@@ -46,11 +46,11 @@ struct evdev_client {
 struct evdev {
     struct input_dev *input_dev;
     int index;
-    struct list_head client_list;
     spinlock_t lock;
 };
 
 static struct evdev *evdev_devices[32];
+#define EVDEV_MAX_DEVICES 32
 static int evdev_count = 0;
 static spinlock_t evdev_global_lock = SPINLOCK_INIT;
 static bool devfs_input_dir_created = false;
@@ -199,7 +199,7 @@ static ssize_t evdev_fread(struct file *file, void *buf, size_t len) {
             if (nonblock)
                 return -EAGAIN;
 
-            int ret = proc_sleep_on(&client->wait, &client->wait, false);
+            int ret = proc_sleep_on(&client->wait, &client->wait, true);
             if (ret < 0)
                 return ret;
         }
@@ -263,23 +263,35 @@ int evdev_register_device(struct input_dev *dev) {
     if (!dev)
         return -EINVAL;
 
+    bool irq_state = arch_irq_save();
+    spin_lock(&evdev_global_lock);
+
     if (!devfs_input_dir_created) {
         devfs_register_dir("/dev/input");
         devfs_input_dir_created = true;
     }
+
+    if (evdev_count >= EVDEV_MAX_DEVICES) {
+        spin_unlock(&evdev_global_lock);
+        arch_irq_restore(irq_state);
+        pr_err("evdev: max devices reached\n");
+        return -ENOSPC;
+    }
+
+    spin_unlock(&evdev_global_lock);
+    arch_irq_restore(irq_state);
 
     struct evdev *evdev = kzalloc(sizeof(*evdev));
     if (!evdev)
         return -ENOMEM;
 
     spin_init(&evdev->lock);
-    INIT_LIST_HEAD(&evdev->client_list);
     evdev->input_dev = dev;
 
-    bool irq_state = arch_irq_save();
+    irq_state = arch_irq_save();
     spin_lock(&evdev_global_lock);
     evdev->index = evdev_count;
-    evdev_devices[evdev_count++] = evdev;
+    evdev_devices[evdev_count] = evdev;
     spin_unlock(&evdev_global_lock);
     arch_irq_restore(irq_state);
 
@@ -289,11 +301,50 @@ int evdev_register_device(struct input_dev *dev) {
     int ret = devfs_register_node(name, &evdev_fops, evdev);
     if (ret < 0) {
         pr_err("evdev: failed to register %s\n", name);
+        irq_state = arch_irq_save();
+        spin_lock(&evdev_global_lock);
+        evdev_devices[evdev->index] = NULL;
+        spin_unlock(&evdev_global_lock);
+        arch_irq_restore(irq_state);
         kfree(evdev);
         return ret;
     }
 
+    irq_state = arch_irq_save();
+    spin_lock(&evdev_global_lock);
+    evdev_count++;
+    spin_unlock(&evdev_global_lock);
+    arch_irq_restore(irq_state);
+
     pr_info("evdev: registered %s for '%s'\n", name, dev->name);
 
     return 0;
+}
+
+void evdev_unregister_device(struct input_dev *dev) {
+    if (!dev)
+        return;
+
+    bool irq_state = arch_irq_save();
+    spin_lock(&evdev_global_lock);
+
+    for (int i = 0; i < evdev_count; i++) {
+        if (evdev_devices[i] && evdev_devices[i]->input_dev == dev) {
+            struct evdev *evdev = evdev_devices[i];
+            for (int j = i; j < evdev_count - 1; j++)
+                evdev_devices[j] = evdev_devices[j + 1];
+            evdev_devices[evdev_count - 1] = NULL;
+            evdev_count--;
+
+            spin_unlock(&evdev_global_lock);
+            arch_irq_restore(irq_state);
+
+            /* FIXME: devfs node removal not yet supported */
+            kfree(evdev);
+            return;
+        }
+    }
+
+    spin_unlock(&evdev_global_lock);
+    arch_irq_restore(irq_state);
 }
