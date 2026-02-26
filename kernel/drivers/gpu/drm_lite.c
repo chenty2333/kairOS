@@ -189,9 +189,27 @@ static int drm_buffer_kobj_poll_attach(struct kobj *obj, struct vnode *vn)
 
     watch->vn = vn;
     mutex_lock(&bkobj->damage_lock);
+
+    struct drm_buffer_watch *iter;
+    list_for_each_entry(iter, &bkobj->poll_vnodes, node) {
+        if (iter->vn == vn) {
+            bool should_wake = bkobj->damage_pending;
+            mutex_unlock(&bkobj->damage_lock);
+            kfree(watch);
+            if (should_wake) {
+                vfs_poll_wake(vn, POLLIN);
+            }
+            return 0;
+        }
+    }
+
     list_add_tail(&watch->node, &bkobj->poll_vnodes);
+    bool should_wake = bkobj->damage_pending;
     mutex_unlock(&bkobj->damage_lock);
 
+    if (should_wake) {
+        vfs_poll_wake(vn, POLLIN);
+    }
     return 0;
 }
 
@@ -755,6 +773,13 @@ static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
         kobj_put(obj);
 
         if (copy_to_user((void *)arg, &req, sizeof(req)) < 0) {
+            if (!existing) {
+                mutex_lock(&ldev->lock);
+                list_del(&bkobj->buf->list);
+                ldev->buffer_count--;
+                mutex_unlock(&ldev->lock);
+                drm_lite_buffer_put(bkobj->buf);
+            }
             return -EFAULT;
         }
         return 0;
