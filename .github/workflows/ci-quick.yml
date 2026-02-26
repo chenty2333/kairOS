@@ -67,6 +67,19 @@ jobs:
             cat focused-targets-riscv64.md >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+      - name: Classify focused gate failures
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/impl/classify-run-failures.py \
+            --runs-root build/runs \
+            --max-runs 20 \
+            --json-out focused-failure-classify-riscv64.json \
+            --markdown-out focused-failure-classify-riscv64.md
+          if [[ -f focused-failure-classify-riscv64.md ]]; then
+            cat focused-failure-classify-riscv64.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
       - name: Upload focused gate artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,6 +90,8 @@ jobs:
           path: |
             focused-targets-riscv64.json
             focused-targets-riscv64.md
+            focused-failure-classify-riscv64.json
+            focused-failure-classify-riscv64.md
             build/runs/*/manifest.json
             build/runs/*/result.json
             build/runs/*/riscv64/logs/*.log
