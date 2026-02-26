@@ -116,6 +116,7 @@ pollwait.c:
 - `poll_wait_source_block_ex` extends wait-source blocking with explicit interruptible policy; `poll_wait_source_block` remains the interruptible wrapper
 - Unified ready wake bridge: `poll_ready_wake_one/all` wakes wait_queue waiters and poll watchers on one path
 - `wait_queue_wakeup_one_hint()` adds a wait-core wake primitive with optional direct-switch hint; `poll_ready_wake_one` now uses it and enables single-waiter direct switch when no vnode fanout is involved
+- `poll_wait_wake()` now also takes the same direct-switch fastpath when there is exactly one waiter and no watch callback fanout, so epoll-style waiter-only heads reuse the optimized wake handoff
 - `eventfd`/`timerfd`/`inotify`/`signalfd`/`pidfd` block+wake paths now use `poll_wait_source_*` wrappers over wait-core helpers instead of direct `proc_sleep_on*` call sites
 - pipe read/write blocking queues and close wakeups now route through `poll_wait_source` (pipe poll fanout remains on `poll_wait_head`)
 - AF_UNIX and AF_INET stream/listen/datagram wait queues now route through `poll_wait_source` while socket poll readiness fanout remains on socket poll heads

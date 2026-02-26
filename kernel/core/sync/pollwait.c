@@ -240,6 +240,17 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
     }
     spin_unlock_irqrestore(&head->wq.lock, flags);
 
+    bool single_waiter = !list_empty(&wake_list) &&
+                         (wake_list.next->next == &wake_list);
+    bool can_direct_switch = single_waiter && list_empty(&notify_list);
+    if (can_direct_switch) {
+        struct wait_queue_entry *entry =
+            list_first_entry(&wake_list, struct wait_queue_entry, node);
+        list_del(&entry->node);
+        if (entry->proc)
+            proc_wakeup_ex(entry->proc, true);
+    }
+
     struct wait_queue_entry *entry, *tmp;
     list_for_each_entry_safe(entry, tmp, &wake_list, node) {
         list_del(&entry->node);

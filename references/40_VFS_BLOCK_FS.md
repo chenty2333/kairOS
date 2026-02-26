@@ -116,6 +116,7 @@ Special:
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
 - poll/epoll/futex/socket timeout waits share a common wait-core deadline/block path (`poll_timeout_to_deadline_ms` + `poll_block_current_ex` family / `poll_wait_source_block`)
 - poll wait-core now provides `poll_wait_source` (`wait_queue` + optional vnode) so fd-event paths can share one internal block/wake surface
+- poll wait-core `poll_wait_wake` now uses a single-waiter direct-switch fastpath when no poll-watch callback fanout is pending
 - eventfd/timerfd/inotify/signalfd/pidfd wakeups now route through `poll_wait_source_wake_*` (built on `poll_ready_wake_all`) to keep wait_queue + poll watcher wake paths consistent
 - eventfd/timerfd/inotify/signalfd blocking waits now go through `poll_wait_source_block` (wait-core wrapper) instead of direct `proc_sleep_on*`
 - pipe read/write blocking and close-end waiter wakeups now also use `poll_wait_source`; pipe poll readiness fanout still uses `poll_wait_head`
