@@ -9,6 +9,7 @@
 #include <kairos/syscall.h>
 #include <kairos/tracepoint.h>
 #include <kairos/uaccess.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/vfs.h>
 
 #define RWF_HIPRI   0x00000001U
@@ -23,8 +24,8 @@ static inline int sysfs_abi_int32(uint64_t v) {
 static bool sysfs_console_fallback_allowed(int fd) {
     if (fd != 1 && fd != 2)
         return false;
-    struct file *probe = fd_get(proc_current(), fd);
-    if (probe) {
+    struct file *probe = NULL;
+    if (handle_bridge_pin_fd(proc_current(), fd, 0, &probe, NULL) == 0) {
         file_put(probe);
         return false;
     }
@@ -84,7 +85,7 @@ static int64_t sys_read_write(uint64_t fd, uint64_t buf, uint64_t count,
     int kfd = sysfs_abi_int32(fd);
     uint32_t req_rights = is_write ? FD_RIGHT_WRITE : FD_RIGHT_READ;
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), kfd, req_rights, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, req_rights, &f, NULL);
 
     if (fr < 0) {
         /* Fallback: early console for stdout/stderr without file */
@@ -134,9 +135,10 @@ int64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3,
     (void)a3; (void)a4; (void)a5;
     int kfd = sysfs_abi_int32(fd);
     int kwhence = sysfs_abi_int32(whence);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, 0, &f, NULL);
+    if (fr < 0)
+        return fr;
     if (f->vnode && f->vnode->type == VNODE_PIPE) {
         file_put(f);
         return -ESPIPE;
@@ -154,7 +156,7 @@ static int64_t sys_pread_write(uint64_t fd, uint64_t buf, uint64_t count,
     int kfd = sysfs_abi_int32(fd);
     uint32_t req_rights = is_write ? FD_RIGHT_WRITE : FD_RIGHT_READ;
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), kfd, req_rights, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, req_rights, &f, NULL);
     if (fr < 0)
         return fr;
     if (!f->vnode || f->vnode->type == VNODE_PIPE) {
@@ -266,7 +268,7 @@ int64_t sys_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
 
     int kfd = sysfs_abi_int32(fd);
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), kfd, FD_RIGHT_WRITE, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, FD_RIGHT_WRITE, &f, NULL);
     if (fr < 0) {
         /* Fallback for stdout/stderr without file — delegate per-iov */
         if (!sysfs_console_fallback_allowed(kfd))
@@ -325,7 +327,7 @@ int64_t sys_readv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt, uint64_t a3,
 
     int kfd = sysfs_abi_int32(fd);
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), kfd, FD_RIGHT_READ, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, FD_RIGHT_READ, &f, NULL);
     if (fr < 0)
         return fr;
 
@@ -365,7 +367,7 @@ static int64_t sys_pread_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
     int kfd = sysfs_abi_int32(fd);
     uint32_t req_rights = is_write ? FD_RIGHT_WRITE : FD_RIGHT_READ;
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), kfd, req_rights, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, req_rights, &f, NULL);
     if (fr < 0)
         return fr;
     if (!f->vnode || f->vnode->type == VNODE_PIPE) {
@@ -538,11 +540,11 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
     int kfd_in = sysfs_abi_int32(fd_in);
     int kfd_out = sysfs_abi_int32(fd_out);
     struct file *fin = NULL;
-    int fr = fd_get_required(p, kfd_in, FD_RIGHT_READ, &fin);
+    int fr = handle_bridge_pin_fd(p, kfd_in, FD_RIGHT_READ, &fin, NULL);
     if (fr < 0)
         return fr;
     struct file *fout = NULL;
-    fr = fd_get_required(p, kfd_out, FD_RIGHT_WRITE, &fout);
+    fr = handle_bridge_pin_fd(p, kfd_out, FD_RIGHT_WRITE, &fout, NULL);
     if (fr < 0) {
         file_put(fin);
         return fr;
@@ -719,9 +721,10 @@ int64_t sys_fsync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                   uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, 0, &f, NULL);
+    if (fr < 0)
+        return fr;
     int64_t ret = vfs_fsync(f, 0);
     file_put(f);
     return ret;
@@ -731,9 +734,10 @@ int64_t sys_fdatasync(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                       uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     int kfd = sysfs_abi_int32(fd);
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, 0, &f, NULL);
+    if (fr < 0)
+        return fr;
     int64_t ret = vfs_fsync(f, 1);
     file_put(f);
     return ret;

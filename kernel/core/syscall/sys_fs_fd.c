@@ -7,6 +7,7 @@
 #include <kairos/syscall.h>
 #include <kairos/time.h>
 #include <kairos/uaccess.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/pipe.h>
 #include <kairos/vfs.h>
 
@@ -201,7 +202,7 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     if ((int32_t)ucmd == F_SETFL)
         req_rights = FD_RIGHT_IOCTL;
     struct file *f = NULL;
-    int fr = fd_get_required(p, kfd, req_rights, &f);
+    int fr = handle_bridge_pin_fd(p, kfd, req_rights, &f, NULL);
     if (fr < 0)
         return fr;
 
@@ -284,7 +285,8 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
     if ((int64_t)length < 0)
         return -EINVAL;
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), sysfs_fd_int(fd), FD_RIGHT_WRITE, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), sysfs_fd_int(fd),
+                                  FD_RIGHT_WRITE, &f, NULL);
     if (fr < 0)
         return fr;
     if (!f->vnode) {
@@ -310,7 +312,8 @@ int64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), sysfs_fd_int(fd), FD_RIGHT_WRITE, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), sysfs_fd_int(fd),
+                                  FD_RIGHT_WRITE, &f, NULL);
     if (fr < 0)
         return fr;
     if (!f->vnode) {
@@ -335,7 +338,8 @@ int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
     uint32_t uowner = (uint32_t)owner;
     uint32_t ugroup = (uint32_t)group;
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), sysfs_fd_int(fd), FD_RIGHT_WRITE, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), sysfs_fd_int(fd),
+                                  FD_RIGHT_WRITE, &f, NULL);
     if (fr < 0)
         return fr;
     if (!f->vnode) {

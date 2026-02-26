@@ -193,11 +193,13 @@ int main(int argc, char **argv) {
     }
 
     char root_path[96] = {0};
+    char mount_source[96] = {0};
     int last_err = 0;
     bool mounted = false;
-    char candidates[8][64];
+    char candidates[12][64];
     size_t candidate_count = 0;
-    const char *fallbacks[] = {"vda", "vdb", "vdc", "vdd"};
+    const char *fallbacks[] = {"vda",  "vda1", "vdb",  "vdb1",
+                               "vdc",  "vdc1", "vdd",  "vdd1"};
     size_t i;
 
     if (root_from_cmdline)
@@ -210,12 +212,13 @@ int main(int argc, char **argv) {
 
     for (i = 0; i < candidate_count; ++i) {
         snprintf(root_path, sizeof(root_path), "%s", candidates[i]);
-        if (do_mount(root_path, "/newroot", root_fstype, 0) == 0) {
+        snprintf(mount_source, sizeof(mount_source), "/dev/%s", root_path);
+        if (do_mount(mount_source, "/newroot", root_fstype, 0) == 0) {
             mounted = true;
             break;
         }
         last_err = errno;
-        log_msg("initramfs: mount try root=%s type=%s failed (%d)\n", root_path,
+        log_msg("initramfs: mount try root=%s type=%s failed (%d)\n", mount_source,
                 root_fstype, last_err);
     }
 

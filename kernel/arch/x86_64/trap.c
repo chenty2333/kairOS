@@ -19,6 +19,8 @@
 #define IRQ_BASE 32
 #define SYSCALL_VEC 0x80
 #define X86_NR_ARCH_PRCTL 158
+#define X86_NR_MKDIR 83
+#define X86_NR_RMDIR 84
 #define ARCH_SET_GS 0x1001
 #define ARCH_SET_FS 0x1002
 #define ARCH_GET_FS 0x1003
@@ -273,6 +275,18 @@ static void handle_syscall(struct trap_frame *tf) {
     uint64_t nr = tf->rax;
     if (nr == X86_NR_ARCH_PRCTL) {
         tf->rax = x86_sys_arch_prctl(tf->rdi, tf->rsi);
+        return;
+    }
+    if (nr == X86_NR_MKDIR) {
+        tf->rax = syscall_dispatch(LINUX_NR_mkdirat,
+                                   (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                   tf->rsi, 0, 0, 0);
+        return;
+    }
+    if (nr == X86_NR_RMDIR) {
+        tf->rax = syscall_dispatch(LINUX_NR_unlinkat,
+                                   (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                   AT_REMOVEDIR, 0, 0, 0);
         return;
     }
     tf->rax = syscall_dispatch(x86_syscall_remap(nr), tf->rdi, tf->rsi,
