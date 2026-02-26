@@ -108,6 +108,7 @@ struct process *proc_alloc(void) {
     p->sched_flags = PROC_SCHEDF_STEALABLE;
     proc_sched_set_affinity_all(p);
     p->mm = NULL;
+    p->active_tf = NULL;
     p->parent = NULL;
     p->kstack_top = 0;
     sched_entity_init(&p->se);
@@ -212,6 +213,8 @@ void proc_adopt_child(struct process *parent, struct process *child) {
 }
 
 void proc_free_internal(struct process *p) {
+    if (p)
+        p->active_tf = NULL;
     if (p && p->context) {
         p->kstack_top = 0;
         arch_context_free(p->context);

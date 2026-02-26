@@ -18,6 +18,11 @@
 
 #define IRQ_BASE 32
 #define SYSCALL_VEC 0x80
+#define X86_NR_ARCH_PRCTL 158
+#define ARCH_SET_GS 0x1001
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+#define ARCH_GET_GS 0x1004
 
 struct idt_entry {
     uint16_t off_low;
@@ -89,6 +94,52 @@ extern void isr240(void);
 
 static void handle_irq(struct trap_frame *tf, const struct trap_core_event *ev);
 
+static bool x86_tf_on_current_kstack(const struct process *p,
+                                     const struct trap_frame *tf) {
+    if (!p || !tf || !p->kstack_top)
+        return false;
+    uint64_t top = p->kstack_top;
+    uint64_t bottom = top + sizeof(uint64_t) - (2ULL * CONFIG_PAGE_SIZE);
+    uint64_t start = (uint64_t)tf;
+    uint64_t end = start + sizeof(*tf) - 1;
+    if (end < start)
+        return false;
+    return start >= bottom && end <= top;
+}
+
+static uint64_t x86_syscall_remap(uint64_t nr) {
+    switch (nr) {
+#include "syscall_compat.inc"
+    default:
+        return nr;
+    }
+}
+
+static int64_t x86_sys_arch_prctl(uint64_t code, uint64_t addr) {
+    struct process *cur = proc_current();
+    if (!cur || !cur->context)
+        return -EINVAL;
+
+    switch (code) {
+    case ARCH_SET_FS:
+        if (addr > USER_SPACE_END)
+            return -EINVAL;
+        arch_set_tls(cur->context, addr);
+        return 0;
+    case ARCH_GET_FS: {
+        uint64_t fs = arch_get_tls(cur->context);
+        if (copy_to_user((void *)addr, &fs, sizeof(fs)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case ARCH_SET_GS:
+    case ARCH_GET_GS:
+        return -EOPNOTSUPP;
+    default:
+        return -EINVAL;
+    }
+}
+
 static void idt_set_gate_dpl(int n, void (*handler)(void), uint8_t dpl) {
     uint64_t addr = (uint64_t)handler;
     uint16_t cs;
@@ -115,11 +166,18 @@ static void idt_load(void) {
 }
 
 struct trap_frame *get_current_trapframe(void) {
-    struct trap_frame *tf = arch_get_percpu()->current_tf;
-    if (tf)
-        return tf;
     struct process *p = proc_current();
-    return p ? (struct trap_frame *)p->active_tf : NULL;
+    struct trap_frame *tf = arch_get_percpu()->current_tf;
+    if (!p)
+        return tf;
+    if (x86_tf_on_current_kstack(p, tf))
+        return tf;
+    struct trap_frame *ptf = p ? (struct trap_frame *)p->active_tf : NULL;
+    if (x86_tf_on_current_kstack(p, ptf))
+        return ptf;
+    if (p)
+        p->active_tf = NULL;
+    return NULL;
 }
 
 void arch_irq_handler(struct trap_frame *tf) {
@@ -155,6 +213,8 @@ static void handle_exception(struct trap_frame *tf) {
 
     if (from_user) {
         if (cur) {
+            pr_warn("x86_64 user exception trap=%lu rip=%p err=%p cr2=%p pid=%d\n",
+                    trapno, (void *)tf->rip, (void *)tf->err, (void *)cr2, cur->pid);
             signal_send(cur->pid, SIGSEGV);
             signal_deliver_pending();
             return;
@@ -171,8 +231,20 @@ static void handle_exception(struct trap_frame *tf) {
                (void *)tf->rdi, (void *)tf->rsi, (void *)tf->rcx,
                (void *)tf->rdx, (void *)tf->rax);
     } else if (trapno == 14) {
-        pr_err("x86_64 #PF rip=%p err=%p cr2=%p\n",
-               (void *)tf->rip, (void *)tf->err, (void *)cr2);
+        pr_err("x86_64 #PF rip=%p err=%p cr2=%p rsp=%p rbp=%p cs=%p tf=%p from_user=%d\n",
+               (void *)tf->rip, (void *)tf->err, (void *)cr2, (void *)tf->rsp,
+               (void *)tf->rbp, (void *)tf->cs, (void *)tf,
+               from_user ? 1 : 0);
+        if (cur && cur->kstack_top) {
+            uint64_t kstack_top = cur->kstack_top;
+            uint64_t kstack_bottom =
+                kstack_top + sizeof(uint64_t) - (2ULL * CONFIG_PAGE_SIZE);
+            bool rsp_in_kstack =
+                (tf->rsp >= kstack_bottom) && (tf->rsp <= kstack_top);
+            pr_err("x86_64 #PF proc pid=%d kstack=%p..%p rsp_in_kstack=%d\n",
+                   cur->pid, (void *)kstack_bottom, (void *)kstack_top,
+                   rsp_in_kstack ? 1 : 0);
+        }
     } else {
         pr_err("x86_64 exception %lu rip=%p err=%p\n", trapno,
                (void *)tf->rip, (void *)tf->err);
@@ -181,8 +253,13 @@ static void handle_exception(struct trap_frame *tf) {
 }
 
 static void handle_syscall(struct trap_frame *tf) {
-    tf->rax = syscall_dispatch(tf->rax, tf->rdi, tf->rsi, tf->rdx, tf->r10,
-                               tf->r8, tf->r9);
+    uint64_t nr = tf->rax;
+    if (nr == X86_NR_ARCH_PRCTL) {
+        tf->rax = x86_sys_arch_prctl(tf->rdi, tf->rsi);
+        return;
+    }
+    tf->rax = syscall_dispatch(x86_syscall_remap(nr), tf->rdi, tf->rsi,
+                               tf->rdx, tf->r10, tf->r8, tf->r9);
 }
 
 static void handle_irq(struct trap_frame *tf, const struct trap_core_event *ev) {

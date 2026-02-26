@@ -72,7 +72,7 @@ kthread_entry:
 .global fork_ret
 fork_ret:
     call sched_post_switch_cleanup
-    sti
+    /* iretq restores user IF from trap-frame rflags. */
     mov %rsp, %rdi
     call x86_return_to_user
 1:  hlt; jmp 1b

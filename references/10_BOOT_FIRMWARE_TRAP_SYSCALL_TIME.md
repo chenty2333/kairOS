@@ -54,6 +54,7 @@ Per-architecture entry:
 - x86_64: IDT → isr_common (syscall goes through IDT 0x80), switches to kernel stack via TSS
   - x86_64 `#PF` first routes user-range faults through `mm_handle_fault()` (write/exec intent decoded from PF error bits) for both user and kernel origins; unresolved kernel faults then consult `search_exception_table(rip)` for uaccess fixup
   - x86_64 uaccess assembly emits `__ex_table` fixups for `copy_from_user` / `copy_to_user` / `strncpy_from_user`; fixup returns remaining bytes for copy helpers and `-EFAULT` for string copy
+  - x86_64 `get_current_trapframe()` now validates that `current_tf` / process `active_tf` lies inside the current process kernel stack range before use; mismatched stale process-scoped trapframe pointers are dropped
 - aarch64: VBAR_EL1 → vector_table, distinguishes EL0/EL1 origin
 
 trap_core.c:trap_core_dispatch() is the architecture-independent dispatch boundary:
@@ -62,6 +63,7 @@ trap_core.c:trap_core_dispatch() is the architecture-independent dispatch bounda
 - Calls architecture handle_event() (dispatches to interrupt handler / exception handler / syscall)
 - Delivers pending signals
 - Restores per-CPU current_tf and process-scoped `active_tf`
+- Process allocation/free paths initialize and clear `process.active_tf` to prevent stale trapframe reuse across recycled process slots
 - RISC-V page-fault diagnostics now log unresolved fault context with `pid/comm/sepc/fault-addr/access-type` before signal/panic path, and MM fault logs include the same context.
 
 Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses GIC.

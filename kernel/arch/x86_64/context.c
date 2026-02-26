@@ -7,6 +7,7 @@
 #include <kairos/config.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
+#include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
 
@@ -25,10 +26,43 @@ struct arch_context {
     uint64_t cr3;
     uint64_t kthread_fn;
     uint64_t kthread_arg;
+    uint64_t fs_base;
 };
 
 extern void kthread_entry(void);
 extern void fork_ret(void);
+
+static inline bool stack_addr_in_range(uint64_t addr, uint64_t bottom,
+                                       uint64_t top) {
+    return addr >= bottom && addr <= top;
+}
+
+static inline uint64_t stack_rebase_addr(uint64_t addr, uint64_t src_top,
+                                         uint64_t dst_top) {
+    return dst_top - (src_top - addr);
+}
+
+static void rebase_saved_rbp_chain(struct arch_context *dst, uint64_t src_bottom,
+                                   uint64_t src_top, uint64_t dst_bottom,
+                                   uint64_t dst_top, uint64_t stack_bytes) {
+    if (!stack_addr_in_range(dst->rbp, dst_bottom, dst_top))
+        return;
+
+    uint64_t fp = dst->rbp;
+    uint64_t max_steps = stack_bytes / sizeof(uint64_t);
+    for (uint64_t i = 0; i < max_steps; i++) {
+        if (fp < dst_bottom || fp > (dst_top - sizeof(uint64_t)))
+            break;
+        uint64_t next = *(uint64_t *)fp;
+        if (!stack_addr_in_range(next, src_bottom, src_top))
+            break;
+        uint64_t rebased = stack_rebase_addr(next, src_top, dst_top);
+        *(uint64_t *)fp = rebased;
+        if (rebased <= fp)
+            break;
+        fp = rebased;
+    }
+}
 
 struct arch_context *arch_context_alloc(void) {
     struct arch_context *ctx = kmalloc(sizeof(*ctx));
@@ -63,9 +97,13 @@ void arch_context_free(struct arch_context *ctx) {
 }
 
 void arch_context_set_cpu(struct arch_context *ctx, int cpu) {
-    if (ctx && ctx->kernel_stack) {
+    if (!ctx)
+        return;
+    if (ctx->kernel_stack)
         *(uint64_t *)ctx->kernel_stack = (uint64_t)cpu;
-    }
+    __asm__ __volatile__("wrmsr" :: "c"(0xC0000100),
+                         "a"((uint32_t)ctx->fs_base),
+                         "d"((uint32_t)(ctx->fs_base >> 32)));
 }
 
 void arch_context_init(struct arch_context *ctx, vaddr_t entry, vaddr_t arg,
@@ -93,7 +131,31 @@ void arch_context_init(struct arch_context *ctx, vaddr_t entry, vaddr_t arg,
 }
 
 void arch_context_clone(struct arch_context *dst, struct arch_context *src) {
+    if (!dst || !src)
+        return;
+
+    uint64_t dst_top = dst->kernel_stack;
+    uint64_t src_top = src->kernel_stack;
+    uint64_t stack_bytes = 2ULL * CONFIG_PAGE_SIZE;
+
     *dst = *src;
+    dst->kernel_stack = dst_top;
+
+    if (!dst_top || !src_top)
+        return;
+
+    uint64_t src_bottom = src_top + sizeof(uint64_t) - stack_bytes;
+    uint64_t dst_bottom = dst_top + sizeof(uint64_t) - stack_bytes;
+    memcpy((void *)dst_bottom, (const void *)src_bottom, (size_t)stack_bytes);
+
+    if (stack_addr_in_range(src->rsp, src_bottom, src_top))
+        dst->rsp = stack_rebase_addr(src->rsp, src_top, dst_top);
+    if (stack_addr_in_range(src->rbp, src_bottom, src_top))
+        dst->rbp = stack_rebase_addr(src->rbp, src_top, dst_top);
+
+    /* Rebase saved frame links so leave/ret cannot pivot back to src stack. */
+    rebase_saved_rbp_chain(dst, src_bottom, src_top, dst_bottom, dst_top,
+                           stack_bytes);
 }
 
 void arch_setup_fork_child(struct arch_context *ctx, struct trap_frame *tf) {
@@ -120,10 +182,16 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
 void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
     if (!ctx)
         return;
-    /* Set FS base via MSR on context restore; store in context for now */
-    /* IA32_FS_BASE MSR = 0xC0000100 */
-    __asm__ __volatile__("wrmsr" :: "c"(0xC0000100),
-                         "a"((uint32_t)tls), "d"((uint32_t)(tls >> 32)));
+    ctx->fs_base = tls;
+    struct process *cur = proc_current();
+    if (!cur || cur->context != ctx)
+        return;
+    __asm__ __volatile__("wrmsr" :: "c"(0xC0000100), "a"((uint32_t)tls),
+                         "d"((uint32_t)(tls >> 32)));
+}
+
+uint64_t arch_get_tls(const struct arch_context *ctx) {
+    return ctx ? ctx->fs_base : 0;
 }
 
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {

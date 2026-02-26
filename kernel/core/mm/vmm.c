@@ -135,22 +135,47 @@ static void mm_fault_log_ctx(const char *reason, vaddr_t addr, uint32_t flags,
     const char *comm = (p && p->name[0]) ? p->name : "?";
     vaddr_t sepc = tf ? tf->sepc : 0;
     const char *access = mm_fault_access_type(flags);
+#if defined(ARCH_x86_64)
+    vaddr_t rsp = tf ? tf->rsp : 0;
+    vaddr_t rbp = tf ? tf->rbp : 0;
+    vaddr_t cs = tf ? tf->cs : 0;
+    vaddr_t err = tf ? tf->err : 0;
+#endif
 
     if (vma_flags) {
+#if defined(ARCH_x86_64)
+        pr_err("mm: fault pid=%d comm=%s sepc=%p rsp=%p rbp=%p cs=%p err=%p addr=%p access=%s %s (vma_flags=0x%x)\n",
+               pid, comm, (void *)sepc, (void *)rsp, (void *)rbp,
+               (void *)cs, (void *)err, (void *)addr, access, reason,
+               vma_flags);
+#else
         pr_err("mm: fault pid=%d comm=%s sepc=%p addr=%p access=%s %s (vma_flags=0x%x)\n",
                pid, comm, (void *)sepc, (void *)addr, access, reason,
                vma_flags);
+#endif
         return;
     }
 
     if (has_extra) {
+#if defined(ARCH_x86_64)
+        pr_err("mm: fault pid=%d comm=%s sepc=%p rsp=%p rbp=%p cs=%p err=%p addr=%p access=%s %s (%ld)\n",
+               pid, comm, (void *)sepc, (void *)rsp, (void *)rbp,
+               (void *)cs, (void *)err, (void *)addr, access, reason, extra);
+#else
         pr_err("mm: fault pid=%d comm=%s sepc=%p addr=%p access=%s %s (%ld)\n",
                pid, comm, (void *)sepc, (void *)addr, access, reason, extra);
+#endif
         return;
     }
 
+#if defined(ARCH_x86_64)
+    pr_err("mm: fault pid=%d comm=%s sepc=%p rsp=%p rbp=%p cs=%p err=%p addr=%p access=%s %s\n",
+           pid, comm, (void *)sepc, (void *)rsp, (void *)rbp, (void *)cs,
+           (void *)err, (void *)addr, access, reason);
+#else
     pr_err("mm: fault pid=%d comm=%s sepc=%p addr=%p access=%s %s\n",
            pid, comm, (void *)sepc, (void *)addr, access, reason);
+#endif
 }
 
 static struct vm_area *mm_stack_grow_target_locked(struct mm_struct *mm,
