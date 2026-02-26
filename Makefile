@@ -78,6 +78,8 @@ RISCV_AIA ?= 0
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
 CONFIG_VIRTIO_IOMMU ?= 1
+QEMU_IOMMU ?= auto
+VIRTIO_IOMMU_HEALTH_REQUIRED ?=
 
 ifeq ($(ARCH),riscv64)
   CROSS_COMPILE ?= riscv64-unknown-elf-
@@ -121,6 +123,51 @@ else
   $(error Unsupported architecture: $(ARCH))
 endif
 
+VALID_QEMU_IOMMU_MODES := auto off virtio
+ifneq ($(filter $(QEMU_IOMMU),$(VALID_QEMU_IOMMU_MODES)),$(QEMU_IOMMU))
+$(error invalid QEMU_IOMMU='$(QEMU_IOMMU)' (expected auto|off|virtio))
+endif
+
+QEMU_HAS_VIRTIO_IOMMU := $(shell command -v $(QEMU) >/dev/null 2>&1 && $(QEMU) -device help 2>/dev/null | grep -q 'virtio-iommu-pci' && echo 1 || echo 0)
+
+ifeq ($(QEMU_IOMMU),auto)
+ifeq ($(ARCH),x86_64)
+ifeq ($(QEMU_HAS_VIRTIO_IOMMU),1)
+QEMU_IOMMU_EFFECTIVE := virtio
+else
+QEMU_IOMMU_EFFECTIVE := off
+endif
+else ifeq ($(ARCH),aarch64)
+ifeq ($(QEMU_HAS_VIRTIO_IOMMU),1)
+QEMU_IOMMU_EFFECTIVE := virtio
+else
+QEMU_IOMMU_EFFECTIVE := off
+endif
+else
+QEMU_IOMMU_EFFECTIVE := off
+endif
+else
+QEMU_IOMMU_EFFECTIVE := $(QEMU_IOMMU)
+endif
+
+ifeq ($(CONFIG_VIRTIO_IOMMU),0)
+QEMU_IOMMU_EFFECTIVE := off
+endif
+
+ifeq ($(QEMU_IOMMU_EFFECTIVE),virtio)
+ifeq ($(ARCH),riscv64)
+$(error QEMU_IOMMU=virtio is unsupported on ARCH=riscv64 (virtio-iommu requires PCI transport))
+endif
+endif
+
+ifeq ($(strip $(VIRTIO_IOMMU_HEALTH_REQUIRED)),)
+ifeq ($(QEMU_IOMMU_EFFECTIVE),virtio)
+VIRTIO_IOMMU_HEALTH_REQUIRED := 1
+else
+VIRTIO_IOMMU_HEALTH_REQUIRED := 0
+endif
+endif
+
 ifeq ($(USE_GCC),1)
   CC := $(CROSS_COMPILE)gcc
   LD := $(CROSS_COMPILE)ld
@@ -147,6 +194,7 @@ CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 CFLAGS += -DCONFIG_EMBEDDED_INIT=$(EMBEDDED_INIT)
 CFLAGS += -DCONFIG_DRM_LITE=$(CONFIG_DRM_LITE)
 CFLAGS += -DCONFIG_VIRTIO_IOMMU=$(CONFIG_VIRTIO_IOMMU)
+CFLAGS += -DCONFIG_VIRTIO_IOMMU_HEALTH_REQUIRED=$(VIRTIO_IOMMU_HEALTH_REQUIRED)
 CFLAGS += -DCONFIG_KERNEL_TESTS=$(KERNEL_TESTS)
 CFLAGS += $(EXTRA_CFLAGS)
 
@@ -288,7 +336,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -479,6 +527,14 @@ else
   QEMU_VIRTIO_PCI_ROM_OPT :=
   QEMU_FILTER_UEFI_NOISE ?= 0
 endif
+
+QEMU_IOMMU_FLAGS :=
+ifeq ($(QEMU_IOMMU_EFFECTIVE),virtio)
+ifneq ($(ARCH),riscv64)
+QEMU_IOMMU_FLAGS += -device virtio-iommu-pci$(QEMU_VIRTIO_PCI_ROM_OPT)
+endif
+endif
+QEMU_FLAGS += $(QEMU_IOMMU_FLAGS)
 
 # Optional graphical output (QEMU_GUI=1)
 ifeq ($(QEMU_GUI),1)
@@ -994,6 +1050,43 @@ test-syscall-trap:
 
 test-syscall: test-syscall-trap
 
+test-ipc-cap:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+		QEMU_IOMMU=off \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x40 -DCONFIG_SYSCALL_TRAP_IPC_CAP_ONLY=1" test
+
+test-ipc-cap-matrix:
+	$(Q)set -eu; \
+	for arch in aarch64 x86_64 riscv64; do \
+		echo "test-ipc-cap-matrix: ARCH=$$arch"; \
+		$(MAKE) --no-print-directory ARCH="$$arch" TEST_TIMEOUT="$(TEST_TIMEOUT)" QEMU_IOMMU=off test-ipc-cap; \
+	done
+
+test-x86-boot-smp: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+	$(Q)set -eu; \
+	if [ "$(ARCH)" != "x86_64" ]; then \
+		echo "test-x86-boot-smp: requires ARCH=x86_64 (got $(ARCH))" >&2; \
+		exit 2; \
+	fi; \
+	run_case() { \
+		smp="$$1"; \
+		log_path="$(BUILD_DIR)/test-x86-boot-smp-$$smp.log"; \
+		required_regex="SMP: $$smp CPU active|SMP: $$smp/$$smp CPUs active"; \
+		required_all="$$(printf '%b' 'init: started /init\ninit: starting shell\nBusyBox v')"; \
+		echo "test-x86-boot-smp: smp=$$smp log=$$log_path"; \
+		qemu_cmd="make --no-print-directory -j1 ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) KERNEL_TESTS=0 QEMU_SMP=$$smp RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) run-direct"; \
+		QEMU_CMD="$$qemu_cmd" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$$log_path" \
+			TEST_REQUIRE_MARKERS=1 TEST_EXPECT_TIMEOUT=1 TEST_REQUIRE_STRUCTURED=0 \
+			TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
+			TEST_REQUIRED_MARKERS_ALL="$$required_all" \
+			TEST_FORBIDDEN_MARKER_REGEX='fault pid=|shell exited|fork failed|Process .* killed|sepc=' \
+			TEST_BUILD_ROOT="$(BUILD_ROOT)" TEST_ARCH="$(ARCH)" TEST_RUN_ID="$(RUN_ID)" \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOCK_FILE="$(BUILD_DIR)/.locks/test.lock" \
+			./scripts/run-qemu-test.sh; \
+	}; \
+	run_case 1; \
+	run_case 4
+
 test-vfs-ipc:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x80" test
@@ -1228,6 +1321,10 @@ print-config:
 	@echo "  BUILD_ROOT=$(BUILD_ROOT)"
 	@echo "  BUILD_DIR=$(BUILD_DIR)"
 	@echo "  RUN_ID=$(RUN_ID)"
+	@echo "  CONFIG_VIRTIO_IOMMU=$(CONFIG_VIRTIO_IOMMU)"
+	@echo "  QEMU_IOMMU=$(QEMU_IOMMU)"
+	@echo "  QEMU_IOMMU_EFFECTIVE=$(QEMU_IOMMU_EFFECTIVE)"
+	@echo "  VIRTIO_IOMMU_HEALTH_REQUIRED=$(VIRTIO_IOMMU_HEALTH_REQUIRED)"
 	@echo ""
 	@echo "Run/Test Isolation:"
 	@echo "  RUN_ISOLATED=$(RUN_ISOLATED)"
@@ -1333,6 +1430,9 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-crash - Run crash test module only"
 	@echo "  test-syscall-trap - Run syscall/trap test module only"
 	@echo "  test-syscall - Alias of test-syscall-trap"
+	@echo "  test-ipc-cap - Run focused capability/channel/port syscall-trap subset (IOMMU forced off)"
+	@echo "  test-ipc-cap-matrix - Run test-ipc-cap across aarch64/x86_64/riscv64"
+	@echo "  test-x86-boot-smp - Verify x86_64 boot chain on QEMU_SMP=1 and QEMU_SMP=4"
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
 	@echo "  test-socket - Run socket module only (AF_UNIX/AF_INET)"
 	@echo "  test-device-virtio - Run device model + virtio probe-path tests (IRQ matrix on aarch64/riscv64)"
@@ -1374,6 +1474,8 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  IRQ_SOAK_TEST_TIMEOUT - Timeout seconds for test-irq-soak (default: 420)"
 	@echo "  IRQ_SOAK_TEST_EXTRA_CFLAGS - Extra CFLAGS appended by test-irq-soak"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
+	@echo "  QEMU_IOMMU - IOMMU device mode for QEMU (auto, off, virtio)"
+	@echo "  VIRTIO_IOMMU_HEALTH_REQUIRED - Fail driver test when virtio-iommu backend is unavailable (default: auto by QEMU_IOMMU_EFFECTIVE)"
 	@echo "  HELP_ADVANCED - Show advanced help sections (set 1)"
 	@echo ""
 	@echo "Advanced Examples:"

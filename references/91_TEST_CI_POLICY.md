@@ -9,12 +9,16 @@
 - `make test-errno-smoke` runs `/usr/bin/errno_smoke` inside guest; if `__ERRNO_SMOKE_DONE__` is not observed within `ERRNO_SMOKE_DONE_WAIT_SEC` (default 30s), host-side runner appends fallback structured markers (`SMOKE_FAIL:errno_smoke_done_missing` + `TEST_SUMMARY` + `TEST_RESULT_JSON`) so verdicting does not hang on timeout-only outcomes
 - `make test-isolated` — isolated test alias
 - `make test-driver` — driver module only
+- `test-driver` includes `virtio_iommu_health` checks; strict backend-required mode is controlled by `VIRTIO_IOMMU_HEALTH_REQUIRED` (default auto-derived from `QEMU_IOMMU_EFFECTIVE`, so PCI arches running with `virtio-iommu-pci` fail instead of skipping when backend is unavailable)
 - `make test-mm` — memory module only
 - `make test-sync` — sync module only
 - `make test-vfork` — vfork module only
-- `make test-sched` — scheduler module only
+- `make test-sched` — scheduler module only (includes `poll_wait_head` single-waiter fastpath regression)
 - `make test-crash` — crash module only
 - `make test-syscall-trap` / `make test-syscall` — syscall/trap module only
+- `make test-ipc-cap` — focused syscall-trap IPC/Capability subset (`cap_rights_fd`, `channel_port`, `channel_port_stress_mpmc`, `file_handle_bridge`, `kobj_refcount_history`) with `QEMU_IOMMU=off` to avoid unrelated backend noise
+- `make test-ipc-cap-matrix` — run `test-ipc-cap` across `aarch64`, `x86_64`, `riscv64`
+- `make test-x86-boot-smp` — x86_64 boot-chain smoke on `QEMU_SMP=1` and `QEMU_SMP=4` with `KERNEL_TESTS=0`; requires shell boot markers (`SMP`, `/init`, BusyBox) and rejects fault/kill/fork-fail markers
 - `make test-vfs-ipc` — vfs/tmpfs/pipe/epoll module only (includes epoll EPOLLET/EPOLLONESHOT regressions and timerfd-path monotonic clock progress check under `proc_yield`)
 - `make test-socket` — socket module only (AF_UNIX stream/dgram + accept stability, AF_INET TCP/UDP time-bounded attempts)
 - `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module coverage. On `aarch64`, this target runs a 4-case IRQ-route matrix with explicit log assertions (`MSI-X(2)`, `MSI-X(1)`, `MSI-attempt fallback`, `INTx`) via `VIRTIO_IRQ_MODE:<mode>:<vectors>` + `VIRTIO_IRQ_MSI_STATE:<state>` markers and validates MSI-X affinity programming via `VIRTIO_IRQ_AFFINITY:ok:<vec>:<mask>`. On `riscv64`, it runs an 8-case AIA on/off matrix (`MSI-X(2)`, `MSI-X(1)`, `MSI-attempt`, `INTx`) using unstructured marker assertions over `run-direct`; when `RISCV_IRQ_BACKEND:imsic` is present, MSI-X route/affinity markers are required; when `RISCV_IRQ_BACKEND:none` is present, INTx + fallback markers are required.
@@ -31,6 +35,7 @@
 - CI workflow bootstrap steps are centralized in `scripts/impl/ci-bootstrap.sh` (`install-host-deps`, `fetch-required-third-party`, `locate-uefi`) to keep host package/dependency/firmware detection logic consistent across jobs.
 - `third_party/` sources are intentionally not tracked in git; CI bootstraps required components (`lwip`, `limine`, `musl`, `busybox`, `tcc`, `doomgeneric`) via `scripts/kairos.sh deps fetch <component>` before test jobs.
 - `scripts/impl/fetch-deps.sh` validates each cached dependency by sentinel files; when a directory exists but is incomplete/corrupted, it is removed and refetched instead of being blindly skipped.
+- QEMU IOMMU mode is controlled by `QEMU_IOMMU` (`auto|off|virtio`): `auto` enables `virtio-iommu-pci` on `x86_64`/`aarch64` only when host QEMU advertises the device, otherwise falls back to `off`.
 - lwIP source for `deps fetch lwip` is configurable: `LWIP_GIT_URL` / `LWIP_GIT_REF` / `LWIP_GIT_COMMIT` (default URL currently `https://github.com/lwip-tcpip/lwip.git`, ref `STABLE-2_2_1_RELEASE`).
 - `scripts/impl/fetch-deps.sh` defaults to preserving tracked `kernel/include/boot/limine.h`; refresh only when `FORCE_LIMINE_HEADER_FETCH=1`. Header source is configurable via `LIMINE_HEADER_REF` or `LIMINE_HEADER_URL` (default currently GitHub raw from `limine-protocol` `trunk`).
 - musl source for `deps fetch musl` is configurable: `MUSL_GIT_URL` / `MUSL_GIT_REF` / `MUSL_GIT_COMMIT` (default still official musl git URL, ref `v1.2.5`).
@@ -40,6 +45,7 @@
 - Test module selection uses `CONFIG_KERNEL_TEST_MASK` via `TEST_EXTRA_CFLAGS` (default mask `0x7FF`)
 - Kernel test module bits: `0x01 driver`, `0x02 mm`, `0x04 sync`, `0x08 vfork`, `0x10 sched`, `0x20 crash`, `0x40 syscall/trap`, `0x80 vfs/ipc`, `0x100 socket`, `0x200 device/virtio`, `0x400 tty`, `0x800 soak-pr`
 - `test-syscall-trap` includes a kernel-launched user-mode syscall regression (riscv64 `ecall`, x86_64 `int 0x80`, aarch64 `svc #0`) covering bad user pointer (`-EFAULT`) and positive syscall path; it also covers `uaccess` cross-page/large-range copy behavior plus `strncpy_from_user` semantics (returned length excludes terminating `NUL`; unmapped tail without `NUL` returns `-EFAULT`; if `NUL` appears before the unmapped page, copy succeeds even when `count` spans that page), and trapframe fallback semantics (`current_tf` + process `active_tf`) for trap/syscall paths that can schedule
+- `test-ipc-cap` is enabled by compile-time selector `CONFIG_SYSCALL_TRAP_IPC_CAP_ONLY=1` on top of `CONFIG_KERNEL_TEST_MASK=0x40`; default `test-syscall-trap` behavior is unchanged when the selector is not set
 - Example (only syscall/trap): `make ARCH=riscv64 test TEST_EXTRA_CFLAGS='-DCONFIG_KERNEL_TESTS=1 -DCONFIG_KERNEL_TEST_MASK=0x40'`
 - `test-soak-pr` tunables (via `SOAK_PR_EXTRA_CFLAGS`): `CONFIG_KERNEL_FAULT_INJECT`, `CONFIG_KERNEL_SOAK_PR_DURATION_SEC`, `CONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE`, `CONFIG_KERNEL_SOAK_PR_SUITE_MASK`, `CONFIG_KERNEL_SOAK_PR_MAX_ITERS`, `CONFIG_KERNEL_SOAK_PR_SCHED_EVERY`, `CONFIG_KERNEL_SOAK_PR_FAULT_EVERY`, `CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE`, `CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC`
 - Fault injection probe points in PR soak: `kmalloc`, `copy_from_user`, `copy_to_user`; each probe logs hit/failure counters.
