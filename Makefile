@@ -336,7 +336,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -1062,6 +1062,31 @@ test-ipc-cap-matrix:
 		$(MAKE) --no-print-directory ARCH="$$arch" TEST_TIMEOUT="$(TEST_TIMEOUT)" QEMU_IOMMU=off test-ipc-cap; \
 	done
 
+test-boot-smoke: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
+	$(Q)if [ "$(TEST_ISOLATED)" = "1" ]; then \
+		if [ "$(GC_RUNS_AUTO)" = "1" ]; then \
+			$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
+		fi; \
+		$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
+			TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test-boot-smoke; \
+	else \
+		set -eu; \
+		log_path="$(BUILD_DIR)/test-boot-smoke.log"; \
+		required_regex="SMP: [0-9]+ CPU active|SMP: [0-9]+/[0-9]+ CPUs active"; \
+		required_all="$$(printf '%b' 'init: started /init\ninit: starting shell\nBusyBox v')"; \
+		echo "test-boot-smoke: arch=$(ARCH) smp=$(QEMU_SMP) log=$$log_path"; \
+		qemu_cmd="make --no-print-directory -j1 ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) KERNEL_TESTS=0 QEMU_SMP=$(QEMU_SMP) RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) run-direct"; \
+		QEMU_CMD="$$qemu_cmd" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$$log_path" \
+			TEST_REQUIRE_MARKERS=1 TEST_EXPECT_TIMEOUT=1 TEST_REQUIRE_STRUCTURED=0 \
+			TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
+			TEST_REQUIRED_MARKERS_ALL="$$required_all" \
+			TEST_FORBIDDEN_MARKER_REGEX='fault pid=|shell exited|fork failed|Process .* killed|sepc=' \
+			TEST_BUILD_ROOT="$(BUILD_ROOT)" TEST_ARCH="$(ARCH)" TEST_RUN_ID="$(RUN_ID)" \
+			TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" TEST_LOCK_FILE="$(BUILD_DIR)/.locks/test.lock" \
+			./scripts/run-qemu-test.sh; \
+	fi
+
 test-x86-boot-smp: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 	$(Q)set -eu; \
 	if [ "$(ARCH)" != "x86_64" ]; then \
@@ -1366,6 +1391,7 @@ help:
 	@echo "  test-mm  - Run memory test module only"
 	@echo "  test-sched - Run scheduler test module only"
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
+	@echo "  test-boot-smoke - Boot chain smoke gate (markers-only, structured disabled)"
 	@echo "  test-device-virtio - Run device model + virtio probe-path tests (IRQ matrix on aarch64/riscv64)"
 	@echo "  test-irq-soak - Run IRQ-only long-run soak gate (virtio_iommu forced off)"
 	@echo "  test-concurrent-vfs-ipc - Concurrent smoke preset for test-vfs-ipc"
@@ -1432,6 +1458,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-syscall - Alias of test-syscall-trap"
 	@echo "  test-ipc-cap - Run focused capability/channel/port syscall-trap subset (IOMMU forced off)"
 	@echo "  test-ipc-cap-matrix - Run test-ipc-cap across aarch64/x86_64/riscv64"
+	@echo "  test-boot-smoke - Boot chain smoke gate (single-SMP markers path)"
 	@echo "  test-x86-boot-smp - Verify x86_64 boot chain on QEMU_SMP=1 and QEMU_SMP=4"
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
 	@echo "  test-socket - Run socket module only (AF_UNIX/AF_INET)"

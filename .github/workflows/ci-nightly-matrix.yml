@@ -1,0 +1,165 @@
+name: ci-nightly-matrix
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-nightly-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  nightly-matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            default_smp: 1
+          - arch: x86_64
+            default_smp: 2
+          - arch: aarch64
+            default_smp: 2
+
+    env:
+      ARCH: ${{ matrix.arch }}
+      DEFAULT_SMP: ${{ matrix.default_smp }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          set -euo pipefail
+          scripts/impl/ci-bootstrap.sh install-host-deps "${ARCH}"
+
+      - name: Restore third-party source cache
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+          restore-keys: |
+            third-party-${{ runner.os }}-
+
+      - name: Fetch required third-party sources
+        run: |
+          set -euo pipefail
+          scripts/impl/ci-bootstrap.sh fetch-required-third-party
+
+      - name: Locate UEFI firmware
+        run: |
+          set -euo pipefail
+          scripts/impl/ci-bootstrap.sh locate-uefi "${ARCH}"
+
+      - name: Run nightly full matrix gates
+        run: |
+          set -euo pipefail
+
+          latest_run() {
+            ls -1dt build/runs/* 2>/dev/null | head -n 1 || true
+          }
+
+          assert_structured_latest() {
+            label="$1"
+            expected_online="$2"
+            latest="$(latest_run)"
+            if [[ -z "${latest}" ]]; then
+              echo "No isolated run found after ${label}" >&2
+              exit 2
+            fi
+            python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+            if [[ "${ARCH}" == "aarch64" ]]; then
+              python3 scripts/impl/assert-aarch64-smp.py --run-dir "${latest}" --arch aarch64 --expected-online "${expected_online}"
+            fi
+          }
+
+          if [[ "${ARCH}" == "x86_64" ]]; then
+            make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=180 test-x86-boot-smp
+          else
+            make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=180 test-boot-smoke
+          fi
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=300 test-ipc-cap
+          assert_structured_latest "${ARCH} ipc-cap gate" "${DEFAULT_SMP}"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=300 test-syscall-trap
+          assert_structured_latest "${ARCH} syscall/trap gate" "${DEFAULT_SMP}"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=300 test-sched
+          assert_structured_latest "${ARCH} sched gate" "${DEFAULT_SMP}"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=360 test-vfs-ipc
+          assert_structured_latest "${ARCH} vfs/ipc gate" "${DEFAULT_SMP}"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=420 test-socket
+          assert_structured_latest "${ARCH} socket gate" "${DEFAULT_SMP}"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=360 test-driver
+          assert_structured_latest "${ARCH} driver gate" "${DEFAULT_SMP}"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TEST_TIMEOUT=480 test-device-virtio
+
+          if [[ "${ARCH}" != "riscv64" ]]; then
+            make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${DEFAULT_SMP}" TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=420 test-tcc-smoke
+            assert_structured_latest "${ARCH} tcc smoke gate" "${DEFAULT_SMP}"
+          fi
+
+          if [[ "${ARCH}" == "aarch64" ]]; then
+            make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-syscall-trap
+            assert_structured_latest "aarch64 smp4 syscall/trap gate" 4
+
+            make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=360 test-vfs-ipc
+            assert_structured_latest "aarch64 smp4 vfs/ipc gate" 4
+          fi
+
+      - name: Classify recent failure signatures
+        if: always()
+        run: |
+          set -euo pipefail
+          json_out="nightly-failure-summary-${ARCH}.json"
+          md_out="nightly-failure-summary-${ARCH}.md"
+          python3 scripts/impl/classify-run-failures.py \
+            --runs-root build/runs \
+            --max-runs 12 \
+            --json-out "${json_out}" \
+            --markdown-out "${md_out}" || true
+          if [[ -f "${md_out}" ]]; then
+            cat "${md_out}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Capture latest isolated run
+        id: latest_run
+        if: always()
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
+            echo "Result file: ${latest}/result.json"
+            cat "${latest}/result.json"
+          fi
+
+      - name: Upload nightly artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.arch }}-${{ github.run_id }}
+          retention-days: 21
+          if-no-files-found: warn
+          path: |
+            nightly-failure-summary-${{ matrix.arch }}.json
+            nightly-failure-summary-${{ matrix.arch }}.md
+            ${{ steps.latest_run.outputs.path }}/manifest.json
+            ${{ steps.latest_run.outputs.path }}/result.json
+            ${{ steps.latest_run.outputs.path }}/${{ matrix.arch }}/logs/*.log
+            ${{ steps.latest_run.outputs.path }}/${{ matrix.arch }}/*.log
+            build/runs/*/manifest.json
+            build/runs/*/result.json
+            build/runs/*/${{ matrix.arch }}/logs/*.log
+            build/runs/*/${{ matrix.arch }}/*.log
+            build/${{ matrix.arch }}/test-x86-boot-smp-*.log
+            build/${{ matrix.arch }}/test-device-virtio-*.log
