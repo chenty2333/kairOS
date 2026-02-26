@@ -117,6 +117,10 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
                   size_t *out_bytes, struct khandle_transfer *handles,
                   size_t handles_cap, size_t *out_handles,
                   bool *out_handles_truncated, uint32_t options);
+int kchannel_poll_revents(struct kobj *channel_obj, uint32_t events,
+                          uint32_t *out_revents);
+int kchannel_poll_attach_vnode(struct kobj *channel_obj, struct vnode *vn);
+int kchannel_poll_detach_vnode(struct kobj *channel_obj, struct vnode *vn);
 
 int kport_create(struct kobj **out);
 int kport_bind_channel(struct kobj *port_obj, struct kobj *channel_obj,

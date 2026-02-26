@@ -2103,6 +2103,7 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t h2b = -1;
     int32_t port = -1;
     int32_t port_fd = -1;
+    int32_t ch_fd = -1;
     int32_t recv_h = -1;
     int32_t dup_h = -1;
 
@@ -2197,6 +2198,106 @@ static void test_kairos_channel_port_syscalls(void) {
     test_check(ret64 == 0, "kh portfd poll idle");
     if (ret64 < 0)
         goto out;
+
+    ret64 =
+        sys_kairos_fd_from_handle((uint64_t)h1, (uint64_t)u_hout, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd_from_handle channel");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&ch_fd, u_hout, sizeof(ch_fd));
+    test_check(ret == 0, "kh read channel fd");
+    if (ret < 0)
+        goto out;
+
+    pfd.fd = ch_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    ret = copy_to_user(u_pollfd, &pfd, sizeof(pfd));
+    test_check(ret == 0, "kh copy ch pollfd idle");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channelfd poll idle");
+    if (ret64 < 0)
+        goto out;
+
+    struct kairos_channel_msg_user ch_send_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+        .handles = 0,
+        .num_bytes = 2,
+        .num_handles = 0,
+    };
+    ret = copy_to_user(u_send_bytes, "FD", 2);
+    test_check(ret == 0, "kh copy channel fd send bytes");
+    ret = copy_to_user(u_send_msg, &ch_send_msg, sizeof(ch_send_msg));
+    test_check(ret == 0, "kh copy channel fd send msg");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channel_send for channelfd");
+    if (ret64 < 0)
+        goto out;
+
+    pfd.fd = ch_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    ret = copy_to_user(u_pollfd, &pfd, sizeof(pfd));
+    test_check(ret == 0, "kh copy ch pollfd readable");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+    test_check(ret64 == 1, "kh channelfd poll readable");
+    if (ret64 == 1) {
+        ret = copy_from_user(&pfd, u_pollfd, sizeof(pfd));
+        test_check(ret == 0, "kh read ch pollfd readable");
+        if (ret == 0)
+            test_check((pfd.revents & POLLIN) != 0, "kh channelfd pollin");
+    }
+
+    ret64 = sys_read((uint64_t)ch_fd, (uint64_t)u_recv_bytes, 8, 0, 0, 0);
+    test_check(ret64 == 2, "kh channelfd read");
+    if (ret64 == 2) {
+        char got[2] = {0};
+        ret = copy_from_user(got, u_recv_bytes, sizeof(got));
+        test_check(ret == 0, "kh read channelfd bytes");
+        if (ret == 0)
+            test_check(memcmp(got, "FD", 2) == 0, "kh channelfd payload");
+    }
+
+    ret = copy_to_user(u_send_bytes, "WR", 2);
+    test_check(ret == 0, "kh copy channelfd write bytes");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_write((uint64_t)ch_fd, (uint64_t)u_send_bytes, 2, 0, 0, 0);
+    test_check(ret64 == 2, "kh channelfd write");
+    if (ret64 < 0)
+        goto out;
+
+    struct kairos_channel_msg_user ch_recv_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+        .handles = 0,
+        .num_bytes = 8,
+        .num_handles = 0,
+    };
+    ret = copy_to_user(u_recv_msg, &ch_recv_msg, sizeof(ch_recv_msg));
+    test_check(ret == 0, "kh copy recv msg from channelfd write");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_kairos_channel_recv((uint64_t)h0, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh recv channelfd write payload");
+    if (ret64 == 0) {
+        struct kairos_channel_msg_user got = {0};
+        char got_bytes[2] = {0};
+        ret = copy_from_user(&got, u_recv_msg, sizeof(got));
+        test_check(ret == 0, "kh read recv msg from channelfd");
+        ret = copy_from_user(got_bytes, u_recv_bytes, sizeof(got_bytes));
+        test_check(ret == 0, "kh read recv bytes from channelfd");
+        if (ret == 0) {
+            test_check(got.num_bytes == 2, "kh recv num_bytes from channelfd");
+            test_check(memcmp(got_bytes, "WR", 2) == 0,
+                       "kh recv payload from channelfd");
+        }
+    }
 
     struct kairos_channel_msg_user send_msg = {
         .bytes = (uint64_t)(uintptr_t)u_send_bytes,
@@ -2350,6 +2451,25 @@ static void test_kairos_channel_port_syscalls(void) {
     if (ret64 == 0)
         h0 = -1;
 
+    if (ch_fd >= 0) {
+        pfd.fd = ch_fd;
+        pfd.events = POLLIN | POLLHUP;
+        pfd.revents = 0;
+        ret = copy_to_user(u_pollfd, &pfd, sizeof(pfd));
+        test_check(ret == 0, "kh copy ch pollfd peer_closed");
+        if (ret == 0) {
+            ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+            test_check(ret64 == 1, "kh channelfd poll peer_closed");
+            if (ret64 == 1) {
+                ret = copy_from_user(&pfd, u_pollfd, sizeof(pfd));
+                test_check(ret == 0, "kh read ch pollfd peer_closed");
+                if (ret == 0)
+                    test_check((pfd.revents & POLLHUP) != 0,
+                               "kh channelfd pollhup");
+            }
+        }
+    }
+
     ret64 = sys_kairos_port_wait((uint64_t)port, (uint64_t)u_pkt, 500000000ULL, 0,
                                  0, 0);
     test_check(ret64 == 0, "kh port_wait peer_closed");
@@ -2365,6 +2485,8 @@ static void test_kairos_channel_port_syscalls(void) {
     }
 
 out:
+    if (ch_fd >= 0)
+        (void)sys_close((uint64_t)ch_fd, 0, 0, 0, 0, 0);
     if (port_fd >= 0)
         (void)sys_close((uint64_t)port_fd, 0, 0, 0, 0, 0);
     if (dup_h >= 0)

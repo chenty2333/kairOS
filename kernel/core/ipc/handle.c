@@ -38,6 +38,7 @@ struct kchannel {
     struct wait_queue write_wait;
     struct list_head rxq;
     size_t rxq_len;
+    struct list_head poll_vnodes;
     struct kchannel *peer;
     bool peer_closed;
     bool endpoint_closed;
@@ -51,6 +52,11 @@ struct kport_packet {
 };
 
 struct kport_watch {
+    struct list_head node;
+    struct vnode *vn;
+};
+
+struct kchannel_watch {
     struct list_head node;
     struct vnode *vn;
 };
@@ -108,6 +114,35 @@ static inline struct kfile *kfile_from_obj(struct kobj *obj) {
 }
 
 static void kchannel_emit_locked(struct kchannel *ch, uint32_t signal);
+static void kchannel_poll_wake_locked(struct kchannel *ch, uint32_t events);
+
+static uint32_t kchannel_poll_revents_locked(struct kchannel *ch,
+                                             uint32_t events) {
+    uint32_t revents = 0;
+    if (!ch)
+        return 0;
+
+    if (!list_empty(&ch->rxq))
+        revents |= POLLIN;
+    if (ch->peer_closed || !ch->peer)
+        revents |= POLLHUP;
+
+    if ((events & POLLOUT) && !ch->peer_closed && ch->peer) {
+        if (!mutex_trylock(&ch->peer->lock)) {
+            /*
+             * Poll wake callbacks can observe channel state while send/recv
+             * still holds endpoint locks. Report writable conservatively.
+             */
+            revents |= POLLOUT;
+        } else {
+            if (ch->peer->rxq_len < KCHANNEL_MAX_QUEUE)
+                revents |= POLLOUT;
+            mutex_unlock(&ch->peer->lock);
+        }
+    }
+
+    return revents;
+}
 
 static void kchannel_on_last_handle_release(struct kchannel *ch) {
     if (!ch)
@@ -146,6 +181,7 @@ static void kchannel_on_last_handle_release(struct kchannel *ch) {
     peer->peer_closed = true;
     wait_queue_wakeup_all(&peer->read_wait);
     wait_queue_wakeup_all(&peer->write_wait);
+    kchannel_poll_wake_locked(peer, POLLHUP);
     kchannel_emit_locked(peer, KPORT_BIND_PEER_CLOSED);
     mutex_unlock(&peer->lock);
 
@@ -496,6 +532,16 @@ static void kchannel_emit_locked(struct kchannel *ch, uint32_t signal) {
     mutex_unlock(&port->lock);
 }
 
+static void kchannel_poll_wake_locked(struct kchannel *ch, uint32_t events) {
+    if (!ch || events == 0)
+        return;
+    struct kchannel_watch *watch;
+    list_for_each_entry(watch, &ch->poll_vnodes, node) {
+        if (watch->vn)
+            vfs_poll_wake(watch->vn, events);
+    }
+}
+
 static struct kchannel *kchannel_alloc(void) {
     struct kchannel *ch = kzalloc(sizeof(*ch));
     if (!ch)
@@ -506,6 +552,7 @@ static struct kchannel *kchannel_alloc(void) {
     wait_queue_init(&ch->read_wait);
     wait_queue_init(&ch->write_wait);
     INIT_LIST_HEAD(&ch->rxq);
+    INIT_LIST_HEAD(&ch->poll_vnodes);
     ch->rxq_len = 0;
     ch->peer = NULL;
     ch->peer_closed = false;
@@ -624,6 +671,7 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     peer->rxq_len++;
     msg->owns_caps = true;
     wait_queue_wakeup_one(&peer->read_wait);
+    kchannel_poll_wake_locked(peer, POLLIN);
     kchannel_emit_locked(peer, KPORT_BIND_READABLE);
     ret = 0;
 
@@ -656,6 +704,7 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
 
     bool nonblock = (options & KCHANNEL_OPT_NONBLOCK) != 0;
     struct kchannel_msg *msg = NULL;
+    struct kchannel *peer_for_write = NULL;
 
     mutex_lock(&ch->lock);
     while (list_empty(&ch->rxq)) {
@@ -687,10 +736,22 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     list_del(&msg->node);
     if (ch->rxq_len > 0)
         ch->rxq_len--;
+    peer_for_write = ch->peer;
+    if (peer_for_write)
+        kobj_get(&peer_for_write->obj);
+    if (!list_empty(&ch->rxq))
+        kchannel_poll_wake_locked(ch, POLLIN);
     if (!list_empty(&ch->rxq))
         kchannel_emit_locked(ch, KPORT_BIND_READABLE);
     wait_queue_wakeup_one(&ch->write_wait);
     mutex_unlock(&ch->lock);
+
+    if (peer_for_write) {
+        mutex_lock(&peer_for_write->lock);
+        kchannel_poll_wake_locked(peer_for_write, POLLOUT);
+        mutex_unlock(&peer_for_write->lock);
+        kobj_put(&peer_for_write->obj);
+    }
 
     if (msg->num_bytes > 0)
         memcpy(bytes, msg->bytes, msg->num_bytes);
@@ -724,6 +785,79 @@ int kport_create(struct kobj **out) {
 
     *out = &port->obj;
     return 0;
+}
+
+int kchannel_poll_revents(struct kobj *channel_obj, uint32_t events,
+                          uint32_t *out_revents) {
+    struct kchannel *ch = kchannel_from_obj(channel_obj);
+    if (!ch || !out_revents)
+        return -EINVAL;
+
+    if (!mutex_trylock(&ch->lock)) {
+        /*
+         * Poll wake callbacks can race with endpoint lock holders. Report
+         * readiness conservatively to avoid lock inversion in callbacks.
+         */
+        *out_revents = events & (POLLIN | POLLOUT | POLLHUP);
+        return 0;
+    }
+
+    *out_revents = kchannel_poll_revents_locked(ch, events) & events;
+    mutex_unlock(&ch->lock);
+    return 0;
+}
+
+int kchannel_poll_attach_vnode(struct kobj *channel_obj, struct vnode *vn) {
+    struct kchannel *ch = kchannel_from_obj(channel_obj);
+    if (!ch || !vn)
+        return -EINVAL;
+
+    struct kchannel_watch *watch = kzalloc(sizeof(*watch));
+    if (!watch)
+        return -ENOMEM;
+    watch->vn = vn;
+    INIT_LIST_HEAD(&watch->node);
+
+    uint32_t wake_events = 0;
+    mutex_lock(&ch->lock);
+    struct kchannel_watch *iter;
+    list_for_each_entry(iter, &ch->poll_vnodes, node) {
+        if (iter->vn == vn) {
+            wake_events =
+                kchannel_poll_revents_locked(ch, POLLIN | POLLOUT | POLLHUP);
+            mutex_unlock(&ch->lock);
+            kfree(watch);
+            if (wake_events)
+                vfs_poll_wake(vn, wake_events);
+            return 0;
+        }
+    }
+    list_add_tail(&watch->node, &ch->poll_vnodes);
+    wake_events = kchannel_poll_revents_locked(ch, POLLIN | POLLOUT | POLLHUP);
+    mutex_unlock(&ch->lock);
+
+    if (wake_events)
+        vfs_poll_wake(vn, wake_events);
+    return 0;
+}
+
+int kchannel_poll_detach_vnode(struct kobj *channel_obj, struct vnode *vn) {
+    struct kchannel *ch = kchannel_from_obj(channel_obj);
+    if (!ch || !vn)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+    struct kchannel_watch *iter, *tmp;
+    list_for_each_entry_safe(iter, tmp, &ch->poll_vnodes, node) {
+        if (iter->vn != vn)
+            continue;
+        list_del(&iter->node);
+        mutex_unlock(&ch->lock);
+        kfree(iter);
+        return 0;
+    }
+    mutex_unlock(&ch->lock);
+    return -ENOENT;
 }
 
 int kport_bind_channel(struct kobj *port_obj, struct kobj *channel_obj,
@@ -927,6 +1061,7 @@ static void kchannel_release_obj(struct kobj *obj) {
     struct kchannel *peer = NULL;
     struct kport *bound = NULL;
     LIST_HEAD(reap);
+    LIST_HEAD(poll_reap);
 
     mutex_lock(&ch->lock);
     peer = ch->peer;
@@ -943,6 +1078,12 @@ static void kchannel_release_obj(struct kobj *obj) {
         list_del(&msg->node);
         list_add_tail(&msg->node, &reap);
     }
+    while (!list_empty(&ch->poll_vnodes)) {
+        struct kchannel_watch *watch =
+            list_first_entry(&ch->poll_vnodes, struct kchannel_watch, node);
+        list_del(&watch->node);
+        list_add_tail(&watch->node, &poll_reap);
+    }
     ch->rxq_len = 0;
     mutex_unlock(&ch->lock);
 
@@ -951,6 +1092,12 @@ static void kchannel_release_obj(struct kobj *obj) {
             list_first_entry(&reap, struct kchannel_msg, node);
         list_del(&msg->node);
         kchannel_msg_free(msg);
+    }
+    while (!list_empty(&poll_reap)) {
+        struct kchannel_watch *watch =
+            list_first_entry(&poll_reap, struct kchannel_watch, node);
+        list_del(&watch->node);
+        kfree(watch);
     }
 
     if (bound)
@@ -963,6 +1110,7 @@ static void kchannel_release_obj(struct kobj *obj) {
         peer->peer_closed = true;
         wait_queue_wakeup_all(&peer->read_wait);
         wait_queue_wakeup_all(&peer->write_wait);
+        kchannel_poll_wake_locked(peer, POLLHUP);
         kchannel_emit_locked(peer, KPORT_BIND_PEER_CLOSED);
         mutex_unlock(&peer->lock);
 

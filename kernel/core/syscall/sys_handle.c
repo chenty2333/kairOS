@@ -13,11 +13,19 @@
 #include <kairos/vfs.h>
 
 #define PORTFD_MAGIC 0x706f7266U
+#define CHANFD_MAGIC 0x63686664U
 
 struct portfd_ctx {
     uint32_t magic;
     struct kobj *port_obj;
     struct vnode *vnode;
+};
+
+struct channelfd_ctx {
+    uint32_t magic;
+    struct kobj *channel_obj;
+    struct vnode *vnode;
+    uint32_t rights;
 };
 
 static inline int32_t syshandle_abi_i32(uint64_t raw) {
@@ -154,6 +162,154 @@ static int portfd_create_file(struct kobj *obj, uint32_t rights, struct file **o
     file->path[0] = '\0';
 
     int rc = kport_poll_attach_vnode(obj, vn);
+    if (rc < 0) {
+        kobj_put(obj);
+        vfs_file_free(file);
+        kfree(vn);
+        kfree(ctx);
+        return rc;
+    }
+
+    *out = file;
+    return 0;
+}
+
+static int channelfd_close(struct vnode *vn) {
+    if (!vn)
+        return 0;
+
+    struct channelfd_ctx *ctx = (struct channelfd_ctx *)vn->fs_data;
+    if (ctx && ctx->magic == CHANFD_MAGIC) {
+        if (ctx->channel_obj && ctx->vnode)
+            (void)kchannel_poll_detach_vnode(ctx->channel_obj, ctx->vnode);
+        if (ctx->channel_obj)
+            kobj_put(ctx->channel_obj);
+        ctx->magic = 0;
+        kfree(ctx);
+    }
+
+    kfree(vn);
+    return 0;
+}
+
+static int channelfd_poll(struct file *file, uint32_t events) {
+    if (!file || !file->vnode)
+        return POLLNVAL;
+
+    struct channelfd_ctx *ctx = (struct channelfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj)
+        return POLLNVAL;
+
+    uint32_t revents = 0;
+    int rc = kchannel_poll_revents(ctx->channel_obj, events, &revents);
+    if (rc < 0)
+        return POLLERR;
+    return (int)revents;
+}
+
+static ssize_t channelfd_fread(struct file *file, void *buf, size_t len) {
+    if (!file || !file->vnode || !buf)
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+
+    struct channelfd_ctx *ctx = (struct channelfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj)
+        return -EINVAL;
+    if ((ctx->rights & KRIGHT_READ) == 0)
+        return -EBADF;
+
+    size_t got_bytes = 0;
+    size_t got_handles = 0;
+    bool handles_truncated = false;
+    uint32_t opts = (file->flags & O_NONBLOCK) ? KCHANNEL_OPT_NONBLOCK : 0;
+    int rc = kchannel_recv(ctx->channel_obj, buf, len, &got_bytes, NULL, 0,
+                           &got_handles, &handles_truncated, opts);
+    if (rc == -EMSGSIZE && got_handles > 0)
+        return -EOPNOTSUPP;
+    if (rc < 0)
+        return rc;
+    return (ssize_t)got_bytes;
+}
+
+static ssize_t channelfd_fwrite(struct file *file, const void *buf, size_t len) {
+    if (!file || !file->vnode || (!buf && len > 0))
+        return -EINVAL;
+    if (len > KCHANNEL_MAX_MSG_BYTES)
+        return -EMSGSIZE;
+
+    struct channelfd_ctx *ctx = (struct channelfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != CHANFD_MAGIC || !ctx->channel_obj)
+        return -EINVAL;
+    if ((ctx->rights & KRIGHT_WRITE) == 0)
+        return -EBADF;
+
+    uint32_t opts = (file->flags & O_NONBLOCK) ? KCHANNEL_OPT_NONBLOCK : 0;
+    int rc = kchannel_send(ctx->channel_obj, buf, len, NULL, 0, opts);
+    if (rc < 0)
+        return rc;
+    return (ssize_t)len;
+}
+
+static struct file_ops channelfd_file_ops = {
+    .close = channelfd_close,
+    .fread = channelfd_fread,
+    .fwrite = channelfd_fwrite,
+    .poll = channelfd_poll,
+};
+
+static int channelfd_create_file(struct kobj *obj, uint32_t rights,
+                                 struct file **out) {
+    if (!obj || !out)
+        return -EINVAL;
+    *out = NULL;
+
+    if (obj->type != KOBJ_TYPE_CHANNEL)
+        return -ENOTSUP;
+
+    bool can_read = (rights & KRIGHT_READ) != 0;
+    bool can_write = (rights & KRIGHT_WRITE) != 0;
+    if (!can_read && !can_write)
+        return -EACCES;
+
+    struct channelfd_ctx *ctx = kzalloc(sizeof(*ctx));
+    struct vnode *vn = kzalloc(sizeof(*vn));
+    struct file *file = vfs_file_alloc();
+    if (!ctx || !vn || !file) {
+        kfree(ctx);
+        kfree(vn);
+        if (file)
+            vfs_file_free(file);
+        return -ENOMEM;
+    }
+
+    ctx->magic = CHANFD_MAGIC;
+    ctx->channel_obj = obj;
+    ctx->vnode = vn;
+    ctx->rights = rights;
+    kobj_get(obj);
+
+    vn->type = VNODE_FILE;
+    vn->mode = S_IFREG | 0;
+    vn->ops = &channelfd_file_ops;
+    vn->fs_data = ctx;
+    vn->size = 0;
+    atomic_init(&vn->refcount, 1);
+    rwlock_init(&vn->lock, "channelfd_vnode");
+    poll_wait_head_init(&vn->pollers);
+
+    file->vnode = vn;
+    file->dentry = NULL;
+    file->offset = 0;
+    if (can_read && can_write)
+        file->flags = O_RDWR;
+    else if (can_write)
+        file->flags = O_WRONLY;
+    else
+        file->flags = O_RDONLY;
+    file->path[0] = '\0';
+
+    int rc = kchannel_poll_attach_vnode(obj, vn);
     if (rc < 0) {
         kobj_put(obj);
         vfs_file_free(file);
@@ -319,6 +475,26 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
     int new_fd = -1;
     if (obj->type == KOBJ_TYPE_FILE) {
         rc = handle_bridge_fd_from_kobj(p, obj, rights, fd_flags, &new_fd);
+    } else if (obj->type == KOBJ_TYPE_CHANNEL) {
+        struct file *file = NULL;
+        rc = channelfd_create_file(obj, rights, &file);
+        if (rc >= 0) {
+            uint32_t fd_rights = 0;
+            if (rights & KRIGHT_READ)
+                fd_rights |= FD_RIGHT_READ;
+            if (rights & KRIGHT_WRITE)
+                fd_rights |= FD_RIGHT_WRITE;
+            if (rights & KRIGHT_DUPLICATE)
+                fd_rights |= FD_RIGHT_DUP;
+            int fd = fd_alloc_rights(p, file, fd_flags, fd_rights);
+            if (fd < 0) {
+                vfs_close(file);
+                rc = fd;
+            } else {
+                new_fd = fd;
+                rc = 0;
+            }
+        }
     } else if (obj->type == KOBJ_TYPE_PORT) {
         struct file *file = NULL;
         rc = portfd_create_file(obj, rights, &file);
