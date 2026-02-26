@@ -18,5 +18,7 @@ int handle_bridge_kobj_from_fd(struct process *p, int fd, uint32_t rights_mask,
 int handle_bridge_fd_from_kobj(struct process *p, struct kobj *obj,
                                uint32_t krights, uint32_t fd_flags,
                                int *out_fd);
+int handle_bridge_dup_fd(struct process *src, int src_fd, struct process *dst,
+                         uint32_t fd_flags, int *out_fd);
 
 #endif

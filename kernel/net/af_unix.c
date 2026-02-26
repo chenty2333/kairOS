@@ -47,6 +47,7 @@ struct unix_dgram_msg {
     struct socket_ucred creds;
     size_t rights_count;
     struct file *rights[SOCKET_MAX_RIGHTS];
+    uint32_t rights_masks[SOCKET_MAX_RIGHTS];
     uint8_t data[];
 };
 
@@ -58,6 +59,7 @@ struct unix_stream_ctrl {
     struct socket_ucred creds;
     size_t rights_count;
     struct file *rights[SOCKET_MAX_RIGHTS];
+    uint32_t rights_masks[SOCKET_MAX_RIGHTS];
 };
 
 /* Pending connection for accept queue */
@@ -367,6 +369,7 @@ static void unix_stream_ctrl_release(struct unix_stream_ctrl *msg) {
             file_put(msg->rights[i]);
             msg->rights[i] = NULL;
         }
+        msg->rights_masks[i] = 0;
     }
     msg->rights_count = 0;
     msg->has_creds = false;
@@ -398,6 +401,7 @@ static int unix_stream_ctrl_from_send(const struct socket_control *control,
         }
         file_get(control->rights[i]);
         msg->rights[i] = control->rights[i];
+        msg->rights_masks[i] = control->rights_masks[i];
     }
     *out = msg;
     return 0;
@@ -427,9 +431,12 @@ static void unix_stream_ctrl_merge_to_recv(struct socket_control *control,
             continue;
         if (!consume)
             file_get(f);
+        control->rights_masks[control->rights_count] = msg->rights_masks[i];
         control->rights[control->rights_count++] = f;
-        if (consume)
+        if (consume) {
             msg->rights[i] = NULL;
+            msg->rights_masks[i] = 0;
+        }
     }
     if (consume && take == msg->rights_count) {
         msg->rights_count = 0;
@@ -945,6 +952,7 @@ static void unix_dgram_msg_release_control(struct unix_dgram_msg *msg) {
             file_put(msg->rights[i]);
             msg->rights[i] = NULL;
         }
+        msg->rights_masks[i] = 0;
     }
     msg->rights_count = 0;
     msg->has_creds = false;
@@ -1005,6 +1013,7 @@ static ssize_t unix_dgram_sendmsg(struct socket *sock, const void *buf,
             if (control->rights[i]) {
                 file_get(control->rights[i]);
                 msg->rights[i] = control->rights[i];
+                msg->rights_masks[i] = control->rights_masks[i];
             }
         }
     }
@@ -1106,7 +1115,9 @@ static ssize_t unix_dgram_recvmsg(struct socket *sock, void *buf,
             control->rights_count = SOCKET_MAX_RIGHTS;
         for (size_t i = 0; i < control->rights_count; i++) {
             control->rights[i] = msg->rights[i];
+            control->rights_masks[i] = msg->rights_masks[i];
             msg->rights[i] = NULL;
+            msg->rights_masks[i] = 0;
         }
         msg->rights_count = 0;
         msg->has_creds = false;

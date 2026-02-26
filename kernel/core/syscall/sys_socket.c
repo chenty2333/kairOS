@@ -120,6 +120,7 @@ static void socket_control_release(struct socket_control *control) {
             file_put(control->rights[i]);
             control->rights[i] = NULL;
         }
+        control->rights_masks[i] = 0;
     }
     control->rights_count = 0;
     control->has_creds = false;
@@ -177,7 +178,15 @@ static int socket_parse_send_control(const struct socket_msghdr *msg,
                     rc = fr;
                     goto fail;
                 }
+                uint32_t rights = 0;
+                fr = fd_get_rights(curr, ufd, &rights);
+                if (fr < 0) {
+                    file_put(f);
+                    rc = fr;
+                    goto fail;
+                }
                 control->rights[control->rights_count++] = f;
+                control->rights_masks[control->rights_count - 1] = rights;
             }
         } else if (hdr.cmsg_level == SOL_SOCKET &&
                    hdr.cmsg_type == SCM_CREDENTIALS) {
@@ -277,8 +286,9 @@ static int socket_copyout_recv_control(struct socket_msghdr *msg,
                     socket_close_installed_fds(curr, installed, i);
                     return -EINVAL;
                 }
-                int fd = fd_alloc_flags(curr, control->rights[i],
-                                        cloexec ? FD_CLOEXEC : 0);
+                int fd = fd_alloc_rights(curr, control->rights[i],
+                                         cloexec ? FD_CLOEXEC : 0,
+                                         control->rights_masks[i]);
                 if (fd < 0) {
                     socket_close_installed_fds(curr, installed, i);
                     return fd;

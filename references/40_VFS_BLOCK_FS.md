@@ -129,6 +129,7 @@ Special:
 - `timerfd_settime` accepts `TFD_TIMER_CANCEL_ON_SET` for realtime absolute timers; after `clock_settime(CLOCK_REALTIME, ...)`, reads fail with `ECANCELED` until re-armed
 - `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch` are wired; VFS open/write/create/delete/rename/close paths emit inotify events to watched vnodes
 - `sendmsg`/`recvmsg` support iovec payload and optional peer address; ancillary data supports `SOL_SOCKET` `SCM_RIGHTS`/`SCM_CREDENTIALS` with real AF_UNIX transport (`SCM_RIGHTS` installs new fds on receive, `SCM_CREDENTIALS` returns sender pid/uid/gid)
+- `SCM_RIGHTS` now carries sender fd-rights masks end-to-end and installs received fds via `fd_alloc_rights`, preventing rights expansion relative to sender descriptors
 - ancillary parser accepts structurally valid non-`SOL_SOCKET` control segments as compatibility no-ops (not transported yet); unknown `SOL_SOCKET` control types still return `EOPNOTSUPP`
 - AF_UNIX ancillary transport is enabled for both `SOCK_DGRAM` and `SOCK_STREAM`
 - `SOCK_STREAM` control payload is bound to stream byte offsets (not recv-call count): control is delivered only when its corresponding bytes are consumed, and data paths without ancillary buffers (`recvfrom`/`read`) still consume and drop crossed control payload to avoid stale later delivery

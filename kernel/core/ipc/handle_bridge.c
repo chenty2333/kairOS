@@ -98,3 +98,32 @@ int handle_bridge_fd_from_kobj(struct process *p, struct kobj *obj,
     *out_fd = fd;
     return 0;
 }
+
+int handle_bridge_dup_fd(struct process *src, int src_fd, struct process *dst,
+                         uint32_t fd_flags, int *out_fd) {
+    if (out_fd)
+        *out_fd = -1;
+    if (!src || !dst || !out_fd)
+        return -EINVAL;
+
+    struct file *src_file = NULL;
+    int rc = fd_get_required(src, src_fd, FD_RIGHT_DUP, &src_file);
+    if (rc < 0)
+        return rc;
+
+    uint32_t src_rights = 0;
+    rc = fd_get_rights(src, src_fd, &src_rights);
+    if (rc < 0) {
+        file_put(src_file);
+        return rc;
+    }
+
+    int new_fd = fd_alloc_rights(dst, src_file, fd_flags, src_rights);
+    if (new_fd < 0) {
+        file_put(src_file);
+        return new_fd;
+    }
+
+    *out_fd = new_fd;
+    return 0;
+}

@@ -100,6 +100,7 @@ struct socket_control {
     bool truncated;
     size_t rights_count;
     struct file *rights[SOCKET_MAX_RIGHTS];
+    uint32_t rights_masks[SOCKET_MAX_RIGHTS];
 };
 
 struct socket;
