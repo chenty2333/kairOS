@@ -19,6 +19,7 @@
 ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
 EXTRA_CFLAGS ?=
+VIRTIO_PCI_TEST_CFLAGS ?=
 KERNEL_TESTS ?= 1
 
 # Auto-detect parallelism: use all available cores
@@ -374,11 +375,33 @@ $(ROOTFS_STAMP): $(ROOTFS_BASE_STAMP) $(ROOTFS_BUSYBOX_STAMP) $(ROOTFS_INIT_STAM
 
 # Track CFLAGS changes so object files rebuild when EXTRA_CFLAGS changes.
 CFLAGS_HASH := $(shell printf '%s' "$(CFLAGS)" | sha1sum | awk '{print $$1}')
-CFLAGS_STAMP := $(BUILD_DIR)/.cflags.$(CFLAGS_HASH)
+CFLAGS_STATE_FILE := $(BUILD_DIR)/.cflags.hash
+CFLAGS_STAMP := $(BUILD_DIR)/.cflags.stamp
+VIRTIO_PCI_TEST_HASH := $(shell printf '%s' "$(VIRTIO_PCI_TEST_CFLAGS)" | sha1sum | awk '{print $$1}')
+VIRTIO_PCI_TEST_STATE_FILE := $(BUILD_DIR)/.virtio_pci_test.hash
+VIRTIO_PCI_TEST_STAMP := $(BUILD_DIR)/.virtio_pci_test.stamp
 
-$(CFLAGS_STAMP):
+.PHONY: _cflags_state
+_cflags_state:
+
+$(CFLAGS_STAMP): _cflags_state
 	@mkdir -p $(dir $@)
-	@touch $@
+	@old_hash="$$(cat "$(CFLAGS_STATE_FILE)" 2>/dev/null || true)"; \
+	if [ "$$old_hash" != "$(CFLAGS_HASH)" ]; then \
+		printf '%s\n' "$(CFLAGS_HASH)" > "$(CFLAGS_STATE_FILE)"; \
+		touch "$@"; \
+	fi
+
+.PHONY: _virtio_pci_test_state
+_virtio_pci_test_state:
+
+$(VIRTIO_PCI_TEST_STAMP): _virtio_pci_test_state
+	@mkdir -p $(dir $@)
+	@old_hash="$$(cat "$(VIRTIO_PCI_TEST_STATE_FILE)" 2>/dev/null || true)"; \
+	if [ "$$old_hash" != "$(VIRTIO_PCI_TEST_HASH)" ]; then \
+		printf '%s\n' "$(VIRTIO_PCI_TEST_HASH)" > "$(VIRTIO_PCI_TEST_STATE_FILE)"; \
+		touch "$@"; \
+	fi
 
 # Progress counter for build output
 OBJ_TOTAL := $(words $(OBJS))
@@ -402,6 +425,13 @@ $(BUILD_DIR)/$(LWIP_DIR)/%.o: $(LWIP_DIR)/%.c $(CFLAGS_STAMP) | _reset_count
 	@flock $(OBJ_COUNT_FILE).lock sh -c \
 	  'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); printf "  [%s/$(OBJ_TOTAL)] CC %s\n" "$$n" "$<"'
 	$(Q)$(CC) $(LWIP_CFLAGS) -MMD -MP -c -o $@ $<
+
+# Compile virtio_pci with per-case test flags without forcing a global rebuild.
+$(BUILD_DIR)/kernel/drivers/virtio/virtio_pci.o: kernel/drivers/virtio/virtio_pci.c $(CFLAGS_STAMP) $(VIRTIO_PCI_TEST_STAMP) | _reset_count
+	@mkdir -p $(dir $@)
+	@flock $(OBJ_COUNT_FILE).lock sh -c \
+	  'n=$$(cat $(OBJ_COUNT_FILE) 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > $(OBJ_COUNT_FILE); printf "  [%s/$(OBJ_TOTAL)] CC %s\n" "$$n" "$<"'
+	$(Q)$(CC) $(CFLAGS) $(VIRTIO_PCI_TEST_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Compile C files
 $(BUILD_DIR)/%.o: %.c $(CFLAGS_STAMP) | _reset_count
@@ -975,7 +1005,8 @@ test-device-virtio:
 				KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
 				KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL="$$required_all" \
 				KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
-				TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200 $$extra_flags" \
+				TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200" \
+				VIRTIO_PCI_TEST_CFLAGS="$$extra_flags" \
 				$$extra_make_vars test; \
 		else \
 			$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_ISOLATED=0 TEST_TIMEOUT="$(TEST_TIMEOUT)" \
@@ -983,7 +1014,8 @@ test-device-virtio:
 				KAIROS_RUN_TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
 				KAIROS_RUN_TEST_REQUIRED_MARKERS_ALL="$$required_all" \
 				KAIROS_RUN_TEST_FORBIDDEN_MARKER_REGEX="$$forbidden_regex" \
-				TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200 $$extra_flags" test; \
+				TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x200" \
+				VIRTIO_PCI_TEST_CFLAGS="$$extra_flags" test; \
 		fi; \
 	}; \
 	run_case_riscv() { \
@@ -996,7 +1028,7 @@ test-device-virtio:
 		optional_rules="$$(printf '%b' "$${7:-}")"; \
 		log_path="$(BUILD_DIR)/test-device-virtio-$$case_name.log"; \
 		echo "test-device-virtio: case=$$case_name log=$$log_path"; \
-		qemu_cmd="make --no-print-directory -j1 ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) KERNEL_TESTS=0 EXTRA_CFLAGS='$$extra_flags' RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) $$extra_make_vars run-direct"; \
+		qemu_cmd="make --no-print-directory -j1 ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT) KERNEL_TESTS=0 VIRTIO_PCI_TEST_CFLAGS='$$extra_flags' RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=$(UEFI_BOOT_MODE) QEMU_UEFI_BOOT_MODE=$(QEMU_UEFI_BOOT_MODE) $$extra_make_vars run-direct"; \
 		QEMU_CMD="$$qemu_cmd" TEST_TIMEOUT="$(TEST_TIMEOUT)" TEST_LOG="$$log_path" \
 			TEST_REQUIRE_MARKERS=1 TEST_EXPECT_TIMEOUT=1 TEST_REQUIRE_STRUCTURED=0 \
 			TEST_REQUIRED_MARKER_REGEX="$$required_regex" \
