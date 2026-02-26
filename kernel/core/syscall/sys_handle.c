@@ -19,6 +19,7 @@ struct portfd_ctx {
     uint32_t magic;
     struct kobj *port_obj;
     struct vnode *vnode;
+    uint32_t rights;
 };
 
 struct channelfd_ctx {
@@ -106,6 +107,8 @@ static int portfd_poll(struct file *file, uint32_t events) {
     struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
     if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
         return POLLNVAL;
+    if ((ctx->rights & KRIGHT_WAIT) == 0)
+        return POLLNVAL;
 
     uint32_t revents = 0;
     int rc = kobj_poll_revents(ctx->port_obj, events, &revents);
@@ -123,6 +126,8 @@ static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {
     struct portfd_ctx *ctx = (struct portfd_ctx *)file->vnode->fs_data;
     if (!ctx || ctx->magic != PORTFD_MAGIC || !ctx->port_obj)
         return -EINVAL;
+    if ((ctx->rights & KRIGHT_WAIT) == 0)
+        return -EBADF;
 
     struct kairos_port_packet_user pkt = {0};
     uint32_t opts = (file->flags & O_NONBLOCK) ? KPORT_WAIT_NONBLOCK : 0;
@@ -148,6 +153,7 @@ static int portfd_to_kobj(struct file *file, uint32_t fd_rights,
         return -EINVAL;
 
     uint32_t rights = portfd_krights_from_fd(fd_rights);
+    rights &= ctx->rights;
     if (rights == 0)
         return -EACCES;
 
@@ -173,7 +179,7 @@ static int portfd_create_file(struct kobj *obj, uint32_t rights,
 
     if (obj->type != KOBJ_TYPE_PORT)
         return -ENOTSUP;
-    if ((rights & KRIGHT_WAIT) == 0)
+    if ((rights & (KRIGHT_WAIT | KRIGHT_MANAGE | KRIGHT_DUPLICATE)) == 0)
         return -EACCES;
 
     struct portfd_ctx *ctx = kzalloc(sizeof(*ctx));
@@ -190,6 +196,7 @@ static int portfd_create_file(struct kobj *obj, uint32_t rights,
     ctx->magic = PORTFD_MAGIC;
     ctx->port_obj = obj;
     ctx->vnode = vn;
+    ctx->rights = rights;
     kobj_get(obj);
 
     vn->type = VNODE_FILE;
@@ -317,6 +324,7 @@ static int channelfd_to_kobj(struct file *file, uint32_t fd_rights,
         return -EINVAL;
 
     uint32_t rights = channelfd_krights_from_fd(fd_rights);
+    rights &= ctx->rights;
     if (rights == 0)
         return -EACCES;
 
@@ -583,11 +591,18 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
         struct file *file = NULL;
         rc = portfd_create_file(obj, rights, open_flags, &file);
         if (rc >= 0) {
-            uint32_t fd_rights = FD_RIGHT_READ;
+            uint32_t fd_rights = 0;
+            if (rights & KRIGHT_WAIT)
+                fd_rights |= FD_RIGHT_READ;
             if (rights & KRIGHT_MANAGE)
                 fd_rights |= FD_RIGHT_IOCTL;
             if (rights & KRIGHT_DUPLICATE)
                 fd_rights |= FD_RIGHT_DUP;
+            if (fd_rights == 0) {
+                vfs_close(file);
+                kobj_put(obj);
+                return -EACCES;
+            }
             int fd = fd_alloc_rights(p, file, fd_flags, fd_rights);
             if (fd < 0) {
                 vfs_close(file);

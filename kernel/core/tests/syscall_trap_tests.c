@@ -2133,6 +2133,9 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t port_fd = -1;
     int32_t port_nb_fd = -1;
     int32_t port_from_fd_h = -1;
+    int32_t port_manage_h = -1;
+    int32_t port_manage_fd = -1;
+    int32_t port_manage_from_fd_h = -1;
     int32_t ch_fd = -1;
     int32_t ch_nb_fd = -1;
     int32_t ch_from_fd_h = -1;
@@ -2217,6 +2220,77 @@ static void test_kairos_channel_port_syscalls(void) {
     test_check(ret == 0, "kh read port fd");
     if (ret < 0)
         goto out;
+
+    ret64 = sys_kairos_handle_duplicate((uint64_t)port,
+                                        KRIGHT_MANAGE | KRIGHT_DUPLICATE,
+                                        (uint64_t)u_hout, 0, 0, 0);
+    test_check(ret64 == 0, "kh duplicate port manage_only");
+    if (ret64 == 0) {
+        ret = copy_from_user(&port_manage_h, u_hout, sizeof(port_manage_h));
+        test_check(ret == 0, "kh read port manage_only handle");
+        if (ret < 0)
+            goto out;
+    }
+
+    if (port_manage_h >= 0) {
+        ret64 = sys_kairos_fd_from_handle((uint64_t)port_manage_h,
+                                          (uint64_t)u_hout, 0, 0, 0, 0);
+        test_check(ret64 == 0, "kh fd_from_handle port manage_only");
+        if (ret64 == 0) {
+            ret = copy_from_user(&port_manage_fd, u_hout, sizeof(port_manage_fd));
+            test_check(ret == 0, "kh read port manage_only fd");
+            if (ret < 0)
+                goto out;
+        }
+
+        if (port_manage_fd >= 0) {
+            ret64 = sys_read((uint64_t)port_manage_fd, (uint64_t)u_pkt,
+                             sizeof(*u_pkt), 0, 0, 0);
+            test_check(ret64 == -EBADF, "kh port manage_only fd read denied");
+
+            struct pollfd pmfd = {
+                .fd = port_manage_fd,
+                .events = POLLIN,
+                .revents = 0,
+            };
+            ret = copy_to_user(u_pollfd, &pmfd, sizeof(pmfd));
+            test_check(ret == 0, "kh copy pollfd port manage_only");
+            if (ret < 0)
+                goto out;
+            ret64 = sys_poll((uint64_t)u_pollfd, 1, 0, 0, 0, 0);
+            test_check(ret64 == 1, "kh poll port manage_only");
+            if (ret64 == 1) {
+                ret = copy_from_user(&pmfd, u_pollfd, sizeof(pmfd));
+                test_check(ret == 0, "kh read pollfd port manage_only");
+                if (ret == 0)
+                    test_check((pmfd.revents & POLLNVAL) != 0,
+                               "kh pollnval port manage_only");
+            }
+
+            ret64 = sys_kairos_handle_from_fd((uint64_t)port_manage_fd,
+                                              (uint64_t)u_hout, 0, 0, 0, 0);
+            test_check(ret64 == 0, "kh handle_from_fd port manage_only");
+            if (ret64 == 0) {
+                ret = copy_from_user(&port_manage_from_fd_h, u_hout,
+                                     sizeof(port_manage_from_fd_h));
+                test_check(ret == 0, "kh read port manage_only handle from fd");
+                if (ret < 0)
+                    goto out;
+            }
+        }
+
+        if (port_manage_from_fd_h >= 0) {
+            ret64 = sys_kairos_port_wait((uint64_t)port_manage_from_fd_h,
+                                         (uint64_t)u_pkt, 0, KPORT_WAIT_NONBLOCK,
+                                         0, 0);
+            test_check(ret64 == -EACCES, "kh port manage_only wait denied");
+
+            ret64 = sys_kairos_port_bind((uint64_t)port_manage_from_fd_h,
+                                         (uint64_t)h1, 0x56, KPORT_BIND_READABLE,
+                                         0, 0);
+            test_check(ret64 == 0, "kh port manage_only bind allowed");
+        }
+    }
 
     ret64 = sys_kairos_handle_from_fd((uint64_t)port_fd, (uint64_t)u_hout, 0, 0, 0,
                                       0);
@@ -2803,8 +2877,15 @@ static void test_kairos_channel_port_syscalls(void) {
 out:
     if (ch_from_fd_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)ch_from_fd_h, 0, 0, 0, 0, 0);
+    if (port_manage_from_fd_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)port_manage_from_fd_h, 0, 0, 0, 0,
+                                      0);
+    if (port_manage_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)port_manage_h, 0, 0, 0, 0, 0);
     if (port_from_fd_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)port_from_fd_h, 0, 0, 0, 0, 0);
+    if (port_manage_fd >= 0)
+        (void)sys_close((uint64_t)port_manage_fd, 0, 0, 0, 0, 0);
     if (ch_nb_fd >= 0)
         (void)sys_close((uint64_t)ch_nb_fd, 0, 0, 0, 0, 0);
     if (ch_fd >= 0)
