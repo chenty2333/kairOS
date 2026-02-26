@@ -141,6 +141,13 @@ void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
     tf->regs[3] = tls;
 }
 
+uint64_t arch_get_tls(const struct arch_context *ctx) {
+    if (!ctx)
+        return 0;
+    const struct trap_frame *tf = (const struct trap_frame *)ctx->sp;
+    return tf ? tf->regs[3] : 0;
+}
+
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {
     if (!ctx)
         return;

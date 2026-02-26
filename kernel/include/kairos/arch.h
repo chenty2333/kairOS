@@ -51,6 +51,14 @@ void arch_context_set_args(struct arch_context *ctx, uint64_t a0, uint64_t a1,
                            uint64_t a2);
 void arch_context_set_cpu(struct arch_context *ctx, int cpu);
 void arch_set_tls(struct arch_context *ctx, uint64_t tls);
+#ifdef ARCH_HAS_CONTEXT_TLS
+uint64_t arch_get_tls(const struct arch_context *ctx);
+#else
+static inline uint64_t arch_get_tls(const struct arch_context *ctx) {
+    (void)ctx;
+    return 0;
+}
+#endif
 #ifdef ARCH_HAS_TSS
 void arch_tss_set_rsp0(uint64_t rsp0);
 #else

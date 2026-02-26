@@ -94,7 +94,27 @@ void arch_context_init(struct arch_context *ctx, vaddr_t entry, vaddr_t arg,
 }
 
 void arch_context_clone(struct arch_context *dst, struct arch_context *src) {
+    if (!dst || !src)
+        return;
+
+    uint64_t dst_top = dst->kernel_stack;
+    uint64_t src_top = src->kernel_stack;
+    uint64_t stack_bytes = 2ULL * CONFIG_PAGE_SIZE;
+
     *dst = *src;
+    dst->kernel_stack = dst_top;
+
+    if (!dst_top || !src_top)
+        return;
+
+    uint64_t src_bottom = src_top + sizeof(uint64_t) - stack_bytes;
+    uint64_t dst_bottom = dst_top + sizeof(uint64_t) - stack_bytes;
+    memcpy((void *)dst_bottom, (const void *)src_bottom, (size_t)stack_bytes);
+
+    if (src->sp >= src_bottom && src->sp <= src_top)
+        dst->sp = dst_top - (src_top - src->sp);
+    if (src->x29 >= src_bottom && src->x29 <= src_top)
+        dst->x29 = dst_top - (src_top - src->x29);
 }
 
 void arch_setup_fork_child(struct arch_context *ctx, struct trap_frame *tf) {
@@ -123,6 +143,10 @@ void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
     if (!ctx)
         return;
     ctx->tpidr_el0 = tls;
+}
+
+uint64_t arch_get_tls(const struct arch_context *ctx) {
+    return ctx ? ctx->tpidr_el0 : 0;
 }
 
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {

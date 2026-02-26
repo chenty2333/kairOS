@@ -213,8 +213,6 @@ static void handle_exception(struct trap_frame *tf) {
 
     if (from_user) {
         if (cur) {
-            pr_warn("x86_64 user exception trap=%lu rip=%p err=%p cr2=%p pid=%d\n",
-                    trapno, (void *)tf->rip, (void *)tf->err, (void *)cr2, cur->pid);
             signal_send(cur->pid, SIGSEGV);
             signal_deliver_pending();
             return;

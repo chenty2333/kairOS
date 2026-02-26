@@ -37,6 +37,7 @@ static inline int arch_cpu_id_stable(void) {
 #define ARCH_HAS_CPU_ID 1
 #define ARCH_HAS_CONTEXT_KERNEL_STACK 1
 #define ARCH_HAS_CONTEXT_SET_USER_SP 1
+#define ARCH_HAS_CONTEXT_TLS 1
 #define ARCH_HAS_EARLY_GETCHAR 1
 #define ARCH_HAS_CONSOLE_INPUT_IRQ 1
 

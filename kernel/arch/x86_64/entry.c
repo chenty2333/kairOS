@@ -152,6 +152,27 @@ static inline void wrmsr(uint32_t msr, uint64_t val) {
     __asm__ __volatile__("wrmsr" :: "c"(msr), "a"(lo), "d"(hi));
 }
 
+static void x86_enable_fpu_sse(void) {
+    uint64_t cr0;
+    uint64_t cr4;
+    __asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4));
+
+    /* x87/SSE for userland: clear EM/TS, keep MP/NE, and enable OS FX support. */
+    cr0 &= ~((uint64_t)1 << 2); /* EM */
+    cr0 &= ~((uint64_t)1 << 3); /* TS */
+    cr0 |= ((uint64_t)1 << 1);  /* MP */
+    cr0 |= ((uint64_t)1 << 5);  /* NE */
+    cr4 |= ((uint64_t)1 << 9);  /* OSFXSR */
+    cr4 |= ((uint64_t)1 << 10); /* OSXMMEXCPT */
+
+    __asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0));
+    __asm__ __volatile__("mov %0, %%cr4" : : "r"(cr4));
+    __asm__ __volatile__("fninit");
+    uint32_t mxcsr = 0x1f80;
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
+}
+
 uint64_t x86_cpu_id_slots[CONFIG_MAX_CPUS];
 
 static void gdt_set_entry(struct gdt_entry *e, uint32_t base, uint32_t limit,
@@ -239,6 +260,7 @@ void arch_tss_set_rsp0(uint64_t rsp0) {
 
 void arch_cpu_init(int cpu_id) {
     x86_gdt_init(cpu_id);
+    x86_enable_fpu_sse();
     serial_init();
     serial_inited = true;
     if (cpu_id < CONFIG_MAX_CPUS) {
