@@ -169,9 +169,10 @@ static int socket_parse_send_control(const struct socket_msghdr *msg,
                     rc = -EFAULT;
                     goto fail;
                 }
-                struct file *f = fd_get(curr, ufd);
-                if (!f) {
-                    rc = -EBADF;
+                struct file *f = NULL;
+                int fr = fd_get_required(curr, ufd, FD_RIGHT_DUP, &f);
+                if (fr < 0) {
+                    rc = fr;
                     goto fail;
                 }
                 control->rights[control->rights_count++] = f;

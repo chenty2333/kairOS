@@ -1975,6 +1975,7 @@ static void test_get_current_trapframe_process_fallback(void) {
 }
 
 static void test_kairos_cap_rights_fd_syscalls(void) {
+    enum { TEST_F_SETFL = 4 };
     struct user_map_ctx um = {0};
     bool mapped = false;
     int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
@@ -2045,8 +2046,25 @@ static void test_kairos_cap_rights_fd_syscalls(void) {
                       0);
     test_check(ret64 == 0, "cap_rights_fd ioctl allowed");
 
+    ret64 = sys_fcntl((uint64_t)fds[1], (uint64_t)TEST_F_SETFL,
+                      (uint64_t)O_NONBLOCK, 0, 0, 0);
+    test_check(ret64 == 0, "cap_rights_fd fcntl setfl allowed with ioctl");
+
     ret64 = sys_write((uint64_t)fds[1], (uint64_t)u_dummy, 0, 0, 0, 0);
     test_check(ret64 == -EBADF, "cap_rights_fd write denied after limit");
+
+    int64_t dupfd = sys_dup((uint64_t)fds[0], 0, 0, 0, 0, 0);
+    test_check(dupfd >= 0, "cap_rights_fd dup read_end");
+    if (dupfd >= 0) {
+        ret64 = sys_kairos_cap_rights_limit((uint64_t)dupfd, FD_RIGHT_READ, 0, 0,
+                                            0, 0);
+        test_check(ret64 == 0, "cap_rights_fd limit dupfd read_only");
+        ret64 = sys_fcntl((uint64_t)dupfd, (uint64_t)TEST_F_SETFL,
+                          (uint64_t)O_NONBLOCK, 0, 0, 0);
+        test_check(ret64 == -EBADF,
+                   "cap_rights_fd fcntl setfl denied without ioctl");
+        (void)sys_close((uint64_t)dupfd, 0, 0, 0, 0, 0);
+    }
 
     ret64 = sys_kairos_cap_rights_limit((uint64_t)fds[0], FD_RIGHT_IOCTL, 0, 0, 0,
                                         0);

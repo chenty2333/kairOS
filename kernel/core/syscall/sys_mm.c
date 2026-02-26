@@ -90,9 +90,13 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
     if (!anon) {
         if ((offset & (CONFIG_PAGE_SIZE - 1)) != 0)
             return -EINVAL;
-        struct file *f = fd_get(p, sysmm_abi_int32(fd));
-        if (!f)
-            return -EBADF;
+        uint32_t req_rights = FD_RIGHT_READ;
+        if (shared && (uprot & PROT_WRITE))
+            req_rights |= FD_RIGHT_WRITE;
+        struct file *f = NULL;
+        int fr = fd_get_required(p, sysmm_abi_int32(fd), req_rights, &f);
+        if (fr < 0)
+            return fr;
         if (!f->vnode || f->vnode->type != VNODE_FILE) {
             file_put(f);
             return -ENODEV;

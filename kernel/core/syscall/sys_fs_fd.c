@@ -197,9 +197,13 @@ int64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    struct file *f = fd_get(p, kfd);
-    if (!f)
-        return -EBADF;
+    uint32_t req_rights = 0;
+    if ((int32_t)ucmd == F_SETFL)
+        req_rights = FD_RIGHT_IOCTL;
+    struct file *f = NULL;
+    int fr = fd_get_required(p, kfd, req_rights, &f);
+    if (fr < 0)
+        return fr;
 
     switch ((int32_t)ucmd) {
     case F_DUPFD: {
@@ -279,9 +283,12 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
     (void)a2; (void)a3; (void)a4; (void)a5;
     if ((int64_t)length < 0)
         return -EINVAL;
-    struct file *f = fd_get(proc_current(), sysfs_fd_int(fd));
-    if (!f || !f->vnode) {
-        if (f) file_put(f);
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), sysfs_fd_int(fd), FD_RIGHT_WRITE, &f);
+    if (fr < 0)
+        return fr;
+    if (!f->vnode) {
+        file_put(f);
         return -EBADF;
     }
     if (f->vnode->type == VNODE_DIR) {
@@ -302,10 +309,12 @@ int64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2, uint64_t a3,
 int64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a2; (void)a3; (void)a4; (void)a5;
-    struct file *f = fd_get(proc_current(), sysfs_fd_int(fd));
-    if (!f || !f->vnode) {
-        if (f)
-            file_put(f);
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), sysfs_fd_int(fd), FD_RIGHT_WRITE, &f);
+    if (fr < 0)
+        return fr;
+    if (!f->vnode) {
+        file_put(f);
         return -EBADF;
     }
     rwlock_write_lock(&f->vnode->lock);
@@ -325,9 +334,12 @@ int64_t sys_fchown(uint64_t fd, uint64_t owner, uint64_t group, uint64_t a3,
     (void)a3; (void)a4; (void)a5;
     uint32_t uowner = (uint32_t)owner;
     uint32_t ugroup = (uint32_t)group;
-    struct file *f = fd_get(proc_current(), sysfs_fd_int(fd));
-    if (!f || !f->vnode) {
-        if (f) file_put(f);
+    struct file *f = NULL;
+    int fr = fd_get_required(proc_current(), sysfs_fd_int(fd), FD_RIGHT_WRITE, &f);
+    if (fr < 0)
+        return fr;
+    if (!f->vnode) {
+        file_put(f);
         return -EBADF;
     }
     rwlock_write_lock(&f->vnode->lock);
