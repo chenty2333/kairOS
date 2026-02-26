@@ -28,7 +28,7 @@ struct futex_bucket {
 struct futex_waiter {
     struct list_head node;
     struct futex_bucket *bucket;
-    struct process *proc;
+    struct poll_wait_source *wait_src;
     vaddr_t uaddr;
     int index;
     int *wake_index;
@@ -158,11 +158,12 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
     if (delta == UINT64_MAX)
         return -EINVAL;
 
-    struct process *curr = proc_current();
+    struct poll_wait_source wait_src;
+    poll_wait_source_init(&wait_src, NULL);
     struct futex_waiter waiter = {0};
     INIT_LIST_HEAD(&waiter.node);
     waiter.bucket = futex_bucket_for(uaddr);
-    waiter.proc = curr;
+    waiter.wait_src = &wait_src;
     waiter.uaddr = uaddr;
     waiter.index = -1;
     waiter.wake_index = NULL;
@@ -190,27 +191,45 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
             return (rc < 0) ? rc : -EAGAIN;
         }
 
-        mutex_unlock(&waiter.bucket->lock);
+        int sleep_rc = poll_wait_source_block(&wait_src, deadline, (void *)uaddr,
+                                              &waiter.bucket->lock);
 
-        int sleep_rc = poll_block_current(deadline, (void *)uaddr);
-
-        if (waiter.woken)
+        if (waiter.woken) {
+            if (waiter.active) {
+                list_del(&waiter.node);
+                waiter.active = false;
+            }
+            mutex_unlock(&waiter.bucket->lock);
             return 0;
+        }
 
         if (sleep_rc == -EINTR) {
-            futex_waiter_remove(&waiter);
+            if (waiter.active) {
+                list_del(&waiter.node);
+                waiter.active = false;
+            }
+            mutex_unlock(&waiter.bucket->lock);
             return -EINTR;
         }
 
         if (sleep_rc == -ETIMEDOUT ||
             (deadline && arch_timer_get_ticks() >= deadline)) {
-            futex_waiter_remove(&waiter);
+            if (waiter.active) {
+                list_del(&waiter.node);
+                waiter.active = false;
+            }
+            mutex_unlock(&waiter.bucket->lock);
             return -ETIMEDOUT;
         }
         if (sleep_rc < 0) {
-            futex_waiter_remove(&waiter);
+            if (waiter.active) {
+                list_del(&waiter.node);
+                waiter.active = false;
+            }
+            mutex_unlock(&waiter.bucket->lock);
             return sleep_rc;
         }
+        mutex_unlock(&waiter.bucket->lock);
         /* Spurious wakeup: retry. */
     }
 }
@@ -226,7 +245,6 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
         return -EINVAL;
     struct futex_bucket *bucket = futex_bucket_for(uaddr);
 
-    LIST_HEAD(wake_list);
     int woken = 0;
 
     mutex_lock(&bucket->lock);
@@ -244,18 +262,13 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
                                               __ATOMIC_ACQ_REL,
                                               __ATOMIC_ACQUIRE);
         }
-        list_add_tail(&waiter->node, &wake_list);
+        if (waiter->wait_src)
+            poll_wait_source_wake_one(waiter->wait_src, 0);
         woken++;
         if (woken >= nr_wake)
             break;
     }
     mutex_unlock(&bucket->lock);
-
-    list_for_each_entry_safe(waiter, tmp, &wake_list, node) {
-        list_del(&waiter->node);
-        if (waiter->proc)
-            proc_wakeup(waiter->proc);
-    }
 
     return woken;
 }
@@ -276,9 +289,10 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
             return -ETIMEDOUT;
     }
 
-    struct process *curr = proc_current();
-    if (!curr)
+    if (!proc_current())
         return -EINVAL;
+    struct poll_wait_source wait_src;
+    poll_wait_source_init(&wait_src, NULL);
 
     struct futex_waiter *kwaiters =
         kzalloc((size_t)nr_waiters * sizeof(*kwaiters));
@@ -316,7 +330,7 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
 
         INIT_LIST_HEAD(&kwaiters[i].node);
         kwaiters[i].bucket = futex_bucket_for(uaddr);
-        kwaiters[i].proc = curr;
+        kwaiters[i].wait_src = &wait_src;
         kwaiters[i].uaddr = uaddr;
         kwaiters[i].index = (int)i;
         kwaiters[i].wake_index = &wake_index;
@@ -358,7 +372,7 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
             return -ETIMEDOUT;
         }
 
-        int sleep_rc = poll_block_current(deadline, kwaiters);
+        int sleep_rc = poll_wait_source_block(&wait_src, deadline, kwaiters, NULL);
 
         idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {
