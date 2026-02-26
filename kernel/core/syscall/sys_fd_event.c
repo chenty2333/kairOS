@@ -1,5 +1,6 @@
 #include <kairos/arch.h>
 #include <kairos/dentry.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/inotify.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
@@ -1215,9 +1216,10 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
     if (!new_ptr)
         return -EFAULT;
 
-    struct file *file = fd_get(proc_current(), kfd);
-    if (!file)
-        return -EBADF;
+    struct file *file = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &file, NULL);
+    if (frc < 0)
+        return frc;
     if (!file->vnode) {
         file_put(file);
         return -EINVAL;
@@ -1308,9 +1310,10 @@ int64_t sys_timerfd_gettime(uint64_t fd, uint64_t curr_ptr, uint64_t a2,
     if (!curr_ptr)
         return -EFAULT;
 
-    struct file *file = fd_get(proc_current(), kfd);
-    if (!file)
-        return -EBADF;
+    struct file *file = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &file, NULL);
+    if (frc < 0)
+        return frc;
     if (!file->vnode) {
         file_put(file);
         return -EINVAL;
@@ -1371,9 +1374,10 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
         return newfd;
     }
 
-    struct file *file = fd_get(proc_current(), kfd);
-    if (!file)
-        return -EBADF;
+    struct file *file = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &file, NULL);
+    if (frc < 0)
+        return frc;
     if (!file->vnode) {
         file_put(file);
         return -EINVAL;
@@ -1455,10 +1459,11 @@ int64_t sys_inotify_add_watch(uint64_t fd, uint64_t path_ptr, uint64_t mask,
         return -ENOTDIR;
     }
 
-    struct file *file = fd_get(proc_current(), kfd);
-    if (!file) {
+    struct file *file = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &file, NULL);
+    if (frc < 0) {
         dentry_put(resolved.dentry);
-        return -EBADF;
+        return frc;
     }
     struct inotify_ctx *ctx = inotify_ctx_from_fd(file);
     if (!ctx) {
@@ -1515,9 +1520,10 @@ int64_t sys_inotify_rm_watch(uint64_t fd, uint64_t wd, uint64_t a2, uint64_t a3,
     (void)a2; (void)a3; (void)a4; (void)a5;
     int kfd = sysfd_abi_int32(fd);
     int kwd = sysfd_abi_int32(wd);
-    struct file *file = fd_get(proc_current(), kfd);
-    if (!file)
-        return -EBADF;
+    struct file *file = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &file, NULL);
+    if (frc < 0)
+        return frc;
     struct inotify_ctx *ctx = inotify_ctx_from_fd(file);
     if (!ctx) {
         file_put(file);

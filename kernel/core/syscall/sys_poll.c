@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
@@ -59,8 +60,10 @@ static int poll_check_fds(struct pollfd *fds, size_t nfds) {
             ready++;
             continue;
         }
-        struct file *f = fd_get(proc_current(), fds[i].fd);
-        if (!f) {
+        struct file *f = NULL;
+        int frc =
+            handle_bridge_pin_fd(proc_current(), fds[i].fd, 0, &f, NULL);
+        if (frc < 0) {
             fds[i].revents = POLLNVAL;
             ready++;
             continue;
@@ -95,8 +98,9 @@ static void poll_register_waiters(struct pollfd *fds, struct poll_waiter *waiter
          */
         if (fds[i].fd < 0)
             continue;
-        struct file *f = fd_get(curr, fds[i].fd);
-        if (!f)
+        struct file *f = NULL;
+        int frc = handle_bridge_pin_fd(curr, fds[i].fd, 0, &f, NULL);
+        if (frc < 0)
             continue;
         vfs_poll_register(f, &waiters[i], (uint32_t)fds[i].events);
         file_put(f);
