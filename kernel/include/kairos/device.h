@@ -69,6 +69,7 @@ void bus_unregister(struct bus_type *bus);
 
 int device_register(struct device *dev);
 void device_unregister(struct device *dev);
+int device_for_each(int (*fn)(struct device *dev, void *arg), void *arg);
 
 int driver_register(struct driver *drv);
 void driver_unregister(struct driver *drv);

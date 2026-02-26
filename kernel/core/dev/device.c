@@ -105,6 +105,44 @@ void device_unregister(struct device *dev) {
     }
 }
 
+int device_for_each(int (*fn)(struct device *dev, void *arg), void *arg) {
+    if (!fn)
+        return -EINVAL;
+
+    size_t count = 0;
+    bool irq_flags;
+    spin_lock_irqsave(&device_model_lock, &irq_flags);
+    struct device *iter;
+    list_for_each_entry(iter, &device_list, list) { count++; }
+    spin_unlock_irqrestore(&device_model_lock, irq_flags);
+
+    if (!count)
+        return 0;
+
+    struct device **snapshot = kzalloc(sizeof(*snapshot) * count);
+    if (!snapshot)
+        return -ENOMEM;
+
+    size_t n = 0;
+    spin_lock_irqsave(&device_model_lock, &irq_flags);
+    list_for_each_entry(iter, &device_list, list) {
+        if (n >= count)
+            break;
+        snapshot[n++] = iter;
+    }
+    spin_unlock_irqrestore(&device_model_lock, irq_flags);
+
+    int ret = 0;
+    for (size_t i = 0; i < n; i++) {
+        ret = fn(snapshot[i], arg);
+        if (ret)
+            break;
+    }
+
+    kfree(snapshot);
+    return ret;
+}
+
 int driver_register(struct driver *drv) {
     if (!drv || !drv->probe) return -EINVAL;
     

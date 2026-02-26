@@ -109,11 +109,14 @@ struct virtio_iommu_state {
     struct virtio_device *vdev;
     struct virtqueue *req_vq;
     uint64_t page_size_mask;
+    uint64_t input_start;
+    uint64_t input_end;
     uint32_t domain_start;
     uint32_t domain_end;
     uint32_t next_domain;
     size_t granule;
     bool map_unmap;
+    bool input_range;
     bool ready;
     spinlock_t req_lock;
     spinlock_t domain_lock;
@@ -121,6 +124,13 @@ struct virtio_iommu_state {
 };
 
 static struct virtio_iommu_state virtio_iommu_state;
+
+struct virtio_iommu_rebind_ctx {
+    struct virtio_iommu_state *state;
+    uint32_t attempted;
+    uint32_t attached;
+    uint32_t failed;
+};
 
 static size_t virtio_iommu_pick_granule(uint64_t page_size_mask) {
     for (uint64_t sz = CONFIG_PAGE_SIZE; sz != 0; sz <<= 1U) {
@@ -421,7 +431,20 @@ static struct iommu_domain *virtio_iommu_provider_alloc(struct device *dev,
     if (virtio_iommu_endpoint_from_dev(dev, &endpoint) < 0)
         return NULL;
 
-    struct iommu_domain *domain = iommu_domain_create(IOMMU_DOMAIN_DMA, 0, 0);
+    dma_addr_t iova_base = 0;
+    size_t iova_size = 0;
+    if (state->input_range) {
+        if (state->input_end < state->input_start)
+            return NULL;
+        uint64_t span = (state->input_end - state->input_start) + 1ULL;
+        if (!span || span > (uint64_t)SIZE_MAX)
+            return NULL;
+        iova_base = (dma_addr_t)state->input_start;
+        iova_size = (size_t)span;
+    }
+
+    struct iommu_domain *domain =
+        iommu_domain_create(IOMMU_DOMAIN_DMA, iova_base, iova_size);
     if (!domain)
         return NULL;
 
@@ -470,6 +493,29 @@ static const struct iommu_hw_ops virtio_iommu_hw_ops = {
     .match = virtio_iommu_provider_match,
     .alloc_default_domain = virtio_iommu_provider_alloc,
 };
+
+static int virtio_iommu_rebind_pci_dev(struct device *dev, void *arg) {
+    struct virtio_iommu_rebind_ctx *ctx = arg;
+    if (!ctx || !ctx->state || !ctx->state->ready || !dev)
+        return 0;
+    if (dev->bus != &pci_bus_type)
+        return 0;
+
+    struct iommu_domain *domain = iommu_get_domain(dev);
+    if (domain && domain != iommu_get_passthrough_domain())
+        return 0;
+
+    ctx->attempted++;
+    int ret = iommu_attach_default_domain(dev);
+    if (ret < 0) {
+        ctx->failed++;
+        pr_warn("virtio-iommu: reattach failed for %s ret=%d\n", dev->name,
+                ret);
+        return 0;
+    }
+    ctx->attached++;
+    return 0;
+}
 
 static void virtio_iommu_intr(struct virtio_device *vdev) {
     (void)vdev;
@@ -537,6 +583,20 @@ static int virtio_iommu_probe(struct virtio_device *vdev) {
         return -ENOTSUP;
     }
 
+    uint64_t input_start = 0;
+    uint64_t input_end = 0;
+    bool input_range = false;
+    if (driver_features & (1ULL << VIRTIO_IOMMU_F_INPUT_RANGE)) {
+        if (cfg.input_range_end < cfg.input_range_start) {
+            virtqueue_free(req_vq);
+            virtio_device_set_failed(vdev);
+            return -ERANGE;
+        }
+        input_start = cfg.input_range_start;
+        input_end = cfg.input_range_end;
+        input_range = true;
+    }
+
     uint32_t domain_start = 1;
     uint32_t domain_end = 0xffffU;
     if (driver_features & (1ULL << VIRTIO_IOMMU_F_DOMAIN_RANGE)) {
@@ -553,11 +613,14 @@ static int virtio_iommu_probe(struct virtio_device *vdev) {
     state->vdev = vdev;
     state->req_vq = req_vq;
     state->page_size_mask = cfg.page_size_mask;
+    state->input_start = input_start;
+    state->input_end = input_end;
     state->domain_start = domain_start;
     state->domain_end = domain_end;
     state->next_domain = domain_start;
     state->granule = granule;
     state->map_unmap = true;
+    state->input_range = input_range;
     spin_init(&state->req_lock);
     spin_init(&state->domain_lock);
     INIT_LIST_HEAD(&state->domains);
@@ -582,9 +645,19 @@ static int virtio_iommu_probe(struct virtio_device *vdev) {
     state->ready = true;
     vdev->priv = state;
 
-    pr_info("virtio-iommu: backend online granule=%zu page_mask=0x%llx domain=[%u,%u]\n",
+    struct virtio_iommu_rebind_ctx rebind = {
+        .state = state,
+    };
+    ret = device_for_each(virtio_iommu_rebind_pci_dev, &rebind);
+    if (ret < 0)
+        pr_warn("virtio-iommu: rebind walk failed ret=%d\n", ret);
+
+    pr_info("virtio-iommu: backend online granule=%zu page_mask=0x%llx domain=[%u,%u] input=[0x%llx,0x%llx] rebind=%u/%u fail=%u\n",
             state->granule, (unsigned long long)state->page_size_mask,
-            state->domain_start, state->domain_end);
+            state->domain_start, state->domain_end,
+            (unsigned long long)state->input_start,
+            (unsigned long long)state->input_end, rebind.attached,
+            rebind.attempted, rebind.failed);
     return 0;
 }
 

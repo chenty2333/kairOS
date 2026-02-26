@@ -223,6 +223,73 @@ static void test_driver_unregister_cleanup(void) {
     bus_unregister(&bus);
 }
 
+struct dm_for_each_ctx {
+    struct bus_type *bus;
+    int seen;
+    bool saw_a;
+    bool saw_b;
+};
+
+static int dm_for_each_collect(struct device *dev, void *arg) {
+    struct dm_for_each_ctx *ctx = arg;
+    if (!ctx || !dev || dev->bus != ctx->bus)
+        return 0;
+
+    ctx->seen++;
+    if (strcmp(dev->name, "ktest-dev-each-a") == 0)
+        ctx->saw_a = true;
+    if (strcmp(dev->name, "ktest-dev-each-b") == 0)
+        ctx->saw_b = true;
+    return 0;
+}
+
+static void test_device_for_each_snapshot(void) {
+    struct bus_type bus = {
+        .name = "ktest-bus-each",
+        .match = match_by_compatible,
+    };
+    struct device dev_a;
+    struct device dev_b;
+    memset(&dev_a, 0, sizeof(dev_a));
+    memset(&dev_b, 0, sizeof(dev_b));
+    strncpy(dev_a.name, "ktest-dev-each-a", sizeof(dev_a.name) - 1);
+    strncpy(dev_b.name, "ktest-dev-each-b", sizeof(dev_b.name) - 1);
+    dev_a.bus = &bus;
+    dev_b.bus = &bus;
+
+    int ret = bus_register(&bus);
+    test_check(ret == 0, "dm_each bus_register");
+    if (ret < 0)
+        return;
+
+    ret = device_register(&dev_a);
+    test_check(ret == 0, "dm_each device_a register");
+    if (ret < 0) {
+        bus_unregister(&bus);
+        return;
+    }
+    ret = device_register(&dev_b);
+    test_check(ret == 0, "dm_each device_b register");
+    if (ret < 0) {
+        device_unregister(&dev_a);
+        bus_unregister(&bus);
+        return;
+    }
+
+    struct dm_for_each_ctx ctx = {
+        .bus = &bus,
+    };
+    ret = device_for_each(dm_for_each_collect, &ctx);
+    test_check(ret == 0, "dm_each walk ret");
+    test_check(ctx.seen == 2, "dm_each seen count");
+    test_check(ctx.saw_a, "dm_each saw a");
+    test_check(ctx.saw_b, "dm_each saw b");
+
+    device_unregister(&dev_b);
+    device_unregister(&dev_a);
+    bus_unregister(&bus);
+}
+
 /* ---- VirtIO core lifecycle ---- */
 
 struct fake_virtio_transport {
@@ -571,6 +638,7 @@ int run_device_virtio_tests(void) {
     test_device_register_bind_unbind();
     test_device_probe_failure_rollback();
     test_driver_unregister_cleanup();
+    test_device_for_each_snapshot();
     test_virtio_bus_probe_and_rollback();
     test_virtio_mmio_probe_remove_cleanup();
     test_virtio_mmio_probe_failfast();
