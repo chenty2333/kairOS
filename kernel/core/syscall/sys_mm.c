@@ -3,6 +3,7 @@
  */
 
 #include <kairos/config.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
 #include <kairos/uaccess.h>
@@ -94,7 +95,8 @@ int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags,
         if (shared && (uprot & PROT_WRITE))
             req_rights |= FD_RIGHT_WRITE;
         struct file *f = NULL;
-        int fr = fd_get_required(p, sysmm_abi_int32(fd), req_rights, &f);
+        int fr = handle_bridge_pin_fd(p, sysmm_abi_int32(fd), req_rights, &f,
+                                      NULL);
         if (fr < 0)
             return fr;
         if (!f->vnode || f->vnode->type != VNODE_FILE) {

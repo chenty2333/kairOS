@@ -5,6 +5,7 @@
 #include <kairos/clone.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/namei.h>
 #include <kairos/pidfd.h>
 #include <kairos/process.h>
@@ -520,7 +521,7 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
         if (kfd < 0)
             return -EBADF;
         struct file *pidfd_file = NULL;
-        int rc = fd_get_required(proc_current(), kfd, 0, &pidfd_file);
+        int rc = handle_bridge_pin_fd(proc_current(), kfd, 0, &pidfd_file, NULL);
         if (rc < 0)
             return rc;
         rc = pidfd_get_target(pidfd_file, &pid, NULL);
@@ -691,9 +692,10 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
 
     if (uflags & AT_EMPTY_PATH) {
         /* Execute the file referred to by dirfd directly */
-        struct file *f = fd_get(proc_current(), (int)kdirfd);
-        if (!f)
-            return -EBADF;
+        struct file *f = NULL;
+        int frc = handle_bridge_pin_fd(proc_current(), (int)kdirfd, 0, &f, NULL);
+        if (frc < 0)
+            return frc;
         strncpy(kpath, f->path, sizeof(kpath) - 1);
         kpath[sizeof(kpath) - 1] = '\0';
         file_put(f);
@@ -704,9 +706,11 @@ int64_t sys_execveat(uint64_t dirfd, uint64_t path, uint64_t argv,
 
         /* Resolve relative to dirfd if not absolute and not AT_FDCWD */
         if (kpath[0] != '/' && kdirfd != AT_FDCWD) {
-            struct file *df = fd_get(proc_current(), (int)kdirfd);
-            if (!df)
-                return -EBADF;
+            struct file *df = NULL;
+            int frc = handle_bridge_pin_fd(proc_current(), (int)kdirfd, 0, &df,
+                                           NULL);
+            if (frc < 0)
+                return frc;
             /* Build full path from dirfd path + relative path */
             char full[CONFIG_PATH_MAX];
             int dlen = (int)strlen(df->path);

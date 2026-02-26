@@ -3,6 +3,7 @@
  */
 
 #include <kairos/ioctl.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/process.h>
 #include <kairos/sync.h>
 #include <kairos/uaccess.h>
@@ -25,7 +26,7 @@ int64_t sys_ioctl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
     int kfd = sysdev_abi_i32(fd);
     uint32_t ucmd = sysdev_abi_u32(cmd);
     struct file *f = NULL;
-    int fr = fd_get_required(proc_current(), kfd, FD_RIGHT_IOCTL, &f);
+    int fr = handle_bridge_pin_fd(proc_current(), kfd, FD_RIGHT_IOCTL, &f, NULL);
     if (fr < 0)
         return fr;
 
