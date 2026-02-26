@@ -648,8 +648,16 @@ static void test_irq_stats_export(void) {
     platform_irq_dispatch_nr((uint32_t)irq);
     platform_irq_dispatch_nr((uint32_t)irq);
 
-    char buf[1024];
-    int n = platform_irq_format_stats(buf, sizeof(buf), true);
+    size_t cap = 128 + (size_t)IRQCHIP_MAX_IRQS * 128;
+    char *buf = kmalloc(cap);
+    test_check(buf != NULL, "irq stats buffer alloc");
+    if (!buf) {
+        ret = arch_free_irq_ex(irq, test_irq_gate_handler, NULL);
+        test_check(ret == 0, "irq stats free");
+        return;
+    }
+
+    int n = platform_irq_format_stats(buf, cap, true);
     test_check(n > 0, "irq stats format");
     test_check(strstr(buf, "dispatch") != NULL, "irq stats header");
     test_check(strstr(buf, "in_flight") != NULL, "irq stats in_flight header");
@@ -659,6 +667,7 @@ static void test_irq_stats_export(void) {
     char needle[32];
     snprintf(needle, sizeof(needle), "%3d ", irq);
     test_check(strstr(buf, needle) != NULL, "irq stats contains irq line");
+    kfree(buf);
 
     ret = arch_free_irq_ex(irq, test_irq_gate_handler, NULL);
     test_check(ret == 0, "irq stats free");
