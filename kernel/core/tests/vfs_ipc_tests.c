@@ -3894,10 +3894,14 @@ static void test_procfs_pid_handle_transfers_v2_cursor(void) {
                                      "procfs xfer v2 cursor0");
             test_snapshot_expect_u64(page0, "page_size", 16,
                                      "procfs xfer v2 page_size0");
+            test_snapshot_expect_str(page0, "token", "0.16",
+                                     "procfs xfer v2 token0");
             test_snapshot_expect_u64(page0, "returned", 16,
                                      "procfs xfer v2 returned0");
             test_snapshot_expect_u64(page0, "next_cursor", 16,
                                      "procfs xfer v2 next0");
+            test_snapshot_expect_str(page0, "next_token", "16.16",
+                                     "procfs xfer v2 next token0");
             test_snapshot_expect_u64(page0, "end", 0, "procfs xfer v2 end0");
             test_check(procfs_first_data_row(page0, first0, sizeof(first0)),
                        "procfs xfer v2 first row page0");
@@ -3915,6 +3919,8 @@ static void test_procfs_pid_handle_transfers_v2_cursor(void) {
                                      "procfs xfer v2 cursor1");
             test_snapshot_expect_u64(page1, "page_size", 16,
                                      "procfs xfer v2 page_size1");
+            test_snapshot_expect_str(page1, "token", "16.16",
+                                     "procfs xfer v2 token1");
             test_check(strstr(page1, "returned=0\n") == NULL,
                        "procfs xfer v2 page1 has data");
             test_check(procfs_first_data_row(page1, first1, sizeof(first1)),
@@ -3960,6 +3966,153 @@ static void test_procfs_pid_handle_transfers_v2_cursor(void) {
     close_file_if_open(&f);
 
     procfs_release_transfer_events(self, ch0, ch1, handles, created);
+}
+
+static void test_procfs_ipc_object_transfers_v2_cursor(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs ipc obj xfer self present");
+    if (!self)
+        return;
+
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    struct file *f = NULL;
+    char path[128];
+    char page0[1024];
+    char page1[1024];
+    char tail[1024];
+    char first0[192];
+    char first1[192];
+
+    int rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0, "procfs ipc obj xfer create channel pair");
+    if (rc < 0)
+        return;
+
+    uint32_t obj_id = kobj_id(ch0);
+    int32_t self_pid = self->pid;
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_TAKE, self_pid, -1,
+                         KRIGHT_TRANSFER);
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_RESTORE, -1, self_pid,
+                         KRIGHT_TRANSFER);
+
+    int npath = snprintf(path, sizeof(path),
+                         "/proc/ipc/objects/%u/transfers_v2.0.1", obj_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "procfs ipc obj xfer path page0");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "procfs ipc obj xfer open page0");
+        if (rc == 0) {
+            ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
+            test_check(rd > 0, "procfs ipc obj xfer read page0");
+            if (rd > 0) {
+                test_snapshot_expect_str(page0, "schema",
+                                         "procfs_ipc_object_transfers_v2",
+                                         "procfs ipc obj xfer schema");
+                test_snapshot_expect_u64(page0, "obj_id", obj_id,
+                                         "procfs ipc obj xfer obj id");
+                test_snapshot_expect_u64(page0, "cursor", 0,
+                                         "procfs ipc obj xfer cursor0");
+                test_snapshot_expect_u64(page0, "page_size", 1,
+                                         "procfs ipc obj xfer page_size");
+                test_snapshot_expect_str(page0, "token", "0.1",
+                                         "procfs ipc obj xfer token0");
+                test_snapshot_expect_u64(page0, "returned", 1,
+                                         "procfs ipc obj xfer returned0");
+                test_snapshot_expect_u64(page0, "next_cursor", 1,
+                                         "procfs ipc obj xfer next0");
+                test_snapshot_expect_str(page0, "next_token", "1.1",
+                                         "procfs ipc obj xfer next token0");
+                test_snapshot_expect_u64(page0, "end", 0,
+                                         "procfs ipc obj xfer end0");
+                test_check(procfs_first_data_row(page0, first0, sizeof(first0)),
+                           "procfs ipc obj xfer row0");
+            }
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path),
+                     "/proc/ipc/objects/%u/transfers_v2.1.1", obj_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "procfs ipc obj xfer path page1");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "procfs ipc obj xfer open page1");
+        if (rc == 0) {
+            ssize_t rd = proc_control_read_snapshot(f, page1, sizeof(page1));
+            test_check(rd > 0, "procfs ipc obj xfer read page1");
+            if (rd > 0) {
+                test_snapshot_expect_u64(page1, "cursor", 1,
+                                         "procfs ipc obj xfer cursor1");
+                test_snapshot_expect_str(page1, "token", "1.1",
+                                         "procfs ipc obj xfer token1");
+                test_snapshot_expect_u64(page1, "returned", 1,
+                                         "procfs ipc obj xfer returned1");
+                test_check(procfs_first_data_row(page1, first1, sizeof(first1)),
+                           "procfs ipc obj xfer row1");
+                if (first0[0] != '\0' && first1[0] != '\0')
+                    test_check(strcmp(first0, first1) != 0,
+                               "procfs ipc obj xfer cursor advances");
+            }
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path),
+                     "/proc/ipc/objects/%u/transfers_v2.999999.1", obj_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "procfs ipc obj xfer path tail");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "procfs ipc obj xfer open tail");
+        if (rc == 0) {
+            ssize_t rd = proc_control_read_snapshot(f, tail, sizeof(tail));
+            test_check(rd > 0, "procfs ipc obj xfer read tail");
+            if (rd > 0) {
+                test_snapshot_expect_u64(tail, "returned", 0,
+                                         "procfs ipc obj xfer tail returned");
+                test_snapshot_expect_u64(tail, "end", 1,
+                                         "procfs ipc obj xfer tail end");
+            }
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path), "/proc/ipc/objects/%u/transfers_v2",
+                     obj_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "procfs ipc obj xfer path default");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "procfs ipc obj xfer open default");
+        if (rc == 0) {
+            ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
+            test_check(rd > 0, "procfs ipc obj xfer read default");
+            if (rd > 0)
+                test_snapshot_expect_u64(page0, "cursor", 0,
+                                         "procfs ipc obj xfer default cursor");
+        }
+        close_file_if_open(&f);
+    }
+
+    npath = snprintf(path, sizeof(path),
+                     "/proc/ipc/objects/%u/transfers_v2.0.1", obj_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(path),
+               "procfs ipc obj xfer path readonly");
+    if (npath > 0 && (size_t)npath < sizeof(path)) {
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        test_check(rc == 0, "procfs ipc obj xfer reopen readonly");
+        if (rc == 0) {
+            ssize_t wr = vfs_write(f, "x", 1);
+            test_check(wr == -EPERM, "procfs ipc obj xfer readonly");
+        }
+        close_file_if_open(&f);
+    }
+
+    kobj_put(ch1);
+    kobj_put(ch0);
 }
 
 struct stop_cont_timing_ctx {
@@ -4986,6 +5139,7 @@ int run_vfs_ipc_tests(void) {
     test_procfs_pid_handle_transfers_readonly();
     test_procfs_pid_handle_transfers_large_not_truncated();
     test_procfs_pid_handle_transfers_v2_cursor();
+    test_procfs_ipc_object_transfers_v2_cursor();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");

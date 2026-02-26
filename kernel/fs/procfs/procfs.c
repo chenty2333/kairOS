@@ -33,6 +33,10 @@
 enum procfs_type {
     PROCFS_ROOT,
     PROCFS_STATIC,
+    PROCFS_IPC_DIR,
+    PROCFS_IPC_OBJECTS_DIR,
+    PROCFS_IPC_OBJECT_DIR,
+    PROCFS_IPC_OBJECT_ENTRY,
     PROCFS_PID_DIR,
     PROCFS_PID_ENTRY,
     PROCFS_SELF_LINK
@@ -84,6 +88,7 @@ struct procfs_entry {
     enum procfs_type type;
     ino_t ino;
     pid_t pid;
+    uint32_t obj_id;
     procfs_gen_t generate;
     struct procfs_control_audit control_audit;
     struct vnode vn;
@@ -131,10 +136,15 @@ static int gen_pid_handles(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_handle_transfers_v2(struct procfs_entry *ent,
                                        char *buf, size_t bufsz);
+static int gen_ipc_object_transfers_v2(struct procfs_entry *ent, char *buf,
+                                       size_t bufsz);
 static int gen_pid_control(struct procfs_entry *ent, char *buf, size_t bufsz);
 static bool procfs_parse_handle_transfers_v2_name(const char *name,
                                                   uint32_t *cursor,
                                                   uint32_t *page_size);
+static bool procfs_parse_ipc_object_transfers_v2_name(const char *name,
+                                                      uint32_t *cursor,
+                                                      uint32_t *page_size);
 static int procfs_generate_entry(struct procfs_entry *ent, char *buf,
                                  size_t bufsz);
 
@@ -602,18 +612,17 @@ static bool procfs_parse_u32_component(const char *s, size_t len, uint32_t *out)
     return true;
 }
 
-static bool procfs_parse_handle_transfers_v2_name(const char *name,
-                                                  uint32_t *cursor,
-                                                  uint32_t *page_size) {
-    static const char prefix[] = "handle_transfers_v2";
-    const size_t prefix_len = sizeof(prefix) - 1;
-
-    if (!name || !cursor || !page_size)
+static bool procfs_parse_cursor_page_name(const char *name, const char *prefix,
+                                          uint32_t default_page,
+                                          uint32_t max_page, uint32_t *cursor,
+                                          uint32_t *page_size) {
+    if (!name || !prefix || !cursor || !page_size)
         return false;
 
+    const size_t prefix_len = strlen(prefix);
     if (strcmp(name, prefix) == 0) {
         *cursor = 0;
-        *page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+        *page_size = default_page;
         return true;
     }
 
@@ -632,7 +641,7 @@ static bool procfs_parse_handle_transfers_v2_name(const char *name,
             return false;
         }
         *cursor = parsed_cursor;
-        *page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+        *page_size = default_page;
         return true;
     }
 
@@ -651,13 +660,29 @@ static bool procfs_parse_handle_transfers_v2_name(const char *name,
         return false;
     }
     if (parsed_page_size == 0)
-        parsed_page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
-    if (parsed_page_size > PROCFS_TRANSFER_V2_MAX_PAGE)
-        parsed_page_size = PROCFS_TRANSFER_V2_MAX_PAGE;
+        parsed_page_size = default_page;
+    if (parsed_page_size > max_page)
+        parsed_page_size = max_page;
 
     *cursor = parsed_cursor;
     *page_size = parsed_page_size;
     return true;
+}
+
+static bool procfs_parse_handle_transfers_v2_name(const char *name,
+                                                  uint32_t *cursor,
+                                                  uint32_t *page_size) {
+    return procfs_parse_cursor_page_name(
+        name, "handle_transfers_v2", PROCFS_TRANSFER_V2_DEFAULT_PAGE,
+        PROCFS_TRANSFER_V2_MAX_PAGE, cursor, page_size);
+}
+
+static bool procfs_parse_ipc_object_transfers_v2_name(const char *name,
+                                                      uint32_t *cursor,
+                                                      uint32_t *page_size) {
+    return procfs_parse_cursor_page_name(
+        name, "transfers_v2", PROCFS_TRANSFER_V2_DEFAULT_PAGE,
+        PROCFS_TRANSFER_V2_MAX_PAGE, cursor, page_size);
 }
 
 static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz) {
@@ -746,9 +771,10 @@ static int gen_pid_handle_transfers_v2(struct procfs_entry *ent, char *buf,
                        "pid=%d\n"
                        "cursor=%u\n"
                        "page_size=%u\n"
+                       "token=%u.%u\n"
                        "columns=handle cap_id obj_id type rights seq event "
                        "from_pid to_pid transfer_rights cpu ticks\n",
-                       ent->pid, cursor, page_size);
+                       ent->pid, cursor, page_size, cursor, page_size);
     if (len < 0)
         return -EINVAL;
     if ((size_t)len >= bufsz)
@@ -812,14 +838,82 @@ static int gen_pid_handle_transfers_v2(struct procfs_entry *ent, char *buf,
     int n = snprintf(buf + len, bufsz - (size_t)len,
                      "returned=%u\n"
                      "next_cursor=%u\n"
+                     "next_token=%u.%u\n"
                      "end=%u\n",
-                     emitted, next_cursor, has_more ? 0U : 1U);
+                     emitted, next_cursor, next_cursor, page_size,
+                     has_more ? 0U : 1U);
     if (n < 0)
         return -EINVAL;
     if ((size_t)n >= bufsz - (size_t)len)
         return (int)bufsz - 1;
     len += n;
 
+    return len;
+}
+
+static int gen_ipc_object_transfers_v2(struct procfs_entry *ent, char *buf,
+                                       size_t bufsz) {
+    if (!ent || !buf || bufsz == 0)
+        return -EINVAL;
+
+    uint32_t cursor = 0;
+    uint32_t page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+    if (!procfs_parse_ipc_object_transfers_v2_name(ent->name, &cursor,
+                                                   &page_size)) {
+        return -EINVAL;
+    }
+
+    struct kobj_transfer_history_entry rows[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+    uint32_t returned = 0;
+    uint32_t next_cursor = cursor;
+    bool end = true;
+    uint32_t obj_type = 0;
+    int rc = kobj_transfer_history_page_by_id(
+        ent->obj_id, cursor, page_size, rows, ARRAY_SIZE(rows), &returned,
+        &next_cursor, &end, &obj_type);
+    if (rc < 0)
+        return rc;
+
+    int len = snprintf(buf, bufsz,
+                       "schema=procfs_ipc_object_transfers_v2\n"
+                       "obj_id=%u\n"
+                       "type=%s\n"
+                       "cursor=%u\n"
+                       "page_size=%u\n"
+                       "token=%u.%u\n"
+                       "columns=seq event from_pid to_pid rights cpu ticks\n",
+                       ent->obj_id, kobj_type_name(obj_type), cursor, page_size,
+                       cursor, page_size);
+    if (len < 0)
+        return -EINVAL;
+    if ((size_t)len >= bufsz)
+        return (int)bufsz - 1;
+
+    for (uint32_t i = 0; i < returned; i++) {
+        int n = snprintf(buf + len, bufsz - (size_t)len,
+                         "%u %s %d %d 0x%x %u %llu\n", rows[i].seq,
+                         procfs_transfer_event_name(rows[i].event),
+                         rows[i].from_pid, rows[i].to_pid, rows[i].rights,
+                         rows[i].cpu, (unsigned long long)rows[i].ticks);
+        if (n < 0)
+            return -EINVAL;
+        if ((size_t)n >= bufsz - (size_t)len)
+            return (int)bufsz - 1;
+        len += n;
+    }
+
+    int n = snprintf(buf + len, bufsz - (size_t)len,
+                     "returned=%u\n"
+                     "next_cursor=%u\n"
+                     "next_token=%u.%u\n"
+                     "end=%u\n",
+                     returned, next_cursor, next_cursor, page_size,
+                     end ? 1U : 0U);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - (size_t)len)
+        return (int)bufsz - 1;
+    len += n;
     return len;
 }
 
@@ -949,6 +1043,11 @@ static int procfs_generate_entry(struct procfs_entry *ent, char *buf,
         procfs_parse_handle_transfers_v2_name(ent->name, &cursor,
                                               &page_size)) {
         return gen_pid_handle_transfers_v2(ent, buf, bufsz);
+    }
+    if (ent->type == PROCFS_IPC_OBJECT_ENTRY &&
+        procfs_parse_ipc_object_transfers_v2_name(ent->name, &cursor,
+                                                  &page_size)) {
+        return gen_ipc_object_transfers_v2(ent, buf, bufsz);
     }
 
     if (!ent->generate)
@@ -1290,6 +1389,57 @@ static struct procfs_entry *procfs_create_pid_dir(struct procfs_mount *pm,
     return ent;
 }
 
+static struct procfs_entry *procfs_create_ipc_dir(struct procfs_mount *pm) {
+    struct procfs_entry *ent =
+        procfs_alloc_entry(pm, "ipc", PROCFS_IPC_DIR, NULL, 0);
+    if (!ent)
+        return NULL;
+    procfs_init_vnode(&ent->vn, pm->mnt, ent, VNODE_DIR, S_IFDIR | 0555,
+                      &procfs_dir_ops);
+    return ent;
+}
+
+static struct procfs_entry *
+procfs_create_ipc_objects_dir(struct procfs_mount *pm) {
+    struct procfs_entry *ent =
+        procfs_alloc_entry(pm, "objects", PROCFS_IPC_OBJECTS_DIR, NULL, 0);
+    if (!ent)
+        return NULL;
+    procfs_init_vnode(&ent->vn, pm->mnt, ent, VNODE_DIR, S_IFDIR | 0555,
+                      &procfs_dir_ops);
+    return ent;
+}
+
+static struct procfs_entry *
+procfs_create_ipc_object_dir(struct procfs_mount *pm, uint32_t obj_id) {
+    char name[16] = {0};
+    int n = snprintf(name, sizeof(name), "%u", obj_id);
+    if (n < 0 || (size_t)n >= sizeof(name))
+        return NULL;
+
+    struct procfs_entry *ent =
+        procfs_alloc_entry(pm, name, PROCFS_IPC_OBJECT_DIR, NULL, 0);
+    if (!ent)
+        return NULL;
+    ent->obj_id = obj_id;
+    procfs_init_vnode(&ent->vn, pm->mnt, ent, VNODE_DIR, S_IFDIR | 0555,
+                      &procfs_dir_ops);
+    return ent;
+}
+
+static struct procfs_entry *
+procfs_create_ipc_object_entry(struct procfs_mount *pm, uint32_t obj_id,
+                               const char *name, mode_t mode) {
+    struct procfs_entry *ent =
+        procfs_alloc_entry(pm, name, PROCFS_IPC_OBJECT_ENTRY, NULL, 0);
+    if (!ent)
+        return NULL;
+    ent->obj_id = obj_id;
+    procfs_init_vnode(&ent->vn, pm->mnt, ent, VNODE_FILE, mode,
+                      &procfs_file_ops);
+    return ent;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Directory operations                                               */
 /* ------------------------------------------------------------------ */
@@ -1320,8 +1470,8 @@ static const struct static_entry_def static_entries[] = {
 };
 
 #define NUM_STATIC_ENTRIES ARRAY_SIZE(static_entries)
-/* "self" is an extra root entry (symlink) */
-#define NUM_ROOT_FIXED (NUM_STATIC_ENTRIES + 1)
+/* "self" and "ipc" are extra root entries */
+#define NUM_ROOT_FIXED (NUM_STATIC_ENTRIES + 2)
 
 static int procfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off) {
     struct procfs_entry *pe = vn->fs_data;
@@ -1356,6 +1506,17 @@ static int procfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off) {
             return 1;
         }
 
+        /* "ipc" directory */
+        if (idx == (off_t)(NUM_STATIC_ENTRIES + 1)) {
+            ent->d_ino = NUM_STATIC_ENTRIES + 3;
+            ent->d_off = idx;
+            ent->d_reclen = sizeof(*ent);
+            ent->d_type = DT_DIR;
+            strncpy(ent->d_name, "ipc", CONFIG_NAME_MAX - 1);
+            *off = idx + 1;
+            return 1;
+        }
+
         /* PID directories */
         int pid_idx = (int)(idx - (off_t)NUM_ROOT_FIXED);
         pid_t pid = procfs_get_nth_pid(pid_idx);
@@ -1367,6 +1528,45 @@ static int procfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off) {
         ent->d_type = DT_DIR;
         snprintf(ent->d_name, CONFIG_NAME_MAX, "%d", pid);
         *off = idx + 1;
+        return 1;
+    }
+
+    if (pe->type == PROCFS_IPC_DIR) {
+        if (*off > 0)
+            return 0;
+        ent->d_ino = (ino_t)(5000);
+        ent->d_off = *off;
+        ent->d_reclen = sizeof(*ent);
+        ent->d_type = DT_DIR;
+        strncpy(ent->d_name, "objects", CONFIG_NAME_MAX - 1);
+        *off = *off + 1;
+        return 1;
+    }
+
+    if (pe->type == PROCFS_IPC_OBJECTS_DIR) {
+        uint32_t obj_id = 0;
+        uint32_t obj_type = 0;
+        if (kobj_registry_get_nth((size_t)(*off), &obj_id, &obj_type) < 0)
+            return 0;
+        (void)obj_type;
+        ent->d_ino = (ino_t)(6000 + obj_id);
+        ent->d_off = *off;
+        ent->d_reclen = sizeof(*ent);
+        ent->d_type = DT_DIR;
+        snprintf(ent->d_name, CONFIG_NAME_MAX, "%u", obj_id);
+        *off = *off + 1;
+        return 1;
+    }
+
+    if (pe->type == PROCFS_IPC_OBJECT_DIR) {
+        if (*off > 0)
+            return 0;
+        ent->d_ino = (ino_t)(7000 + pe->obj_id);
+        ent->d_off = *off;
+        ent->d_reclen = sizeof(*ent);
+        ent->d_type = DT_REG;
+        strncpy(ent->d_name, "transfers_v2", CONFIG_NAME_MAX - 1);
+        *off = *off + 1;
         return 1;
     }
 
@@ -1438,6 +1638,23 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
             return NULL;
         }
 
+        if (strcmp(name, "ipc") == 0) {
+            spin_lock(&pm->lock);
+            for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+                if (e->type == PROCFS_IPC_DIR) {
+                    vnode_get(&e->vn);
+                    spin_unlock(&pm->lock);
+                    return &e->vn;
+                }
+            }
+            struct procfs_entry *e = procfs_create_ipc_dir(pm);
+            spin_unlock(&pm->lock);
+            if (!e)
+                return NULL;
+            vnode_get(&e->vn);
+            return &e->vn;
+        }
+
         /* Try as PID directory */
         pid_t pid = 0;
         for (const char *s = name; *s; s++) {
@@ -1468,6 +1685,84 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
             return NULL;
         vnode_get(&pdir->vn);
         return &pdir->vn;
+    }
+
+    if (pe->type == PROCFS_IPC_DIR) {
+        if (strcmp(name, "objects") != 0)
+            return NULL;
+        spin_lock(&pm->lock);
+        for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+            if (e->type == PROCFS_IPC_OBJECTS_DIR) {
+                vnode_get(&e->vn);
+                spin_unlock(&pm->lock);
+                return &e->vn;
+            }
+        }
+        struct procfs_entry *e = procfs_create_ipc_objects_dir(pm);
+        spin_unlock(&pm->lock);
+        if (!e)
+            return NULL;
+        vnode_get(&e->vn);
+        return &e->vn;
+    }
+
+    if (pe->type == PROCFS_IPC_OBJECTS_DIR) {
+        uint32_t obj_id = 0;
+        if (!procfs_parse_u32_component(name, strlen(name), &obj_id) ||
+            obj_id == 0) {
+            return NULL;
+        }
+
+        uint32_t obj_type = 0;
+        if (kobj_lookup_type_by_id(obj_id, &obj_type) < 0)
+            return NULL;
+
+        spin_lock(&pm->lock);
+        for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+            if (e->type == PROCFS_IPC_OBJECT_DIR && e->obj_id == obj_id) {
+                vnode_get(&e->vn);
+                spin_unlock(&pm->lock);
+                return &e->vn;
+            }
+        }
+        struct procfs_entry *e = procfs_create_ipc_object_dir(pm, obj_id);
+        spin_unlock(&pm->lock);
+        if (!e)
+            return NULL;
+        vnode_get(&e->vn);
+        return &e->vn;
+    }
+
+    if (pe->type == PROCFS_IPC_OBJECT_DIR) {
+        uint32_t cursor = 0;
+        uint32_t page_size = 0;
+        if (!(strcmp(name, "transfers_v2") == 0 ||
+              procfs_parse_ipc_object_transfers_v2_name(name, &cursor,
+                                                        &page_size))) {
+            return NULL;
+        }
+
+        uint32_t obj_type = 0;
+        if (kobj_lookup_type_by_id(pe->obj_id, &obj_type) < 0)
+            return NULL;
+
+        spin_lock(&pm->lock);
+        for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+            if (e->type == PROCFS_IPC_OBJECT_ENTRY &&
+                e->obj_id == pe->obj_id && strcmp(e->name, name) == 0) {
+                vnode_get(&e->vn);
+                spin_unlock(&pm->lock);
+                return &e->vn;
+            }
+        }
+        struct procfs_entry *e =
+            procfs_create_ipc_object_entry(pm, pe->obj_id, name,
+                                           S_IFREG | 0444);
+        spin_unlock(&pm->lock);
+        if (!e)
+            return NULL;
+        vnode_get(&e->vn);
+        return &e->vn;
     }
 
     if (pe->type == PROCFS_PID_DIR) {

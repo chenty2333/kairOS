@@ -3617,6 +3617,139 @@ static void test_kchannel_inline_queue_zero_heap(void) {
 #endif
 }
 
+static void test_sys_kchannel_inline_queue_zero_heap(void) {
+#if CONFIG_KERNEL_FAULT_INJECT
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int32_t h0 = -1;
+    int32_t h1 = -1;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "sys_kchannel_inline user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    int32_t *u_h0 = (int32_t *)user_map_ptr(&um, 0x000);
+    int32_t *u_h1 = (int32_t *)user_map_ptr(&um, 0x008);
+    struct kairos_channel_msg_user *u_send_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x080);
+    struct kairos_channel_msg_user *u_recv_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x0C0);
+    uint8_t *u_send_bytes = (uint8_t *)user_map_ptr(&um, 0x180);
+    uint8_t *u_recv_bytes = (uint8_t *)user_map_ptr(&um, 0x200);
+    test_check(u_h0 && u_h1 && u_send_msg && u_recv_msg && u_send_bytes &&
+                   u_recv_bytes,
+               "sys_kchannel_inline user_ptr");
+    if (!u_h0 || !u_h1 || !u_send_msg || !u_recv_msg || !u_send_bytes ||
+        !u_recv_bytes)
+        goto out;
+
+    int64_t ret64 =
+        sys_kairos_channel_create((uint64_t)u_h0, (uint64_t)u_h1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "sys_kchannel_inline channel_create");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&h0, u_h0, sizeof(h0));
+    test_check(rc == 0, "sys_kchannel_inline read h0");
+    if (rc < 0)
+        goto out;
+    rc = copy_from_user(&h1, u_h1, sizeof(h1));
+    test_check(rc == 0, "sys_kchannel_inline read h1");
+    if (rc < 0)
+        goto out;
+
+    uint8_t payload[32] = "sys-inline-zero-heap";
+    struct kairos_channel_msg_user send_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+        .handles = 0,
+        .num_bytes = (uint32_t)sizeof(payload),
+        .num_handles = 0,
+    };
+    rc = copy_to_user(u_send_bytes, payload, sizeof(payload));
+    test_check(rc == 0, "sys_kchannel_inline copy payload");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(rc == 0, "sys_kchannel_inline copy send msg");
+    if (rc < 0)
+        goto out;
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_KMALLOC, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_KMALLOC, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_KMALLOC, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    ret64 = sys_kairos_channel_send((uint64_t)h0, (uint64_t)u_send_msg, 0, 0, 0,
+                                    0);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+
+    test_check(ret64 == 0, "sys_kchannel_inline send under kmalloc fault");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_KMALLOC) == 0,
+               "sys_kchannel_inline send no kmalloc");
+    if (ret64 < 0)
+        goto out;
+
+    struct kairos_channel_msg_user recv_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+        .handles = 0,
+        .num_bytes = (uint32_t)sizeof(payload),
+        .num_handles = 0,
+    };
+    rc = copy_to_user(u_recv_msg, &recv_msg, sizeof(recv_msg));
+    test_check(rc == 0, "sys_kchannel_inline copy recv msg");
+    if (rc < 0)
+        goto out;
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_KMALLOC, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_KMALLOC, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_KMALLOC, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    ret64 = sys_kairos_channel_recv((uint64_t)h1, (uint64_t)u_recv_msg, 0, 0, 0,
+                                    0);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+
+    test_check(ret64 == 0, "sys_kchannel_inline recv under kmalloc fault");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_KMALLOC) == 0,
+               "sys_kchannel_inline recv no kmalloc");
+    if (ret64 == 0) {
+        struct kairos_channel_msg_user got = {0};
+        rc = copy_from_user(&got, u_recv_msg, sizeof(got));
+        test_check(rc == 0, "sys_kchannel_inline read recv msg");
+        if (rc == 0) {
+            test_check(got.num_bytes == sizeof(payload),
+                       "sys_kchannel_inline recv bytes");
+            test_check(got.num_handles == 0,
+                       "sys_kchannel_inline recv handles");
+        }
+
+        uint8_t out[sizeof(payload)] = {0};
+        rc = copy_from_user(out, u_recv_bytes, sizeof(out));
+        test_check(rc == 0, "sys_kchannel_inline read payload");
+        if (rc == 0) {
+            test_check(memcmp(out, payload, sizeof(payload)) == 0,
+                       "sys_kchannel_inline payload");
+        }
+    }
+
+out:
+    fault_inject_enable(false);
+    fault_inject_reset();
+    if (h1 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h1, 0, 0, 0, 0, 0);
+    if (h0 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h0, 0, 0, 0, 0, 0);
+    if (mapped)
+        user_map_end(&um);
+#endif
+}
+
 static void run_syscall_trap_tests_full(void) {
     test_syscall_table_slot_coverage();
     test_syscall_invalid_num_legacy();
@@ -3645,6 +3778,7 @@ static void run_syscall_trap_tests_full(void) {
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
     test_kchannel_inline_queue_zero_heap();
+    test_sys_kchannel_inline_queue_zero_heap();
     test_syscall_user_e2e();
 }
 
@@ -3655,6 +3789,7 @@ static void run_syscall_trap_tests_ipc_cap_only(void) {
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
     test_kchannel_inline_queue_zero_heap();
+    test_sys_kchannel_inline_queue_zero_heap();
 }
 
 int run_syscall_trap_tests(void) {

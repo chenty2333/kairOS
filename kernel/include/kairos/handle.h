@@ -190,6 +190,13 @@ void kobj_transfer_record(struct kobj *obj, enum kobj_transfer_event event,
 size_t kobj_transfer_history_snapshot(struct kobj *obj,
                                       struct kobj_transfer_history_entry *out,
                                       size_t max_entries);
+int kobj_lookup_type_by_id(uint32_t obj_id, uint32_t *out_type);
+int kobj_registry_get_nth(size_t index, uint32_t *out_id, uint32_t *out_type);
+int kobj_transfer_history_page_by_id(
+    uint32_t obj_id, uint32_t cursor, uint32_t page_size,
+    struct kobj_transfer_history_entry *out, size_t out_cap,
+    uint32_t *out_returned, uint32_t *out_next_cursor, bool *out_end,
+    uint32_t *out_type);
 
 struct handletable *handletable_alloc(void);
 struct handletable *handletable_copy(struct handletable *src);
