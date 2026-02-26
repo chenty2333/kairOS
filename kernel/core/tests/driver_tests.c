@@ -2712,6 +2712,25 @@ static void test_virtio_net_rx_to_lwip_bridge(void) {
 }
 #endif
 
+static void test_virtio_iommu_health_gate(void) {
+    struct virtio_iommu_health health;
+    int ret = virtio_iommu_health_snapshot(&health);
+    if (ret == -ENODEV) {
+        pr_info("tests: skip virtio-iommu health gate (backend unavailable)\n");
+        return;
+    }
+    test_check(ret == 0, "virtio-iommu health snapshot");
+    if (ret < 0)
+        return;
+
+    test_check(!health.faulted, "virtio-iommu not faulted");
+    test_check(health.req_timeout_count == 0, "virtio-iommu no request timeout");
+    test_check(health.req_complete_count <= health.req_submit_count,
+               "virtio-iommu complete<=submit");
+    test_check(health.req_error_count <= health.req_submit_count,
+               "virtio-iommu error<=submit");
+}
+
 static void test_vfs_umount_busy_with_child_mount(void) {
     struct stat st;
     int ret = vfs_stat("/tmp", &st);
@@ -2794,6 +2813,7 @@ static void run_driver_suite_once(void) {
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();
 #endif
+    test_virtio_iommu_health_gate();
     test_vfs_umount_busy_with_child_mount();
 }
 

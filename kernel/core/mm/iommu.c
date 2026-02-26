@@ -37,6 +37,14 @@ __attribute__((weak)) int arch_iommu_init(void) {
     return -ENODEV;
 }
 
+__attribute__((weak)) int
+virtio_iommu_health_snapshot(struct virtio_iommu_health *out) {
+    if (!out)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    return -ENODEV;
+}
+
 static bool iommu_granule_valid(size_t granule) {
     if (granule < CONFIG_PAGE_SIZE)
         return false;

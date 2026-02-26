@@ -83,6 +83,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - When `virtio-iommu` comes online, it sweeps already-registered PCI devices and re-attaches passthrough-attached endpoints to backend-managed default domains, avoiding boot-order loss of IOMMU coverage
 - `virtio-iommu` request submission uses heap-backed request/cookie context with bounded wait timeout; backend stalls now fail with `-ETIMEDOUT` instead of unbounded spin
 - On first request-timeout fault, `virtio-iommu` marks backend faulted and unregisters its `iommu_hw_ops` provider to stop further default-domain attachments until reprobe
+- `virtio-iommu` exports runtime health telemetry (`virtio_iommu_health_snapshot()`): submit/complete/timeout/error counters and last request/fault tuple, so kernel tests can gate on backend timeout/fault regressions
 
 ## Driver Overview
 

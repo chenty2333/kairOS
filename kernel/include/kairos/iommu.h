@@ -40,6 +40,20 @@ struct iommu_hw_ops {
                                                  void *priv);
 };
 
+struct virtio_iommu_health {
+    bool ready;
+    bool faulted;
+    uint64_t req_submit_count;
+    uint64_t req_complete_count;
+    uint64_t req_timeout_count;
+    uint64_t req_error_count;
+    uint8_t last_req_type;
+    int32_t last_req_ret;
+    uint8_t last_fault_req_type;
+    int32_t last_fault_ret;
+    uint64_t last_fault_ticks;
+};
+
 struct iommu_domain {
     enum iommu_domain_type type;
     const struct iommu_domain_ops *ops;
@@ -72,5 +86,6 @@ int iommu_register_hw_ops(const struct iommu_hw_ops *ops, void *priv);
 void iommu_unregister_hw_ops(const struct iommu_hw_ops *ops);
 
 const struct dma_ops *iommu_get_dma_ops(void);
+int virtio_iommu_health_snapshot(struct virtio_iommu_health *out);
 
 #endif

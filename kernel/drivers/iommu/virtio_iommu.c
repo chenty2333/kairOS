@@ -125,6 +125,15 @@ struct virtio_iommu_state {
     bool input_range;
     bool faulted;
     bool ready;
+    uint64_t req_submit_count;
+    uint64_t req_complete_count;
+    uint64_t req_timeout_count;
+    uint64_t req_error_count;
+    uint8_t last_req_type;
+    int32_t last_req_ret;
+    uint8_t last_fault_req_type;
+    int32_t last_fault_ret;
+    uint64_t last_fault_ticks;
     spinlock_t req_lock;
     spinlock_t domain_lock;
     struct list_head domains;
@@ -139,6 +148,33 @@ struct virtio_iommu_rebind_ctx {
     uint32_t attached;
     uint32_t failed;
 };
+
+int virtio_iommu_health_snapshot(struct virtio_iommu_health *out) {
+    if (!out)
+        return -EINVAL;
+
+    struct virtio_iommu_state *state = &virtio_iommu_state;
+    memset(out, 0, sizeof(*out));
+    out->ready = __atomic_load_n(&state->ready, __ATOMIC_ACQUIRE);
+    out->faulted = __atomic_load_n(&state->faulted, __ATOMIC_ACQUIRE);
+    out->req_submit_count =
+        __atomic_load_n(&state->req_submit_count, __ATOMIC_RELAXED);
+    out->req_complete_count =
+        __atomic_load_n(&state->req_complete_count, __ATOMIC_RELAXED);
+    out->req_timeout_count =
+        __atomic_load_n(&state->req_timeout_count, __ATOMIC_RELAXED);
+    out->req_error_count =
+        __atomic_load_n(&state->req_error_count, __ATOMIC_RELAXED);
+    out->last_req_type = __atomic_load_n(&state->last_req_type, __ATOMIC_RELAXED);
+    out->last_req_ret = __atomic_load_n(&state->last_req_ret, __ATOMIC_RELAXED);
+    out->last_fault_req_type =
+        __atomic_load_n(&state->last_fault_req_type, __ATOMIC_RELAXED);
+    out->last_fault_ret =
+        __atomic_load_n(&state->last_fault_ret, __ATOMIC_RELAXED);
+    out->last_fault_ticks =
+        __atomic_load_n(&state->last_fault_ticks, __ATOMIC_RELAXED);
+    return 0;
+}
 
 static size_t virtio_iommu_pick_granule(uint64_t page_size_mask) {
     for (uint64_t sz = CONFIG_PAGE_SIZE; sz != 0; sz <<= 1U) {
@@ -182,6 +218,10 @@ static void virtio_iommu_mark_faulted(struct virtio_iommu_state *state,
                                       uint8_t req_type, int ret) {
     if (!state)
         return;
+    __atomic_store_n(&state->last_fault_req_type, req_type, __ATOMIC_RELAXED);
+    __atomic_store_n(&state->last_fault_ret, ret, __ATOMIC_RELAXED);
+    __atomic_store_n(&state->last_fault_ticks, arch_timer_ticks(),
+                     __ATOMIC_RELAXED);
     if (__atomic_exchange_n(&state->faulted, true, __ATOMIC_ACQ_REL))
         return;
 
@@ -274,6 +314,8 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
         !state->req_vq || !req || !req_size || write_desc_offset >= req_size) {
         return -EINVAL;
     }
+    uint8_t req_type = *((uint8_t *)req);
+    __atomic_add_fetch(&state->req_submit_count, 1, __ATOMIC_RELAXED);
 
     struct virtio_iommu_req_cookie *cookie = kzalloc(sizeof(*cookie));
     if (!cookie)
@@ -336,14 +378,21 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
 
     spin_unlock_irqrestore(&state->req_lock, irq_flags);
     if (ret < 0) {
+        __atomic_add_fetch(&state->req_error_count, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&state->last_req_type, req_type, __ATOMIC_RELAXED);
+        __atomic_store_n(&state->last_req_ret, ret, __ATOMIC_RELAXED);
         virtio_iommu_req_cookie_put(cookie);
         return ret;
     }
 
     if (wait_ret < 0) {
+        __atomic_add_fetch(&state->req_timeout_count, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&state->req_error_count, 1, __ATOMIC_RELAXED);
         pr_warn("virtio-iommu: request timeout type=%u\n",
                 *((uint8_t *)cookie->req_buf));
-        virtio_iommu_mark_faulted(state, *((uint8_t *)cookie->req_buf), wait_ret);
+        __atomic_store_n(&state->last_req_type, req_type, __ATOMIC_RELAXED);
+        __atomic_store_n(&state->last_req_ret, wait_ret, __ATOMIC_RELAXED);
+        virtio_iommu_mark_faulted(state, req_type, wait_ret);
         virtio_iommu_req_cookie_put(cookie);
         return wait_ret;
     }
@@ -352,8 +401,14 @@ static int virtio_iommu_submit_req(struct virtio_iommu_state *state, void *req,
                        sizeof(struct virtio_iommu_req_tail));
     if (status_out)
         *status_out = status;
+    __atomic_add_fetch(&state->req_complete_count, 1, __ATOMIC_RELAXED);
     virtio_iommu_req_cookie_put(cookie);
-    return virtio_iommu_status_to_errno(status);
+    int req_ret = virtio_iommu_status_to_errno(status);
+    if (req_ret < 0)
+        __atomic_add_fetch(&state->req_error_count, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&state->last_req_type, req_type, __ATOMIC_RELAXED);
+    __atomic_store_n(&state->last_req_ret, req_ret, __ATOMIC_RELAXED);
+    return req_ret;
 }
 
 static int virtio_iommu_send_attach(struct virtio_iommu_domain_ctx *ctx) {
@@ -691,7 +746,7 @@ static int virtio_iommu_probe(struct virtio_device *vdev) {
     state->granule = granule;
     state->map_unmap = true;
     state->input_range = input_range;
-    state->faulted = false;
+    __atomic_store_n(&state->faulted, false, __ATOMIC_RELEASE);
     spin_init(&state->req_lock);
     spin_init(&state->domain_lock);
     INIT_LIST_HEAD(&state->domains);
@@ -713,7 +768,7 @@ static int virtio_iommu_probe(struct virtio_device *vdev) {
         return ret;
     }
 
-    state->ready = true;
+    __atomic_store_n(&state->ready, true, __ATOMIC_RELEASE);
     vdev->priv = state;
 
     struct virtio_iommu_rebind_ctx rebind = {
@@ -738,8 +793,8 @@ static void virtio_iommu_remove(struct virtio_device *vdev) {
         return;
 
     iommu_unregister_hw_ops(&virtio_iommu_hw_ops);
-    state->faulted = true;
-    state->ready = false;
+    __atomic_store_n(&state->faulted, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&state->ready, false, __ATOMIC_RELEASE);
 
     bool irq_flags;
     bool domains_active;
