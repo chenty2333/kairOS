@@ -115,6 +115,7 @@ pollwait.c:
 - Unified wait-core helpers: `poll_timeout_to_deadline_ms`, `poll_deadline_expired`, `poll_block_current_ex`, `poll_block_current`, `poll_block_current_mutex` (supports wait_queue + mutex sleep sites and interruptible policy)
 - `poll_wait_source_block_ex` extends wait-source blocking with explicit interruptible policy; `poll_wait_source_block` remains the interruptible wrapper
 - Unified ready wake bridge: `poll_ready_wake_one/all` wakes wait_queue waiters and poll watchers on one path
+- `wait_queue_wakeup_one_hint()` adds a wait-core wake primitive with optional direct-switch hint; `poll_ready_wake_one` now uses it and enables single-waiter direct switch when no vnode fanout is involved
 - `eventfd`/`timerfd`/`inotify`/`signalfd`/`pidfd` block+wake paths now use `poll_wait_source_*` wrappers over wait-core helpers instead of direct `proc_sleep_on*` call sites
 - pipe read/write blocking queues and close wakeups now route through `poll_wait_source` (pipe poll fanout remains on `poll_wait_head`)
 - AF_UNIX and AF_INET stream/listen/datagram wait queues now route through `poll_wait_source` while socket poll readiness fanout remains on socket poll heads
@@ -144,6 +145,7 @@ Current IPC mechanisms:
 - PID FDs: `pidfd_open` creates pollable process handles; `pidfd_send_signal` supports liveness probe (`sig=0`), signal delivery via pidfd, and `info!=NULL` pointer validation; `waitid(P_PIDFD, ...)` is wired for child wait/reap semantics and supports `WNOWAIT` for exited-child observation without immediate reap (`WSTOPPED/WCONTINUED` currently only accepted in nonblocking no-event polling path); `pidfd_getfd` duplicates a target fd into the caller with CLOEXEC
 - Inotify: `inotify_init1/add_watch/rm_watch` is wired with vnode-based watches and pollable event queue delivery
 - Capability handles: per-process `handletable` (refcounted; cloned with `CLONE_FILES` sharing or copied otherwise), rights-mask model (`READ/WRITE/TRANSFER/DUPLICATE/WAIT/MANAGE`), and generic `kobj` refcounted object lifetime
+- Handle access checks now expose a unified op-based entry (`khandle_get_for_access` / `khandle_take_for_access`) so new fast paths reuse one rights-check surface instead of per-callsite bespoke masks
 - Capability file bridge: Linux fd/file objects can be wrapped as `KOBJ_TYPE_FILE` handles and converted back to fd without changing Linux ABI syscalls; `fd_alloc_rights()` preserves rights attenuation when materializing fd from a handle
 - Internal bridge helpers (`handle_bridge`) centralize fd-rights <-> handle-rights mapping plus fd<->`KOBJ_TYPE_FILE` conversion, so non-syscall kernel paths can reuse one capability conversion entrypoint
 - fd core provides `fd_get_required_with_rights()` to pin `file*` and snapshot fd-rights in one lock pass; bridge paths now reuse this single pin/query entrypoint
@@ -154,7 +156,8 @@ Current IPC mechanisms:
 - Channel IPC (Kairos extension): message-oriented pair endpoints with bounded queue (`KCHANNEL_MAX_QUEUE`), blocking/nonblocking send/recv, and handle transfer (`KRIGHT_TRANSFER`) with move semantics
 - Port wait queue (Kairos extension): channel endpoint can bind to a port key; events currently include `READABLE` and `PEER_CLOSED`, consumed through blocking/nonblocking `port_wait` with optional timeout
 - Channel/port internal sleep+wake paths now share `poll_wait_source` for waiter blocking and wakeup; port fd poll fanout to multiple vnodes remains unchanged
-- `kobj` now carries a base `wait_queue`, and channel/port objects expose unified poll/wait callbacks through `kobj_ops` (`kobj_wait`, `kobj_poll_*` dispatch)
+- `kobj` now carries a base `wait_queue`; channel/port expose unified `kobj_ops` dispatch for `read/write/poll/signal/wait` (`kobj_read`, `kobj_write`, `kobj_poll`, `kobj_signal`, `kobj_wait`)
+- `kobj` lifecycle tracking now records bounded refcount history per object (init/get/put/last-put) with snapshot API (`kobj_refcount_history_snapshot`) for postmortem/debug inspection
 - `port_wait` blocking now sleeps on object-level `kobj.waitq` (wake source remains channel/port enqueue/close paths), keeping fd-poll fanout unchanged
 - Channel fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_CHANNEL`; resulting fd supports byte `read()`/`write()` on channel payload path (any transferred handles on `read()` are consumed and dropped), and `poll` readiness is rights-gated (`KRIGHT_READ` for `POLLIN`, `KRIGHT_WRITE` for `POLLOUT`, `POLLHUP` preserved)
 - Port fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_PORT`; resulting fd rights now mirror handle attenuation (`KRIGHT_WAIT`->`FD_RIGHT_READ`, `KRIGHT_MANAGE`->`FD_RIGHT_IOCTL`, `KRIGHT_DUPLICATE`->`FD_RIGHT_DUP`), and `read()/poll` require `KRIGHT_WAIT`

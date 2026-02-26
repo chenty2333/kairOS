@@ -92,8 +92,16 @@ struct kfile {
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
 static void kfile_release_obj(struct kobj *obj);
+static int kchannel_obj_read(struct kobj *obj, void *buf, size_t len,
+                             size_t *out_len, uint32_t options);
+static int kchannel_obj_write(struct kobj *obj, const void *buf, size_t len,
+                              size_t *out_len, uint32_t options);
 static int kchannel_obj_poll_revents(struct kobj *obj, uint32_t events,
                                      uint32_t *out_revents);
+static int kchannel_obj_signal(struct kobj *obj, uint32_t signal,
+                               uint32_t flags);
+static int kport_obj_read(struct kobj *obj, void *buf, size_t len,
+                          size_t *out_len, uint32_t options);
 static int kchannel_obj_poll_attach(struct kobj *obj, struct vnode *vn);
 static int kchannel_obj_poll_detach(struct kobj *obj, struct vnode *vn);
 static int kport_obj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
@@ -107,15 +115,19 @@ static bool kchannel_try_rendezvous_locked(struct kchannel *peer,
 
 static const struct kobj_ops kchannel_ops = {
     .release = kchannel_release_obj,
-    .poll_revents = kchannel_obj_poll_revents,
+    .read = kchannel_obj_read,
+    .write = kchannel_obj_write,
+    .poll = kchannel_obj_poll_revents,
+    .signal = kchannel_obj_signal,
     .poll_attach_vnode = kchannel_obj_poll_attach,
     .poll_detach_vnode = kchannel_obj_poll_detach,
 };
 
 static const struct kobj_ops kport_ops = {
     .release = kport_release_obj,
+    .read = kport_obj_read,
     .wait = kport_obj_wait,
-    .poll_revents = kport_obj_poll_revents,
+    .poll = kport_obj_poll_revents,
     .poll_attach_vnode = kport_obj_poll_attach,
     .poll_detach_vnode = kport_obj_poll_detach,
 };
@@ -256,26 +268,80 @@ static void kchannel_msg_free(struct kchannel_msg *msg) {
     kfree(msg);
 }
 
+static uint32_t kobj_refcount_record(struct kobj *obj,
+                                     enum kobj_refcount_event event,
+                                     uint32_t refcount) {
+    if (!obj)
+        return 0;
+    uint32_t seq = atomic_add_return(&obj->refcount_hist_head, 1);
+    uint32_t idx = (seq - 1) % KOBJ_REFCOUNT_HISTORY_DEPTH;
+    struct process *curr = proc_current();
+    struct kobj_refcount_history_entry *ent = &obj->refcount_hist[idx];
+    ent->ticks = arch_timer_get_ticks();
+    ent->pid = curr ? curr->pid : -1;
+    ent->refcount = refcount;
+    ent->event = (uint16_t)event;
+    int cpu = arch_cpu_id();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    ent->cpu = (uint16_t)cpu;
+    __atomic_store_n(&ent->seq, seq, __ATOMIC_RELEASE);
+    return seq;
+}
+
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops) {
     if (!obj)
         return;
     atomic_init(&obj->refcount, 1);
+    atomic_init(&obj->refcount_hist_head, 0);
+    memset(obj->refcount_hist, 0, sizeof(obj->refcount_hist));
     obj->type = type;
     obj->ops = ops;
     wait_queue_init(&obj->waitq);
+    kobj_refcount_record(obj, KOBJ_REFCOUNT_INIT, 1);
 }
 
 void kobj_get(struct kobj *obj) {
     if (!obj)
         return;
-    atomic_inc(&obj->refcount);
+    uint32_t refcount = atomic_inc_return(&obj->refcount);
+    kobj_refcount_record(obj, KOBJ_REFCOUNT_GET, refcount);
 }
 
 void kobj_put(struct kobj *obj) {
     if (!obj)
         return;
-    if (atomic_dec_return(&obj->refcount) == 0 && obj->ops && obj->ops->release)
+    uint32_t refcount = atomic_dec_return(&obj->refcount);
+    if (refcount == 0)
+        kobj_refcount_record(obj, KOBJ_REFCOUNT_LAST_PUT, 0);
+    else
+        kobj_refcount_record(obj, KOBJ_REFCOUNT_PUT, refcount);
+    if (refcount == 0 && obj->ops && obj->ops->release)
         obj->ops->release(obj);
+}
+
+int kobj_read(struct kobj *obj, void *buf, size_t len, size_t *out_len,
+              uint32_t options) {
+    if (!obj)
+        return -EINVAL;
+    if ((len > 0 && !buf) || !out_len)
+        return -EINVAL;
+    *out_len = 0;
+    if (!obj->ops || !obj->ops->read)
+        return -ENOTSUP;
+    return obj->ops->read(obj, buf, len, out_len, options);
+}
+
+int kobj_write(struct kobj *obj, const void *buf, size_t len, size_t *out_len,
+               uint32_t options) {
+    if (!obj)
+        return -EINVAL;
+    if ((len > 0 && !buf) || !out_len)
+        return -EINVAL;
+    *out_len = 0;
+    if (!obj->ops || !obj->ops->write)
+        return -ENOTSUP;
+    return obj->ops->write(obj, buf, len, out_len, options);
 }
 
 int kobj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
@@ -285,13 +351,25 @@ int kobj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
     return obj->ops->wait(obj, out, timeout_ns, options);
 }
 
-int kobj_poll_revents(struct kobj *obj, uint32_t events,
-                      uint32_t *out_revents) {
+int kobj_poll(struct kobj *obj, uint32_t events, uint32_t *out_revents) {
     if (!obj || !out_revents)
         return -EINVAL;
-    if (!obj->ops || !obj->ops->poll_revents)
+    if (!obj->ops || !obj->ops->poll)
         return -ENOTSUP;
-    return obj->ops->poll_revents(obj, events, out_revents);
+    return obj->ops->poll(obj, events, out_revents);
+}
+
+int kobj_poll_revents(struct kobj *obj, uint32_t events,
+                      uint32_t *out_revents) {
+    return kobj_poll(obj, events, out_revents);
+}
+
+int kobj_signal(struct kobj *obj, uint32_t signal, uint32_t flags) {
+    if (!obj)
+        return -EINVAL;
+    if (!obj->ops || !obj->ops->signal)
+        return -ENOTSUP;
+    return obj->ops->signal(obj, signal, flags);
 }
 
 int kobj_poll_attach_vnode(struct kobj *obj, struct vnode *vn) {
@@ -308,6 +386,39 @@ int kobj_poll_detach_vnode(struct kobj *obj, struct vnode *vn) {
     if (!obj->ops || !obj->ops->poll_detach_vnode)
         return -ENOTSUP;
     return obj->ops->poll_detach_vnode(obj, vn);
+}
+
+size_t kobj_refcount_history_snapshot(struct kobj *obj,
+                                      struct kobj_refcount_history_entry *out,
+                                      size_t max_entries) {
+    if (!obj || !out || max_entries == 0)
+        return 0;
+
+    uint32_t head = atomic_read(&obj->refcount_hist_head);
+    size_t available = head < KOBJ_REFCOUNT_HISTORY_DEPTH ? (size_t)head
+                                                          : KOBJ_REFCOUNT_HISTORY_DEPTH;
+    if (available > max_entries)
+        available = max_entries;
+    if (available == 0)
+        return 0;
+
+    uint32_t start = (head >= available) ? (head - (uint32_t)available) : 0;
+    for (size_t i = 0; i < available; i++) {
+        uint32_t pos = (start + (uint32_t)i) % KOBJ_REFCOUNT_HISTORY_DEPTH;
+        const struct kobj_refcount_history_entry *src = &obj->refcount_hist[pos];
+        while (1) {
+            uint32_t seq0 = __atomic_load_n(&src->seq, __ATOMIC_ACQUIRE);
+            if (seq0 == 0) {
+                memset(&out[i], 0, sizeof(out[i]));
+                break;
+            }
+            out[i] = *src;
+            uint32_t seq1 = __atomic_load_n(&src->seq, __ATOMIC_ACQUIRE);
+            if (seq0 == seq1 && seq0 == out[i].seq)
+                break;
+        }
+    }
+    return available;
 }
 
 struct handletable *handletable_alloc(void) {
@@ -386,8 +497,34 @@ int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights) {
     return -EMFILE;
 }
 
-int khandle_get(struct process *p, int32_t handle, uint32_t required_rights,
-                struct kobj **out_obj, uint32_t *out_rights) {
+static bool krights_allow_access(uint32_t rights, enum kobj_access_op access) {
+    switch (access) {
+    case KOBJ_ACCESS_READ:
+        return (rights & KRIGHT_READ) != 0;
+    case KOBJ_ACCESS_WRITE:
+        return (rights & KRIGHT_WRITE) != 0;
+    case KOBJ_ACCESS_POLL:
+        return (rights & (KRIGHT_READ | KRIGHT_WRITE | KRIGHT_WAIT)) != 0;
+    case KOBJ_ACCESS_SIGNAL:
+        return (rights & (KRIGHT_MANAGE | KRIGHT_READ)) != 0;
+    case KOBJ_ACCESS_WAIT:
+        return (rights & KRIGHT_WAIT) != 0;
+    case KOBJ_ACCESS_MANAGE:
+        return (rights & KRIGHT_MANAGE) != 0;
+    case KOBJ_ACCESS_DUPLICATE:
+        return (rights & KRIGHT_DUPLICATE) != 0;
+    case KOBJ_ACCESS_TRANSFER:
+        return (rights & KRIGHT_TRANSFER) != 0;
+    default:
+        return false;
+    }
+}
+
+static int khandle_get_common(struct process *p, int32_t handle,
+                              uint32_t required_rights,
+                              enum kobj_access_op access, bool use_access,
+                              struct kobj **out_obj, uint32_t *out_rights,
+                              bool take) {
     struct handletable *ht = proc_handletable(p);
     if (!ht || !out_obj)
         return -EINVAL;
@@ -406,11 +543,19 @@ int khandle_get(struct process *p, int32_t handle, uint32_t required_rights,
         mutex_unlock(&ht->lock);
         return -EBADF;
     }
-    if ((rights & required_rights) != required_rights) {
+    bool allowed = use_access ? krights_allow_access(rights, access)
+                              : ((rights & required_rights) == required_rights);
+    if (!allowed) {
         mutex_unlock(&ht->lock);
         return -EACCES;
     }
-    kobj_get(obj);
+
+    if (take) {
+        ht->entries[handle].obj = NULL;
+        ht->entries[handle].rights = 0;
+    } else {
+        kobj_get(obj);
+    }
     mutex_unlock(&ht->lock);
 
     *out_obj = obj;
@@ -419,39 +564,30 @@ int khandle_get(struct process *p, int32_t handle, uint32_t required_rights,
     return 0;
 }
 
+int khandle_get(struct process *p, int32_t handle, uint32_t required_rights,
+                struct kobj **out_obj, uint32_t *out_rights) {
+    return khandle_get_common(p, handle, required_rights, 0, false, out_obj,
+                              out_rights, false);
+}
+
+int khandle_get_for_access(struct process *p, int32_t handle,
+                           enum kobj_access_op access, struct kobj **out_obj,
+                           uint32_t *out_rights) {
+    return khandle_get_common(p, handle, 0, access, true, out_obj, out_rights,
+                              false);
+}
+
 int khandle_take(struct process *p, int32_t handle, uint32_t required_rights,
                  struct kobj **out_obj, uint32_t *out_rights) {
-    struct handletable *ht = proc_handletable(p);
-    if (!ht || !out_obj)
-        return -EINVAL;
+    return khandle_get_common(p, handle, required_rights, 0, false, out_obj,
+                              out_rights, true);
+}
 
-    *out_obj = NULL;
-    if (out_rights)
-        *out_rights = 0;
-
-    if (handle < 0 || handle >= CONFIG_MAX_HANDLES_PER_PROC)
-        return -EBADF;
-
-    mutex_lock(&ht->lock);
-    struct kobj *obj = ht->entries[handle].obj;
-    uint32_t rights = ht->entries[handle].rights;
-    if (!obj) {
-        mutex_unlock(&ht->lock);
-        return -EBADF;
-    }
-    if ((rights & required_rights) != required_rights) {
-        mutex_unlock(&ht->lock);
-        return -EACCES;
-    }
-
-    ht->entries[handle].obj = NULL;
-    ht->entries[handle].rights = 0;
-    mutex_unlock(&ht->lock);
-
-    *out_obj = obj;
-    if (out_rights)
-        *out_rights = rights;
-    return 0;
+int khandle_take_for_access(struct process *p, int32_t handle,
+                            enum kobj_access_op access, struct kobj **out_obj,
+                            uint32_t *out_rights) {
+    return khandle_get_common(p, handle, 0, access, true, out_obj, out_rights,
+                              true);
 }
 
 int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
@@ -1156,6 +1292,103 @@ int kport_poll_detach_vnode(struct kobj *port_obj, struct vnode *vn) {
     }
     mutex_unlock(&port->lock);
     return -ENOENT;
+}
+
+static int kobj_options_to_channel(uint32_t options, uint32_t *out_opts) {
+    if (!out_opts)
+        return -EINVAL;
+    if (options & ~(KOBJ_IO_NONBLOCK | KOBJ_IO_RENDEZVOUS))
+        return -EINVAL;
+    uint32_t kopts = 0;
+    if (options & KOBJ_IO_NONBLOCK)
+        kopts |= KCHANNEL_OPT_NONBLOCK;
+    if (options & KOBJ_IO_RENDEZVOUS)
+        kopts |= KCHANNEL_OPT_RENDEZVOUS;
+    *out_opts = kopts;
+    return 0;
+}
+
+static int kchannel_obj_read(struct kobj *obj, void *buf, size_t len,
+                             size_t *out_len, uint32_t options) {
+    if (!out_len)
+        return -EINVAL;
+    *out_len = 0;
+
+    uint32_t kopts = 0;
+    int rc = kobj_options_to_channel(options, &kopts);
+    if (rc < 0)
+        return rc;
+
+    size_t got_handles = 0;
+    bool handles_truncated = false;
+    struct khandle_transfer dropped[KCHANNEL_MAX_MSG_HANDLES] = {0};
+    rc = kchannel_recv(obj, buf, len, out_len, dropped, KCHANNEL_MAX_MSG_HANDLES,
+                       &got_handles, &handles_truncated, kopts);
+    if (rc < 0)
+        return rc;
+    (void)handles_truncated;
+
+    for (size_t i = 0; i < got_handles; i++) {
+        if (dropped[i].obj) {
+            khandle_transfer_drop(dropped[i].obj);
+            dropped[i].obj = NULL;
+        }
+    }
+    return 0;
+}
+
+static int kchannel_obj_write(struct kobj *obj, const void *buf, size_t len,
+                              size_t *out_len, uint32_t options) {
+    if (!out_len)
+        return -EINVAL;
+    *out_len = 0;
+
+    uint32_t kopts = 0;
+    int rc = kobj_options_to_channel(options, &kopts);
+    if (rc < 0)
+        return rc;
+
+    rc = kchannel_send(obj, buf, len, NULL, 0, kopts);
+    if (rc < 0)
+        return rc;
+    *out_len = len;
+    return 0;
+}
+
+static int kchannel_obj_signal(struct kobj *obj, uint32_t signal,
+                               uint32_t flags) {
+    struct kchannel *ch = kchannel_from_obj(obj);
+    if (!ch)
+        return -ENOTSUP;
+    if (flags != 0)
+        return -EINVAL;
+    if (signal == 0 || (signal & ~KPORT_BIND_ALL) != 0)
+        return -EINVAL;
+
+    mutex_lock(&ch->lock);
+    kchannel_emit_locked(ch, signal);
+    mutex_unlock(&ch->lock);
+    return 0;
+}
+
+static int kport_obj_read(struct kobj *obj, void *buf, size_t len,
+                          size_t *out_len, uint32_t options) {
+    if (!buf || !out_len)
+        return -EINVAL;
+    *out_len = 0;
+    if (len < sizeof(struct kairos_port_packet_user))
+        return -EINVAL;
+    if (options & ~KOBJ_IO_NONBLOCK)
+        return -EINVAL;
+
+    struct kairos_port_packet_user pkt = {0};
+    uint32_t wait_opts = (options & KOBJ_IO_NONBLOCK) ? KPORT_WAIT_NONBLOCK : 0;
+    int rc = kport_wait(obj, &pkt, UINT64_MAX, wait_opts);
+    if (rc < 0)
+        return rc;
+    memcpy(buf, &pkt, sizeof(pkt));
+    *out_len = sizeof(pkt);
+    return 0;
 }
 
 static int kchannel_obj_poll_revents(struct kobj *obj, uint32_t events,

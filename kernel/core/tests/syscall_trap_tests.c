@@ -3355,6 +3355,85 @@ out:
         user_map_end(&um);
 }
 
+static void test_kobj_ops_refcount_history(void) {
+    struct kobj *tx_obj = NULL;
+    struct kobj *rx_obj = NULL;
+    struct kobj *port_obj = NULL;
+
+    int rc = kchannel_create_pair(&tx_obj, &rx_obj);
+    test_check(rc == 0, "kobj_ops create pair");
+    if (rc < 0)
+        return;
+
+    char tx = 'Q';
+    size_t wrote = 0;
+    rc = kobj_write(tx_obj, &tx, sizeof(tx), &wrote, 0);
+    test_check(rc == 0 && wrote == sizeof(tx), "kobj_ops write channel");
+
+    uint32_t revents = 0;
+    rc = kobj_poll(rx_obj, POLLIN, &revents);
+    test_check(rc == 0 && (revents & POLLIN) != 0, "kobj_ops poll channel");
+
+    char rx = 0;
+    size_t read_len = 0;
+    rc = kobj_read(rx_obj, &rx, sizeof(rx), &read_len, 0);
+    test_check(rc == 0 && read_len == sizeof(rx) && rx == tx,
+               "kobj_ops read channel");
+
+    rc = kport_create(&port_obj);
+    test_check(rc == 0, "kobj_ops create port");
+    if (rc < 0)
+        goto out;
+
+    rc = kport_bind_channel(port_obj, rx_obj, 0x1234, KPORT_BIND_READABLE);
+    test_check(rc == 0, "kobj_ops bind port");
+    if (rc < 0)
+        goto out;
+
+    rc = kobj_signal(rx_obj, KPORT_BIND_READABLE, 0);
+    test_check(rc == 0, "kobj_ops signal channel");
+
+    struct kairos_port_packet_user pkt = {0};
+    size_t pkt_len = 0;
+    rc = kobj_read(port_obj, &pkt, sizeof(pkt), &pkt_len, KOBJ_IO_NONBLOCK);
+    test_check(rc == 0 && pkt_len == sizeof(pkt), "kobj_ops read port");
+    if (rc == 0) {
+        test_check(pkt.key == 0x1234, "kobj_ops packet key");
+        test_check((pkt.observed & KPORT_BIND_READABLE) != 0,
+                   "kobj_ops packet signal");
+    }
+
+    kobj_get(rx_obj);
+    kobj_put(rx_obj);
+
+    struct kobj_refcount_history_entry hist[KOBJ_REFCOUNT_HISTORY_DEPTH] = {0};
+    size_t hist_count =
+        kobj_refcount_history_snapshot(rx_obj, hist, KOBJ_REFCOUNT_HISTORY_DEPTH);
+    test_check(hist_count > 0, "kobj_refhist snapshot");
+    bool saw_init = false;
+    bool saw_get = false;
+    bool saw_put = false;
+    for (size_t i = 0; i < hist_count; i++) {
+        if (hist[i].event == KOBJ_REFCOUNT_INIT)
+            saw_init = true;
+        else if (hist[i].event == KOBJ_REFCOUNT_GET)
+            saw_get = true;
+        else if (hist[i].event == KOBJ_REFCOUNT_PUT)
+            saw_put = true;
+    }
+    test_check(saw_init, "kobj_refhist init");
+    test_check(saw_get, "kobj_refhist get");
+    test_check(saw_put, "kobj_refhist put");
+
+out:
+    if (port_obj)
+        kobj_put(port_obj);
+    if (rx_obj)
+        kobj_put(rx_obj);
+    if (tx_obj)
+        kobj_put(tx_obj);
+}
+
 int run_syscall_trap_tests(void) {
     tests_failed = 0;
     pr_info("Running syscall/trap tests...\n");
@@ -3384,6 +3463,7 @@ int run_syscall_trap_tests(void) {
     test_kairos_channel_port_syscalls();
     test_kairos_channel_port_stress_mpmc();
     test_kairos_file_handle_bridge();
+    test_kobj_ops_refcount_history();
     test_syscall_user_e2e();
 
     if (tests_failed == 0)

@@ -37,6 +37,9 @@ struct vnode;
 #define KCHANNEL_OPT_NONBLOCK   (1U << 0)
 #define KCHANNEL_OPT_RENDEZVOUS (1U << 1)
 
+#define KOBJ_IO_NONBLOCK   (1U << 0)
+#define KOBJ_IO_RENDEZVOUS (1U << 1)
+
 #define KPORT_BIND_READABLE    (1U << 0)
 #define KPORT_BIND_PEER_CLOSED (1U << 1)
 #define KPORT_BIND_ALL (KPORT_BIND_READABLE | KPORT_BIND_PEER_CLOSED)
@@ -47,24 +50,59 @@ struct vnode;
 #define KCHANNEL_MAX_MSG_HANDLES 8U
 #define KCHANNEL_MAX_QUEUE 64U
 #define KPORT_MAX_QUEUE 128U
+#define KOBJ_REFCOUNT_HISTORY_DEPTH 16U
 
 struct kobj;
 
+enum kobj_access_op {
+    KOBJ_ACCESS_READ = 1,
+    KOBJ_ACCESS_WRITE = 2,
+    KOBJ_ACCESS_POLL = 3,
+    KOBJ_ACCESS_SIGNAL = 4,
+    KOBJ_ACCESS_WAIT = 5,
+    KOBJ_ACCESS_MANAGE = 6,
+    KOBJ_ACCESS_DUPLICATE = 7,
+    KOBJ_ACCESS_TRANSFER = 8,
+};
+
+enum kobj_refcount_event {
+    KOBJ_REFCOUNT_INIT = 1,
+    KOBJ_REFCOUNT_GET = 2,
+    KOBJ_REFCOUNT_PUT = 3,
+    KOBJ_REFCOUNT_LAST_PUT = 4,
+};
+
+struct kobj_refcount_history_entry {
+    uint64_t ticks;
+    uint32_t seq;
+    int32_t pid;
+    uint32_t refcount;
+    uint16_t event;
+    uint16_t cpu;
+};
+
 struct kobj_ops {
     void (*release)(struct kobj *obj);
+    int (*read)(struct kobj *obj, void *buf, size_t len, size_t *out_len,
+                uint32_t options);
+    int (*write)(struct kobj *obj, const void *buf, size_t len, size_t *out_len,
+                 uint32_t options);
     int (*wait)(struct kobj *obj, void *out, uint64_t timeout_ns,
                 uint32_t options);
-    int (*poll_revents)(struct kobj *obj, uint32_t events,
-                        uint32_t *out_revents);
+    int (*poll)(struct kobj *obj, uint32_t events, uint32_t *out_revents);
+    int (*signal)(struct kobj *obj, uint32_t signal, uint32_t flags);
     int (*poll_attach_vnode)(struct kobj *obj, struct vnode *vn);
     int (*poll_detach_vnode)(struct kobj *obj, struct vnode *vn);
 };
 
 struct kobj {
     atomic_t refcount;
+    atomic_t refcount_hist_head;
     uint32_t type;
     const struct kobj_ops *ops;
     struct wait_queue waitq;
+    struct kobj_refcount_history_entry
+        refcount_hist[KOBJ_REFCOUNT_HISTORY_DEPTH];
 };
 
 struct khandle_entry {
@@ -99,12 +137,21 @@ struct khandle_transfer {
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops);
 void kobj_get(struct kobj *obj);
 void kobj_put(struct kobj *obj);
+int kobj_read(struct kobj *obj, void *buf, size_t len, size_t *out_len,
+              uint32_t options);
+int kobj_write(struct kobj *obj, const void *buf, size_t len, size_t *out_len,
+               uint32_t options);
 int kobj_wait(struct kobj *obj, void *out, uint64_t timeout_ns,
               uint32_t options);
+int kobj_poll(struct kobj *obj, uint32_t events, uint32_t *out_revents);
 int kobj_poll_revents(struct kobj *obj, uint32_t events,
                       uint32_t *out_revents);
+int kobj_signal(struct kobj *obj, uint32_t signal, uint32_t flags);
 int kobj_poll_attach_vnode(struct kobj *obj, struct vnode *vn);
 int kobj_poll_detach_vnode(struct kobj *obj, struct vnode *vn);
+size_t kobj_refcount_history_snapshot(struct kobj *obj,
+                                      struct kobj_refcount_history_entry *out,
+                                      size_t max_entries);
 
 struct handletable *handletable_alloc(void);
 struct handletable *handletable_copy(struct handletable *src);
@@ -114,8 +161,14 @@ void handletable_put(struct handletable *ht);
 int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights);
 int khandle_get(struct process *p, int32_t handle, uint32_t required_rights,
                 struct kobj **out_obj, uint32_t *out_rights);
+int khandle_get_for_access(struct process *p, int32_t handle,
+                           enum kobj_access_op access, struct kobj **out_obj,
+                           uint32_t *out_rights);
 int khandle_take(struct process *p, int32_t handle, uint32_t required_rights,
                  struct kobj **out_obj, uint32_t *out_rights);
+int khandle_take_for_access(struct process *p, int32_t handle,
+                            enum kobj_access_op access, struct kobj **out_obj,
+                            uint32_t *out_rights);
 int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
                     uint32_t rights);
 int khandle_close(struct process *p, int32_t handle);

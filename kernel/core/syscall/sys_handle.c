@@ -111,7 +111,7 @@ static int portfd_poll(struct file *file, uint32_t events) {
         return POLLNVAL;
 
     uint32_t revents = 0;
-    int rc = kobj_poll_revents(ctx->port_obj, events, &revents);
+    int rc = kobj_poll(ctx->port_obj, events, &revents);
     if (rc < 0)
         return POLLERR;
     return (int)revents;
@@ -130,10 +130,13 @@ static ssize_t portfd_fread(struct file *file, void *buf, size_t len) {
         return -EBADF;
 
     struct kairos_port_packet_user pkt = {0};
-    uint32_t opts = (file->flags & O_NONBLOCK) ? KPORT_WAIT_NONBLOCK : 0;
-    int rc = kobj_wait(ctx->port_obj, &pkt, UINT64_MAX, opts);
+    size_t got = 0;
+    uint32_t opts = (file->flags & O_NONBLOCK) ? KOBJ_IO_NONBLOCK : 0;
+    int rc = kobj_read(ctx->port_obj, &pkt, sizeof(pkt), &got, opts);
     if (rc < 0)
         return rc;
+    if (got != sizeof(pkt))
+        return -EIO;
 
     memcpy(buf, &pkt, sizeof(pkt));
     return (ssize_t)sizeof(pkt);
@@ -260,7 +263,7 @@ static int channelfd_poll(struct file *file, uint32_t events) {
         allowed_events |= POLLOUT;
 
     uint32_t revents = 0;
-    int rc = kobj_poll_revents(ctx->channel_obj, events, &revents);
+    int rc = kobj_poll(ctx->channel_obj, events, &revents);
     if (rc < 0)
         return POLLERR;
     return (int)(revents & allowed_events);
@@ -279,21 +282,10 @@ static ssize_t channelfd_fread(struct file *file, void *buf, size_t len) {
         return -EBADF;
 
     size_t got_bytes = 0;
-    size_t got_handles = 0;
-    bool handles_truncated = false;
-    struct khandle_transfer dropped[KCHANNEL_MAX_MSG_HANDLES] = {0};
-    uint32_t opts = (file->flags & O_NONBLOCK) ? KCHANNEL_OPT_NONBLOCK : 0;
-    int rc = kchannel_recv(ctx->channel_obj, buf, len, &got_bytes, dropped,
-                           KCHANNEL_MAX_MSG_HANDLES, &got_handles,
-                           &handles_truncated, opts);
+    uint32_t opts = (file->flags & O_NONBLOCK) ? KOBJ_IO_NONBLOCK : 0;
+    int rc = kobj_read(ctx->channel_obj, buf, len, &got_bytes, opts);
     if (rc < 0)
         return rc;
-    for (size_t i = 0; i < got_handles; i++) {
-        if (dropped[i].obj) {
-            khandle_transfer_drop(dropped[i].obj);
-            dropped[i].obj = NULL;
-        }
-    }
     return (ssize_t)got_bytes;
 }
 
@@ -309,11 +301,12 @@ static ssize_t channelfd_fwrite(struct file *file, const void *buf, size_t len) 
     if ((ctx->rights & KRIGHT_WRITE) == 0)
         return -EBADF;
 
-    uint32_t opts = (file->flags & O_NONBLOCK) ? KCHANNEL_OPT_NONBLOCK : 0;
-    int rc = kchannel_send(ctx->channel_obj, buf, len, NULL, 0, opts);
+    size_t wrote = 0;
+    uint32_t opts = (file->flags & O_NONBLOCK) ? KOBJ_IO_NONBLOCK : 0;
+    int rc = kobj_write(ctx->channel_obj, buf, len, &wrote, opts);
     if (rc < 0)
         return rc;
-    return (ssize_t)len;
+    return (ssize_t)wrote;
 }
 
 static int channelfd_to_kobj(struct file *file, uint32_t fd_rights,
@@ -560,8 +553,8 @@ int64_t sys_kairos_fd_from_handle(uint64_t handle, uint64_t out_fd_ptr,
 
     struct kobj *obj = NULL;
     uint32_t rights = 0;
-    int rc = khandle_get(p, syshandle_abi_i32(handle), KRIGHT_DUPLICATE, &obj,
-                         &rights);
+    int rc = khandle_get_for_access(p, syshandle_abi_i32(handle),
+                                    KOBJ_ACCESS_DUPLICATE, &obj, &rights);
     if (rc < 0)
         return rc;
 
@@ -736,8 +729,8 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     }
 
     struct kobj *channel_obj = NULL;
-    int rc = khandle_get(p, syshandle_abi_i32(handle), KRIGHT_WRITE, &channel_obj,
-                         NULL);
+    int rc = khandle_get_for_access(p, syshandle_abi_i32(handle),
+                                    KOBJ_ACCESS_WRITE, &channel_obj, NULL);
     if (rc < 0) {
         kfree(bytes);
         return rc;
@@ -745,8 +738,10 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
 
     size_t taken = 0;
     for (; taken < msg.num_handles; taken++) {
-        rc = khandle_take(p, user_handles[taken], KRIGHT_TRANSFER,
-                          &transfers[taken].obj, &transfers[taken].rights);
+        rc = khandle_take_for_access(p, user_handles[taken],
+                                     KOBJ_ACCESS_TRANSFER,
+                                     &transfers[taken].obj,
+                                     &transfers[taken].rights);
         if (rc < 0)
             break;
     }
@@ -820,8 +815,8 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
         installed[i] = -1;
 
     struct kobj *channel_obj = NULL;
-    int rc = khandle_get(p, syshandle_abi_i32(handle), KRIGHT_READ, &channel_obj,
-                         NULL);
+    int rc = khandle_get_for_access(p, syshandle_abi_i32(handle),
+                                    KOBJ_ACCESS_READ, &channel_obj, NULL);
     if (rc < 0) {
         kfree(bytes);
         return rc;
@@ -949,14 +944,14 @@ int64_t sys_kairos_port_bind(uint64_t port_handle, uint64_t channel_handle,
         return -EINVAL;
 
     struct kobj *port_obj = NULL;
-    int rc = khandle_get(p, syshandle_abi_i32(port_handle), KRIGHT_MANAGE,
-                         &port_obj, NULL);
+    int rc = khandle_get_for_access(p, syshandle_abi_i32(port_handle),
+                                    KOBJ_ACCESS_MANAGE, &port_obj, NULL);
     if (rc < 0)
         return rc;
 
     struct kobj *channel_obj = NULL;
-    rc = khandle_get(p, syshandle_abi_i32(channel_handle), KRIGHT_READ,
-                     &channel_obj, NULL);
+    rc = khandle_get_for_access(p, syshandle_abi_i32(channel_handle),
+                                KOBJ_ACCESS_SIGNAL, &channel_obj, NULL);
     if (rc < 0) {
         kobj_put(port_obj);
         return rc;
@@ -982,8 +977,8 @@ int64_t sys_kairos_port_wait(uint64_t port_handle, uint64_t packet_ptr,
         return -EINVAL;
 
     struct kobj *port_obj = NULL;
-    int rc = khandle_get(p, syshandle_abi_i32(port_handle), KRIGHT_WAIT,
-                         &port_obj, NULL);
+    int rc = khandle_get_for_access(p, syshandle_abi_i32(port_handle),
+                                    KOBJ_ACCESS_WAIT, &port_obj, NULL);
     if (rc < 0)
         return rc;
 
