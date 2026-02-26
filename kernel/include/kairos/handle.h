@@ -47,10 +47,14 @@ struct vnode;
 #define KPORT_WAIT_NONBLOCK (1U << 0)
 
 #define KCHANNEL_MAX_MSG_BYTES 1024U
+#define KCHANNEL_INLINE_MSG_BYTES 128U
 #define KCHANNEL_MAX_MSG_HANDLES 8U
 #define KCHANNEL_MAX_QUEUE 64U
 #define KPORT_MAX_QUEUE 128U
 #define KOBJ_REFCOUNT_HISTORY_DEPTH 16U
+#define KHANDLE_INVALID_CAP_ID 0ULL
+#define KHANDLE_CLOSE_F_REVOKE_DESCENDANTS (1U << 0)
+#define KOBJ_TRANSFER_HISTORY_DEPTH 32U
 
 struct kobj;
 
@@ -72,11 +76,30 @@ enum kobj_refcount_event {
     KOBJ_REFCOUNT_LAST_PUT = 4,
 };
 
+enum kobj_transfer_event {
+    KOBJ_TRANSFER_TAKE = 1,
+    KOBJ_TRANSFER_ENQUEUE = 2,
+    KOBJ_TRANSFER_DELIVER = 3,
+    KOBJ_TRANSFER_INSTALL = 4,
+    KOBJ_TRANSFER_RESTORE = 5,
+    KOBJ_TRANSFER_DROP = 6,
+};
+
 struct kobj_refcount_history_entry {
     uint64_t ticks;
     uint32_t seq;
     int32_t pid;
     uint32_t refcount;
+    uint16_t event;
+    uint16_t cpu;
+};
+
+struct kobj_transfer_history_entry {
+    uint64_t ticks;
+    uint32_t seq;
+    int32_t from_pid;
+    int32_t to_pid;
+    uint32_t rights;
     uint16_t event;
     uint16_t cpu;
 };
@@ -98,22 +121,29 @@ struct kobj_ops {
 struct kobj {
     atomic_t refcount;
     atomic_t refcount_hist_head;
+    atomic_t transfer_hist_head;
+    uint32_t id;
     uint32_t type;
     const struct kobj_ops *ops;
     struct wait_queue waitq;
     struct kobj_refcount_history_entry
         refcount_hist[KOBJ_REFCOUNT_HISTORY_DEPTH];
+    struct kobj_transfer_history_entry
+        transfer_hist[KOBJ_TRANSFER_HISTORY_DEPTH];
 };
 
 struct khandle_entry {
     struct kobj *obj;
     uint32_t rights;
+    uint64_t cap_id;
 };
 
 struct handletable {
     struct khandle_entry entries[CONFIG_MAX_HANDLES_PER_PROC];
     struct mutex lock;
     atomic_t refcount;
+    atomic_t seq;
+    uint64_t cache_epoch;
 };
 
 struct kairos_channel_msg_user {
@@ -132,11 +162,13 @@ struct kairos_port_packet_user {
 struct khandle_transfer {
     struct kobj *obj;
     uint32_t rights;
+    uint64_t cap_id;
 };
 
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops);
 void kobj_get(struct kobj *obj);
 void kobj_put(struct kobj *obj);
+uint32_t kobj_id(const struct kobj *obj);
 int kobj_read(struct kobj *obj, void *buf, size_t len, size_t *out_len,
               uint32_t options);
 int kobj_write(struct kobj *obj, const void *buf, size_t len, size_t *out_len,
@@ -152,6 +184,11 @@ int kobj_poll_detach_vnode(struct kobj *obj, struct vnode *vn);
 size_t kobj_refcount_history_snapshot(struct kobj *obj,
                                       struct kobj_refcount_history_entry *out,
                                       size_t max_entries);
+void kobj_transfer_record(struct kobj *obj, enum kobj_transfer_event event,
+                          int32_t from_pid, int32_t to_pid, uint32_t rights);
+size_t kobj_transfer_history_snapshot(struct kobj *obj,
+                                      struct kobj_transfer_history_entry *out,
+                                      size_t max_entries);
 
 struct handletable *handletable_alloc(void);
 struct handletable *handletable_copy(struct handletable *src);
@@ -166,15 +203,34 @@ int khandle_get_for_access(struct process *p, int32_t handle,
                            uint32_t *out_rights);
 int khandle_take(struct process *p, int32_t handle, uint32_t required_rights,
                  struct kobj **out_obj, uint32_t *out_rights);
+int khandle_take_with_cap(struct process *p, int32_t handle,
+                          uint32_t required_rights, struct kobj **out_obj,
+                          uint32_t *out_rights, uint64_t *out_cap_id);
 int khandle_take_for_access(struct process *p, int32_t handle,
                             enum kobj_access_op access, struct kobj **out_obj,
                             uint32_t *out_rights);
+int khandle_take_for_access_with_cap(struct process *p, int32_t handle,
+                                     enum kobj_access_op access,
+                                     struct kobj **out_obj,
+                                     uint32_t *out_rights,
+                                     uint64_t *out_cap_id);
 int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
                     uint32_t rights);
+int khandle_restore_cap(struct process *p, int32_t handle, struct kobj *obj,
+                        uint32_t rights, uint64_t cap_id);
 int khandle_close(struct process *p, int32_t handle);
 int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
                       int32_t *out_new_handle);
+int khandle_revoke_descendants(struct process *p, int32_t handle);
+void khandle_transfer_drop_cap(struct kobj *obj, uint32_t rights,
+                               uint64_t cap_id);
 void khandle_transfer_drop(struct kobj *obj);
+void khandle_transfer_drop_with_rights(struct kobj *obj, uint32_t rights);
+int khandle_install_transferred_cap(struct process *p, struct kobj *obj,
+                                    uint32_t rights, uint64_t cap_id,
+                                    int32_t *out_handle);
+int khandle_install_transferred(struct process *p, struct kobj *obj,
+                                uint32_t rights, int32_t *out_handle);
 
 int kchannel_create_pair(struct kobj **out0, struct kobj **out1);
 int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,

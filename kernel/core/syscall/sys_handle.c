@@ -64,11 +64,13 @@ static void syshandle_restore_taken(struct process *p, const int32_t *user_handl
     for (size_t i = 0; i < count; i++) {
         if (!transfers[i].obj)
             continue;
-        int rc =
-            khandle_restore(p, user_handles[i], transfers[i].obj, transfers[i].rights);
+        int rc = khandle_restore_cap(p, user_handles[i], transfers[i].obj,
+                                     transfers[i].rights, transfers[i].cap_id);
         if (rc < 0)
-            khandle_transfer_drop(transfers[i].obj);
+            khandle_transfer_drop_cap(transfers[i].obj, transfers[i].rights,
+                                      transfers[i].cap_id);
         transfers[i].obj = NULL;
+        transfers[i].cap_id = KHANDLE_INVALID_CAP_ID;
     }
 }
 
@@ -411,7 +413,6 @@ static int channelfd_create_file(struct kobj *obj, uint32_t rights,
 
 int64_t sys_kairos_handle_close(uint64_t handle, uint64_t a1, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a1;
     (void)a2;
     (void)a3;
     (void)a4;
@@ -420,7 +421,16 @@ int64_t sys_kairos_handle_close(uint64_t handle, uint64_t a1, uint64_t a2,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    return (int64_t)khandle_close(p, syshandle_abi_i32(handle));
+    uint32_t flags = (uint32_t)a1;
+    if (flags & ~KHANDLE_CLOSE_F_REVOKE_DESCENDANTS)
+        return -EINVAL;
+    int32_t h = syshandle_abi_i32(handle);
+    if (flags & KHANDLE_CLOSE_F_REVOKE_DESCENDANTS) {
+        int rc = khandle_revoke_descendants(p, h);
+        if (rc < 0)
+            return rc;
+    }
+    return (int64_t)khandle_close(p, h);
 }
 
 int64_t sys_kairos_handle_duplicate(uint64_t handle, uint64_t rights_mask,
@@ -707,14 +717,22 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     if (msg.num_handles > 0 && msg.handles == 0)
         return -EFAULT;
 
+    uint8_t inline_bytes[KCHANNEL_INLINE_MSG_BYTES] = {0};
     void *bytes = NULL;
+    bool bytes_heap = false;
     if (msg.num_bytes > 0) {
-        bytes = kmalloc(msg.num_bytes);
-        if (!bytes)
-            return -ENOMEM;
+        if (msg.num_bytes <= sizeof(inline_bytes)) {
+            bytes = inline_bytes;
+        } else {
+            bytes = kmalloc(msg.num_bytes);
+            if (!bytes)
+                return -ENOMEM;
+            bytes_heap = true;
+        }
         if (copy_from_user(bytes, (const void *)(uintptr_t)msg.bytes,
                            msg.num_bytes) < 0) {
-            kfree(bytes);
+            if (bytes_heap)
+                kfree(bytes);
             return -EFAULT;
         }
     }
@@ -725,7 +743,8 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
         size_t bytes_len = (size_t)msg.num_handles * sizeof(int32_t);
         if (copy_from_user(user_handles, (const void *)(uintptr_t)msg.handles,
                            bytes_len) < 0) {
-            kfree(bytes);
+            if (bytes_heap)
+                kfree(bytes);
             return -EFAULT;
         }
     }
@@ -734,23 +753,25 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     int rc = khandle_get_for_access(p, syshandle_abi_i32(handle),
                                     KOBJ_ACCESS_WRITE, &channel_obj, NULL);
     if (rc < 0) {
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return rc;
     }
 
     size_t taken = 0;
     for (; taken < msg.num_handles; taken++) {
-        rc = khandle_take_for_access(p, user_handles[taken],
-                                     KOBJ_ACCESS_TRANSFER,
-                                     &transfers[taken].obj,
-                                     &transfers[taken].rights);
+        rc = khandle_take_for_access_with_cap(
+            p, user_handles[taken], KOBJ_ACCESS_TRANSFER,
+            &transfers[taken].obj, &transfers[taken].rights,
+            &transfers[taken].cap_id);
         if (rc < 0)
             break;
     }
     if (rc < 0) {
         syshandle_restore_taken(p, user_handles, transfers, taken);
         kobj_put(channel_obj);
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return rc;
     }
 
@@ -759,7 +780,8 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     if (rc < 0) {
         syshandle_restore_taken(p, user_handles, transfers, msg.num_handles);
         kobj_put(channel_obj);
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return rc;
     }
 
@@ -771,7 +793,8 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     }
 
     kobj_put(channel_obj);
-    kfree(bytes);
+    if (bytes_heap)
+        kfree(bytes);
     return 0;
 }
 
@@ -804,11 +827,18 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
     if (msg.num_handles > 0 && msg.handles == 0)
         return -EFAULT;
 
+    uint8_t inline_bytes[KCHANNEL_INLINE_MSG_BYTES] = {0};
     void *bytes = NULL;
+    bool bytes_heap = false;
     if (msg.num_bytes > 0) {
-        bytes = kmalloc(msg.num_bytes);
-        if (!bytes)
-            return -ENOMEM;
+        if (msg.num_bytes <= sizeof(inline_bytes)) {
+            bytes = inline_bytes;
+        } else {
+            bytes = kmalloc(msg.num_bytes);
+            if (!bytes)
+                return -ENOMEM;
+            bytes_heap = true;
+        }
     }
 
     struct khandle_transfer transfers[KCHANNEL_MAX_MSG_HANDLES] = {0};
@@ -820,7 +850,8 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
     int rc = khandle_get_for_access(p, syshandle_abi_i32(handle),
                                     KOBJ_ACCESS_READ, &channel_obj, NULL);
     if (rc < 0) {
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return rc;
     }
 
@@ -836,37 +867,48 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
         if (copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0)
             rc = -EFAULT;
         kobj_put(channel_obj);
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return rc;
     }
     if (rc < 0) {
         kobj_put(channel_obj);
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return rc;
     }
 
     for (size_t i = 0; i < got_handles; i++) {
-        rc = khandle_alloc(p, transfers[i].obj, transfers[i].rights);
+        int32_t installed_handle = -1;
+        rc = khandle_install_transferred_cap(
+            p, transfers[i].obj, transfers[i].rights, transfers[i].cap_id,
+            &installed_handle);
         if (rc < 0) {
             syshandle_close_installed(p, installed, i);
             for (size_t j = i; j < got_handles; j++) {
                 if (transfers[j].obj)
-                    khandle_transfer_drop(transfers[j].obj);
+                    khandle_transfer_drop_cap(transfers[j].obj,
+                                              transfers[j].rights,
+                                              transfers[j].cap_id);
             }
             kobj_put(channel_obj);
-            kfree(bytes);
+            if (bytes_heap)
+                kfree(bytes);
             return rc;
         }
-        installed[i] = rc;
-        khandle_transfer_drop(transfers[i].obj);
+        installed[i] = installed_handle;
+        khandle_transfer_drop_cap(transfers[i].obj, transfers[i].rights,
+                                  transfers[i].cap_id);
         transfers[i].obj = NULL;
+        transfers[i].cap_id = KHANDLE_INVALID_CAP_ID;
     }
 
     if (got_bytes > 0 &&
         copy_to_user((void *)(uintptr_t)msg.bytes, bytes, got_bytes) < 0) {
         syshandle_close_installed(p, installed, got_handles);
         kobj_put(channel_obj);
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return -EFAULT;
     }
 
@@ -876,7 +918,8 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
             0) {
             syshandle_close_installed(p, installed, got_handles);
             kobj_put(channel_obj);
-            kfree(bytes);
+            if (bytes_heap)
+                kfree(bytes);
             return -EFAULT;
         }
     }
@@ -886,12 +929,14 @@ int64_t sys_kairos_channel_recv(uint64_t handle, uint64_t msg_ptr,
     if (copy_to_user((void *)msg_ptr, &msg, sizeof(msg)) < 0) {
         syshandle_close_installed(p, installed, got_handles);
         kobj_put(channel_obj);
-        kfree(bytes);
+        if (bytes_heap)
+            kfree(bytes);
         return -EFAULT;
     }
 
     kobj_put(channel_obj);
-    kfree(bytes);
+    if (bytes_heap)
+        kfree(bytes);
     return 0;
 }
 

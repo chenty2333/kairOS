@@ -8,8 +8,10 @@
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
+#include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/string.h>
+#include <kairos/sysfs.h>
 #include <kairos/vfs.h>
 
 struct kchannel;
@@ -25,9 +27,11 @@ struct kchannel_msg {
     struct list_head node;
     size_t num_bytes;
     uint8_t *bytes;
+    bool inline_bytes_used;
     size_t num_handles;
     bool owns_caps;
     struct khandle_transfer handles[KCHANNEL_MAX_MSG_HANDLES];
+    uint8_t inline_bytes[KCHANNEL_INLINE_MSG_BYTES];
 };
 
 struct kchannel_rendezvous {
@@ -89,6 +93,20 @@ struct kfile {
     struct file *file;
 };
 
+struct ipc_registry_entry {
+    struct list_head node;
+    struct kobj *obj;
+};
+
+static LIST_HEAD(ipc_channel_registry);
+static LIST_HEAD(ipc_port_registry);
+static struct mutex ipc_registry_lock;
+static bool ipc_registry_lock_ready;
+static spinlock_t ipc_registry_init_lock = SPINLOCK_INIT;
+static struct sysfs_node *ipc_sysfs_root;
+static bool ipc_sysfs_ready;
+static atomic_t kobj_id_next = ATOMIC_INIT(0);
+
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
 static void kfile_release_obj(struct kobj *obj);
@@ -112,6 +130,12 @@ static int kport_obj_poll_attach(struct kobj *obj, struct vnode *vn);
 static int kport_obj_poll_detach(struct kobj *obj, struct vnode *vn);
 static bool kchannel_try_rendezvous_locked(struct kchannel *peer,
                                            struct kchannel_msg *msg);
+static bool kchannel_try_rendezvous_raw_locked(
+    struct kchannel *peer, const void *bytes, size_t num_bytes,
+    const struct khandle_transfer *handles, size_t num_handles);
+static void ipc_registry_register_obj(struct kobj *obj);
+static void ipc_registry_unregister_obj(struct kobj *obj);
+static void ipc_sysfs_ensure_ready(void);
 
 static const struct kobj_ops kchannel_ops = {
     .release = kchannel_release_obj,
@@ -156,6 +180,348 @@ static inline struct kfile *kfile_from_obj(struct kobj *obj) {
     if (!obj || obj->type != KOBJ_TYPE_FILE)
         return NULL;
     return (struct kfile *)obj;
+}
+
+static const char *kobj_type_name(uint32_t type) {
+    switch (type) {
+    case KOBJ_TYPE_CHANNEL:
+        return "channel";
+    case KOBJ_TYPE_PORT:
+        return "port";
+    case KOBJ_TYPE_FILE:
+        return "file";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *kobj_transfer_event_name(uint16_t event) {
+    switch (event) {
+    case KOBJ_TRANSFER_TAKE:
+        return "take";
+    case KOBJ_TRANSFER_ENQUEUE:
+        return "enqueue";
+    case KOBJ_TRANSFER_DELIVER:
+        return "deliver";
+    case KOBJ_TRANSFER_INSTALL:
+        return "install";
+    case KOBJ_TRANSFER_RESTORE:
+        return "restore";
+    case KOBJ_TRANSFER_DROP:
+        return "drop";
+    default:
+        return "unknown";
+    }
+}
+
+static void ipc_registry_ensure_lock(void) {
+    if (__atomic_load_n(&ipc_registry_lock_ready, __ATOMIC_ACQUIRE))
+        return;
+
+    bool irq_flags;
+    spin_lock_irqsave(&ipc_registry_init_lock, &irq_flags);
+    if (!ipc_registry_lock_ready) {
+        mutex_init(&ipc_registry_lock, "ipc_registry");
+        __atomic_store_n(&ipc_registry_lock_ready, true, __ATOMIC_RELEASE);
+    }
+    spin_unlock_irqrestore(&ipc_registry_init_lock, irq_flags);
+}
+
+static struct list_head *ipc_registry_list_for_type(uint32_t type) {
+    switch (type) {
+    case KOBJ_TYPE_CHANNEL:
+        return &ipc_channel_registry;
+    case KOBJ_TYPE_PORT:
+        return &ipc_port_registry;
+    default:
+        return NULL;
+    }
+}
+
+static ssize_t ipc_sysfs_show_objects(void *priv __attribute__((unused)),
+                                      char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz, "id type refcount\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_channel_registry, node) {
+        struct kobj *obj = ent->obj;
+        if (!obj)
+            continue;
+        n = snprintf(buf + len, bufsz - len, "%u %s %u\n", obj->id,
+                     kobj_type_name(obj->type), atomic_read(&obj->refcount));
+        if (n < 0 || (size_t)n >= bufsz - len) {
+            len = bufsz;
+            break;
+        }
+        len += (size_t)n;
+    }
+    if (len < bufsz) {
+        list_for_each_entry(ent, &ipc_port_registry, node) {
+            struct kobj *obj = ent->obj;
+            if (!obj)
+                continue;
+            n = snprintf(buf + len, bufsz - len, "%u %s %u\n", obj->id,
+                         kobj_type_name(obj->type), atomic_read(&obj->refcount));
+            if (n < 0 || (size_t)n >= bufsz - len) {
+                len = bufsz;
+                break;
+            }
+            len += (size_t)n;
+        }
+    }
+
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_channels(void *priv __attribute__((unused)),
+                                       char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz,
+                     "id refcount handle_refs rxq_len peer_closed endpoint_closed\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_channel_registry, node) {
+        struct kobj *obj = ent->obj;
+        struct kchannel *ch = kchannel_from_obj(obj);
+        if (!obj || !ch)
+            continue;
+
+        size_t rxq_len = 0;
+        bool peer_closed = false;
+        bool endpoint_closed = false;
+        mutex_lock(&ch->lock);
+        rxq_len = ch->rxq_len;
+        peer_closed = ch->peer_closed;
+        endpoint_closed = ch->endpoint_closed;
+        mutex_unlock(&ch->lock);
+
+        n = snprintf(buf + len, bufsz - len, "%u %u %u %zu %u %u\n", obj->id,
+                     atomic_read(&obj->refcount), atomic_read(&ch->handle_refs),
+                     rxq_len, peer_closed ? 1U : 0U, endpoint_closed ? 1U : 0U);
+        if (n < 0 || (size_t)n >= bufsz - len) {
+            len = bufsz;
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_ports(void *priv __attribute__((unused)), char *buf,
+                                    size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz, "id refcount queue_len\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_port_registry, node) {
+        struct kobj *obj = ent->obj;
+        struct kport *port = kport_from_obj(obj);
+        if (!obj || !port)
+            continue;
+
+        size_t queue_len = 0;
+        mutex_lock(&port->lock);
+        queue_len = port->queue_len;
+        mutex_unlock(&port->lock);
+
+        n = snprintf(buf + len, bufsz - len, "%u %u %zu\n", obj->id,
+                     atomic_read(&obj->refcount), queue_len);
+        if (n < 0 || (size_t)n >= bufsz - len) {
+            len = bufsz;
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_transfers(void *priv __attribute__((unused)),
+                                        char *buf, size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    size_t len = 0;
+    int n = snprintf(buf, bufsz,
+                     "obj_id seq event from_pid to_pid rights cpu ticks\n");
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)(bufsz - 1);
+    len = (size_t)n;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+
+    struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_channel_registry, node) {
+        struct kobj *obj = ent->obj;
+        if (!obj)
+            continue;
+        size_t count =
+            kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+        for (size_t i = 0; i < count; i++) {
+            if (hist[i].seq == 0)
+                continue;
+            n = snprintf(buf + len, bufsz - len, "%u %u %s %d %d 0x%x %u %llu\n",
+                         obj->id, hist[i].seq,
+                         kobj_transfer_event_name(hist[i].event),
+                         hist[i].from_pid, hist[i].to_pid, hist[i].rights,
+                         hist[i].cpu, (unsigned long long)hist[i].ticks);
+            if (n < 0 || (size_t)n >= bufsz - len) {
+                len = bufsz;
+                goto out;
+            }
+            len += (size_t)n;
+        }
+    }
+
+    list_for_each_entry(ent, &ipc_port_registry, node) {
+        struct kobj *obj = ent->obj;
+        if (!obj)
+            continue;
+        size_t count =
+            kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+        for (size_t i = 0; i < count; i++) {
+            if (hist[i].seq == 0)
+                continue;
+            n = snprintf(buf + len, bufsz - len, "%u %u %s %d %d 0x%x %u %llu\n",
+                         obj->id, hist[i].seq,
+                         kobj_transfer_event_name(hist[i].event),
+                         hist[i].from_pid, hist[i].to_pid, hist[i].rights,
+                         hist[i].cpu, (unsigned long long)hist[i].ticks);
+            if (n < 0 || (size_t)n >= bufsz - len) {
+                len = bufsz;
+                goto out;
+            }
+            len += (size_t)n;
+        }
+    }
+
+out:
+    mutex_unlock(&ipc_registry_lock);
+    return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static const struct sysfs_attribute ipc_sysfs_attrs[] = {
+    {.name = "objects", .mode = 0444, .show = ipc_sysfs_show_objects},
+    {.name = "channels", .mode = 0444, .show = ipc_sysfs_show_channels},
+    {.name = "ports", .mode = 0444, .show = ipc_sysfs_show_ports},
+    {.name = "transfers", .mode = 0444, .show = ipc_sysfs_show_transfers},
+};
+
+static void ipc_sysfs_ensure_ready(void) {
+    ipc_registry_ensure_lock();
+    if (__atomic_load_n(&ipc_sysfs_ready, __ATOMIC_ACQUIRE))
+        return;
+    mutex_lock(&ipc_registry_lock);
+    if (ipc_sysfs_ready) {
+        mutex_unlock(&ipc_registry_lock);
+        return;
+    }
+
+    struct sysfs_node *root = sysfs_root();
+    if (!root) {
+        mutex_unlock(&ipc_registry_lock);
+        return;
+    }
+
+    ipc_sysfs_root = sysfs_mkdir(root, "ipc");
+    if (!ipc_sysfs_root) {
+        mutex_unlock(&ipc_registry_lock);
+        return;
+    }
+
+    if (sysfs_create_files(ipc_sysfs_root, ipc_sysfs_attrs,
+                           ARRAY_SIZE(ipc_sysfs_attrs)) < 0) {
+        pr_warn("ipc: failed to create /sys/ipc attributes\n");
+        mutex_unlock(&ipc_registry_lock);
+        return;
+    }
+
+    __atomic_store_n(&ipc_sysfs_ready, true, __ATOMIC_RELEASE);
+    mutex_unlock(&ipc_registry_lock);
+}
+
+static void ipc_registry_register_obj(struct kobj *obj) {
+    if (!obj)
+        return;
+    struct list_head *list = ipc_registry_list_for_type(obj->type);
+    if (!list)
+        return;
+
+    ipc_registry_ensure_lock();
+    struct ipc_registry_entry *ent = kzalloc(sizeof(*ent));
+    if (!ent)
+        return;
+    ent->obj = obj;
+    INIT_LIST_HEAD(&ent->node);
+
+    mutex_lock(&ipc_registry_lock);
+    list_add_tail(&ent->node, list);
+    mutex_unlock(&ipc_registry_lock);
+
+    ipc_sysfs_ensure_ready();
+}
+
+static void ipc_registry_unregister_obj(struct kobj *obj) {
+    if (!obj)
+        return;
+    struct list_head *list = ipc_registry_list_for_type(obj->type);
+    if (!list)
+        return;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    struct ipc_registry_entry *ent, *tmp;
+    list_for_each_entry_safe(ent, tmp, list, node) {
+        if (ent->obj != obj)
+            continue;
+        list_del(&ent->node);
+        mutex_unlock(&ipc_registry_lock);
+        kfree(ent);
+        return;
+    }
+    mutex_unlock(&ipc_registry_lock);
 }
 
 static void kchannel_emit_locked(struct kchannel *ch, uint32_t signal);
@@ -257,13 +623,17 @@ static void kchannel_msg_free(struct kchannel_msg *msg) {
         return;
     for (size_t i = 0; i < msg->num_handles; i++) {
         if (msg->handles[i].obj) {
-            if (msg->owns_caps)
-                kobj_handle_ref_dec(msg->handles[i].obj);
-            kobj_put(msg->handles[i].obj);
+            if (msg->owns_caps) {
+                khandle_transfer_drop_cap(msg->handles[i].obj,
+                                          msg->handles[i].rights,
+                                          msg->handles[i].cap_id);
+            } else {
+                kobj_put(msg->handles[i].obj);
+            }
             msg->handles[i].obj = NULL;
         }
     }
-    if (msg->bytes)
+    if (msg->bytes && !msg->inline_bytes_used)
         kfree(msg->bytes);
     kfree(msg);
 }
@@ -289,16 +659,42 @@ static uint32_t kobj_refcount_record(struct kobj *obj,
     return seq;
 }
 
+static uint32_t kobj_transfer_record_internal(struct kobj *obj,
+                                              enum kobj_transfer_event event,
+                                              int32_t from_pid, int32_t to_pid,
+                                              uint32_t rights) {
+    if (!obj)
+        return 0;
+    uint32_t seq = atomic_add_return(&obj->transfer_hist_head, 1);
+    uint32_t idx = (seq - 1) % KOBJ_TRANSFER_HISTORY_DEPTH;
+    struct kobj_transfer_history_entry *ent = &obj->transfer_hist[idx];
+    ent->ticks = arch_timer_get_ticks();
+    ent->from_pid = from_pid;
+    ent->to_pid = to_pid;
+    ent->rights = rights;
+    ent->event = (uint16_t)event;
+    int cpu = arch_cpu_id();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    ent->cpu = (uint16_t)cpu;
+    __atomic_store_n(&ent->seq, seq, __ATOMIC_RELEASE);
+    return seq;
+}
+
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops) {
     if (!obj)
         return;
     atomic_init(&obj->refcount, 1);
     atomic_init(&obj->refcount_hist_head, 0);
+    atomic_init(&obj->transfer_hist_head, 0);
     memset(obj->refcount_hist, 0, sizeof(obj->refcount_hist));
+    memset(obj->transfer_hist, 0, sizeof(obj->transfer_hist));
+    obj->id = atomic_inc_return(&kobj_id_next);
     obj->type = type;
     obj->ops = ops;
     wait_queue_init(&obj->waitq);
     kobj_refcount_record(obj, KOBJ_REFCOUNT_INIT, 1);
+    ipc_registry_register_obj(obj);
 }
 
 void kobj_get(struct kobj *obj) {
@@ -318,6 +714,12 @@ void kobj_put(struct kobj *obj) {
         kobj_refcount_record(obj, KOBJ_REFCOUNT_PUT, refcount);
     if (refcount == 0 && obj->ops && obj->ops->release)
         obj->ops->release(obj);
+}
+
+uint32_t kobj_id(const struct kobj *obj) {
+    if (!obj)
+        return 0;
+    return obj->id;
 }
 
 int kobj_read(struct kobj *obj, void *buf, size_t len, size_t *out_len,
@@ -421,80 +823,257 @@ size_t kobj_refcount_history_snapshot(struct kobj *obj,
     return available;
 }
 
-struct handletable *handletable_alloc(void) {
-    struct handletable *ht = kzalloc(sizeof(*ht));
-    if (!ht)
-        return NULL;
-    mutex_init(&ht->lock, "handletable");
-    atomic_init(&ht->refcount, 1);
-    return ht;
+void kobj_transfer_record(struct kobj *obj, enum kobj_transfer_event event,
+                          int32_t from_pid, int32_t to_pid, uint32_t rights) {
+    if (!obj)
+        return;
+    kobj_transfer_record_internal(obj, event, from_pid, to_pid, rights);
 }
 
-struct handletable *handletable_copy(struct handletable *src) {
-    if (!src)
-        return handletable_alloc();
+size_t kobj_transfer_history_snapshot(struct kobj *obj,
+                                      struct kobj_transfer_history_entry *out,
+                                      size_t max_entries) {
+    if (!obj || !out || max_entries == 0)
+        return 0;
 
-    struct handletable *dst = handletable_alloc();
-    if (!dst)
-        return NULL;
+    uint32_t head = atomic_read(&obj->transfer_hist_head);
+    size_t available = head < KOBJ_TRANSFER_HISTORY_DEPTH ? (size_t)head
+                                                          : KOBJ_TRANSFER_HISTORY_DEPTH;
+    if (available > max_entries)
+        available = max_entries;
+    if (available == 0)
+        return 0;
 
-    mutex_lock(&src->lock);
-    for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
-        struct kobj *obj = src->entries[i].obj;
-        if (!obj)
-            continue;
-        kobj_get(obj);
-        kobj_handle_ref_inc(obj);
-        dst->entries[i].obj = obj;
-        dst->entries[i].rights = src->entries[i].rights;
+    uint32_t start = (head >= available) ? (head - (uint32_t)available) : 0;
+    for (size_t i = 0; i < available; i++) {
+        uint32_t pos = (start + (uint32_t)i) % KOBJ_TRANSFER_HISTORY_DEPTH;
+        const struct kobj_transfer_history_entry *src = &obj->transfer_hist[pos];
+        while (1) {
+            uint32_t seq0 = __atomic_load_n(&src->seq, __ATOMIC_ACQUIRE);
+            if (seq0 == 0) {
+                memset(&out[i], 0, sizeof(out[i]));
+                break;
+            }
+            out[i] = *src;
+            uint32_t seq1 = __atomic_load_n(&src->seq, __ATOMIC_ACQUIRE);
+            if (seq0 == seq1 && seq0 == out[i].seq)
+                break;
+        }
     }
-    mutex_unlock(&src->lock);
-
-    return dst;
+    return available;
 }
 
-void handletable_get(struct handletable *ht) {
-    if (!ht)
-        return;
-    atomic_inc(&ht->refcount);
+#define KHANDLE_CACHE_SLOTS 16U
+_Static_assert((KHANDLE_CACHE_SLOTS & (KHANDLE_CACHE_SLOTS - 1U)) == 0,
+               "KHANDLE_CACHE_SLOTS must be power-of-two");
+
+struct kcap_node {
+    struct list_head all_node;
+    struct list_head sibling_node;
+    struct list_head children;
+    struct kcap_node *parent;
+    uint64_t id;
+    struct handletable *owner_ht;
+    int32_t owner_handle;
+    bool live;
+};
+
+struct khandle_lookup_cache_entry {
+    struct process *proc;
+    struct handletable *ht;
+    uint64_t cache_epoch;
+    int32_t handle;
+    uint32_t seq;
+    enum kobj_access_op access;
+    uint32_t rights;
+    struct kobj *obj;
+};
+
+struct khandle_lookup_cache_cpu {
+    struct khandle_lookup_cache_entry slots[KHANDLE_CACHE_SLOTS];
+};
+
+static LIST_HEAD(kcap_nodes);
+static spinlock_t kcap_lock = SPINLOCK_INIT;
+static uint64_t kcap_next_id = 1;
+static uint64_t khandle_cache_epoch_next = 1;
+static struct khandle_lookup_cache_cpu
+    khandle_lookup_cache[CONFIG_MAX_CPUS];
+
+static uint64_t kcap_alloc_id(void) {
+    return __atomic_fetch_add(&kcap_next_id, 1, __ATOMIC_RELAXED);
 }
 
-void handletable_put(struct handletable *ht) {
-    if (!ht)
-        return;
-    if (atomic_dec_return(&ht->refcount) != 0)
-        return;
+static uint64_t khandle_alloc_cache_epoch(void) {
+    return __atomic_fetch_add(&khandle_cache_epoch_next, 1,
+                              __ATOMIC_RELAXED);
+}
 
-    for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
-        struct kobj *obj = ht->entries[i].obj;
-        if (!obj)
-            continue;
-        ht->entries[i].obj = NULL;
-        ht->entries[i].rights = 0;
-        kobj_handle_ref_dec(obj);
-        kobj_put(obj);
+static struct kcap_node *kcap_find_locked(uint64_t cap_id) {
+    struct list_head *pos = NULL;
+    list_for_each(pos, &kcap_nodes) {
+        struct kcap_node *node = list_entry(pos, struct kcap_node, all_node);
+        if (node->id == cap_id)
+            return node;
     }
-    kfree(ht);
+    return NULL;
 }
 
-int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights) {
-    struct handletable *ht = proc_handletable(p);
-    if (!ht || !obj || rights == 0)
+static void kcap_free_nodes(struct list_head *free_nodes) {
+    struct list_head *pos = NULL;
+    struct list_head *tmp = NULL;
+    list_for_each_safe(pos, tmp, free_nodes) {
+        struct kcap_node *node = list_entry(pos, struct kcap_node, all_node);
+        list_del(&node->all_node);
+        kfree(node);
+    }
+}
+
+static void kcap_prune_locked(struct kcap_node *node,
+                              struct list_head *free_nodes) {
+    while (node && !node->live && list_empty(&node->children)) {
+        struct kcap_node *parent = node->parent;
+        if (parent)
+            list_del(&node->sibling_node);
+        list_del(&node->all_node);
+        list_add(&node->all_node, free_nodes);
+        node = parent;
+    }
+}
+
+static uint64_t kcap_create(uint64_t parent_cap_id, struct handletable *owner_ht,
+                            int32_t owner_handle) {
+    struct kcap_node *node = kzalloc(sizeof(*node));
+    if (!node)
+        return KHANDLE_INVALID_CAP_ID;
+
+    INIT_LIST_HEAD(&node->all_node);
+    INIT_LIST_HEAD(&node->sibling_node);
+    INIT_LIST_HEAD(&node->children);
+    node->owner_ht = owner_ht;
+    node->owner_handle = owner_handle;
+    node->live = true;
+
+    spin_lock(&kcap_lock);
+    if (parent_cap_id != KHANDLE_INVALID_CAP_ID) {
+        struct kcap_node *parent = kcap_find_locked(parent_cap_id);
+        if (!parent) {
+            spin_unlock(&kcap_lock);
+            kfree(node);
+            return KHANDLE_INVALID_CAP_ID;
+        }
+        node->parent = parent;
+        list_add_tail(&node->sibling_node, &parent->children);
+    }
+    node->id = kcap_alloc_id();
+    list_add_tail(&node->all_node, &kcap_nodes);
+    spin_unlock(&kcap_lock);
+    return node->id;
+}
+
+static int kcap_bind_existing(uint64_t cap_id, struct handletable *owner_ht,
+                              int32_t owner_handle) {
+    if (cap_id == KHANDLE_INVALID_CAP_ID)
         return -EINVAL;
 
-    mutex_lock(&ht->lock);
-    for (int h = 0; h < CONFIG_MAX_HANDLES_PER_PROC; h++) {
-        if (ht->entries[h].obj)
-            continue;
-        kobj_get(obj);
-        kobj_handle_ref_inc(obj);
-        ht->entries[h].obj = obj;
-        ht->entries[h].rights = rights;
-        mutex_unlock(&ht->lock);
-        return h;
+    spin_lock(&kcap_lock);
+    struct kcap_node *node = kcap_find_locked(cap_id);
+    if (!node) {
+        spin_unlock(&kcap_lock);
+        return -ENOENT;
     }
-    mutex_unlock(&ht->lock);
-    return -EMFILE;
+    if (node->live) {
+        spin_unlock(&kcap_lock);
+        return -EBUSY;
+    }
+    node->owner_ht = owner_ht;
+    node->owner_handle = owner_handle;
+    node->live = true;
+    spin_unlock(&kcap_lock);
+    return 0;
+}
+
+static void kcap_detach_owner(uint64_t cap_id, struct handletable *owner_ht,
+                              int32_t owner_handle, bool retain_node) {
+    if (cap_id == KHANDLE_INVALID_CAP_ID)
+        return;
+
+    LIST_HEAD(free_nodes);
+    spin_lock(&kcap_lock);
+    struct kcap_node *node = kcap_find_locked(cap_id);
+    if (node && node->live && node->owner_ht == owner_ht &&
+        node->owner_handle == owner_handle) {
+        node->owner_ht = NULL;
+        node->owner_handle = -1;
+        node->live = false;
+        if (!retain_node)
+            kcap_prune_locked(node, &free_nodes);
+    }
+    spin_unlock(&kcap_lock);
+    kcap_free_nodes(&free_nodes);
+}
+
+static void kcap_drop_detached(uint64_t cap_id) {
+    if (cap_id == KHANDLE_INVALID_CAP_ID)
+        return;
+
+    LIST_HEAD(free_nodes);
+    spin_lock(&kcap_lock);
+    struct kcap_node *node = kcap_find_locked(cap_id);
+    if (node && !node->live)
+        kcap_prune_locked(node, &free_nodes);
+    spin_unlock(&kcap_lock);
+    kcap_free_nodes(&free_nodes);
+}
+
+static struct kcap_node *kcap_find_live_descendant_locked(
+    struct kcap_node *root) {
+    if (!root)
+        return NULL;
+
+    struct list_head *pos = NULL;
+    list_for_each(pos, &root->children) {
+        struct kcap_node *child =
+            list_entry(pos, struct kcap_node, sibling_node);
+        if (child->live && child->owner_ht &&
+            child->owner_handle >= 0 &&
+            child->owner_handle < CONFIG_MAX_HANDLES_PER_PROC)
+            return child;
+        struct kcap_node *nested = kcap_find_live_descendant_locked(child);
+        if (nested)
+            return nested;
+    }
+    return NULL;
+}
+
+static int kcap_pick_live_descendant(uint64_t root_cap_id,
+                                     struct handletable **out_ht,
+                                     int32_t *out_handle,
+                                     uint64_t *out_cap_id) {
+    if (!out_ht || !out_handle || !out_cap_id)
+        return -EINVAL;
+    *out_ht = NULL;
+    *out_handle = -1;
+    *out_cap_id = KHANDLE_INVALID_CAP_ID;
+
+    spin_lock(&kcap_lock);
+    struct kcap_node *root = kcap_find_locked(root_cap_id);
+    if (!root) {
+        spin_unlock(&kcap_lock);
+        return -ENOENT;
+    }
+    struct kcap_node *node = kcap_find_live_descendant_locked(root);
+    if (!node || !node->owner_ht) {
+        spin_unlock(&kcap_lock);
+        return -ENOENT;
+    }
+
+    *out_ht = node->owner_ht;
+    handletable_get(*out_ht);
+    *out_handle = node->owner_handle;
+    *out_cap_id = node->id;
+    spin_unlock(&kcap_lock);
+    return 0;
 }
 
 static bool krights_allow_access(uint32_t rights, enum kobj_access_op access) {
@@ -520,11 +1099,246 @@ static bool krights_allow_access(uint32_t rights, enum kobj_access_op access) {
     }
 }
 
+static bool khandle_rights_allow(uint32_t rights, uint32_t required_rights,
+                                 enum kobj_access_op access, bool use_access) {
+    if (use_access)
+        return krights_allow_access(rights, access);
+    return (rights & required_rights) == required_rights;
+}
+
+static int khandle_cache_cpu_index(void) {
+    int cpu = arch_cpu_id_stable();
+    if (cpu < 0 || cpu >= CONFIG_MAX_CPUS)
+        cpu = 0;
+    return cpu;
+}
+
+static uint32_t khandle_cache_slot_index(int32_t handle,
+                                         enum kobj_access_op access) {
+    uint32_t key = (uint32_t)handle ^ ((uint32_t)access << 8);
+    return key & (KHANDLE_CACHE_SLOTS - 1U);
+}
+
+static void khandle_cache_slot_invalidate(
+    struct khandle_lookup_cache_entry *slot) {
+    if (!slot)
+        return;
+    if (slot->obj)
+        kobj_put(slot->obj);
+    memset(slot, 0, sizeof(*slot));
+}
+
+static bool khandle_cache_lookup(struct process *p, struct handletable *ht,
+                                 int32_t handle, enum kobj_access_op access,
+                                 struct kobj **out_obj,
+                                 uint32_t *out_rights) {
+    if (!p || !ht || !out_obj)
+        return false;
+
+    int cpu = khandle_cache_cpu_index();
+    struct khandle_lookup_cache_entry *slot =
+        &khandle_lookup_cache[cpu]
+             .slots[khandle_cache_slot_index(handle, access)];
+    if (!slot->obj)
+        return false;
+    if (slot->proc != p || slot->ht != ht || slot->handle != handle ||
+        slot->access != access) {
+        return false;
+    }
+
+    if (slot->cache_epoch != ht->cache_epoch ||
+        slot->seq != (uint32_t)atomic_read(&ht->seq) ||
+        !khandle_rights_allow(slot->rights, 0, access, true)) {
+        khandle_cache_slot_invalidate(slot);
+        return false;
+    }
+
+    kobj_get(slot->obj);
+    *out_obj = slot->obj;
+    if (out_rights)
+        *out_rights = slot->rights;
+    return true;
+}
+
+static void khandle_cache_store(struct process *p, struct handletable *ht,
+                                int32_t handle, enum kobj_access_op access,
+                                uint32_t rights, struct kobj *obj) {
+    if (!p || !ht || !obj)
+        return;
+
+    int cpu = khandle_cache_cpu_index();
+    struct khandle_lookup_cache_entry *slot =
+        &khandle_lookup_cache[cpu]
+             .slots[khandle_cache_slot_index(handle, access)];
+    khandle_cache_slot_invalidate(slot);
+    slot->proc = p;
+    slot->ht = ht;
+    slot->cache_epoch = ht->cache_epoch;
+    slot->handle = handle;
+    slot->seq = (uint32_t)atomic_read(&ht->seq);
+    slot->access = access;
+    slot->rights = rights;
+    slot->obj = obj;
+    kobj_get(obj);
+}
+
+struct handletable *handletable_alloc(void) {
+    struct handletable *ht = kzalloc(sizeof(*ht));
+    if (!ht)
+        return NULL;
+    mutex_init(&ht->lock, "handletable");
+    atomic_init(&ht->refcount, 1);
+    atomic_init(&ht->seq, 1);
+    ht->cache_epoch = khandle_alloc_cache_epoch();
+    return ht;
+}
+
+struct handletable *handletable_copy(struct handletable *src) {
+    if (!src)
+        return handletable_alloc();
+
+    struct handletable *dst = handletable_alloc();
+    if (!dst)
+        return NULL;
+
+    int rc = 0;
+    mutex_lock(&src->lock);
+    for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
+        struct kobj *obj = src->entries[i].obj;
+        if (!obj)
+            continue;
+        uint64_t parent_cap = src->entries[i].cap_id;
+        uint64_t cap_id = kcap_create(parent_cap, dst, i);
+        if (cap_id == KHANDLE_INVALID_CAP_ID) {
+            rc = -ENOMEM;
+            break;
+        }
+        kobj_get(obj);
+        kobj_handle_ref_inc(obj);
+        dst->entries[i].obj = obj;
+        dst->entries[i].rights = src->entries[i].rights;
+        dst->entries[i].cap_id = cap_id;
+    }
+    mutex_unlock(&src->lock);
+    if (rc < 0) {
+        handletable_put(dst);
+        return NULL;
+    }
+
+    return dst;
+}
+
+void handletable_get(struct handletable *ht) {
+    if (!ht)
+        return;
+    atomic_inc(&ht->refcount);
+}
+
+void handletable_put(struct handletable *ht) {
+    if (!ht)
+        return;
+    if (atomic_dec_return(&ht->refcount) != 0)
+        return;
+
+    for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
+        struct kobj *obj = ht->entries[i].obj;
+        uint64_t cap_id = ht->entries[i].cap_id;
+        if (!obj)
+            continue;
+        ht->entries[i].obj = NULL;
+        ht->entries[i].rights = 0;
+        ht->entries[i].cap_id = KHANDLE_INVALID_CAP_ID;
+        kcap_detach_owner(cap_id, ht, i, false);
+        kobj_handle_ref_dec(obj);
+        kobj_put(obj);
+    }
+    kfree(ht);
+}
+
+static int khandle_close_in_table(struct handletable *ht, int32_t handle,
+                                  uint64_t expected_cap_id,
+                                  bool enforce_cap_id) {
+    if (!ht)
+        return -EINVAL;
+    if (handle < 0 || handle >= CONFIG_MAX_HANDLES_PER_PROC)
+        return -EBADF;
+
+    struct kobj *obj = NULL;
+    uint64_t cap_id = KHANDLE_INVALID_CAP_ID;
+    mutex_lock(&ht->lock);
+    obj = ht->entries[handle].obj;
+    if (!obj) {
+        mutex_unlock(&ht->lock);
+        return -EBADF;
+    }
+    cap_id = ht->entries[handle].cap_id;
+    if (enforce_cap_id && cap_id != expected_cap_id) {
+        mutex_unlock(&ht->lock);
+        return -EAGAIN;
+    }
+    ht->entries[handle].obj = NULL;
+    ht->entries[handle].rights = 0;
+    ht->entries[handle].cap_id = KHANDLE_INVALID_CAP_ID;
+    atomic_inc(&ht->seq);
+    mutex_unlock(&ht->lock);
+
+    kcap_detach_owner(cap_id, ht, handle, false);
+    kobj_handle_ref_dec(obj);
+    kobj_put(obj);
+    return 0;
+}
+
+static int khandle_install_locked(struct handletable *ht, int32_t handle,
+                                  struct kobj *obj, uint32_t rights,
+                                  uint64_t parent_cap_id,
+                                  uint64_t existing_cap_id) {
+    uint64_t cap_id = KHANDLE_INVALID_CAP_ID;
+    if (existing_cap_id != KHANDLE_INVALID_CAP_ID) {
+        int rc = kcap_bind_existing(existing_cap_id, ht, handle);
+        if (rc < 0)
+            return rc;
+        cap_id = existing_cap_id;
+    } else {
+        cap_id = kcap_create(parent_cap_id, ht, handle);
+        if (cap_id == KHANDLE_INVALID_CAP_ID)
+            return -ENOMEM;
+    }
+
+    kobj_get(obj);
+    kobj_handle_ref_inc(obj);
+    ht->entries[handle].obj = obj;
+    ht->entries[handle].rights = rights;
+    ht->entries[handle].cap_id = cap_id;
+    atomic_inc(&ht->seq);
+    return 0;
+}
+
+int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights) {
+    struct handletable *ht = proc_handletable(p);
+    if (!ht || !obj || rights == 0)
+        return -EINVAL;
+
+    mutex_lock(&ht->lock);
+    for (int h = 0; h < CONFIG_MAX_HANDLES_PER_PROC; h++) {
+        if (ht->entries[h].obj)
+            continue;
+        int rc =
+            khandle_install_locked(ht, h, obj, rights, KHANDLE_INVALID_CAP_ID,
+                                   KHANDLE_INVALID_CAP_ID);
+        mutex_unlock(&ht->lock);
+        if (rc < 0)
+            return rc;
+        return h;
+    }
+    mutex_unlock(&ht->lock);
+    return -EMFILE;
+}
+
 static int khandle_get_common(struct process *p, int32_t handle,
                               uint32_t required_rights,
                               enum kobj_access_op access, bool use_access,
                               struct kobj **out_obj, uint32_t *out_rights,
-                              bool take) {
+                              bool take, uint64_t *out_cap_id) {
     struct handletable *ht = proc_handletable(p);
     if (!ht || !out_obj)
         return -EINVAL;
@@ -532,20 +1346,29 @@ static int khandle_get_common(struct process *p, int32_t handle,
     *out_obj = NULL;
     if (out_rights)
         *out_rights = 0;
+    if (out_cap_id)
+        *out_cap_id = KHANDLE_INVALID_CAP_ID;
 
     if (handle < 0 || handle >= CONFIG_MAX_HANDLES_PER_PROC)
         return -EBADF;
 
+    if (!take && use_access &&
+        khandle_cache_lookup(p, ht, handle, access, out_obj, out_rights)) {
+        return 0;
+    }
+
+    struct kobj *obj = NULL;
+    uint32_t rights = 0;
+    uint64_t cap_id = KHANDLE_INVALID_CAP_ID;
     mutex_lock(&ht->lock);
-    struct kobj *obj = ht->entries[handle].obj;
-    uint32_t rights = ht->entries[handle].rights;
+    obj = ht->entries[handle].obj;
+    rights = ht->entries[handle].rights;
+    cap_id = ht->entries[handle].cap_id;
     if (!obj) {
         mutex_unlock(&ht->lock);
         return -EBADF;
     }
-    bool allowed = use_access ? krights_allow_access(rights, access)
-                              : ((rights & required_rights) == required_rights);
-    if (!allowed) {
+    if (!khandle_rights_allow(rights, required_rights, access, use_access)) {
         mutex_unlock(&ht->lock);
         return -EACCES;
     }
@@ -553,45 +1376,78 @@ static int khandle_get_common(struct process *p, int32_t handle,
     if (take) {
         ht->entries[handle].obj = NULL;
         ht->entries[handle].rights = 0;
+        ht->entries[handle].cap_id = KHANDLE_INVALID_CAP_ID;
+        atomic_inc(&ht->seq);
     } else {
         kobj_get(obj);
     }
     mutex_unlock(&ht->lock);
 
+    if (take) {
+        bool retain_cap_node =
+            use_access && access == KOBJ_ACCESS_TRANSFER;
+        kcap_detach_owner(cap_id, ht, handle, retain_cap_node);
+        if (use_access && access == KOBJ_ACCESS_TRANSFER) {
+            int32_t from_pid = p ? p->pid : -1;
+            kobj_transfer_record(obj, KOBJ_TRANSFER_TAKE, from_pid, -1,
+                                 rights);
+        }
+    } else if (use_access) {
+        khandle_cache_store(p, ht, handle, access, rights, obj);
+    }
+
     *out_obj = obj;
     if (out_rights)
         *out_rights = rights;
+    if (out_cap_id)
+        *out_cap_id = cap_id;
     return 0;
 }
 
 int khandle_get(struct process *p, int32_t handle, uint32_t required_rights,
                 struct kobj **out_obj, uint32_t *out_rights) {
     return khandle_get_common(p, handle, required_rights, 0, false, out_obj,
-                              out_rights, false);
+                              out_rights, false, NULL);
 }
 
 int khandle_get_for_access(struct process *p, int32_t handle,
                            enum kobj_access_op access, struct kobj **out_obj,
                            uint32_t *out_rights) {
     return khandle_get_common(p, handle, 0, access, true, out_obj, out_rights,
-                              false);
+                              false, NULL);
+}
+
+int khandle_take_with_cap(struct process *p, int32_t handle,
+                          uint32_t required_rights, struct kobj **out_obj,
+                          uint32_t *out_rights, uint64_t *out_cap_id) {
+    return khandle_get_common(p, handle, required_rights, 0, false, out_obj,
+                              out_rights, true, out_cap_id);
 }
 
 int khandle_take(struct process *p, int32_t handle, uint32_t required_rights,
                  struct kobj **out_obj, uint32_t *out_rights) {
-    return khandle_get_common(p, handle, required_rights, 0, false, out_obj,
-                              out_rights, true);
+    return khandle_take_with_cap(p, handle, required_rights, out_obj,
+                                 out_rights, NULL);
+}
+
+int khandle_take_for_access_with_cap(struct process *p, int32_t handle,
+                                     enum kobj_access_op access,
+                                     struct kobj **out_obj,
+                                     uint32_t *out_rights,
+                                     uint64_t *out_cap_id) {
+    return khandle_get_common(p, handle, 0, access, true, out_obj, out_rights,
+                              true, out_cap_id);
 }
 
 int khandle_take_for_access(struct process *p, int32_t handle,
                             enum kobj_access_op access, struct kobj **out_obj,
                             uint32_t *out_rights) {
-    return khandle_get_common(p, handle, 0, access, true, out_obj, out_rights,
-                              true);
+    return khandle_take_for_access_with_cap(p, handle, access, out_obj,
+                                            out_rights, NULL);
 }
 
-int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
-                    uint32_t rights) {
+int khandle_restore_cap(struct process *p, int32_t handle, struct kobj *obj,
+                        uint32_t rights, uint64_t cap_id) {
     struct handletable *ht = proc_handletable(p);
     if (!ht || !obj || rights == 0)
         return -EINVAL;
@@ -603,32 +1459,49 @@ int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
         mutex_unlock(&ht->lock);
         return -EBUSY;
     }
+
+    int rc = 0;
+    bool fallback_root = false;
+    uint64_t install_cap = cap_id;
+    if (install_cap != KHANDLE_INVALID_CAP_ID) {
+        rc = kcap_bind_existing(install_cap, ht, handle);
+        if (rc < 0) {
+            install_cap = KHANDLE_INVALID_CAP_ID;
+            fallback_root = true;
+        }
+    }
+    if (install_cap == KHANDLE_INVALID_CAP_ID) {
+        install_cap = kcap_create(KHANDLE_INVALID_CAP_ID, ht, handle);
+        if (install_cap == KHANDLE_INVALID_CAP_ID)
+            rc = -ENOMEM;
+    }
+    if (rc < 0) {
+        mutex_unlock(&ht->lock);
+        return rc;
+    }
+
     ht->entries[handle].obj = obj;
     ht->entries[handle].rights = rights;
+    ht->entries[handle].cap_id = install_cap;
+    atomic_inc(&ht->seq);
     mutex_unlock(&ht->lock);
+    if (fallback_root && cap_id != KHANDLE_INVALID_CAP_ID)
+        kcap_drop_detached(cap_id);
+    kobj_transfer_record(obj, KOBJ_TRANSFER_RESTORE, -1, p ? p->pid : -1,
+                         rights);
     return 0;
+}
+
+int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
+                    uint32_t rights) {
+    return khandle_restore_cap(p, handle, obj, rights, KHANDLE_INVALID_CAP_ID);
 }
 
 int khandle_close(struct process *p, int32_t handle) {
     struct handletable *ht = proc_handletable(p);
     if (!ht)
         return -EINVAL;
-    if (handle < 0 || handle >= CONFIG_MAX_HANDLES_PER_PROC)
-        return -EBADF;
-
-    mutex_lock(&ht->lock);
-    struct kobj *obj = ht->entries[handle].obj;
-    if (!obj) {
-        mutex_unlock(&ht->lock);
-        return -EBADF;
-    }
-    ht->entries[handle].obj = NULL;
-    ht->entries[handle].rights = 0;
-    kobj_handle_ref_dec(obj);
-    mutex_unlock(&ht->lock);
-
-    kobj_put(obj);
-    return 0;
+    return khandle_close_in_table(ht, handle, KHANDLE_INVALID_CAP_ID, false);
 }
 
 int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
@@ -644,6 +1517,7 @@ int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
     mutex_lock(&ht->lock);
     struct kobj *obj = ht->entries[handle].obj;
     uint32_t rights = ht->entries[handle].rights;
+    uint64_t parent_cap_id = ht->entries[handle].cap_id;
     if (!obj) {
         mutex_unlock(&ht->lock);
         return -EBADF;
@@ -662,11 +1536,12 @@ int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
     for (int h = 0; h < CONFIG_MAX_HANDLES_PER_PROC; h++) {
         if (ht->entries[h].obj)
             continue;
-        kobj_get(obj);
-        kobj_handle_ref_inc(obj);
-        ht->entries[h].obj = obj;
-        ht->entries[h].rights = new_rights;
+        int rc =
+            khandle_install_locked(ht, h, obj, new_rights, parent_cap_id,
+                                   KHANDLE_INVALID_CAP_ID);
         mutex_unlock(&ht->lock);
+        if (rc < 0)
+            return rc;
         *out_new_handle = h;
         return 0;
     }
@@ -675,11 +1550,101 @@ int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
     return -EMFILE;
 }
 
-void khandle_transfer_drop(struct kobj *obj) {
+int khandle_revoke_descendants(struct process *p, int32_t handle) {
+    struct handletable *ht = proc_handletable(p);
+    if (!ht)
+        return -EINVAL;
+    if (handle < 0 || handle >= CONFIG_MAX_HANDLES_PER_PROC)
+        return -EBADF;
+
+    uint64_t root_cap_id = KHANDLE_INVALID_CAP_ID;
+    mutex_lock(&ht->lock);
+    if (!ht->entries[handle].obj) {
+        mutex_unlock(&ht->lock);
+        return -EBADF;
+    }
+    root_cap_id = ht->entries[handle].cap_id;
+    mutex_unlock(&ht->lock);
+    if (root_cap_id == KHANDLE_INVALID_CAP_ID)
+        return -EINVAL;
+
+    while (1) {
+        struct handletable *target_ht = NULL;
+        int32_t target_handle = -1;
+        uint64_t target_cap_id = KHANDLE_INVALID_CAP_ID;
+        int rc = kcap_pick_live_descendant(root_cap_id, &target_ht,
+                                           &target_handle, &target_cap_id);
+        if (rc < 0)
+            break;
+        rc = khandle_close_in_table(target_ht, target_handle, target_cap_id,
+                                    true);
+        handletable_put(target_ht);
+        (void)rc;
+    }
+    return 0;
+}
+
+void khandle_transfer_drop_cap(struct kobj *obj, uint32_t rights,
+                               uint64_t cap_id) {
     if (!obj)
         return;
+    kobj_transfer_record(obj, KOBJ_TRANSFER_DROP, -1, -1, rights);
+    kcap_drop_detached(cap_id);
     kobj_handle_ref_dec(obj);
     kobj_put(obj);
+}
+
+void khandle_transfer_drop_with_rights(struct kobj *obj, uint32_t rights) {
+    khandle_transfer_drop_cap(obj, rights, KHANDLE_INVALID_CAP_ID);
+}
+
+void khandle_transfer_drop(struct kobj *obj) {
+    khandle_transfer_drop_cap(obj, 0, KHANDLE_INVALID_CAP_ID);
+}
+
+int khandle_install_transferred_cap(struct process *p, struct kobj *obj,
+                                    uint32_t rights, uint64_t cap_id,
+                                    int32_t *out_handle) {
+    if (out_handle)
+        *out_handle = -1;
+    if (!out_handle)
+        return -EINVAL;
+
+    struct handletable *ht = proc_handletable(p);
+    if (!ht || !obj || rights == 0)
+        return -EINVAL;
+
+    mutex_lock(&ht->lock);
+    for (int h = 0; h < CONFIG_MAX_HANDLES_PER_PROC; h++) {
+        if (ht->entries[h].obj)
+            continue;
+        bool fallback_root = false;
+        int rc = khandle_install_locked(ht, h, obj, rights,
+                                        KHANDLE_INVALID_CAP_ID, cap_id);
+        if (rc < 0 && cap_id != KHANDLE_INVALID_CAP_ID) {
+            fallback_root = true;
+            rc = khandle_install_locked(ht, h, obj, rights,
+                                        KHANDLE_INVALID_CAP_ID,
+                                        KHANDLE_INVALID_CAP_ID);
+        }
+        mutex_unlock(&ht->lock);
+        if (rc < 0)
+            return rc;
+        *out_handle = h;
+        if (fallback_root)
+            kcap_drop_detached(cap_id);
+        kobj_transfer_record(obj, KOBJ_TRANSFER_INSTALL, -1, p ? p->pid : -1,
+                             rights);
+        return 0;
+    }
+    mutex_unlock(&ht->lock);
+    return -EMFILE;
+}
+
+int khandle_install_transferred(struct process *p, struct kobj *obj,
+                                uint32_t rights, int32_t *out_handle) {
+    return khandle_install_transferred_cap(
+        p, obj, rights, KHANDLE_INVALID_CAP_ID, out_handle);
 }
 
 static void kport_enqueue_locked(struct kport *port, uint64_t key,
@@ -829,6 +1794,42 @@ static bool kchannel_try_rendezvous_locked(struct kchannel *peer,
     return true;
 }
 
+static bool kchannel_try_rendezvous_raw_locked(
+    struct kchannel *peer, const void *bytes, size_t num_bytes,
+    const struct khandle_transfer *handles, size_t num_handles) {
+    if (!peer || peer->rxq_len != 0)
+        return false;
+
+    struct kchannel_rendezvous *rv = peer->recv_waiter;
+    if (!rv || !rv->active || rv->completed)
+        return false;
+
+    if (rv->bytes_cap < num_bytes || rv->handles_cap < num_handles)
+        return false;
+
+    if (num_bytes > 0 && bytes)
+        memcpy(rv->bytes, bytes, num_bytes);
+
+    for (size_t i = 0; i < num_handles; i++) {
+        if (!handles[i].obj)
+            return false;
+    }
+    for (size_t i = 0; i < num_handles; i++) {
+        rv->handles[i] = handles[i];
+        kobj_get(rv->handles[i].obj);
+    }
+
+    rv->got_bytes = num_bytes;
+    rv->got_handles = num_handles;
+    rv->handles_truncated = false;
+    rv->status = 0;
+    rv->completed = true;
+
+    poll_wait_source_wake_one(&peer->rd_src, 0);
+    wait_queue_wakeup_one(&peer->obj.waitq);
+    return true;
+}
+
 int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
                   const struct khandle_transfer *handles, size_t num_handles,
                   uint32_t options) {
@@ -843,6 +1844,10 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
         return -EFAULT;
     if (num_handles > 0 && !handles)
         return -EINVAL;
+    for (size_t i = 0; i < num_handles; i++) {
+        if (!handles[i].obj)
+            return -EINVAL;
+    }
 
     struct kchannel *peer = NULL;
     mutex_lock(&self->lock);
@@ -854,6 +1859,26 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     kobj_get(&peer->obj);
     mutex_unlock(&self->lock);
 
+    bool rendezvous = (options & KCHANNEL_OPT_RENDEZVOUS) != 0;
+    int32_t sender_pid = -1;
+    struct process *curr = proc_current();
+    if (curr)
+        sender_pid = curr->pid;
+    if (rendezvous) {
+        mutex_lock(&peer->lock);
+        if (kchannel_try_rendezvous_raw_locked(peer, bytes, num_bytes, handles,
+                                               num_handles)) {
+            for (size_t i = 0; i < num_handles; i++) {
+                kobj_transfer_record(handles[i].obj, KOBJ_TRANSFER_ENQUEUE,
+                                     sender_pid, -1, handles[i].rights);
+            }
+            mutex_unlock(&peer->lock);
+            kobj_put(&peer->obj);
+            return 0;
+        }
+        mutex_unlock(&peer->lock);
+    }
+
     struct kchannel_msg *msg = kzalloc(sizeof(*msg));
     if (!msg) {
         kobj_put(&peer->obj);
@@ -863,20 +1888,20 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     msg->num_bytes = num_bytes;
     msg->num_handles = num_handles;
     if (num_bytes) {
-        msg->bytes = kmalloc(num_bytes);
-        if (!msg->bytes) {
-            kfree(msg);
-            kobj_put(&peer->obj);
-            return -ENOMEM;
+        if (num_bytes <= KCHANNEL_INLINE_MSG_BYTES) {
+            msg->bytes = msg->inline_bytes;
+            msg->inline_bytes_used = true;
+        } else {
+            msg->bytes = kmalloc(num_bytes);
+            if (!msg->bytes) {
+                kfree(msg);
+                kobj_put(&peer->obj);
+                return -ENOMEM;
+            }
         }
         memcpy(msg->bytes, bytes, num_bytes);
     }
     for (size_t i = 0; i < num_handles; i++) {
-        if (!handles[i].obj) {
-            kchannel_msg_free(msg);
-            kobj_put(&peer->obj);
-            return -EINVAL;
-        }
         msg->handles[i] = handles[i];
         if (msg->handles[i].obj)
             kobj_get(msg->handles[i].obj);
@@ -884,7 +1909,6 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
 
     int ret = 0;
     bool nonblock = (options & KCHANNEL_OPT_NONBLOCK) != 0;
-    bool rendezvous = (options & KCHANNEL_OPT_RENDEZVOUS) != 0;
 
     mutex_lock(&peer->lock);
     if (rendezvous && kchannel_try_rendezvous_locked(peer, msg))
@@ -910,6 +1934,10 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     list_add_tail(&msg->node, &peer->rxq);
     peer->rxq_len++;
     msg->owns_caps = true;
+    for (size_t i = 0; i < num_handles; i++) {
+        kobj_transfer_record(handles[i].obj, KOBJ_TRANSFER_ENQUEUE, sender_pid,
+                             -1, handles[i].rights);
+    }
     msg = NULL;
     poll_wait_source_wake_one(&peer->rd_src, 0);
     wait_queue_wakeup_one(&peer->obj.waitq);
@@ -987,6 +2015,16 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     if (rv.active && ch->recv_waiter == &rv)
         ch->recv_waiter = NULL;
     if (rv.completed) {
+        int32_t to_pid = -1;
+        struct process *curr = proc_current();
+        if (curr)
+            to_pid = curr->pid;
+        for (size_t i = 0; i < rv.got_handles; i++) {
+            if (!rv.handles[i].obj)
+                continue;
+            kobj_transfer_record(rv.handles[i].obj, KOBJ_TRANSFER_DELIVER, -1,
+                                 to_pid, rv.handles[i].rights);
+        }
         *out_bytes = rv.got_bytes;
         *out_handles = rv.got_handles;
         *out_handles_truncated = rv.handles_truncated;
@@ -1029,6 +2067,16 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     for (size_t i = 0; i < msg->num_handles; i++) {
         handles[i] = msg->handles[i];
         msg->handles[i].obj = NULL;
+    }
+    int32_t to_pid = -1;
+    struct process *curr = proc_current();
+    if (curr)
+        to_pid = curr->pid;
+    for (size_t i = 0; i < msg->num_handles; i++) {
+        if (!handles[i].obj)
+            continue;
+        kobj_transfer_record(handles[i].obj, KOBJ_TRANSFER_DELIVER, -1, to_pid,
+                             handles[i].rights);
     }
 
     *out_bytes = msg->num_bytes;
@@ -1330,7 +2378,8 @@ static int kchannel_obj_read(struct kobj *obj, void *buf, size_t len,
 
     for (size_t i = 0; i < got_handles; i++) {
         if (dropped[i].obj) {
-            khandle_transfer_drop(dropped[i].obj);
+            khandle_transfer_drop_cap(dropped[i].obj, dropped[i].rights,
+                                      dropped[i].cap_id);
             dropped[i].obj = NULL;
         }
     }
@@ -1467,6 +2516,7 @@ static void kchannel_release_obj(struct kobj *obj) {
     struct kchannel *ch = kchannel_from_obj(obj);
     if (!ch)
         return;
+    ipc_registry_unregister_obj(obj);
 
     struct kchannel *peer = NULL;
     struct kport *bound = NULL;
@@ -1537,6 +2587,7 @@ static void kport_release_obj(struct kobj *obj) {
     struct kport *port = kport_from_obj(obj);
     if (!port)
         return;
+    ipc_registry_unregister_obj(obj);
 
     LIST_HEAD(reap);
     LIST_HEAD(poll_reap);
