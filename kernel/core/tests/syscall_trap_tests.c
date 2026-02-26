@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/fault_inject.h>
 #include <kairos/futex.h>
 #include <kairos/handle.h>
 #include <kairos/ioctl.h>
@@ -3493,6 +3494,74 @@ out:
         kobj_put(tx_obj);
 }
 
+static void test_kchannel_inline_queue_zero_heap(void) {
+#if CONFIG_KERNEL_FAULT_INJECT
+    struct kobj *tx_obj = NULL;
+    struct kobj *rx_obj = NULL;
+    int rc = kchannel_create_pair(&tx_obj, &rx_obj);
+    test_check(rc == 0, "kchannel_inline create pair");
+    if (rc < 0)
+        return;
+
+    uint8_t small_payload[32] = "inline-zero-heap";
+    size_t got_bytes = 0;
+    size_t got_handles = 0;
+    bool truncated = false;
+    uint8_t out[sizeof(small_payload)] = {0};
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_KMALLOC, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_KMALLOC, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_KMALLOC, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    rc = kchannel_send(tx_obj, small_payload, sizeof(small_payload), NULL, 0, 0);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+
+    test_check(rc == 0, "kchannel_inline send under kmalloc fault");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_KMALLOC) == 0,
+               "kchannel_inline small path no kmalloc");
+    if (rc == 0) {
+        rc = kchannel_recv(rx_obj, out, sizeof(out), &got_bytes, NULL, 0,
+                           &got_handles, &truncated, KCHANNEL_OPT_NONBLOCK);
+        test_check(rc == 0, "kchannel_inline recv");
+        if (rc == 0) {
+            test_check(got_bytes == sizeof(small_payload),
+                       "kchannel_inline recv bytes");
+            test_check(got_handles == 0, "kchannel_inline recv handles");
+            test_check(!truncated, "kchannel_inline recv truncate");
+            test_check(memcmp(out, small_payload, sizeof(small_payload)) == 0,
+                       "kchannel_inline payload");
+        }
+    }
+
+    uint8_t large_payload[KCHANNEL_INLINE_MSG_BYTES + 1] = {0};
+    for (size_t i = 0; i < sizeof(large_payload); i++)
+        large_payload[i] = (uint8_t)(i & 0xff);
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_KMALLOC, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_KMALLOC, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_KMALLOC, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    rc = kchannel_send(tx_obj, large_payload, sizeof(large_payload), NULL, 0, 0);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+
+    test_check(rc == -ENOMEM, "kchannel_inline large path kmalloc fail");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_KMALLOC) == 1,
+               "kchannel_inline large path hit kmalloc");
+    fault_inject_reset();
+
+    if (rx_obj)
+        kobj_put(rx_obj);
+    if (tx_obj)
+        kobj_put(tx_obj);
+#endif
+}
+
 static void run_syscall_trap_tests_full(void) {
     test_syscall_table_slot_coverage();
     test_syscall_invalid_num_legacy();
@@ -3520,6 +3589,7 @@ static void run_syscall_trap_tests_full(void) {
     test_kairos_channel_port_stress_mpmc();
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
+    test_kchannel_inline_queue_zero_heap();
     test_syscall_user_e2e();
 }
 
@@ -3529,6 +3599,7 @@ static void run_syscall_trap_tests_ipc_cap_only(void) {
     test_kairos_channel_port_stress_mpmc();
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
+    test_kchannel_inline_queue_zero_heap();
 }
 
 int run_syscall_trap_tests(void) {

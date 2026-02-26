@@ -54,7 +54,9 @@ struct kchannel {
     struct poll_wait_source rd_src;
     struct poll_wait_source wr_src;
     struct list_head rxq;
+    struct list_head rxq_free;
     size_t rxq_len;
+    struct kchannel_msg rxq_slots[KCHANNEL_MAX_QUEUE];
     struct list_head poll_vnodes;
     struct kchannel *peer;
     bool peer_closed;
@@ -533,7 +535,7 @@ static uint32_t kchannel_poll_revents_locked(struct kchannel *ch,
     if (!ch)
         return 0;
 
-    if (!list_empty(&ch->rxq))
+    if (ch->rxq_len > 0)
         revents |= POLLIN;
     if (ch->peer_closed || !ch->peer)
         revents |= POLLHUP;
@@ -618,7 +620,7 @@ static void kobj_handle_ref_dec(struct kobj *obj) {
         kchannel_on_last_handle_release(ch);
 }
 
-static void kchannel_msg_free(struct kchannel_msg *msg) {
+static void kchannel_msg_reset(struct kchannel_msg *msg) {
     if (!msg)
         return;
     for (size_t i = 0; i < msg->num_handles; i++) {
@@ -635,7 +637,30 @@ static void kchannel_msg_free(struct kchannel_msg *msg) {
     }
     if (msg->bytes && !msg->inline_bytes_used)
         kfree(msg->bytes);
-    kfree(msg);
+    msg->num_bytes = 0;
+    msg->bytes = NULL;
+    msg->inline_bytes_used = false;
+    msg->num_handles = 0;
+    msg->owns_caps = false;
+    INIT_LIST_HEAD(&msg->node);
+}
+
+static struct kchannel_msg *kchannel_msg_alloc_locked(struct kchannel *ch) {
+    if (!ch || list_empty(&ch->rxq_free))
+        return NULL;
+    struct kchannel_msg *msg =
+        list_first_entry(&ch->rxq_free, struct kchannel_msg, node);
+    list_del(&msg->node);
+    INIT_LIST_HEAD(&msg->node);
+    return msg;
+}
+
+static void kchannel_msg_recycle_locked(struct kchannel *ch,
+                                        struct kchannel_msg *msg) {
+    if (!ch || !msg)
+        return;
+    kchannel_msg_reset(msg);
+    list_add_tail(&msg->node, &ch->rxq_free);
 }
 
 static uint32_t kobj_refcount_record(struct kobj *obj,
@@ -1722,6 +1747,13 @@ static struct kchannel *kchannel_alloc(void) {
     poll_wait_source_init(&ch->rd_src, NULL);
     poll_wait_source_init(&ch->wr_src, NULL);
     INIT_LIST_HEAD(&ch->rxq);
+    INIT_LIST_HEAD(&ch->rxq_free);
+    for (size_t i = 0; i < KCHANNEL_MAX_QUEUE; i++) {
+        struct kchannel_msg *msg = &ch->rxq_slots[i];
+        memset(msg, 0, sizeof(*msg));
+        INIT_LIST_HEAD(&msg->node);
+        list_add_tail(&msg->node, &ch->rxq_free);
+    }
     INIT_LIST_HEAD(&ch->poll_vnodes);
     ch->rxq_len = 0;
     ch->peer = NULL;
@@ -1864,57 +1896,22 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     struct process *curr = proc_current();
     if (curr)
         sender_pid = curr->pid;
-    if (rendezvous) {
-        mutex_lock(&peer->lock);
-        if (kchannel_try_rendezvous_raw_locked(peer, bytes, num_bytes, handles,
-                                               num_handles)) {
-            for (size_t i = 0; i < num_handles; i++) {
-                kobj_transfer_record(handles[i].obj, KOBJ_TRANSFER_ENQUEUE,
-                                     sender_pid, -1, handles[i].rights);
-            }
-            mutex_unlock(&peer->lock);
-            kobj_put(&peer->obj);
-            return 0;
-        }
-        mutex_unlock(&peer->lock);
-    }
-
-    struct kchannel_msg *msg = kzalloc(sizeof(*msg));
-    if (!msg) {
-        kobj_put(&peer->obj);
-        return -ENOMEM;
-    }
-    INIT_LIST_HEAD(&msg->node);
-    msg->num_bytes = num_bytes;
-    msg->num_handles = num_handles;
-    if (num_bytes) {
-        if (num_bytes <= KCHANNEL_INLINE_MSG_BYTES) {
-            msg->bytes = msg->inline_bytes;
-            msg->inline_bytes_used = true;
-        } else {
-            msg->bytes = kmalloc(num_bytes);
-            if (!msg->bytes) {
-                kfree(msg);
-                kobj_put(&peer->obj);
-                return -ENOMEM;
-            }
-        }
-        memcpy(msg->bytes, bytes, num_bytes);
-    }
-    for (size_t i = 0; i < num_handles; i++) {
-        msg->handles[i] = handles[i];
-        if (msg->handles[i].obj)
-            kobj_get(msg->handles[i].obj);
-    }
-
     int ret = 0;
+    struct kchannel_msg *msg = NULL;
     bool nonblock = (options & KCHANNEL_OPT_NONBLOCK) != 0;
 
     mutex_lock(&peer->lock);
-    if (rendezvous && kchannel_try_rendezvous_locked(peer, msg))
+    if (rendezvous &&
+        kchannel_try_rendezvous_raw_locked(peer, bytes, num_bytes, handles,
+                                           num_handles)) {
+        for (size_t i = 0; i < num_handles; i++) {
+            kobj_transfer_record(handles[i].obj, KOBJ_TRANSFER_ENQUEUE,
+                                 sender_pid, -1, handles[i].rights);
+        }
         goto out_unlock;
+    }
 
-    while (peer->rxq_len >= KCHANNEL_MAX_QUEUE) {
+    while (peer->rxq_len >= KCHANNEL_MAX_QUEUE || list_empty(&peer->rxq_free)) {
         if (nonblock) {
             ret = -EAGAIN;
             goto out_unlock;
@@ -1931,6 +1928,35 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
         }
     }
 
+    msg = kchannel_msg_alloc_locked(peer);
+    if (!msg) {
+        ret = -EAGAIN;
+        goto out_unlock;
+    }
+    msg->num_bytes = num_bytes;
+    msg->num_handles = num_handles;
+    if (num_bytes > 0) {
+        if (num_bytes <= KCHANNEL_INLINE_MSG_BYTES) {
+            msg->bytes = msg->inline_bytes;
+            msg->inline_bytes_used = true;
+        } else {
+            msg->bytes = kmalloc(num_bytes);
+            if (!msg->bytes) {
+                ret = -ENOMEM;
+                goto out_unlock;
+            }
+        }
+        memcpy(msg->bytes, bytes, num_bytes);
+    }
+    for (size_t i = 0; i < num_handles; i++) {
+        msg->handles[i] = handles[i];
+        if (msg->handles[i].obj)
+            kobj_get(msg->handles[i].obj);
+    }
+
+    if (rendezvous && kchannel_try_rendezvous_locked(peer, msg))
+        goto out_unlock;
+
     list_add_tail(&msg->node, &peer->rxq);
     peer->rxq_len++;
     msg->owns_caps = true;
@@ -1946,10 +1972,10 @@ int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
     ret = 0;
 
 out_unlock:
+    if (msg)
+        kchannel_msg_recycle_locked(peer, msg);
     mutex_unlock(&peer->lock);
     kobj_put(&peer->obj);
-    if (msg)
-        kchannel_msg_free(msg);
     return ret;
 }
 
@@ -1979,7 +2005,7 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     struct kchannel_rendezvous rv = {0};
 
     mutex_lock(&ch->lock);
-    while (list_empty(&ch->rxq)) {
+    while (ch->rxq_len == 0) {
         if (rv.completed)
             break;
         if (ch->peer_closed) {
@@ -2042,15 +2068,29 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
     }
 
     list_del(&msg->node);
+    INIT_LIST_HEAD(&msg->node);
     if (ch->rxq_len > 0)
         ch->rxq_len--;
     peer_for_write = ch->peer;
     if (peer_for_write)
         kobj_get(&peer_for_write->obj);
-    if (!list_empty(&ch->rxq))
+    if (ch->rxq_len > 0)
         kchannel_poll_wake_locked(ch, POLLIN);
-    if (!list_empty(&ch->rxq))
+    if (ch->rxq_len > 0)
         kchannel_emit_locked(ch, KPORT_BIND_READABLE);
+    if (msg->num_bytes > 0)
+        memcpy(bytes, msg->bytes, msg->num_bytes);
+
+    size_t delivered_handles = msg->num_handles;
+    for (size_t i = 0; i < delivered_handles; i++) {
+        handles[i] = msg->handles[i];
+        msg->handles[i].obj = NULL;
+    }
+    *out_bytes = msg->num_bytes;
+    *out_handles = msg->num_handles;
+    *out_handles_truncated = false;
+    kchannel_msg_recycle_locked(ch, msg);
+    msg = NULL;
     poll_wait_source_wake_one(&ch->wr_src, 0);
     mutex_unlock(&ch->lock);
 
@@ -2061,28 +2101,17 @@ int kchannel_recv(struct kobj *obj, void *bytes, size_t bytes_cap,
         kobj_put(&peer_for_write->obj);
     }
 
-    if (msg->num_bytes > 0)
-        memcpy(bytes, msg->bytes, msg->num_bytes);
-
-    for (size_t i = 0; i < msg->num_handles; i++) {
-        handles[i] = msg->handles[i];
-        msg->handles[i].obj = NULL;
-    }
     int32_t to_pid = -1;
     struct process *curr = proc_current();
     if (curr)
         to_pid = curr->pid;
-    for (size_t i = 0; i < msg->num_handles; i++) {
+    for (size_t i = 0; i < delivered_handles; i++) {
         if (!handles[i].obj)
             continue;
         kobj_transfer_record(handles[i].obj, KOBJ_TRANSFER_DELIVER, -1, to_pid,
                              handles[i].rights);
     }
 
-    *out_bytes = msg->num_bytes;
-    *out_handles = msg->num_handles;
-    *out_handles_truncated = false;
-    kchannel_msg_free(msg);
     return 0;
 }
 
@@ -2196,7 +2225,7 @@ int kport_bind_channel(struct kobj *port_obj, struct kobj *channel_obj,
     ch->bind.key = key;
     ch->bind.signals = signals;
 
-    if ((signals & KPORT_BIND_READABLE) && !list_empty(&ch->rxq))
+    if ((signals & KPORT_BIND_READABLE) && ch->rxq_len > 0)
         kchannel_emit_locked(ch, KPORT_BIND_READABLE);
     if ((signals & KPORT_BIND_PEER_CLOSED) && ch->peer_closed)
         kchannel_emit_locked(ch, KPORT_BIND_PEER_CLOSED);
@@ -2553,7 +2582,8 @@ static void kchannel_release_obj(struct kobj *obj) {
         struct kchannel_msg *msg =
             list_first_entry(&reap, struct kchannel_msg, node);
         list_del(&msg->node);
-        kchannel_msg_free(msg);
+        INIT_LIST_HEAD(&msg->node);
+        kchannel_msg_reset(msg);
     }
     while (!list_empty(&poll_reap)) {
         struct kchannel_watch *watch =
