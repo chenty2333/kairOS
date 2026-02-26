@@ -3,6 +3,7 @@
  */
 
 #include <kairos/process.h>
+#include <kairos/preempt.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
@@ -146,7 +147,20 @@ void proc_yield(void) {
     schedule();
 }
 
-void proc_wakeup(struct process *p) {
+static bool proc_wakeup_can_direct_switch(const struct process *wakee) {
+    struct process *curr = proc_current();
+    if (!wakee || !curr || curr == wakee)
+        return false;
+    if (!arch_irq_enabled() || in_atomic())
+        return false;
+    if (curr->state != PROC_RUNNING)
+        return false;
+    if (wakee->se.cpu != arch_cpu_id())
+        return false;
+    return true;
+}
+
+void proc_wakeup_ex(struct process *p, bool direct_switch_hint) {
     if (!p)
         return;
 
@@ -162,6 +176,12 @@ void proc_wakeup(struct process *p) {
     sched_trace_event(SCHED_TRACE_WAKEUP, p, 0, 0);
     proc_unlock(p);
     sched_wake(p);
+    if (direct_switch_hint && proc_wakeup_can_direct_switch(p))
+        schedule();
+}
+
+void proc_wakeup(struct process *p) {
+    proc_wakeup_ex(p, false);
 }
 
 void proc_wake_expired_sleepers(uint64_t now_ticks) {

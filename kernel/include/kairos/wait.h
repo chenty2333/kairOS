@@ -29,6 +29,7 @@ void wait_queue_add_entry(struct wait_queue *wq, struct wait_queue_entry *entry)
 void wait_queue_remove_entry(struct wait_queue_entry *entry);
 void wait_queue_add(struct wait_queue *wq, struct process *p);
 void wait_queue_remove(struct wait_queue *wq, struct process *p);
+void wait_queue_wakeup_one_hint(struct wait_queue *wq, bool direct_switch_hint);
 void wait_queue_wakeup_one(struct wait_queue *wq);
 void wait_queue_wakeup_all(struct wait_queue *wq);
 

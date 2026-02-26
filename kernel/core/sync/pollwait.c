@@ -95,7 +95,7 @@ void poll_ready_wake_one(struct wait_queue *wq, struct vnode *vn,
                     (uint64_t)(uintptr_t)wq,
                     (uint64_t)(uintptr_t)vn);
     if (wq)
-        wait_queue_wakeup_one(wq);
+        wait_queue_wakeup_one_hint(wq, vn == NULL);
     if (vn)
         vfs_poll_wake(vn, events);
 }

@@ -61,26 +61,44 @@ void wait_queue_remove(struct wait_queue *wq __attribute__((unused)),
     wait_queue_remove_entry(&p->wait_entry);
 }
 
+static struct wait_queue_entry *wait_queue_pop_one_locked(struct wait_queue *wq,
+                                                          bool *single_waiter) {
+    struct wait_queue_entry *entry = NULL;
+    if (!wq)
+        return NULL;
+
+    bool flags;
+    spin_lock_irqsave(&wq->lock, &flags);
+    if (!list_empty(&wq->head)) {
+        entry = list_first_entry(&wq->head, struct wait_queue_entry, node);
+        list_del(&entry->node);
+        INIT_LIST_HEAD(&entry->node);
+        entry->active = false;
+        entry->wq = NULL;
+        if (single_waiter)
+            *single_waiter = list_empty(&wq->head);
+    } else if (single_waiter) {
+        *single_waiter = false;
+    }
+    spin_unlock_irqrestore(&wq->lock, flags);
+    return entry;
+}
+
+void wait_queue_wakeup_one_hint(struct wait_queue *wq, bool direct_switch_hint) {
+    bool single_waiter = false;
+    struct wait_queue_entry *entry = wait_queue_pop_one_locked(wq, &single_waiter);
+    if (!entry || !entry->proc)
+        return;
+    entry->proc->wait_channel = NULL;
+    proc_wakeup_ex(entry->proc, direct_switch_hint && single_waiter);
+}
+
 static void wait_queue_wakeup(struct wait_queue *wq, bool all) {
     if (!wq)
         return;
 
     if (!all) {
-        struct wait_queue_entry *entry = NULL;
-        bool flags;
-        spin_lock_irqsave(&wq->lock, &flags);
-        if (!list_empty(&wq->head)) {
-            entry = list_first_entry(&wq->head, struct wait_queue_entry, node);
-            list_del(&entry->node);
-            INIT_LIST_HEAD(&entry->node);
-            entry->active = false;
-            entry->wq = NULL;
-        }
-        spin_unlock_irqrestore(&wq->lock, flags);
-        if (entry && entry->proc) {
-            entry->proc->wait_channel = NULL;
-            proc_wakeup(entry->proc);
-        }
+        wait_queue_wakeup_one_hint(wq, false);
         return;
     }
 
