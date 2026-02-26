@@ -319,6 +319,24 @@ static ssize_t fd_read_until_ready(int fd, void *buf, size_t len,
     return -EAGAIN;
 }
 
+static bool wait_pid_exit_bounded(pid_t pid, uint64_t timeout_ns,
+                                  int *status_out) {
+    int status = 0;
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    while (time_now_ns() < deadline) {
+        pid_t got = proc_wait(pid, &status, WNOHANG);
+        if (got == pid) {
+            if (status_out)
+                *status_out = status;
+            return true;
+        }
+        if (got < 0)
+            return false;
+        proc_yield();
+    }
+    return false;
+}
+
 static bool inotify_buffer_has_event(const uint8_t *buf, size_t len, int wd,
                                      uint32_t mask, const char *name) {
     if (!buf)
@@ -3134,6 +3152,128 @@ out:
         user_map_end(&um);
 }
 
+struct pidfd_worker_ctx {
+    volatile int started;
+    volatile int exit_now;
+};
+
+static int pidfd_controlled_exit_worker(void *arg) {
+    struct pidfd_worker_ctx *ctx = (struct pidfd_worker_ctx *)arg;
+    if (!ctx)
+        proc_exit(1);
+    ctx->started = 1;
+    while (!ctx->exit_now)
+        proc_yield();
+    proc_exit(0);
+}
+
+static void test_pidfd_syscall_semantics(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "pidfd proc current");
+    if (!self)
+        return;
+
+    int pidfd = -1;
+
+    int64_t ret64 = sys_pidfd_open(0, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "pidfd_open pid 0 einval");
+
+    ret64 = sys_pidfd_open((uint64_t)(uint32_t)self->pid, 1ULL << 32, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "pidfd_open flags width einval");
+
+    ret64 = sys_pidfd_open((uint64_t)(uint32_t)self->pid, O_CLOEXEC, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "pidfd_open unsupported flags einval");
+
+    ret64 = sys_pidfd_open((uint64_t)(uint32_t)self->pid, O_NONBLOCK, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "pidfd_open nonblock");
+    if (ret64 < 0)
+        goto out;
+    pidfd = (int)ret64;
+    test_check(fd_has_cloexec(pidfd), "pidfd_open cloexec set");
+
+    ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0, 0, 1, 0, 0);
+    test_check(ret64 == -EINVAL, "pidfd_send_signal bad flags einval");
+
+    ret64 = sys_pidfd_send_signal((uint64_t)pidfd, NSIG + 1U, 0, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "pidfd_send_signal bad sig einval");
+
+    ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0, 1, 0, 0, 0);
+    test_check(ret64 == -EOPNOTSUPP, "pidfd_send_signal info unsupported");
+
+    ret64 = sys_pidfd_send_signal((uint64_t)-1, 0, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "pidfd_send_signal bad fd ebadf");
+
+    ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "pidfd_send_signal sig0 alive");
+
+out:
+    close_fd_if_open(&pidfd);
+}
+
+static void test_pidfd_syscall_functional(void) {
+    int pidfd = -1;
+    bool child_reaped = false;
+    struct pidfd_worker_ctx ctx = {0};
+    struct process *child =
+        kthread_create_joinable(pidfd_controlled_exit_worker, &ctx, "pidfdex");
+    test_check(child != NULL, "pidfd func create child");
+    if (!child)
+        return;
+
+    sched_enqueue(child);
+    for (int spins = 0; spins < 2000 && !ctx.started; spins++)
+        proc_yield();
+    test_check(ctx.started != 0, "pidfd func child started");
+    if (!ctx.started)
+        goto out;
+
+    int64_t ret64 = sys_pidfd_open((uint64_t)(uint32_t)child->pid, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "pidfd func open child");
+    if (ret64 < 0) {
+        ctx.exit_now = 1;
+        goto out;
+    }
+    pidfd = (int)ret64;
+
+    ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "pidfd func sig0 before exit");
+
+    struct file *pf = fd_get(proc_current(), pidfd);
+    test_check(pf != NULL, "pidfd func fd_get");
+    if (pf) {
+        int pe = vfs_poll(pf, POLLIN | POLLHUP);
+        test_check((pe & (POLLIN | POLLHUP)) == 0, "pidfd func poll before exit");
+        file_put(pf);
+    }
+
+    ctx.exit_now = 1;
+    int status = 0;
+    bool reaped = wait_pid_exit_bounded(child->pid, 2ULL * TEST_NS_PER_SEC, &status);
+    test_check(reaped, "pidfd func child reaped");
+    if (!reaped)
+        goto out;
+    child_reaped = true;
+
+    pf = fd_get(proc_current(), pidfd);
+    test_check(pf != NULL, "pidfd func fd_get after exit");
+    if (pf) {
+        int pe = vfs_poll(pf, POLLIN | POLLHUP);
+        test_check((pe & POLLIN) != 0, "pidfd func pollin after exit");
+        file_put(pf);
+    }
+
+    ret64 = sys_pidfd_send_signal((uint64_t)pidfd, 0, 0, 0, 0, 0);
+    test_check(ret64 == -ESRCH, "pidfd func sig0 after exit esrch");
+
+out:
+    close_fd_if_open(&pidfd);
+    if (!child_reaped) {
+        ctx.exit_now = 1;
+        int ignored = 0;
+        (void)wait_pid_exit_bounded(child->pid, 2ULL * TEST_NS_PER_SEC, &ignored);
+    }
+}
+
 static void test_inotify_syscall_functional(void) {
     int ifd = -1;
     int wd = -1;
@@ -3350,6 +3490,8 @@ int run_vfs_ipc_tests(void) {
     test_signalfd_syscall_semantics();
     test_signalfd_syscall_functional();
     test_signalfd_syscall_rebind();
+    test_pidfd_syscall_semantics();
+    test_pidfd_syscall_functional();
     test_inotify_syscall_semantics();
     test_inotify_syscall_functional();
     test_inotify_mask_update_functional();
