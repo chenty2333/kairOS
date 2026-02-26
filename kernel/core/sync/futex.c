@@ -249,22 +249,24 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
         if (!waiter->active || waiter->uaddr != uaddr)
             continue;
         futex_waiter_dequeue_locked(waiter);
-        waiter->woken = true;
+        bool notify = true;
         struct mutex *wait_lock = waiter->wait_lock;
         if (wait_lock)
             mutex_lock(wait_lock);
         if (waiter->wake_index && waiter->index >= 0) {
             int expected = -1;
-            (void)__atomic_compare_exchange_n(waiter->wake_index, &expected,
-                                              waiter->index, false,
-                                              __ATOMIC_ACQ_REL,
-                                              __ATOMIC_ACQUIRE);
+            notify = __atomic_compare_exchange_n(waiter->wake_index, &expected,
+                                                 waiter->index, false,
+                                                 __ATOMIC_ACQ_REL,
+                                                 __ATOMIC_ACQUIRE);
         }
-        if (waiter->wait_src)
+        waiter->woken = notify;
+        if (notify && waiter->wait_src)
             poll_wait_source_wake_one(waiter->wait_src, 0);
         if (wait_lock)
             mutex_unlock(wait_lock);
-        woken++;
+        if (notify)
+            woken++;
         if (woken >= nr_wake)
             break;
     }
