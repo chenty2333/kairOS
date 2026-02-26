@@ -97,9 +97,12 @@ static int pidfd_is_target_alive(const struct pidfd_ctx *ctx) {
     return 0;
 }
 
-int pidfd_get_pid(struct file *file, pid_t *pid_out) {
+int pidfd_get_target(struct file *file, pid_t *pid_out,
+                     uint64_t *start_time_out) {
     if (pid_out)
         *pid_out = 0;
+    if (start_time_out)
+        *start_time_out = 0;
     if (!file || !file->vnode || !pid_out)
         return -EBADF;
 
@@ -108,6 +111,8 @@ int pidfd_get_pid(struct file *file, pid_t *pid_out) {
         return -EBADF;
 
     *pid_out = ctx->pid;
+    if (start_time_out)
+        *start_time_out = ctx->start_time;
     return 0;
 }
 
@@ -301,4 +306,72 @@ int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t info,
 
     file_put(file);
     return (int64_t)ret;
+}
+
+int64_t sys_pidfd_getfd(uint64_t pidfd, uint64_t targetfd, uint64_t flags,
+                        uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3;
+    (void)a4;
+    (void)a5;
+
+    int kpidfd = syspidfd_abi_int32(pidfd);
+    int ktargetfd = syspidfd_abi_int32(targetfd);
+    uint32_t uflags = (uint32_t)flags;
+
+    if ((uint64_t)uflags != flags)
+        return -EINVAL;
+    if (kpidfd < 0 || ktargetfd < 0)
+        return -EBADF;
+    if (uflags != 0)
+        return -EINVAL;
+
+    struct process *self = proc_current();
+    if (!self)
+        return -EINVAL;
+
+    struct file *pidfd_file = NULL;
+    int rc = fd_get_required(self, kpidfd, FD_RIGHT_IOCTL, &pidfd_file);
+    if (rc < 0)
+        return rc;
+
+    pid_t target_pid = 0;
+    uint64_t target_start = 0;
+    rc = pidfd_get_target(pidfd_file, &target_pid, &target_start);
+    if (rc < 0) {
+        file_put(pidfd_file);
+        return rc;
+    }
+
+    struct process *target = proc_find(target_pid);
+    if (!target || target->start_time != target_start ||
+        target->state == PROC_ZOMBIE || target->state == PROC_REAPING) {
+        file_put(pidfd_file);
+        return -ESRCH;
+    }
+
+    if (target != self && self->uid != 0 && self->uid != target->uid) {
+        file_put(pidfd_file);
+        return -EPERM;
+    }
+
+    struct file *target_file = NULL;
+    rc = fd_get_required(target, ktargetfd, FD_RIGHT_DUP, &target_file);
+    if (rc < 0) {
+        file_put(pidfd_file);
+        return rc;
+    }
+
+    uint32_t target_rights = 0;
+    rc = fd_get_rights(target, ktargetfd, &target_rights);
+    if (rc < 0) {
+        file_put(target_file);
+        file_put(pidfd_file);
+        return rc;
+    }
+
+    int newfd = fd_alloc_rights(self, target_file, FD_CLOEXEC, target_rights);
+    if (newfd < 0)
+        file_put(target_file);
+    file_put(pidfd_file);
+    return (int64_t)newfd;
 }

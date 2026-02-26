@@ -507,7 +507,7 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
         int rc = fd_get_required(proc_current(), kfd, 0, &pidfd_file);
         if (rc < 0)
             return rc;
-        rc = pidfd_get_pid(pidfd_file, &pid);
+        rc = pidfd_get_target(pidfd_file, &pid, NULL);
         file_put(pidfd_file);
         if (rc < 0)
             return rc;

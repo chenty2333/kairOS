@@ -3326,6 +3326,78 @@ out:
     }
 }
 
+static void test_pidfd_getfd_syscall_functional(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "pidfd_getfd proc current");
+    if (!self)
+        return;
+
+    int pidfd = -1;
+    int dupfd = -1;
+    int rfd = -1;
+    int wfd = -1;
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+
+    int ret = pipe_create(&rf, &wf);
+    test_check(ret == 0, "pidfd_getfd create pipe");
+    if (ret < 0)
+        goto out;
+
+    rfd = fd_alloc(self, rf);
+    wfd = fd_alloc(self, wf);
+    test_check(rfd >= 0, "pidfd_getfd alloc rfd");
+    test_check(wfd >= 0, "pidfd_getfd alloc wfd");
+    if (rfd < 0 || wfd < 0)
+        goto out;
+    rf = NULL;
+    wf = NULL;
+
+    int64_t ret64 = sys_pidfd_open((uint64_t)(uint32_t)self->pid, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "pidfd_getfd open self pidfd");
+    if (ret64 < 0)
+        goto out;
+    pidfd = (int)ret64;
+
+    ret64 = sys_pidfd_getfd((uint64_t)pidfd, (uint64_t)(uint32_t)rfd, 1, 0, 0, 0);
+    test_check(ret64 == -EINVAL, "pidfd_getfd bad flags einval");
+
+    ret64 = sys_pidfd_getfd((uint64_t)-1, (uint64_t)(uint32_t)rfd, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "pidfd_getfd bad pidfd ebadf");
+
+    ret64 = sys_pidfd_getfd((uint64_t)(uint32_t)rfd, (uint64_t)(uint32_t)rfd, 0, 0,
+                            0, 0);
+    test_check(ret64 == -EBADF, "pidfd_getfd nonpidfd ebadf");
+
+    ret64 = sys_pidfd_getfd((uint64_t)pidfd, (uint64_t)-1, 0, 0, 0, 0);
+    test_check(ret64 == -EBADF, "pidfd_getfd bad target ebadf");
+
+    ret64 = sys_pidfd_getfd((uint64_t)pidfd, (uint64_t)(uint32_t)rfd, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "pidfd_getfd dup read end");
+    if (ret64 < 0)
+        goto out;
+    dupfd = (int)ret64;
+    test_check(fd_has_cloexec(dupfd), "pidfd_getfd cloexec set");
+
+    ssize_t wr = fd_write_once(wfd, "Z", 1);
+    test_check(wr == 1, "pidfd_getfd seed pipe");
+    if (wr == 1) {
+        char ch = 0;
+        ssize_t rd = fd_read_once(dupfd, &ch, 1);
+        test_check(rd == 1, "pidfd_getfd read dupfd");
+        if (rd == 1)
+            test_check(ch == 'Z', "pidfd_getfd payload");
+    }
+
+out:
+    close_fd_if_open(&dupfd);
+    close_fd_if_open(&pidfd);
+    close_fd_if_open(&wfd);
+    close_fd_if_open(&rfd);
+    close_file_if_open(&wf);
+    close_file_if_open(&rf);
+}
+
 static void test_inotify_syscall_functional(void) {
     int ifd = -1;
     int wd = -1;
@@ -3545,6 +3617,7 @@ int run_vfs_ipc_tests(void) {
     test_pidfd_syscall_semantics();
     test_pidfd_syscall_functional();
     test_waitid_pidfd_functional();
+    test_pidfd_getfd_syscall_functional();
     test_inotify_syscall_semantics();
     test_inotify_syscall_functional();
     test_inotify_mask_update_functional();
