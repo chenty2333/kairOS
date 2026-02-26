@@ -3274,6 +3274,58 @@ out:
     }
 }
 
+static void test_waitid_pidfd_functional(void) {
+    enum { P_PIDFD = 3 };
+    int pidfd = -1;
+    bool child_reaped = false;
+    struct pidfd_worker_ctx ctx = {0};
+    struct process *child =
+        kthread_create_joinable(pidfd_controlled_exit_worker, &ctx, "pidfdwait");
+    test_check(child != NULL, "waitid pidfd create child");
+    if (!child)
+        return;
+
+    sched_enqueue(child);
+    for (int spins = 0; spins < 2000 && !ctx.started; spins++)
+        proc_yield();
+    test_check(ctx.started != 0, "waitid pidfd child started");
+    if (!ctx.started)
+        goto out;
+
+    int64_t ret64 = sys_pidfd_open((uint64_t)(uint32_t)child->pid, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "waitid pidfd open child");
+    if (ret64 < 0) {
+        ctx.exit_now = 1;
+        goto out;
+    }
+    pidfd = (int)ret64;
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd, 0, WEXITED | WNOHANG,
+                       0, 0);
+    test_check(ret64 == 0, "waitid pidfd wnohang before exit");
+
+    ctx.exit_now = 1;
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd, 0, WEXITED, 0, 0);
+    test_check(ret64 == 0, "waitid pidfd reap child");
+    if (ret64 == 0)
+        child_reaped = true;
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)(uint32_t)pidfd, 0, WEXITED | WNOHANG,
+                       0, 0);
+    test_check(ret64 == -ECHILD, "waitid pidfd after reap echid");
+
+    ret64 = sys_waitid(P_PIDFD, (uint64_t)-1, 0, WEXITED | WNOHANG, 0, 0);
+    test_check(ret64 == -EBADF, "waitid pidfd bad fd");
+
+out:
+    close_fd_if_open(&pidfd);
+    if (!child_reaped) {
+        ctx.exit_now = 1;
+        int ignored = 0;
+        (void)wait_pid_exit_bounded(child->pid, 2ULL * TEST_NS_PER_SEC, &ignored);
+    }
+}
+
 static void test_inotify_syscall_functional(void) {
     int ifd = -1;
     int wd = -1;
@@ -3492,6 +3544,7 @@ int run_vfs_ipc_tests(void) {
     test_signalfd_syscall_rebind();
     test_pidfd_syscall_semantics();
     test_pidfd_syscall_functional();
+    test_waitid_pidfd_functional();
     test_inotify_syscall_semantics();
     test_inotify_syscall_functional();
     test_inotify_mask_update_functional();

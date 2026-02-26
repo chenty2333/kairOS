@@ -39,7 +39,7 @@ Other:
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
 - Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` and `dirfd` as 32-bit `int`; `setuid`/`setgid` and `setre*id`/`setres*id` decode uid/gid arguments as 32-bit values (`-1` sentinel is `0xffffffff`)
 - Linux ABI process compatibility also normalizes `pid`/`signal`/`priority` scalar args to 32-bit ABI width for `tgkill`/`tkill`, `getpriority`/`setpriority`, `prlimit64`, `sched_{get,set}affinity`, `setpgid`, `getpgid`, and `getsid`
-- Linux ABI pidfd baseline: `pidfd_open` and `pidfd_send_signal` are wired; pidfd is pollable (`POLLIN|POLLHUP` after target exit), `pidfd_open` enforces Linux-style `O_CLOEXEC` on returned fd, and `pidfd_send_signal` currently supports `flags=0` and `info=NULL` path
+- Linux ABI pidfd baseline: `pidfd_open` and `pidfd_send_signal` are wired; pidfd is pollable (`POLLIN|POLLHUP` after target exit), `pidfd_open` enforces Linux-style `O_CLOEXEC` on returned fd, `pidfd_send_signal` currently supports `flags=0` and `info=NULL` path, and `waitid(P_PIDFD, ...)` resolves pidfd targets through the fd table for child reaping
 
 ## Scheduler (core/sched/sched.c)
 
@@ -133,7 +133,7 @@ Current IPC mechanisms:
 - Signals: inter-process notification
 - Event FDs: `eventfd2` and `timerfd_*` are exposed as anon-vnode file descriptors (pollable, Linux ABI wiring)
 - Signal FDs: `signalfd4` is wired; read consumes matching pending signals from the task signal bitmap
-- PID FDs: `pidfd_open` creates pollable process handles; `pidfd_send_signal` supports liveness probe (`sig=0`) and signal delivery via pidfd
+- PID FDs: `pidfd_open` creates pollable process handles; `pidfd_send_signal` supports liveness probe (`sig=0`) and signal delivery via pidfd; `waitid(P_PIDFD, ...)` is wired for child wait/reap semantics
 - Inotify: `inotify_init1/add_watch/rm_watch` is wired with vnode-based watches and pollable event queue delivery
 - Capability handles: per-process `handletable` (refcounted; cloned with `CLONE_FILES` sharing or copied otherwise), rights-mask model (`READ/WRITE/TRANSFER/DUPLICATE/WAIT/MANAGE`), and generic `kobj` refcounted object lifetime
 - Capability file bridge: Linux fd/file objects can be wrapped as `KOBJ_TYPE_FILE` handles and converted back to fd without changing Linux ABI syscalls; `fd_alloc_rights()` preserves rights attenuation when materializing fd from a handle

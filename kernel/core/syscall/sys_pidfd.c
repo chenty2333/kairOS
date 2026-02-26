@@ -3,6 +3,7 @@
  */
 
 #include <kairos/list.h>
+#include <kairos/pidfd.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
 #include <kairos/process.h>
@@ -93,6 +94,20 @@ static int pidfd_is_target_alive(const struct pidfd_ctx *ctx) {
         return -ESRCH;
     if (target->state == PROC_ZOMBIE || target->state == PROC_REAPING)
         return -ESRCH;
+    return 0;
+}
+
+int pidfd_get_pid(struct file *file, pid_t *pid_out) {
+    if (pid_out)
+        *pid_out = 0;
+    if (!file || !file->vnode || !pid_out)
+        return -EBADF;
+
+    struct pidfd_ctx *ctx = (struct pidfd_ctx *)file->vnode->fs_data;
+    if (!ctx || ctx->magic != PIDFD_MAGIC)
+        return -EBADF;
+
+    *pid_out = ctx->pid;
     return 0;
 }
 

@@ -6,6 +6,7 @@
 #include <kairos/config.h>
 #include <kairos/dentry.h>
 #include <kairos/namei.h>
+#include <kairos/pidfd.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
 #include <kairos/signal.h>
@@ -490,7 +491,7 @@ int64_t sys_wait4(uint64_t pid, uint64_t status_ptr, uint64_t options,
 int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
                    uint64_t options, uint64_t a4, uint64_t a5) {
     (void)a4; (void)a5;
-    enum { P_ALL = 0, P_PID = 1, P_PGID = 2 };
+    enum { P_ALL = 0, P_PID = 1, P_PGID = 2, P_PIDFD = 3 };
     int32_t ktype = sysproc_abi_i32(type);
     uint32_t uoptions = (uint32_t)options;
     if (uoptions & ~(WNOHANG | WEXITED))
@@ -498,6 +499,18 @@ int64_t sys_waitid(uint64_t type, uint64_t id, uint64_t info_ptr,
     pid_t pid = -1;
     if (ktype == P_PID) {
         pid = sysproc_abi_pid(id);
+    } else if (ktype == P_PIDFD) {
+        int kfd = (int)sysproc_abi_fd(id);
+        if (kfd < 0)
+            return -EBADF;
+        struct file *pidfd_file = NULL;
+        int rc = fd_get_required(proc_current(), kfd, 0, &pidfd_file);
+        if (rc < 0)
+            return rc;
+        rc = pidfd_get_pid(pidfd_file, &pid);
+        file_put(pidfd_file);
+        if (rc < 0)
+            return rc;
     } else if (ktype == P_ALL) {
         pid = -1;
     } else {
