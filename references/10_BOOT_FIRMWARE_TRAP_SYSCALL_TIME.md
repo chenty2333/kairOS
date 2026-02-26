@@ -92,6 +92,7 @@ Interrupt controllers: riscv64 uses PLIC, x86_64 uses LAPIC+IOAPIC, aarch64 uses
   - FDT device scan now enumerates cascaded `interrupt-controller` nodes as platform devices (with parent IRQ resource + `platform_device_info.fwnode`), enabling firmware-described cascaded irqchip drivers to hook directly into the generic cascade core
   - root domain coverage is now board-configurable (`platform_desc.irqchip_root_irqs`) so root mappings no longer have to occupy the full global virq space
   - `arch_irq_enable_nr()` / `arch_irq_disable_nr()` / set_type / set_affinity now program irqchips with descriptor `hwirq`, not virq
+  - `arch_irq_set_type()` / `arch_irq_set_affinity()` now return `int`: invalid input is reported to callers, and when IRQ is enabled the irqchip callback error is propagated instead of being silently ignored
   - `platform_irq_dispatch()` now gates handlers on IRQ enable refcount; disabled IRQs no longer dispatch actions
   - `IRQ_FLAG_NO_CHIP` marks software/local IRQ lines that should use refcount gating without programming irqchip enable/disable paths
   - IRQ observability now exports per-IRQ `enable/disable/dispatch` totals plus `in_flight`, `retired_pending`, and `last_cpu` alongside current enable refcount/action count via `platform_irq_format_stats()`; procfs exposes this as `/proc/interrupts`

@@ -273,7 +273,9 @@ int pci_enable_msi(struct pci_device *pdev)
     if (ret < 0)
         return ret;
 
-    arch_irq_set_type((int)msg.irq, IRQ_FLAG_TRIGGER_EDGE);
+    ret = arch_irq_set_type((int)msg.irq, IRQ_FLAG_TRIGGER_EDGE);
+    if (ret < 0)
+        return ret;
     pci_toggle_intx(pdev, true);
 
     pdev->msi_cap = cap;
@@ -377,7 +379,9 @@ int pci_enable_msix_nvec(struct pci_device *pdev, uint16_t nvec)
             goto msix_fail;
         }
         irqs[i] = msg.irq;
-        arch_irq_set_type((int)msg.irq, IRQ_FLAG_TRIGGER_EDGE);
+        ret = arch_irq_set_type((int)msg.irq, IRQ_FLAG_TRIGGER_EDGE);
+        if (ret < 0)
+            goto msix_fail;
 
         volatile uint8_t *entry = table + ((size_t)i * PCI_MSIX_ENTRY_SIZE);
         uint64_t addr = ((uint64_t)msg.address_hi << 32) | msg.address_lo;
@@ -581,8 +585,7 @@ int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
     struct pci_msi_msg msg = {0};
     ret = arch_pci_msi_affinity_msg(pdev, irq, cpu_mask, &msg);
     if (ret == -EOPNOTSUPP || ret == -ENOENT) {
-        arch_irq_set_affinity((int)irq, cpu_mask);
-        return 0;
+        return arch_irq_set_affinity((int)irq, cpu_mask);
     }
     if (ret < 0)
         return ret;
@@ -611,7 +614,9 @@ int pci_msix_set_affinity(struct pci_device *pdev, uint16_t index,
     writel(ctrl, (void *)(entry + 12));
     iounmap((void *)entry);
 
-    arch_irq_set_affinity((int)irq, cpu_mask);
+    ret = arch_irq_set_affinity((int)irq, cpu_mask);
+    if (ret < 0)
+        return ret;
     return 0;
 }
 

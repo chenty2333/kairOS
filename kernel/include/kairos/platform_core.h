@@ -120,8 +120,8 @@ int platform_irq_free(int irq, irq_handler_fn handler, void *arg);
 int platform_irq_free_sync(int irq, irq_handler_fn handler, void *arg);
 int platform_irq_free_cookie(uint64_t cookie);
 int platform_irq_free_cookie_sync(uint64_t cookie);
-void platform_irq_set_type(int irq, uint32_t flags);
-void platform_irq_set_affinity(int irq, uint32_t cpu_mask);
+int platform_irq_set_type(int irq, uint32_t flags);
+int platform_irq_set_affinity(int irq, uint32_t cpu_mask);
 int platform_irq_domain_add_linear(const char *name,
                                    const struct irqchip_ops *chip,
                                    uint32_t hwirq_base, uint32_t virq_base,

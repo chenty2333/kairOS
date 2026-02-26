@@ -2023,15 +2023,17 @@ int platform_irq_free_cookie_sync(uint64_t cookie)
     return 0;
 }
 
-void platform_irq_set_type(int irq, uint32_t flags)
+int platform_irq_set_type(int irq, uint32_t flags)
 {
     struct irq_desc *desc = platform_irq_desc_get(irq);
     if (!desc)
-        return;
+        return -EINVAL;
 
     uint32_t type = flags & IRQ_FLAG_TRIGGER_MASK;
     if (!type)
-        return;
+        return -EINVAL;
+    if (type == IRQ_FLAG_TRIGGER_MASK)
+        return -EINVAL;
 
     bool irq_state;
     spin_lock_irqsave(&desc->lock, &irq_state);
@@ -2042,15 +2044,19 @@ void platform_irq_set_type(int irq, uint32_t flags)
     bool no_chip = (desc->flags & IRQ_FLAG_NO_CHIP) != 0;
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
-    if (!no_chip && chip && chip->set_type && enable_count > 0)
-        (void)chip->set_type((int)hwirq, type);
+    if (!no_chip && enable_count > 0) {
+        if (!chip || !chip->set_type)
+            return -EOPNOTSUPP;
+        return chip->set_type((int)hwirq, type);
+    }
+    return 0;
 }
 
-void platform_irq_set_affinity(int irq, uint32_t cpu_mask)
+int platform_irq_set_affinity(int irq, uint32_t cpu_mask)
 {
     struct irq_desc *desc = platform_irq_desc_get(irq);
     if (!desc)
-        return;
+        return -EINVAL;
 
     uint32_t mask = irq_sanitize_affinity_mask(cpu_mask);
     bool irq_state;
@@ -2062,8 +2068,12 @@ void platform_irq_set_affinity(int irq, uint32_t cpu_mask)
     bool no_chip = (desc->flags & IRQ_FLAG_NO_CHIP) != 0;
     spin_unlock_irqrestore(&desc->lock, irq_state);
 
-    if (!no_chip && chip && chip->set_affinity && enable_count > 0)
-        (void)chip->set_affinity((int)hwirq, mask);
+    if (!no_chip && enable_count > 0) {
+        if (!chip || !chip->set_affinity)
+            return -EOPNOTSUPP;
+        return chip->set_affinity((int)hwirq, mask);
+    }
+    return 0;
 }
 
 void platform_irq_dispatch_hwirq(const struct irqchip_ops *chip,
@@ -2362,14 +2372,14 @@ int arch_free_irq_cookie_sync(uint64_t cookie)
     return platform_irq_free_cookie_sync(cookie);
 }
 
-void arch_irq_set_type(int irq, uint32_t flags)
+int arch_irq_set_type(int irq, uint32_t flags)
 {
-    platform_irq_set_type(irq, flags);
+    return platform_irq_set_type(irq, flags);
 }
 
-void arch_irq_set_affinity(int irq, uint32_t cpu_mask)
+int arch_irq_set_affinity(int irq, uint32_t cpu_mask)
 {
-    platform_irq_set_affinity(irq, cpu_mask);
+    return platform_irq_set_affinity(irq, cpu_mask);
 }
 
 void arch_irq_register(int irq, void (*handler)(void *), void *arg)
