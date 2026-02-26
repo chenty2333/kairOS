@@ -13,7 +13,7 @@ Core data structures:
 
 Two operation interfaces:
 - vfs_ops: filesystem-level operations (mount, unmount, lookup, create, mkdir, symlink, unlink, rmdir, rename, link, mknod, chmod, chown, utimes, statfs)
-- file_ops: split into two layers — vnode-level (read, write, readdir, close, stat, truncate, fsync) and file-level (open, release, fread, fwrite, ioctl, poll)
+- file_ops: split into two layers — vnode-level (read, write, readdir, close, stat, truncate, fsync, optional `copy_file_range`) and file-level (open, release, fread, fwrite, ioctl, poll)
 
 VFS initialization (vfs_init): creates vnode_cache and file_cache (kmem_cache), initializes dentry cache and mount mutex.
 
@@ -74,7 +74,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
   - `preadv2`/`pwritev2` decode `flags` using Linux ABI width (`int`/32-bit)
   - `read`/`write`/`close`/`lseek`/`pread64`/`pwrite64`/`readv`/`writev`/`preadv`/`pwritev`/`copy_file_range`/`fsync`/`fdatasync` decode `fd` via Linux ABI `int` width (32-bit); `lseek` decodes `whence` as 32-bit `int`
   - `preadv2`/`pwritev2` with offset `-1` follow non-positional `readv`/`writev` fallback
-  - `copy_file_range` is wired through vnode read/write paths; `flags` (32-bit ABI width) must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
+  - `copy_file_range` first tries optional vnode fast path (`file_ops.copy_file_range`) and falls back to buffered vnode read/write loop when unsupported (`-EOPNOTSUPP`/`-EXDEV`); `flags` (32-bit ABI width) must be zero, source/destination offsets are updated according to copied bytes, and pipe/socket endpoints are rejected
 - `vfs_fsync()` now falls back to buffer-cache flush when filesystem-specific `fsync` op is absent; `sys_sync` is wired through `vfs_sync()` to the same flush path
 
 ## Block I/O Layer (fs/bio/bio.c)
@@ -114,6 +114,8 @@ Special:
 
 - vfs_poll.c: VFS poll infrastructure, based on pollwait mechanism
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
+- poll/epoll/futex/socket timeout waits share a common wait-core deadline/block helper path (`poll_timeout_to_deadline_ms` + `poll_block_current`)
+- eventfd/timerfd/inotify wakeups now use unified ready-wake bridge (`poll_ready_wake_all`) to keep wait_queue + poll watcher wake paths consistent
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + strict `sigsetsize == sizeof(sigset_t)` checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
 - Linux ABI compatibility also includes `eventfd2`, `timerfd_create/settime/gettime`, and `signalfd4` via anon-vnode pollable file descriptors
@@ -145,6 +147,7 @@ Special:
 - socket message/accept syscall `flags` are decoded using Linux ABI width (`int`/32-bit) for `accept4`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`
 - socket control/int arguments are decoded with Linux ABI `int` width (`socket`/`socketpair` domain/type/protocol, socket syscalls `fd`, `listen` backlog, `shutdown` how, `setsockopt`/`getsockopt` level/optname/optlen, `getsockopt` user `optlen_ptr` value, `sendto`/`recvfrom` flags, sockaddr lengths)
 - `sendmmsg`/`recvmmsg` decode `vlen` using Linux ABI width (`unsigned int`/32-bit), ignoring upper 32 syscall argument bits
+- socket send/recv paths keep Linux ABI semantics while adding small-message inline buffer fast paths (heap allocation fallback for larger payloads)
 - socket address-length values read from userspace (`accept*`, `recvfrom`, `getsockname`, `getpeername`) are decoded as 32-bit ABI values before range checks
 - `poll`/`ppoll` with `nfds=0` now sleep for the requested timeout (or until signal) instead of returning immediately
 - `select`/`pselect6` with no watched fds also honor timeout sleep semantics

@@ -214,6 +214,9 @@ struct file_ops {
     int (*stat)(struct vnode *vn, struct stat *st);
     int (*truncate)(struct vnode *vn, off_t length);
     int (*fsync)(struct vnode *vn, int datasync);
+    ssize_t (*copy_file_range)(struct vnode *src, off_t *src_off,
+                               struct vnode *dst, off_t *dst_off,
+                               size_t len, uint32_t flags);
 
     /* file-level */
     int (*open)(struct file *file);

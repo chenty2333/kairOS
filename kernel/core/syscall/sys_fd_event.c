@@ -231,9 +231,8 @@ static int eventfd_close(struct vnode *vn) {
         spin_lock_irqsave(&ctx->lock, &irq);
         ctx->closed = true;
         spin_unlock_irqrestore(&ctx->lock, irq);
-        wait_queue_wakeup_all(&ctx->rd_wait);
+        poll_ready_wake_all(&ctx->rd_wait, vn, POLLIN | POLLOUT | POLLHUP);
         wait_queue_wakeup_all(&ctx->wr_wait);
-        vfs_poll_wake(vn, POLLIN | POLLOUT | POLLHUP);
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -283,8 +282,7 @@ static ssize_t eventfd_fread(struct file *file, void *buf, size_t len) {
             }
             spin_unlock_irqrestore(&ctx->lock, irq);
             memcpy(buf, &val, sizeof(val));
-            wait_queue_wakeup_all(&ctx->wr_wait);
-            vfs_poll_wake(ctx->vnode, POLLOUT);
+            poll_ready_wake_all(&ctx->wr_wait, ctx->vnode, POLLOUT);
             return (ssize_t)sizeof(uint64_t);
         }
         if (ctx->closed) {
@@ -330,8 +328,7 @@ static ssize_t eventfd_fwrite(struct file *file, const void *buf, size_t len) {
             wake_readers = (val > 0) && was_empty;
             spin_unlock_irqrestore(&ctx->lock, irq);
             if (wake_readers) {
-                wait_queue_wakeup_all(&ctx->rd_wait);
-                vfs_poll_wake(ctx->vnode, POLLIN);
+                poll_ready_wake_all(&ctx->rd_wait, ctx->vnode, POLLIN);
             }
             return (ssize_t)sizeof(uint64_t);
         }
@@ -631,8 +628,7 @@ static void inotify_queue_event_locked(struct inotify_ctx *ctx, int wd,
         list_add_tail(&overflow->node, &ctx->events);
         ctx->queued_bytes += sizeof(struct linux_inotify_event);
         ctx->overflow_pending = true;
-        wait_queue_wakeup_all(&ctx->rd_wait);
-        vfs_poll_wake(ctx->vnode, POLLIN);
+        poll_ready_wake_all(&ctx->rd_wait, ctx->vnode, POLLIN);
         return;
     }
 
@@ -652,8 +648,7 @@ static void inotify_queue_event_locked(struct inotify_ctx *ctx, int wd,
 
     list_add_tail(&ev->node, &ctx->events);
     ctx->queued_bytes += need;
-    wait_queue_wakeup_all(&ctx->rd_wait);
-    vfs_poll_wake(ctx->vnode, POLLIN);
+    poll_ready_wake_all(&ctx->rd_wait, ctx->vnode, POLLIN);
 }
 
 static void inotify_watch_destroy(struct inotify_watch *watch) {
@@ -709,8 +704,7 @@ static int inotify_close(struct vnode *vn) {
         inotify_drop_all_locked(ctx);
         mutex_unlock(&ctx->lock);
 
-        wait_queue_wakeup_all(&ctx->rd_wait);
-        vfs_poll_wake(vn, POLLIN | POLLHUP);
+        poll_ready_wake_all(&ctx->rd_wait, vn, POLLIN | POLLHUP);
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -993,8 +987,7 @@ static int timerfd_close(struct vnode *vn) {
         spin_lock_irqsave(&ctx->lock, &irq);
         ctx->closed = true;
         spin_unlock_irqrestore(&ctx->lock, irq);
-        wait_queue_wakeup_all(&ctx->rd_wait);
-        vfs_poll_wake(vn, POLLIN | POLLHUP);
+        poll_ready_wake_all(&ctx->rd_wait, vn, POLLIN | POLLHUP);
 
         ctx->magic = 0;
         kfree(ctx);
@@ -1127,8 +1120,7 @@ void timerfd_tick(uint64_t now_ticks) {
         wake = timerfd_refresh_locked(ctx, mono_ns, realtime_ns);
         spin_unlock(&ctx->lock);
         if (wake) {
-            wait_queue_wakeup_all(&ctx->rd_wait);
-            vfs_poll_wake(ctx->vnode, POLLIN);
+            poll_ready_wake_all(&ctx->rd_wait, ctx->vnode, POLLIN);
         }
     }
     spin_unlock_irqrestore(&timerfd_list_lock, irq);
@@ -1271,8 +1263,7 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
         return -EFAULT;
     }
     if (wake) {
-        wait_queue_wakeup_all(&ctx->rd_wait);
-        vfs_poll_wake(ctx->vnode, POLLIN);
+        poll_ready_wake_all(&ctx->rd_wait, ctx->vnode, POLLIN);
     }
     file_put(file);
     return 0;

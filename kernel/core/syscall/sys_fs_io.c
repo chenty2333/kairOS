@@ -7,6 +7,7 @@
 #include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/syscall.h>
+#include <kairos/tracepoint.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
@@ -469,6 +470,23 @@ static uint64_t sysfs_linux_split_off(uint64_t pos_l, uint64_t pos_h) {
     return (pos_l & 0xffffffffULL) | (pos_h << 32);
 }
 
+static int64_t sys_copy_file_range_fast_path(struct file *fin, off_t *in_pos,
+                                             struct file *fout, off_t *out_pos,
+                                             size_t len, uint32_t flags) {
+    if (!fin || !fout || !in_pos || !out_pos || len == 0)
+        return -EINVAL;
+    if (!fin->vnode || !fin->vnode->ops || !fin->vnode->ops->copy_file_range)
+        return -EOPNOTSUPP;
+
+    /*
+     * Optional in-kernel fast path (e.g. reflink / in-fs copy). Callers keep
+     * Linux ABI behavior by falling back to buffered copy when unsupported.
+     */
+    return (int64_t)fin->vnode->ops->copy_file_range(fin->vnode, in_pos,
+                                                     fout->vnode, out_pos,
+                                                     len, flags);
+}
+
 int64_t sys_preadv(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt,
                    uint64_t pos_l, uint64_t pos_h, uint64_t a5) {
     (void)a5;
@@ -586,6 +604,39 @@ int64_t sys_copy_file_range(uint64_t fd_in, uint64_t off_in_ptr,
             return -EINVAL;
         }
     }
+
+    int64_t fast_ret = sys_copy_file_range_fast_path(fin, &in_pos, fout, &out_pos,
+                                                     (size_t)len, uflags);
+    if (fast_ret >= 0) {
+        tracepoint_emit(TRACE_IO_COPY_RANGE_FAST, 0, len, (uint64_t)fast_ret);
+        if (off_in_ptr) {
+            if (copy_to_user((void *)off_in_ptr, &in_pos, sizeof(in_pos)) < 0) {
+                file_put(fout);
+                file_put(fin);
+                return -EFAULT;
+            }
+        } else {
+            fin->offset = in_pos;
+        }
+        if (off_out_ptr) {
+            if (copy_to_user((void *)off_out_ptr, &out_pos, sizeof(out_pos)) < 0) {
+                file_put(fout);
+                file_put(fin);
+                return -EFAULT;
+            }
+        } else {
+            fout->offset = out_pos;
+        }
+        file_put(fout);
+        file_put(fin);
+        return fast_ret;
+    }
+    if (fast_ret != -EOPNOTSUPP && fast_ret != -EXDEV) {
+        file_put(fout);
+        file_put(fin);
+        return fast_ret;
+    }
+    tracepoint_emit(TRACE_IO_COPY_RANGE_FALLBACK, 0, len, 0);
 
     size_t remain = (size_t)len;
     size_t done = 0;

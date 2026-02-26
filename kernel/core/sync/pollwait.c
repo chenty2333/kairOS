@@ -3,10 +3,87 @@
  */
 
 #include <kairos/pollwait.h>
+#include <kairos/arch.h>
+#include <kairos/config.h>
 #include <kairos/process.h>
+#include <kairos/tracepoint.h>
+#include <kairos/vfs.h>
 
 static struct poll_wait_head poll_sleep_head;
 static bool poll_sleep_head_init_done;
+
+int poll_timeout_to_deadline_ms(int timeout_ms, uint64_t *deadline_out) {
+    if (!deadline_out)
+        return -EINVAL;
+    *deadline_out = 0;
+
+    if (timeout_ms < -1)
+        return -EINVAL;
+    if (timeout_ms < 0)
+        return 0;
+
+    uint64_t now = arch_timer_get_ticks();
+    if (timeout_ms == 0) {
+        *deadline_out = now;
+        return 0;
+    }
+
+    uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
+    if (!delta)
+        delta = 1;
+    *deadline_out = now + delta;
+    return 0;
+}
+
+bool poll_deadline_expired(uint64_t deadline) {
+    return deadline != 0 && arch_timer_get_ticks() >= deadline;
+}
+
+int poll_block_current(uint64_t deadline, void *channel) {
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+    if (poll_deadline_expired(deadline))
+        return -ETIMEDOUT;
+
+    tracepoint_emit(TRACE_WAIT_BLOCK, deadline ? 1U : 0U, deadline,
+                    (uint64_t)(uintptr_t)channel);
+
+    struct poll_sleep sleep = {0};
+    INIT_LIST_HEAD(&sleep.node);
+    if (deadline)
+        poll_sleep_arm(&sleep, curr, deadline);
+    int rc = proc_sleep_on(NULL, channel, true);
+    if (deadline)
+        poll_sleep_cancel(&sleep);
+
+    if (rc < 0)
+        return rc;
+    if (poll_deadline_expired(deadline))
+        return -ETIMEDOUT;
+    return 0;
+}
+
+void poll_ready_wake_one(struct wait_queue *wq, struct vnode *vn,
+                         uint32_t events) {
+    tracepoint_emit(TRACE_WAIT_WAKE, 0x80000000U | events,
+                    (uint64_t)(uintptr_t)wq,
+                    (uint64_t)(uintptr_t)vn);
+    if (wq)
+        wait_queue_wakeup_one(wq);
+    if (vn)
+        vfs_poll_wake(vn, events);
+}
+
+void poll_ready_wake_all(struct wait_queue *wq, struct vnode *vn,
+                         uint32_t events) {
+    tracepoint_emit(TRACE_WAIT_WAKE, events, (uint64_t)(uintptr_t)wq,
+                    (uint64_t)(uintptr_t)vn);
+    if (wq)
+        wait_queue_wakeup_all(wq);
+    if (vn)
+        vfs_poll_wake(vn, events);
+}
 
 static void poll_sleep_head_init(void) {
     if (poll_sleep_head_init_done)

@@ -533,16 +533,14 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
     if (!ep)
         return -EBADF;
 
-    uint64_t start = arch_timer_get_ticks();
+    int ret;
     uint64_t deadline = 0;
-    if (timeout_ms > 0) {
-        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
-        if (!delta)
-            delta = 1;
-        deadline = start + delta;
+    int dl_rc = poll_timeout_to_deadline_ms(timeout_ms, &deadline);
+    if (dl_rc < 0) {
+        ret = dl_rc;
+        goto out;
     }
 
-    int ret;
     while (1) {
         int ready = epoll_collect_ready(ep, events, maxevents);
         if (ready != 0 || timeout_ms == 0) {
@@ -558,8 +556,7 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
             goto out;
         }
 
-        uint64_t now = arch_timer_get_ticks();
-        if (deadline && now >= deadline) {
+        if (poll_deadline_expired(deadline)) {
             ret = 0;
             goto out;
         }
@@ -586,13 +583,16 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
             goto out;
         }
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        proc_sleep_on(NULL, NULL, true);
-        poll_sleep_cancel(&sleep);
+        int sleep_rc = poll_block_current(deadline, curr);
         poll_wait_remove(&waiter);
+        if (sleep_rc == -EINTR) {
+            ret = -EINTR;
+            goto out;
+        }
+        if (sleep_rc < 0 && sleep_rc != -ETIMEDOUT) {
+            ret = sleep_rc;
+            goto out;
+        }
     }
 out:
     file_put(ep_file);

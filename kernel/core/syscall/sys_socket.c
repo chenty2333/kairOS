@@ -10,11 +10,13 @@
 #include <kairos/socket.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
+#include <kairos/tracepoint.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 
 #define SOCKET_MSG_IOV_MAX 1024
 #define SOCKET_MSG_MAX_LEN 65536
+#define SOCKET_MSG_INLINE_LEN 256
 #define MSG_WAITFORONE 0x10000
 #define NS_PER_SEC 1000000000ULL
 #define SCM_RIGHTS 1
@@ -364,7 +366,7 @@ static int socket_wait_readable(struct socket *sock, struct file *sock_file,
         uint32_t revents = (uint32_t)vfs_poll(sock_file, POLLIN | POLLERR | POLLHUP);
         if (revents & (POLLIN | POLLERR | POLLHUP))
             return 1;
-        if (has_timeout && arch_timer_get_ticks() >= deadline)
+        if (has_timeout && poll_deadline_expired(deadline))
             return 0;
 
         struct poll_waiter waiter = {0};
@@ -377,30 +379,37 @@ static int socket_wait_readable(struct socket *sock, struct file *sock_file,
             poll_wait_remove(&waiter);
             return 1;
         }
-        if (has_timeout && arch_timer_get_ticks() >= deadline) {
+        if (has_timeout && poll_deadline_expired(deadline)) {
             poll_wait_remove(&waiter);
             return 0;
         }
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (has_timeout)
-            poll_sleep_arm(&sleep, curr, deadline);
-        int rc = proc_sleep_on(NULL, has_timeout ? (void *)&sleep : (void *)curr,
-                               true);
-        if (has_timeout)
-            poll_sleep_cancel(&sleep);
+        int rc = poll_block_current(has_timeout ? deadline : 0, sock);
         poll_wait_remove(&waiter);
 
         if (rc == -EINTR)
             return -EINTR;
+        if (rc == -ETIMEDOUT)
+            return 0;
+        if (rc < 0)
+            return rc;
     }
 }
 
 static struct socket *sock_from_fd(struct process *p, uint64_t fd_arg,
+                                   uint32_t required_rights,
                                    struct file **filep) {
     int fd = syssock_abi_i32(fd_arg);
-    struct file *f = fd_get(p, fd);
+    struct file *f = NULL;
+    int fr = 0;
+    if (required_rights) {
+        fr = fd_get_required(p, fd, required_rights, &f);
+    } else {
+        f = fd_get(p, fd);
+        fr = f ? 0 : -EBADF;
+    }
+    if (fr < 0)
+        return NULL;
     if (!f || !f->vnode) {
         if (f) file_put(f);
         return NULL;
@@ -571,15 +580,20 @@ static int64_t socket_sendmsg(struct socket *sock,
         return ret;
     }
 
-    void *kbuf = kmalloc(total);
+    uint8_t inline_buf[SOCKET_MSG_INLINE_LEN];
+    bool use_heap = total > sizeof(inline_buf);
+    void *kbuf = use_heap ? kmalloc(total) : (void *)inline_buf;
     if (!kbuf) {
         socket_control_release(&control);
         return -ENOMEM;
     }
+    tracepoint_emit(use_heap ? TRACE_SOCKET_HEAP_BUF : TRACE_SOCKET_INLINE_BUF,
+                    0, total, 0);
     size_t copied = 0;
     rc = socket_msg_copyin_iov(iov_ptr, msg->msg_iovlen, kbuf, total, &copied);
     if (rc < 0) {
-        kfree(kbuf);
+        if (use_heap)
+            kfree(kbuf);
         socket_control_release(&control);
         return rc;
     }
@@ -589,7 +603,8 @@ static int64_t socket_sendmsg(struct socket *sock,
                                            destp, dlen, &control)
                       : sock->ops->sendto(sock, kbuf, copied, (int32_t)flags,
                                           destp, dlen);
-    kfree(kbuf);
+    if (use_heap)
+        kfree(kbuf);
     socket_control_release(&control);
     if (ret >= 0 && sent_out) {
         *sent_out = (ret > UINT32_MAX) ? UINT32_MAX : (uint32_t)ret;
@@ -618,12 +633,16 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
         total = SOCKET_MSG_MAX_LEN;
     }
 
+    uint8_t inline_buf[SOCKET_MSG_INLINE_LEN];
+    bool use_heap = total > sizeof(inline_buf);
     void *kbuf = NULL;
-    if (total) {
-        kbuf = kmalloc(total);
-        if (!kbuf) {
+    if (total > 0) {
+        kbuf = use_heap ? kmalloc(total) : (void *)inline_buf;
+        if (!kbuf)
             return -ENOMEM;
-        }
+        tracepoint_emit(use_heap ? TRACE_SOCKET_HEAP_BUF
+                                 : TRACE_SOCKET_INLINE_BUF,
+                        0, total, 1);
     }
 
     uint32_t proto_flags = flags & ~MSG_CMSG_CLOEXEC;
@@ -646,12 +665,14 @@ static int64_t socket_recvmsg(struct socket *sock, struct socket_msghdr *msg,
     if (ret > 0) {
         rc = socket_msg_copyout_iov(iov_ptr, msg->msg_iovlen, kbuf, (size_t)ret);
         if (rc < 0) {
-            kfree(kbuf);
+            if (use_heap)
+                kfree(kbuf);
             socket_control_release(&control);
             return rc;
         }
     }
-    kfree(kbuf);
+    if (use_heap)
+        kfree(kbuf);
 
     if (ret >= 0 && msg->msg_name) {
         size_t user_len = (size_t)msg->msg_namelen;
@@ -725,7 +746,7 @@ int64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t addrlen,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -751,7 +772,7 @@ int64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t a2,
     int kbacklog = syssock_abi_i32(backlog);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -773,7 +794,7 @@ static int64_t sys_accept_common(uint64_t fd, uint64_t addr,
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -871,7 +892,7 @@ int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t addrlen,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -898,7 +919,7 @@ int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
                    uint64_t flags, uint64_t dest, uint64_t addrlen) {
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_WRITE, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -932,19 +953,25 @@ int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len,
     if (klen > 65536) {
         klen = 65536;
     }
-    void *kbuf = kmalloc(klen);
+    uint8_t inline_buf[SOCKET_MSG_INLINE_LEN];
+    bool use_heap = klen > sizeof(inline_buf);
+    void *kbuf = use_heap ? kmalloc(klen) : (void *)inline_buf;
     if (!kbuf) {
         file_put(sock_file);
         return -ENOMEM;
     }
+    tracepoint_emit(use_heap ? TRACE_SOCKET_HEAP_BUF : TRACE_SOCKET_INLINE_BUF,
+                    0, klen, 2);
     if (copy_from_user(kbuf, (const void *)buf, klen) < 0) {
-        kfree(kbuf);
+        if (use_heap)
+            kfree(kbuf);
         file_put(sock_file);
         return -EFAULT;
     }
     ssize_t ret = sock->ops->sendto(sock, kbuf, klen, (int32_t)uflags,
                                     destp, dlen);
-    kfree(kbuf);
+    if (use_heap)
+        kfree(kbuf);
     file_put(sock_file);
     return (int64_t)ret;
 }
@@ -953,7 +980,7 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
                      uint64_t flags, uint64_t src, uint64_t addrlen_ptr) {
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_READ, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -967,11 +994,15 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
     if (klen > 65536) {
         klen = 65536;
     }
-    void *kbuf = kmalloc(klen);
+    uint8_t inline_buf[SOCKET_MSG_INLINE_LEN];
+    bool use_heap = klen > sizeof(inline_buf);
+    void *kbuf = use_heap ? kmalloc(klen) : (void *)inline_buf;
     if (!kbuf) {
         file_put(sock_file);
         return -ENOMEM;
     }
+    tracepoint_emit(use_heap ? TRACE_SOCKET_HEAP_BUF : TRACE_SOCKET_INLINE_BUF,
+                    0, klen, 3);
 
     struct sockaddr_storage kaddr;
     int alen = (int)sizeof(kaddr);
@@ -980,12 +1011,14 @@ int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len,
                                       src ? &alen : NULL);
     if (ret > 0) {
         if (copy_to_user((void *)buf, kbuf, (size_t)ret) < 0) {
-            kfree(kbuf);
+            if (use_heap)
+                kfree(kbuf);
             file_put(sock_file);
             return -EFAULT;
         }
     }
-    kfree(kbuf);
+    if (use_heap)
+        kfree(kbuf);
 
     /* Copy source address to user */
     if (ret >= 0 && src && addrlen_ptr) {
@@ -1010,7 +1043,7 @@ int64_t sys_shutdown(uint64_t fd, uint64_t how, uint64_t a2,
     int khow = syssock_abi_i32(how);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1028,7 +1061,7 @@ int64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_WRITE, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1049,7 +1082,7 @@ int64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_READ, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1084,7 +1117,7 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_WRITE, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1129,7 +1162,7 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
 
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_READ, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1197,7 +1230,7 @@ int64_t sys_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_READ, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1244,7 +1277,7 @@ int64_t sys_getpeername(uint64_t fd, uint64_t addr, uint64_t addrlen_ptr,
     (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, FD_RIGHT_READ, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1294,7 +1327,7 @@ int64_t sys_setsockopt(uint64_t fd, uint64_t level, uint64_t optname,
     int klen = syssock_abi_i32(optlen);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }
@@ -1327,7 +1360,7 @@ int64_t sys_getsockopt(uint64_t fd, uint64_t level, uint64_t optname,
     int koptname = syssock_abi_i32(optname);
     struct process *p = proc_current();
     struct file *sock_file = NULL;
-    struct socket *sock = sock_from_fd(p, fd, &sock_file);
+    struct socket *sock = sock_from_fd(p, fd, 0, &sock_file);
     if (!sock) {
         return -ENOTSOCK;
     }

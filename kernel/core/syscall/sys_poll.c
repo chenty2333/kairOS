@@ -109,11 +109,10 @@ static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
         return -ENOMEM;
 
     uint64_t deadline = 0;
-    if (timeout_ms > 0) {
-        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
-        if (!delta)
-            delta = 1;
-        deadline = arch_timer_get_ticks() + delta;
+    int dl_rc = poll_timeout_to_deadline_ms(timeout_ms, &deadline);
+    if (dl_rc < 0) {
+        kfree(waiters);
+        return dl_rc;
     }
 
     int ready;
@@ -126,23 +125,27 @@ static int poll_wait_kernel(struct pollfd *fds, size_t nfds, int timeout_ms) {
             break;
         }
 
-        uint64_t now = arch_timer_get_ticks();
-        if (deadline && now >= deadline) {
+        if (poll_deadline_expired(deadline)) {
             poll_unregister_waiters(waiters, nfds);
             ready = 0;
             break;
         }
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, proc_current(), deadline);
-        int rc = proc_sleep_on(NULL, &sleep, true);
-        poll_sleep_cancel(&sleep);
+        int rc = poll_block_current(deadline, waiters);
         if (rc == -EINTR) {
             poll_unregister_waiters(waiters, nfds);
             kfree(waiters);
             return -EINTR;
+        }
+        if (rc == -ETIMEDOUT) {
+            poll_unregister_waiters(waiters, nfds);
+            ready = 0;
+            break;
+        }
+        if (rc < 0) {
+            poll_unregister_waiters(waiters, nfds);
+            kfree(waiters);
+            return rc;
         }
     } while (1);
 
@@ -245,27 +248,21 @@ static int poll_sleep_timeout(int timeout_ms) {
         return -EINVAL;
 
     uint64_t deadline = 0;
-    if (timeout_ms > 0) {
-        uint64_t delta = ((uint64_t)timeout_ms * CONFIG_HZ + 999) / 1000;
-        if (!delta)
-            delta = 1;
-        deadline = arch_timer_get_ticks() + delta;
-    }
+    int dl_rc = poll_timeout_to_deadline_ms(timeout_ms, &deadline);
+    if (dl_rc < 0)
+        return dl_rc;
 
     while (1) {
-        if (deadline && arch_timer_get_ticks() >= deadline)
+        if (poll_deadline_expired(deadline))
             return 0;
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        int rc = proc_sleep_on(NULL, deadline ? (void *)&sleep : (void *)curr,
-                               true);
-        if (deadline)
-            poll_sleep_cancel(&sleep);
+        int rc = poll_block_current(deadline, (void *)curr);
         if (rc == -EINTR)
             return -EINTR;
+        if (rc == -ETIMEDOUT)
+            return 0;
+        if (rc < 0)
+            return rc;
     }
 }
 

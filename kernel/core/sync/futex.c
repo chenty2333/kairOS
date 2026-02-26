@@ -192,12 +192,7 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
 
         mutex_unlock(&waiter.bucket->lock);
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        int sleep_rc = proc_sleep_on(NULL, (void *)uaddr, true);
-        poll_sleep_cancel(&sleep);
+        int sleep_rc = poll_block_current(deadline, (void *)uaddr);
 
         if (waiter.woken)
             return 0;
@@ -207,9 +202,14 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
             return -EINTR;
         }
 
-        if (deadline && arch_timer_get_ticks() >= deadline) {
+        if (sleep_rc == -ETIMEDOUT ||
+            (deadline && arch_timer_get_ticks() >= deadline)) {
             futex_waiter_remove(&waiter);
             return -ETIMEDOUT;
+        }
+        if (sleep_rc < 0) {
+            futex_waiter_remove(&waiter);
+            return sleep_rc;
         }
         /* Spurious wakeup: retry. */
     }
@@ -358,12 +358,7 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
             return -ETIMEDOUT;
         }
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        if (deadline)
-            poll_sleep_arm(&sleep, curr, deadline);
-        int sleep_rc = proc_sleep_on(NULL, kwaiters, true);
-        poll_sleep_cancel(&sleep);
+        int sleep_rc = poll_block_current(deadline, kwaiters);
 
         idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {
@@ -376,10 +371,16 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
             kfree(kwaiters);
             return -EINTR;
         }
-        if (deadline && arch_timer_get_ticks() >= deadline) {
+        if (sleep_rc == -ETIMEDOUT ||
+            (deadline && arch_timer_get_ticks() >= deadline)) {
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return -ETIMEDOUT;
+        }
+        if (sleep_rc < 0) {
+            futex_waiters_remove_all(kwaiters, nr_waiters);
+            kfree(kwaiters);
+            return sleep_rc;
         }
     }
 }

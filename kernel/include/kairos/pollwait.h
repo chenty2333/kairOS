@@ -43,6 +43,15 @@ struct poll_sleep {
     bool active;
 };
 
+int poll_timeout_to_deadline_ms(int timeout_ms, uint64_t *deadline_out);
+bool poll_deadline_expired(uint64_t deadline);
+int poll_block_current(uint64_t deadline, void *channel);
+
+void poll_ready_wake_one(struct wait_queue *wq, struct vnode *vn,
+                         uint32_t events);
+void poll_ready_wake_all(struct wait_queue *wq, struct vnode *vn,
+                         uint32_t events);
+
 void poll_wait_head_init(struct poll_wait_head *head);
 void poll_wait_add(struct poll_wait_head *head, struct poll_waiter *waiter);
 void poll_wait_remove(struct poll_waiter *waiter);
