@@ -11,6 +11,7 @@
 
 struct iommu_mapping {
     struct list_head list;
+    struct device *dev;
     dma_addr_t dma_addr;
     dma_addr_t iova_base;
     paddr_t cpu_pa;
@@ -129,6 +130,7 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
     }
 
     mapping->dma_addr = iova_base + offset;
+    mapping->dev = dev;
     mapping->iova_base = iova_base;
     mapping->cpu_pa = pa;
     mapping->map_size = map_size;
@@ -159,7 +161,7 @@ static void iommu_dma_unmap_single_impl(struct device *dev, dma_addr_t addr, siz
     spin_lock_irqsave(&domain->lock, &irq_flags);
     struct iommu_mapping *iter;
     list_for_each_entry(iter, &domain->mappings, list) {
-        if (iter->dma_addr == addr) {
+        if (iter->dev == dev && iter->dma_addr == addr) {
             mapping = iter;
             list_del(&iter->list);
             break;
