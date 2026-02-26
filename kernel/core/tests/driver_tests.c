@@ -866,6 +866,71 @@ static void test_irq_stats_export(void) {
     test_check(ret == 0, "irq stats free");
 }
 
+static void test_irq_stats_snapshot_and_procfs(void) {
+    const int irq = 905;
+    irq_gate_hits = 0;
+
+    int ret = arch_request_irq_ex(irq, test_irq_gate_handler, NULL,
+                                  IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "irq snapshot request");
+    if (ret < 0)
+        return;
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    platform_irq_dispatch_nr((uint32_t)irq);
+
+    size_t snap_count = platform_irq_snapshot(NULL, 0, true);
+    test_check(snap_count > 0, "irq snapshot active count");
+
+    struct irq_stats_entry *snaps = NULL;
+    if (snap_count > 0) {
+        snaps = kmalloc(snap_count * sizeof(*snaps));
+        test_check(snaps != NULL, "irq snapshot alloc");
+    }
+
+    if (snaps) {
+        memset(snaps, 0, snap_count * sizeof(*snaps));
+        size_t filled = platform_irq_snapshot(snaps, snap_count, true);
+        test_check(filled == snap_count, "irq snapshot fill count");
+
+        bool found = false;
+        for (size_t i = 0; i < filled; i++) {
+            if (snaps[i].virq != (uint32_t)irq)
+                continue;
+            found = true;
+            test_check(snaps[i].dispatch_calls >= 2,
+                       "irq snapshot dispatch count");
+            test_check(snaps[i].enable_calls > 0, "irq snapshot enable count");
+            test_check(snaps[i].action_count > 0, "irq snapshot action count");
+            break;
+        }
+        test_check(found, "irq snapshot contains virq");
+        kfree(snaps);
+    }
+
+    struct file *f = NULL;
+    ret = vfs_open("/proc/interrupts", 0, 0, &f);
+    test_check(ret == 0 && f != NULL, "irq proc interrupts open");
+    if (ret == 0 && f) {
+        char buf[4096];
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "irq proc interrupts read");
+        if (n > 0) {
+            buf[n] = '\0';
+            test_check(strstr(buf, "dispatch") != NULL,
+                       "irq proc interrupts header");
+            char needle[32];
+            snprintf(needle, sizeof(needle), "%3d ", irq);
+            test_check(strstr(buf, needle) != NULL,
+                       "irq proc interrupts contains virq");
+        }
+        vfs_close(f);
+    }
+
+    ret = arch_free_irq_ex(irq, test_irq_gate_handler, NULL);
+    test_check(ret == 0, "irq snapshot free");
+}
+
 static void test_irq_unregister_dispatch_concurrency(void) {
     const int irq = 907;
     irq_concurrent_hits = 0;
@@ -2100,6 +2165,7 @@ static void run_driver_suite_once(void) {
     test_irq_enable_disable_gate();
     test_irq_request_free_actions();
     test_irq_stats_export();
+    test_irq_stats_snapshot_and_procfs();
     test_irq_unregister_dispatch_concurrency();
     test_irq_domain_remove_waits_reclaim();
     test_irq_free_sync_waits_handler();
