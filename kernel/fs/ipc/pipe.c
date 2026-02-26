@@ -232,6 +232,8 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     vn->ops = &pipe_ops;
     vn->fs_data = p;
     atomic_init(&vn->refcount, 2); /* One for reader, one for writer */
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "pipe_vnode");

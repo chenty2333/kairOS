@@ -235,6 +235,8 @@ int epoll_create_file(struct file **out) {
     vn->ops = &epoll_ops;
     vn->fs_data = ep;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "epoll_vnode");

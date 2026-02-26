@@ -7,12 +7,15 @@
 
 #include <kairos/atomic.h>
 #include <kairos/config.h>
+#include <kairos/handle.h>
 #include <kairos/list.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
 
 struct vnode;
 struct mount;
+
+#define VFS_KOBJ_TYPE_DENTRY 0x101U
 
 enum dentry_flags {
     DENTRY_NEGATIVE = 1u << 0,
@@ -34,6 +37,8 @@ struct dentry {
     struct list_head lru;
     bool hashed;
     struct mutex lock;
+    struct kobj *kobj;
+    atomic_t kobj_state;
 };
 
 struct path {
@@ -52,6 +57,7 @@ void dentry_add_negative(struct dentry *d);
 void dentry_drop(struct dentry *d);
 void dentry_move(struct dentry *d, struct dentry *new_parent,
                  const char *new_name);
+struct kobj *dentry_kobj(struct dentry *d);
 
 static inline void path_init(struct path *path) {
     if (path) {

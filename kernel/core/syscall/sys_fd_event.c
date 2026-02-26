@@ -428,6 +428,8 @@ static int eventfd_create_file(uint32_t initval, uint64_t flags, struct file **o
     vn->ops = &eventfd_file_ops;
     vn->fs_data = ctx;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "eventfd_vnode");
@@ -610,6 +612,8 @@ static int signalfd_create_file(sigset_t mask, uint64_t flags, struct file **out
     vn->ops = &signalfd_file_ops;
     vn->fs_data = ctx;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "signalfd_vnode");
@@ -934,6 +938,8 @@ static int inotify_create_file(uint64_t flags, struct file **out) {
     vn->ops = &inotify_file_ops;
     vn->fs_data = ctx;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "inotify_vnode");
@@ -1202,6 +1208,8 @@ static int timerfd_create_file(int clockid, uint64_t flags, struct file **out) {
     vn->ops = &timerfd_file_ops;
     vn->fs_data = ctx;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "timerfd_vnode");

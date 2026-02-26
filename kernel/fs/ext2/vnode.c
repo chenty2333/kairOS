@@ -246,6 +246,8 @@ struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
     vn->fs_data = id;
     vn->mount = NULL;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "ext2_vnode");

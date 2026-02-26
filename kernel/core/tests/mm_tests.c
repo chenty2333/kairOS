@@ -166,6 +166,8 @@ static void test_mprotect_file_vma_refcount(void) {
     vn.type = VNODE_FILE;
     vn.ops = &dummy_vnode_ops;
     atomic_init(&vn.refcount, 1);
+    vn.kobj = NULL;
+    atomic_init(&vn.kobj_state, 0);
 
     vaddr_t start = MM_TEST_BASE3;
     vaddr_t end = start + 3 * CONFIG_PAGE_SIZE;

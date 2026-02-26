@@ -130,6 +130,8 @@ static void tmpfs_init_vnode(struct vnode *vn, struct mount *mnt,
     vn->fs_data = tn;
     vn->mount = mnt;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "tmpfs_vn");

@@ -152,6 +152,8 @@ static int pidfd_create_file(pid_t pid, uint32_t open_flags, struct file **out) 
     vn->fs_data = ctx;
     vn->size = 0;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     rwlock_init(&vn->lock, "pidfd_vnode");
     poll_wait_head_init(&vn->pollers);
 

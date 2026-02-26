@@ -7,6 +7,7 @@
 
 #include <kairos/atomic.h>
 #include <kairos/config.h>
+#include <kairos/handle.h>
 #include <kairos/list.h>
 #include <kairos/pollwait.h>
 #include <kairos/sync.h>
@@ -15,7 +16,8 @@
 struct dentry;
 struct path;
 struct timespec;
-struct kobj;
+
+#define VFS_KOBJ_TYPE_VNODE 0x100U
 
 struct kstatfs {
     uint64_t f_type;
@@ -105,6 +107,8 @@ struct vnode {
     char name[CONFIG_NAME_MAX];
     struct rwlock lock;
     struct poll_wait_head pollers;
+    struct kobj *kobj;
+    atomic_t kobj_state;
 };
 
 struct file {
@@ -299,6 +303,8 @@ ssize_t vfs_readlink(const char *path, char *buf, size_t bufsz);
 void vnode_get(struct vnode *vn);
 void vnode_put(struct vnode *vn);
 void vnode_set_parent(struct vnode *vn, struct vnode *parent, const char *name);
+void vnode_kobj_init(struct vnode *vn);
+struct kobj *vnode_kobj(struct vnode *vn);
 ssize_t vfs_readlink_vnode(struct vnode *vn, char *buf, size_t bufsz,
                            bool require_full);
 

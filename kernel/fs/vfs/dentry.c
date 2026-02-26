@@ -11,6 +11,10 @@
 
 #define DCACHE_HASH_BITS 8
 #define DCACHE_HASH_SIZE (1u << DCACHE_HASH_BITS)
+#define DENTRY_KOBJ_STATE_UNINIT  0U
+#define DENTRY_KOBJ_STATE_INITING 1U
+#define DENTRY_KOBJ_STATE_READY   2U
+#define DENTRY_KOBJ_STATE_FAILED  3U
 
 static struct kmem_cache *dentry_cache;
 static struct list_head dentry_hash[DCACHE_HASH_SIZE];
@@ -19,6 +23,22 @@ static struct mutex dcache_lock;
 static size_t dcache_count;
 
 static void dcache_evict(void);
+static void dentry_kobj_init(struct dentry *d);
+static inline bool dentry_kobj_is_ready(struct dentry *d);
+
+struct dentry_kobj_bridge {
+    struct kobj obj;
+};
+
+static void dentry_kobj_release(struct kobj *obj) {
+    if (!obj)
+        return;
+    kfree((struct dentry_kobj_bridge *)obj);
+}
+
+static const struct kobj_ops dentry_kobj_ops = {
+    .release = dentry_kobj_release,
+};
 
 static inline struct dentry *dentry_lru_last(void) {
     return list_entry(dentry_lru.prev, struct dentry, lru);
@@ -47,12 +67,63 @@ void dentry_init(void) {
 static void dentry_init_struct(struct dentry *d) {
     memset(d, 0, sizeof(*d));
     atomic_init(&d->refcount, 1);
+    d->kobj = NULL;
+    atomic_init(&d->kobj_state, DENTRY_KOBJ_STATE_UNINIT);
     INIT_LIST_HEAD(&d->children);
     INIT_LIST_HEAD(&d->child);
     INIT_LIST_HEAD(&d->hash);
     INIT_LIST_HEAD(&d->lru);
     d->hashed = false;
     mutex_init(&d->lock, "dentry");
+    dentry_kobj_init(d);
+}
+
+static inline bool dentry_kobj_is_ready(struct dentry *d) {
+    return d && atomic_read(&d->kobj_state) == DENTRY_KOBJ_STATE_READY &&
+           d->kobj != NULL;
+}
+
+static void dentry_kobj_init(struct dentry *d) {
+    if (!d)
+        return;
+    while (1) {
+        uint32_t state = atomic_read(&d->kobj_state);
+        if (state == DENTRY_KOBJ_STATE_READY)
+            return;
+        if (state == DENTRY_KOBJ_STATE_UNINIT) {
+            uint32_t expected = DENTRY_KOBJ_STATE_UNINIT;
+            if (atomic_cmpxchg(&d->kobj_state, &expected,
+                               DENTRY_KOBJ_STATE_INITING)) {
+                struct dentry_kobj_bridge *bridge = kzalloc(sizeof(*bridge));
+                if (!bridge) {
+                    atomic_set(&d->kobj_state, DENTRY_KOBJ_STATE_FAILED);
+                    return;
+                }
+                kobj_init(&bridge->obj, VFS_KOBJ_TYPE_DENTRY, &dentry_kobj_ops);
+                d->kobj = &bridge->obj;
+                uint32_t refs = atomic_read(&d->refcount);
+                for (uint32_t i = 1; i < refs; i++)
+                    kobj_get(d->kobj);
+                atomic_set(&d->kobj_state, DENTRY_KOBJ_STATE_READY);
+                return;
+            }
+            continue;
+        }
+        if (state == DENTRY_KOBJ_STATE_INITING) {
+            arch_cpu_relax();
+            continue;
+        }
+        if (state == DENTRY_KOBJ_STATE_FAILED)
+            return;
+        atomic_set(&d->kobj_state, DENTRY_KOBJ_STATE_UNINIT);
+    }
+}
+
+struct kobj *dentry_kobj(struct dentry *d) {
+    dentry_kobj_init(d);
+    if (!dentry_kobj_is_ready(d))
+        return NULL;
+    return d->kobj;
 }
 
 struct dentry *dentry_alloc(struct dentry *parent, const char *name) {
@@ -76,8 +147,11 @@ struct dentry *dentry_alloc(struct dentry *parent, const char *name) {
 void dentry_get(struct dentry *d) {
     if (!d)
         return;
+    dentry_kobj_init(d);
     WARN_ON(atomic_read(&d->refcount) == 0);
     atomic_inc(&d->refcount);
+    if (dentry_kobj_is_ready(d))
+        kobj_get(d->kobj);
 }
 
 static void dentry_unhash(struct dentry *d) {
@@ -96,10 +170,13 @@ static void dentry_unhash(struct dentry *d) {
 
 void dentry_put(struct dentry *d) {
     while (d) {
+        dentry_kobj_init(d);
         uint32_t old = atomic_read(&d->refcount);
         if (old == 0)
             panic("dentry_put: refcount underflow on dentry '%s'", d->name);
         old = atomic_fetch_sub(&d->refcount, 1);
+        if (dentry_kobj_is_ready(d))
+            kobj_put(d->kobj);
         if (old != 1)
             break;
         struct dentry *parent = d->parent;
@@ -189,6 +266,7 @@ static void dcache_evict(void) {
             list_add(&d->lru, &dentry_lru);
             continue;
         }
+        dentry_kobj_init(d);
         /* Atomically transition refcount 1→0 to close the TOCTOU window.
          * If another thread grabbed a reference after we released d->lock,
          * the cmpxchg fails and we simply skip this dentry. */
@@ -198,6 +276,8 @@ static void dcache_evict(void) {
             list_add(&d->lru, &dentry_lru);
             continue;
         }
+        if (dentry_kobj_is_ready(d))
+            kobj_put(d->kobj);
         /* refcount is now 0 — safe to unhash and reclaim */
         list_del(&d->hash);
         list_del(&d->lru);
@@ -233,8 +313,10 @@ void dentry_add(struct dentry *d, struct vnode *vn) {
     d->flags &= ~DENTRY_NEGATIVE;
     d->neg_expire = 0;
     mutex_unlock(&d->lock);
-    if (vn)
+    if (vn) {
+        vnode_kobj_init(vn);
         vnode_get(vn);
+    }
     dentry_hash_insert(d);
 }
 

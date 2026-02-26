@@ -129,6 +129,8 @@ int sock_create(int domain, int type, int protocol, struct socket **out) {
     vn->ops = &socket_file_ops;
     vn->fs_data = sock;
     atomic_init(&vn->refcount, 1);
+    vn->kobj = NULL;
+    atomic_init(&vn->kobj_state, 0);
     vn->parent = NULL;
     vn->name[0] = '\0';
     rwlock_init(&vn->lock, "sock_vnode");
