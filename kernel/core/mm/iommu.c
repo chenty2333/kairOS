@@ -25,6 +25,10 @@ static const struct iommu_hw_ops *iommu_hw_ops;
 static void *iommu_hw_ops_priv;
 static spinlock_t iommu_hw_ops_lock = SPINLOCK_INIT;
 
+__attribute__((weak)) int arch_iommu_init(void) {
+    return -ENODEV;
+}
+
 static uint32_t iommu_dma_dir_to_prot(int direction) {
     if (direction == DMA_TO_DEVICE)
         return IOMMU_PROT_READ;
@@ -273,6 +277,15 @@ struct iommu_domain *iommu_get_passthrough_domain(void) {
     spin_unlock(&iommu_passthrough_domain_init_lock);
 
     return &iommu_passthrough_domain;
+}
+
+int iommu_init(void) {
+    int ret = arch_iommu_init();
+    if (ret == 0)
+        pr_info("iommu: arch backend initialized\n");
+    else
+        pr_info("iommu: no arch backend (ret=%d), using passthrough\n", ret);
+    return 0;
 }
 
 void iommu_domain_destroy(struct iommu_domain *domain) {

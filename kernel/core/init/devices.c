@@ -9,6 +9,7 @@
 #include <kairos/fdt.h>
 #include <kairos/firmware.h>
 #include <kairos/init.h>
+#include <kairos/iommu.h>
 #include <kairos/mm.h>
 #include <kairos/pci.h>
 #include <kairos/platform.h>
@@ -60,6 +61,7 @@ void init_devices(void) {
 
     printk("\n=== Phase 5: Device Discovery ===\n");
     platform_bus_init();
+    iommu_init();
     pci_bus_init();
     bus_register(&virtio_bus_type);
 

@@ -50,6 +50,7 @@ struct iommu_domain {
 struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
                                          dma_addr_t iova_base,
                                          size_t iova_size);
+int iommu_init(void);
 struct iommu_domain *iommu_get_passthrough_domain(void);
 void iommu_domain_destroy(struct iommu_domain *domain);
 void iommu_domain_set_ops(struct iommu_domain *domain,
