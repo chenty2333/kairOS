@@ -4,6 +4,7 @@
 
 #include <kairos/config.h>
 #include <kairos/dentry.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/namei.h>
 #include <kairos/process.h>
@@ -89,9 +90,10 @@ int64_t sys_fstatfs(uint64_t fd, uint64_t buf, uint64_t a2, uint64_t a3,
     if (!buf)
         return -EFAULT;
     int kfd = (int32_t)(uint32_t)fd;
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &f, NULL);
+    if (frc < 0)
+        return frc;
     struct mount *mnt = NULL;
     if (f->vnode && f->vnode->mount)
         mnt = f->vnode->mount;
@@ -308,9 +310,10 @@ int64_t sys_fstat(uint64_t fd, uint64_t st_ptr, uint64_t a2, uint64_t a3,
     if (!st_ptr)
         return -EFAULT;
     int kfd = (int32_t)(uint32_t)fd;
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &f, NULL);
+    if (frc < 0)
+        return frc;
 
     struct stat st;
     int ret = vfs_fstat(f, &st);
@@ -364,9 +367,10 @@ int64_t sys_newfstatat(uint64_t dirfd, uint64_t path, uint64_t st_ptr,
                 return ret;
             return copy_linux_stat_to_user(st_ptr, &st);
         }
-        struct file *f = fd_get(p, (int)kdirfd);
-        if (!f)
-            return -EBADF;
+        struct file *f = NULL;
+        int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &f, NULL);
+        if (frc < 0)
+            return frc;
         if (!f->vnode) {
             file_put(f);
             return -ENOENT;
@@ -448,9 +452,10 @@ int64_t sys_statx(uint64_t dirfd, uint64_t path, uint64_t flags, uint64_t mask,
             return copy_linux_statx_to_user(stx_ptr, &st, req_mask);
         }
 
-        struct file *f = fd_get(p, (int)kdirfd);
-        if (!f)
-            return -EBADF;
+        struct file *f = NULL;
+        int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &f, NULL);
+        if (frc < 0)
+            return frc;
         if (!f->vnode) {
             file_put(f);
             return -ENOENT;
@@ -497,9 +502,10 @@ int64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count, uint64_t a3,
         return -EINVAL;
 
     int kfd = (int32_t)(uint32_t)fd;
-    struct file *f = fd_get(proc_current(), kfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int frc = handle_bridge_pin_fd(proc_current(), kfd, 0, &f, NULL);
+    if (frc < 0)
+        return frc;
     if (!f->vnode || f->vnode->type != VNODE_DIR) {
         file_put(f);
         return -ENOTDIR;

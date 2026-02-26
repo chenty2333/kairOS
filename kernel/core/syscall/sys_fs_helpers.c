@@ -4,6 +4,7 @@
 
 #include <kairos/dentry.h>
 #include <kairos/config.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/namei.h>
 #include <kairos/process.h>
 #include <kairos/syscall.h>
@@ -71,9 +72,10 @@ int sysfs_get_base_path(int64_t dirfd, const char *path, struct path *base,
         return 0;
     }
 
-    struct file *f = fd_get(p, (int)kdirfd);
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &f, NULL);
+    if (frc < 0)
+        return frc;
     if (!f->vnode || f->vnode->type != VNODE_DIR) {
         file_put(f);
         return -ENOTDIR;

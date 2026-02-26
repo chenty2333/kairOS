@@ -5,6 +5,7 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/dentry.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/namei.h>
 #include <kairos/process.h>
 #include <kairos/printk.h>
@@ -178,9 +179,10 @@ int64_t sys_fchdir(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                    uint64_t a4, uint64_t a5) {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     struct process *p = proc_current();
-    struct file *f = fd_get(p, sysfs_abi_int(fd));
-    if (!f)
-        return -EBADF;
+    struct file *f = NULL;
+    int frc = handle_bridge_pin_fd(p, sysfs_abi_int(fd), 0, &f, NULL);
+    if (frc < 0)
+        return frc;
     if (!f->vnode || f->vnode->type != VNODE_DIR) {
         file_put(f);
         return -ENOTDIR;
@@ -233,9 +235,9 @@ int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
             if (!vn)
                 return -ENOENT;
         } else {
-            f = fd_get(p, (int)kdirfd);
-            if (!f)
-                return -EBADF;
+            int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &f, NULL);
+            if (frc < 0)
+                return frc;
             vn = f->vnode;
             if (!vn) {
                 file_put(f);
@@ -313,9 +315,9 @@ int64_t sys_fchownat(uint64_t dirfd, uint64_t path_ptr, uint64_t owner,
             if (!vn)
                 return -ENOENT;
         } else {
-            f = fd_get(p, (int)kdirfd);
-            if (!f)
-                return -EBADF;
+            int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &f, NULL);
+            if (frc < 0)
+                return frc;
             vn = f->vnode;
             if (!vn) {
                 file_put(f);
@@ -399,9 +401,9 @@ int64_t sys_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr,
                 return -ENOENT;
             mnt = vn->mount;
         } else {
-            hold_f = fd_get(p, (int)kdirfd);
-            if (!hold_f)
-                return -EBADF;
+            int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &hold_f, NULL);
+            if (frc < 0)
+                return frc;
             vn = hold_f->vnode;
             if (!vn) {
                 file_put(hold_f);
@@ -624,9 +626,10 @@ int64_t sys_faccessat(uint64_t dirfd, uint64_t path_ptr, uint64_t mode,
             struct vnode *cwd_vn = sysfs_proc_cwd_vnode(p);
             return sysfs_check_access(cwd_vn, umode, use_effective_ids);
         }
-        struct file *f = fd_get(p, (int)kdirfd);
-        if (!f)
-            return -EBADF;
+        struct file *f = NULL;
+        int frc = handle_bridge_pin_fd(p, (int)kdirfd, 0, &f, NULL);
+        if (frc < 0)
+            return frc;
         int ret = sysfs_check_access(f->vnode, umode, use_effective_ids);
         file_put(f);
         return ret;
