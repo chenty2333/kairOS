@@ -38,6 +38,11 @@ struct device {
     struct resource *resources; /* Resource array */
     size_t num_resources;
     const struct dma_ops *dma_ops; /* DMA backend (NULL => direct mapping) */
+    paddr_t dma_mask;           /* Device-visible DMA address mask */
+    paddr_t dma_aperture_start; /* Optional DMA aperture start (inclusive) */
+    paddr_t dma_aperture_end;   /* Optional DMA aperture end (inclusive) */
+    bool dma_mask_valid;
+    bool dma_aperture_valid;
     struct iommu_domain *iommu_domain; /* Attached IOMMU domain */
     bool iommu_domain_owned;      /* Destroy domain on device detach */
     void *driver_data;          /* Driver private data */

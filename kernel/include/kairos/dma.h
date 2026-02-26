@@ -31,6 +31,8 @@ struct dma_ops {
                           dma_addr_t dma_handle);
 };
 
+#define DMA_MASK_FULL ((dma_addr_t)~(dma_addr_t)0)
+
 #ifdef ARCH_aarch64
 static inline size_t dma_cache_line_size(void) {
     uint64_t ctr_el0;
@@ -79,6 +81,11 @@ static inline void dma_cache_inval_range(void *ptr, size_t size) {
 void dma_set_ops(struct device *dev, const struct dma_ops *ops);
 const struct dma_ops *dma_get_ops(struct device *dev);
 const struct dma_ops *dma_get_direct_ops(void);
+void dma_set_mask(struct device *dev, dma_addr_t mask);
+dma_addr_t dma_get_mask(struct device *dev);
+int dma_set_aperture(struct device *dev, dma_addr_t start, dma_addr_t end);
+void dma_clear_aperture(struct device *dev);
+bool dma_addr_allowed(struct device *dev, dma_addr_t addr, size_t size);
 
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, int direction);
 void dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size, int direction);
