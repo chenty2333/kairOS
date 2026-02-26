@@ -14,6 +14,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/signal.h>
 #include <kairos/spinlock.h>
 #include <kairos/string.h>
 #include <kairos/sync.h>
@@ -59,6 +60,8 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name);
 static int procfs_readdir(struct vnode *vn, struct dirent *ent, off_t *off);
 static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len, off_t off,
                            uint32_t flags);
+static ssize_t procfs_write(struct vnode *vn, const void *buf, size_t len,
+                            off_t off, uint32_t flags);
 static ssize_t procfs_self_read(struct vnode *vn, void *buf, size_t len,
                                 off_t off, uint32_t flags);
 static int procfs_dir_poll(struct file *file, uint32_t events);
@@ -101,6 +104,7 @@ static struct file_ops procfs_dir_ops = {
 
 static struct file_ops procfs_file_ops = {
     .read = procfs_read,
+    .write = procfs_write,
     .poll = procfs_file_poll,
     .close = procfs_close,
 };
@@ -518,6 +522,112 @@ static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len,
     return (ssize_t)len;
 }
 
+static const char *procfs_skip_space(const char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+        s++;
+    return s;
+}
+
+static void procfs_rstrip(char *s) {
+    size_t n = strlen(s);
+    while (n > 0) {
+        char c = s[n - 1];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+            break;
+        s[n - 1] = '\0';
+        n--;
+    }
+}
+
+static int procfs_parse_u32(const char *s, uint32_t *out) {
+    if (!s || !*s || !out)
+        return -EINVAL;
+    uint64_t v = 0;
+    const char *p = s;
+    while (*p) {
+        if (*p < '0' || *p > '9')
+            return -EINVAL;
+        v = v * 10 + (uint64_t)(*p - '0');
+        if (v > 0xFFFFFFFFULL)
+            return -EINVAL;
+        p++;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static int procfs_control_signal_from_cmd(const char *cmd) {
+    if (strcmp(cmd, "stop") == 0)
+        return SIGSTOP;
+    if (strcmp(cmd, "cont") == 0 || strcmp(cmd, "resume") == 0)
+        return SIGCONT;
+    if (strcmp(cmd, "term") == 0)
+        return SIGTERM;
+    if (strcmp(cmd, "kill") == 0)
+        return SIGKILL;
+
+    const char *arg = NULL;
+    if (strncmp(cmd, "sig ", 4) == 0)
+        arg = cmd + 4;
+    else if (strncmp(cmd, "signal ", 7) == 0)
+        arg = cmd + 7;
+    else
+        arg = cmd;
+
+    arg = procfs_skip_space(arg);
+    if (!*arg)
+        return -EINVAL;
+
+    uint32_t sig = 0;
+    if (procfs_parse_u32(arg, &sig) < 0)
+        return -EINVAL;
+    if (sig == 0 || sig > NSIG)
+        return -EINVAL;
+    return (int)sig;
+}
+
+static ssize_t procfs_write(struct vnode *vn, const void *buf, size_t len,
+                            off_t off,
+                            uint32_t flags __attribute__((unused))) {
+    if (!vn || (!buf && len > 0))
+        return -EINVAL;
+    (void)off;
+
+    struct procfs_entry *ent = vn->fs_data;
+    if (!ent || ent->type != PROCFS_PID_ENTRY ||
+        strcmp(ent->name, "control") != 0) {
+        return -EACCES;
+    }
+    if (len == 0)
+        return 0;
+
+    char cmd[64];
+    size_t n = len;
+    if (n >= sizeof(cmd))
+        n = sizeof(cmd) - 1;
+    memcpy(cmd, buf, n);
+    cmd[n] = '\0';
+    procfs_rstrip(cmd);
+    const char *trim = procfs_skip_space(cmd);
+    if (!*trim)
+        return -EINVAL;
+
+    struct process *target = proc_find(ent->pid);
+    if (!target)
+        return -ESRCH;
+    struct process *curr = proc_current();
+    if (curr && curr->uid != 0 && curr->uid != target->uid)
+        return -EPERM;
+
+    int sig = procfs_control_signal_from_cmd(trim);
+    if (sig < 0)
+        return sig;
+    int rc = signal_send(ent->pid, sig);
+    if (rc < 0)
+        return rc;
+    return (ssize_t)len;
+}
+
 static int procfs_close(struct vnode *vn __attribute__((unused))) {
     return 0;
 }
@@ -539,14 +649,16 @@ static int procfs_file_poll(struct file *file __attribute__((unused)),
 struct pid_entry_def {
     const char *name;
     procfs_gen_t gen;
+    mode_t mode;
 };
 
 static const struct pid_entry_def pid_entries[] = {
-    {"stat",    gen_pid_stat},
-    {"status",  gen_pid_status},
-    {"cmdline", gen_pid_cmdline},
-    {"mounts",  gen_mounts},
-    {"maps",    gen_pid_maps},
+    {"stat",    gen_pid_stat,    S_IFREG | 0444},
+    {"status",  gen_pid_status,  S_IFREG | 0444},
+    {"cmdline", gen_pid_cmdline, S_IFREG | 0444},
+    {"mounts",  gen_mounts,      S_IFREG | 0444},
+    {"maps",    gen_pid_maps,    S_IFREG | 0444},
+    {"control", NULL,            S_IFREG | 0200},
 };
 
 #define NUM_PID_ENTRIES ARRAY_SIZE(pid_entries)
@@ -558,13 +670,14 @@ static const struct pid_entry_def pid_entries[] = {
 static struct procfs_entry *procfs_create_pid_entry(struct procfs_mount *pm,
                                                     pid_t pid,
                                                     const char *name,
-                                                    procfs_gen_t gen) {
+                                                    procfs_gen_t gen,
+                                                    mode_t mode) {
     struct procfs_entry *ent = procfs_alloc_entry(pm, name, PROCFS_PID_ENTRY,
                                                   gen, pid);
     if (!ent)
         return NULL;
-    procfs_init_vnode(&ent->vn, pm->mnt, ent, VNODE_FILE,
-                      S_IFREG | 0444, &procfs_file_ops);
+    procfs_init_vnode(&ent->vn, pm->mnt, ent, VNODE_FILE, mode,
+                      &procfs_file_ops);
     return ent;
 }
 
@@ -776,7 +889,8 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
                 }
                 struct procfs_entry *e =
                     procfs_create_pid_entry(pm, pe->pid, pid_entries[i].name,
-                                            pid_entries[i].gen);
+                                            pid_entries[i].gen,
+                                            pid_entries[i].mode);
                 spin_unlock(&pm->lock);
                 if (!e)
                     return NULL;

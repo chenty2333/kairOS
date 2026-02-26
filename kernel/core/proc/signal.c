@@ -148,6 +148,29 @@ void signal_deliver_pending(void) {
         }
 
         if (handler == SIG_DFL) {
+            if (sig == SIGSTOP) {
+                __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
+                while (1) {
+                    uint64_t now_pending =
+                        __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+                    if (now_pending & (1ULL << (SIGKILL - 1)))
+                        break;
+                    if (now_pending & (1ULL << (SIGCONT - 1))) {
+                        __atomic_fetch_and(&p->sig_pending,
+                                           ~(1ULL << (SIGCONT - 1)),
+                                           __ATOMIC_RELEASE);
+                        break;
+                    }
+                    proc_sleep_on(NULL, p, true);
+                }
+                pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+                continue;
+            }
+            if (sig == SIGCONT) {
+                __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
+                pending &= ~mask;
+                continue;
+            }
             if (sig == SIGKILL || sig == SIGILL || sig == SIGSEGV || sig == SIGTERM) {
                 pr_info("Process %d killed by signal %d\n", p->pid, sig);
                 proc_exit(-sig);
