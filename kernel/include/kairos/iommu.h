@@ -32,6 +32,9 @@ struct iommu_domain_ops {
 };
 
 struct iommu_hw_ops {
+    const char *name;
+    int priority;
+    int (*match)(struct device *dev, void *priv);
     struct iommu_domain *(*alloc_default_domain)(struct device *dev, bool *owned,
                                                  void *priv);
 };
@@ -45,6 +48,7 @@ struct iommu_domain {
     dma_addr_t iova_base;
     dma_addr_t iova_limit;
     dma_addr_t iova_cursor;
+    size_t granule;
 };
 
 struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
@@ -55,6 +59,8 @@ struct iommu_domain *iommu_get_passthrough_domain(void);
 void iommu_domain_destroy(struct iommu_domain *domain);
 void iommu_domain_set_ops(struct iommu_domain *domain,
                           const struct iommu_domain_ops *ops, void *ops_priv);
+int iommu_domain_set_granule(struct iommu_domain *domain, size_t granule);
+size_t iommu_domain_get_granule(const struct iommu_domain *domain);
 
 int iommu_attach_device(struct iommu_domain *domain, struct device *dev);
 int iommu_attach_default_domain(struct device *dev);

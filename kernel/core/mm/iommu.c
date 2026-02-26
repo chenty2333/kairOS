@@ -23,12 +23,30 @@ struct iommu_mapping {
 static struct iommu_domain iommu_passthrough_domain;
 static bool iommu_passthrough_domain_init_done;
 static spinlock_t iommu_passthrough_domain_init_lock = SPINLOCK_INIT;
-static const struct iommu_hw_ops *iommu_hw_ops;
-static void *iommu_hw_ops_priv;
+struct iommu_hw_provider_entry {
+    const struct iommu_hw_ops *ops;
+    void *priv;
+};
+
+#define IOMMU_HW_PROVIDERS_MAX 8
+static struct iommu_hw_provider_entry iommu_hw_providers[IOMMU_HW_PROVIDERS_MAX];
+static size_t iommu_hw_provider_count;
 static spinlock_t iommu_hw_ops_lock = SPINLOCK_INIT;
 
 __attribute__((weak)) int arch_iommu_init(void) {
     return -ENODEV;
+}
+
+static bool iommu_granule_valid(size_t granule) {
+    if (granule < CONFIG_PAGE_SIZE)
+        return false;
+    return (granule & (granule - 1U)) == 0;
+}
+
+static size_t iommu_domain_granule(const struct iommu_domain *domain) {
+    if (!domain || !iommu_granule_valid(domain->granule))
+        return CONFIG_PAGE_SIZE;
+    return domain->granule;
 }
 
 static uint32_t iommu_dma_dir_to_prot(int direction) {
@@ -68,14 +86,16 @@ static bool iommu_iova_conflict_locked(struct iommu_domain *domain, dma_addr_t s
 
 static dma_addr_t iommu_iova_find_locked(struct iommu_domain *domain,
                                          struct device *dev, size_t size) {
+    size_t granule = iommu_domain_granule(domain);
+
     if (!size || domain->iova_limit <= domain->iova_base)
         return 0;
     if (size > (size_t)(domain->iova_limit - domain->iova_base))
         return 0;
 
     dma_addr_t starts[2] = {
-        ALIGN_UP(domain->iova_cursor, CONFIG_PAGE_SIZE),
-        ALIGN_UP(domain->iova_base, CONFIG_PAGE_SIZE),
+        ALIGN_UP(domain->iova_cursor, granule),
+        ALIGN_UP(domain->iova_base, granule),
     };
     dma_addr_t ends[2] = {
         domain->iova_limit,
@@ -93,16 +113,16 @@ static dma_addr_t iommu_iova_find_locked(struct iommu_domain *domain,
             if (cand_end < cand)
                 break;
             if (!dma_addr_allowed(dev, cand, size)) {
-                dma_addr_t next = cand + CONFIG_PAGE_SIZE;
+                dma_addr_t next = cand + granule;
                 if (next < cand)
                     break;
-                cand = ALIGN_UP(next, CONFIG_PAGE_SIZE);
+                cand = ALIGN_UP(next, granule);
                 continue;
             }
-            dma_addr_t next = cand + CONFIG_PAGE_SIZE;
+            dma_addr_t next = cand + granule;
             if (!iommu_iova_conflict_locked(domain, cand, cand_end, &next))
                 return cand;
-            cand = ALIGN_UP(next, CONFIG_PAGE_SIZE);
+            cand = ALIGN_UP(next, granule);
         }
     }
     return 0;
@@ -122,15 +142,16 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
     if (!phys_dma)
         return 0;
 
+    size_t granule = iommu_domain_granule(domain);
     paddr_t pa = (paddr_t)phys_dma;
-    paddr_t pa_base = ALIGN_DOWN(pa, CONFIG_PAGE_SIZE);
+    paddr_t pa_base = ALIGN_DOWN(pa, granule);
     size_t offset = (size_t)(pa - pa_base);
     if (offset > SIZE_MAX - size) {
         iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
         return 0;
     }
     size_t req_span = size + offset;
-    size_t map_size = ALIGN_UP(req_span, CONFIG_PAGE_SIZE);
+    size_t map_size = ALIGN_UP(req_span, granule);
     if (!map_size || map_size < req_span) {
         iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
         return 0;
@@ -271,6 +292,7 @@ static const struct dma_ops iommu_dma_ops = {
 struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
                                          dma_addr_t iova_base,
                                          size_t iova_size) {
+    const size_t granule = CONFIG_PAGE_SIZE;
     if (type != IOMMU_DOMAIN_BYPASS && type != IOMMU_DOMAIN_DMA)
         return NULL;
 
@@ -278,8 +300,8 @@ struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
         iova_base = IOMMU_IOVA_DEFAULT_BASE;
     if (!iova_size)
         iova_size = IOMMU_IOVA_DEFAULT_SIZE;
-    iova_base = ALIGN_UP(iova_base, CONFIG_PAGE_SIZE);
-    iova_size = ALIGN_UP(iova_size, CONFIG_PAGE_SIZE);
+    iova_base = ALIGN_UP(iova_base, granule);
+    iova_size = ALIGN_UP(iova_size, granule);
     if (!iova_size)
         return NULL;
 
@@ -295,6 +317,7 @@ struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
     domain->iova_base = iova_base;
     domain->iova_limit = iova_limit;
     domain->iova_cursor = iova_base;
+    domain->granule = granule;
     spin_init(&domain->lock);
     INIT_LIST_HEAD(&domain->mappings);
     return domain;
@@ -312,6 +335,7 @@ struct iommu_domain *iommu_get_passthrough_domain(void) {
         iommu_passthrough_domain.iova_limit =
             IOMMU_IOVA_DEFAULT_BASE + IOMMU_IOVA_DEFAULT_SIZE;
         iommu_passthrough_domain.iova_cursor = iommu_passthrough_domain.iova_base;
+        iommu_passthrough_domain.granule = CONFIG_PAGE_SIZE;
         spin_init(&iommu_passthrough_domain.lock);
         INIT_LIST_HEAD(&iommu_passthrough_domain.mappings);
         __atomic_store_n(&iommu_passthrough_domain_init_done, true,
@@ -365,6 +389,39 @@ void iommu_domain_set_ops(struct iommu_domain *domain,
     spin_unlock_irqrestore(&domain->lock, irq_flags);
 }
 
+int iommu_domain_set_granule(struct iommu_domain *domain, size_t granule) {
+    if (!domain)
+        return -EINVAL;
+    if (!iommu_granule_valid(granule))
+        return -EINVAL;
+    if (domain == &iommu_passthrough_domain)
+        return -EBUSY;
+
+    bool irq_flags;
+    spin_lock_irqsave(&domain->lock, &irq_flags);
+    if (!list_empty(&domain->mappings)) {
+        spin_unlock_irqrestore(&domain->lock, irq_flags);
+        return -EBUSY;
+    }
+
+    dma_addr_t base = ALIGN_UP(domain->iova_base, granule);
+    dma_addr_t limit = ALIGN_DOWN(domain->iova_limit, granule);
+    if (limit <= base) {
+        spin_unlock_irqrestore(&domain->lock, irq_flags);
+        return -EINVAL;
+    }
+    domain->granule = granule;
+    domain->iova_base = base;
+    domain->iova_limit = limit;
+    domain->iova_cursor = base;
+    spin_unlock_irqrestore(&domain->lock, irq_flags);
+    return 0;
+}
+
+size_t iommu_domain_get_granule(const struct iommu_domain *domain) {
+    return iommu_domain_granule(domain);
+}
+
 static int iommu_attach_device_internal(struct iommu_domain *domain,
                                         struct device *dev, bool owned) {
     if (!domain || !dev)
@@ -390,17 +447,32 @@ int iommu_attach_default_domain(struct device *dev) {
     if (!dev)
         return -EINVAL;
 
-    const struct iommu_hw_ops *ops = NULL;
-    void *priv = NULL;
+    struct iommu_hw_provider_entry providers[IOMMU_HW_PROVIDERS_MAX];
+    size_t provider_count = 0;
     spin_lock(&iommu_hw_ops_lock);
-    ops = iommu_hw_ops;
-    priv = iommu_hw_ops_priv;
+    provider_count = iommu_hw_provider_count;
+    if (provider_count > ARRAY_SIZE(providers))
+        provider_count = ARRAY_SIZE(providers);
+    for (size_t i = 0; i < provider_count; i++)
+        providers[i] = iommu_hw_providers[i];
     spin_unlock(&iommu_hw_ops_lock);
 
     struct iommu_domain *domain = NULL;
     bool owned = false;
-    if (ops && ops->alloc_default_domain)
-        domain = ops->alloc_default_domain(dev, &owned, priv);
+    for (size_t i = 0; i < provider_count; i++) {
+        const struct iommu_hw_ops *ops = providers[i].ops;
+        if (!ops || !ops->alloc_default_domain)
+            continue;
+        if (ops->match) {
+            int match = ops->match(dev, providers[i].priv);
+            if (match <= 0)
+                continue;
+        }
+        domain = ops->alloc_default_domain(dev, &owned, providers[i].priv);
+        if (domain)
+            break;
+    }
+
     if (!domain) {
         domain = iommu_get_passthrough_domain();
         owned = false;
@@ -458,13 +530,34 @@ struct iommu_domain *iommu_get_domain(struct device *dev) {
 int iommu_register_hw_ops(const struct iommu_hw_ops *ops, void *priv) {
     if (!ops || !ops->alloc_default_domain)
         return -EINVAL;
+
     spin_lock(&iommu_hw_ops_lock);
-    if (iommu_hw_ops) {
+    for (size_t i = 0; i < iommu_hw_provider_count; i++) {
+        if (iommu_hw_providers[i].ops == ops) {
+            spin_unlock(&iommu_hw_ops_lock);
+            return -EBUSY;
+        }
+    }
+    if (iommu_hw_provider_count >= ARRAY_SIZE(iommu_hw_providers)) {
         spin_unlock(&iommu_hw_ops_lock);
+        pr_warn("iommu: too many hardware backends (max=%u)\n",
+                (unsigned int)ARRAY_SIZE(iommu_hw_providers));
         return -EBUSY;
     }
-    iommu_hw_ops = ops;
-    iommu_hw_ops_priv = priv;
+
+    size_t insert = iommu_hw_provider_count;
+    for (size_t i = 0; i < iommu_hw_provider_count; i++) {
+        if (ops->priority > iommu_hw_providers[i].ops->priority) {
+            insert = i;
+            break;
+        }
+    }
+    for (size_t i = iommu_hw_provider_count; i > insert; i--)
+        iommu_hw_providers[i] = iommu_hw_providers[i - 1];
+
+    iommu_hw_providers[insert].ops = ops;
+    iommu_hw_providers[insert].priv = priv;
+    iommu_hw_provider_count++;
     spin_unlock(&iommu_hw_ops_lock);
     return 0;
 }
@@ -472,10 +565,17 @@ int iommu_register_hw_ops(const struct iommu_hw_ops *ops, void *priv) {
 void iommu_unregister_hw_ops(const struct iommu_hw_ops *ops) {
     if (!ops)
         return;
+
     spin_lock(&iommu_hw_ops_lock);
-    if (iommu_hw_ops == ops) {
-        iommu_hw_ops = NULL;
-        iommu_hw_ops_priv = NULL;
+    for (size_t i = 0; i < iommu_hw_provider_count; i++) {
+        if (iommu_hw_providers[i].ops != ops)
+            continue;
+        for (size_t j = i + 1; j < iommu_hw_provider_count; j++)
+            iommu_hw_providers[j - 1] = iommu_hw_providers[j];
+        iommu_hw_provider_count--;
+        iommu_hw_providers[iommu_hw_provider_count].ops = NULL;
+        iommu_hw_providers[iommu_hw_provider_count].priv = NULL;
+        break;
     }
     spin_unlock(&iommu_hw_ops_lock);
 }

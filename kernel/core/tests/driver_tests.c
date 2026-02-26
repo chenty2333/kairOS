@@ -479,6 +479,183 @@ static void test_iommu_domain_dma_ops(void) {
     iommu_domain_destroy(domain);
 }
 
+static volatile uint32_t iommu_granule_map_calls;
+static volatile uint32_t iommu_granule_unmap_calls;
+static volatile dma_addr_t iommu_granule_last_iova;
+static volatile size_t iommu_granule_last_size;
+
+static int test_iommu_granule_map(struct iommu_domain *domain __unused,
+                                  dma_addr_t iova, paddr_t paddr __unused,
+                                  size_t size, uint32_t prot __unused) {
+    __atomic_store_n(&iommu_granule_last_iova, iova, __ATOMIC_RELAXED);
+    __atomic_store_n(&iommu_granule_last_size, size, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&iommu_granule_map_calls, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static void test_iommu_granule_unmap(struct iommu_domain *domain __unused,
+                                     dma_addr_t iova __unused,
+                                     size_t size __unused) {
+    __atomic_add_fetch(&iommu_granule_unmap_calls, 1, __ATOMIC_RELAXED);
+}
+
+static const struct iommu_domain_ops test_iommu_granule_ops = {
+    .map = test_iommu_granule_map,
+    .unmap = test_iommu_granule_unmap,
+};
+
+static void test_iommu_domain_granule(void) {
+    struct iommu_domain *domain =
+        iommu_domain_create(IOMMU_DOMAIN_DMA, 0x10000ULL, 0x40000ULL);
+    test_check(domain != NULL, "iommu granule domain create");
+    if (!domain)
+        return;
+
+    int ret = iommu_domain_set_granule(domain, 0x10000ULL);
+    test_check(ret == 0, "iommu granule set 64k");
+    test_check(iommu_domain_get_granule(domain) == 0x10000ULL,
+               "iommu granule get 64k");
+
+    iommu_domain_set_ops(domain, &test_iommu_granule_ops, NULL);
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    ret = iommu_attach_device(domain, &dev);
+    test_check(ret == 0, "iommu granule attach");
+    if (ret < 0) {
+        iommu_domain_destroy(domain);
+        return;
+    }
+
+    iommu_granule_map_calls = 0;
+    iommu_granule_unmap_calls = 0;
+    iommu_granule_last_iova = 0;
+    iommu_granule_last_size = 0;
+
+    uint8_t *buf = kmalloc(CONFIG_PAGE_SIZE * 2);
+    test_check(buf != NULL, "iommu granule alloc");
+    if (buf) {
+        dma_addr_t dma = dma_map_single(&dev, buf + 7, 256, DMA_TO_DEVICE);
+        test_check(dma != 0, "iommu granule map");
+        if (dma) {
+            dma_addr_t last_iova =
+                __atomic_load_n(&iommu_granule_last_iova, __ATOMIC_RELAXED);
+            size_t last_size =
+                __atomic_load_n(&iommu_granule_last_size, __ATOMIC_RELAXED);
+            test_check((last_iova & 0xFFFFULL) == 0,
+                       "iommu granule map iova aligned");
+            test_check((last_size & 0xFFFFULL) == 0,
+                       "iommu granule map size aligned");
+            dma_unmap_single(&dev, dma, 256, DMA_TO_DEVICE);
+        }
+        kfree(buf);
+    }
+
+    test_check(__atomic_load_n(&iommu_granule_map_calls, __ATOMIC_RELAXED) == 1,
+               "iommu granule map callback count");
+    test_check(__atomic_load_n(&iommu_granule_unmap_calls, __ATOMIC_RELAXED) == 1,
+               "iommu granule unmap callback count");
+
+    iommu_detach_device(&dev);
+    iommu_domain_destroy(domain);
+}
+
+static volatile uint32_t iommu_hw_prio_primary_enabled = 1;
+static volatile uint32_t iommu_hw_prio_primary_match_calls;
+static volatile uint32_t iommu_hw_prio_primary_alloc_calls;
+static volatile uint32_t iommu_hw_prio_fallback_alloc_calls;
+
+static int test_iommu_hw_prio_primary_match(struct device *dev __unused,
+                                            void *priv __unused) {
+    __atomic_add_fetch(&iommu_hw_prio_primary_match_calls, 1, __ATOMIC_RELAXED);
+    return __atomic_load_n(&iommu_hw_prio_primary_enabled, __ATOMIC_RELAXED) ? 1 : 0;
+}
+
+static struct iommu_domain *test_iommu_hw_prio_primary_alloc(struct device *dev __unused,
+                                                             bool *owned,
+                                                             void *priv __unused) {
+    __atomic_add_fetch(&iommu_hw_prio_primary_alloc_calls, 1, __ATOMIC_RELAXED);
+    struct iommu_domain *domain =
+        iommu_domain_create(IOMMU_DOMAIN_DMA, 0x200000ULL, 0x40000ULL);
+    if (owned)
+        *owned = true;
+    return domain;
+}
+
+static struct iommu_domain *test_iommu_hw_prio_fallback_alloc(struct device *dev __unused,
+                                                              bool *owned,
+                                                              void *priv __unused) {
+    __atomic_add_fetch(&iommu_hw_prio_fallback_alloc_calls, 1, __ATOMIC_RELAXED);
+    struct iommu_domain *domain =
+        iommu_domain_create(IOMMU_DOMAIN_DMA, 0x300000ULL, 0x40000ULL);
+    if (owned)
+        *owned = true;
+    return domain;
+}
+
+static const struct iommu_hw_ops test_iommu_hw_prio_primary_ops = {
+    .name = "test-primary",
+    .priority = 100,
+    .match = test_iommu_hw_prio_primary_match,
+    .alloc_default_domain = test_iommu_hw_prio_primary_alloc,
+};
+
+static const struct iommu_hw_ops test_iommu_hw_prio_fallback_ops = {
+    .name = "test-fallback",
+    .priority = 10,
+    .alloc_default_domain = test_iommu_hw_prio_fallback_alloc,
+};
+
+static void test_iommu_hw_ops_priority_match(void) {
+    iommu_unregister_hw_ops(&test_iommu_hw_prio_primary_ops);
+    iommu_unregister_hw_ops(&test_iommu_hw_prio_fallback_ops);
+
+    int ret = iommu_register_hw_ops(&test_iommu_hw_prio_fallback_ops, NULL);
+    test_check(ret == 0, "iommu hw prio fallback register");
+    ret = iommu_register_hw_ops(&test_iommu_hw_prio_primary_ops, NULL);
+    test_check(ret == 0, "iommu hw prio primary register");
+    if (ret < 0) {
+        iommu_unregister_hw_ops(&test_iommu_hw_prio_fallback_ops);
+        return;
+    }
+
+    iommu_hw_prio_primary_enabled = 1;
+    iommu_hw_prio_primary_match_calls = 0;
+    iommu_hw_prio_primary_alloc_calls = 0;
+    iommu_hw_prio_fallback_alloc_calls = 0;
+
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    ret = iommu_attach_default_domain(&dev);
+    test_check(ret == 0, "iommu hw prio attach primary");
+    if (ret == 0) {
+        struct iommu_domain *domain = iommu_get_domain(&dev);
+        test_check(domain != NULL && domain->iova_base == 0x200000ULL,
+                   "iommu hw prio chose primary");
+        iommu_detach_device(&dev);
+    }
+
+    iommu_hw_prio_primary_enabled = 0;
+    memset(&dev, 0, sizeof(dev));
+    ret = iommu_attach_default_domain(&dev);
+    test_check(ret == 0, "iommu hw prio attach fallback");
+    if (ret == 0) {
+        struct iommu_domain *domain = iommu_get_domain(&dev);
+        test_check(domain != NULL && domain->iova_base == 0x300000ULL,
+                   "iommu hw prio chose fallback");
+        iommu_detach_device(&dev);
+    }
+
+    test_check(__atomic_load_n(&iommu_hw_prio_primary_match_calls, __ATOMIC_RELAXED) == 2,
+               "iommu hw prio primary match calls");
+    test_check(__atomic_load_n(&iommu_hw_prio_primary_alloc_calls, __ATOMIC_RELAXED) == 1,
+               "iommu hw prio primary alloc calls");
+    test_check(__atomic_load_n(&iommu_hw_prio_fallback_alloc_calls, __ATOMIC_RELAXED) == 1,
+               "iommu hw prio fallback alloc calls");
+
+    iommu_unregister_hw_ops(&test_iommu_hw_prio_primary_ops);
+    iommu_unregister_hw_ops(&test_iommu_hw_prio_fallback_ops);
+}
+
 static void test_dma_constraints_iommu_backend(void) {
     struct iommu_domain *domain =
         iommu_domain_create(IOMMU_DOMAIN_DMA, 0x10000ULL, 0x30000ULL);
@@ -550,6 +727,8 @@ static struct iommu_domain *test_iommu_hw_alloc_default(struct device *dev __unu
 }
 
 static const struct iommu_hw_ops test_iommu_hw_ops = {
+    .name = "test-hw-default",
+    .priority = 1000,
     .alloc_default_domain = test_iommu_hw_alloc_default,
 };
 
@@ -619,6 +798,8 @@ static struct iommu_domain *test_iommu_replace_alloc_default(struct device *dev 
 }
 
 static const struct iommu_hw_ops test_iommu_replace_hw_ops = {
+    .name = "test-replace",
+    .priority = 900,
     .alloc_default_domain = test_iommu_replace_alloc_default,
 };
 
@@ -2375,8 +2556,10 @@ static void run_driver_suite_once(void) {
     test_dma_coherent_alloc_free();
     test_dma_constraints_direct_backend();
     test_iommu_domain_dma_ops();
+    test_iommu_domain_granule();
     test_dma_constraints_iommu_backend();
     test_iommu_default_domain_attach();
+    test_iommu_hw_ops_priority_match();
     test_iommu_hw_ops_default_attach();
     test_iommu_attach_replaces_owned_domain();
     test_irq_deferred_dispatch();

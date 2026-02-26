@@ -73,6 +73,8 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - Virtqueue ring memory now uses `dma_alloc_coherent(dev, ...)` with persistent DMA handles (`desc/avail/used`), and both virtio-mmio + virtio-pci program queue base registers from those DMA addresses instead of raw `virt_to_phys()`
 - DMA constraints now support per-device mask/aperture policy (`dma_set_mask()`, `dma_set_aperture()`); map/alloc paths reject DMA addresses outside mask/aperture windows
 - IOMMU core now provides `iommu_domain` + basic IOVA allocation and an IOMMU DMA backend (`iommu_get_dma_ops()`); PCI enumeration uses `iommu_attach_default_domain()`, which currently falls back to a global passthrough domain and can later be redirected by registering `iommu_hw_ops`
+- IOMMU hardware provider registration supports multiple backends with `priority` + optional `match(dev, priv)` selection; default-domain attach walks providers in priority order, then falls back to passthrough
+- IOMMU DMA domains now expose configurable mapping granularity (`iommu_domain_set_granule()`), so backend-required page size (for example 64K) can be enforced in IOVA allocation/map size alignment
 - IOMMU IOVA allocation also honors the same per-device DMA mask/aperture checks, so translated DMA addresses stay inside the declared device-visible window
 - Re-attaching a device to another IOMMU domain now auto-detaches the previous domain attachment and reclaims any per-device DMA mappings from the old domain before switching
 - Device init now runs `iommu_init()` before PCI enumeration; architecture code can provide `arch_iommu_init()` to register hardware-backed domain allocation
