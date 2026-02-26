@@ -137,7 +137,7 @@ kairos_run_test_tcc_smoke_once() {
     printf -v required_all 'RC_STATIC:0\nRC_DYN:0\nRC_DYN_HELLO:0\nHELLO_DYN_OK\n__TCC_SMOKE_DONE__'
 
     printf -v inner_make_cmd \
-        'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
+        'make --no-print-directory -j%q ARCH=%q BUILD_ROOT=%q KERNEL_TESTS=0 EXTRA_CFLAGS=%q RUN_ISOLATED=0 RUN_GC_AUTO=0 UEFI_BOOT_MODE=%q QEMU_UEFI_BOOT_MODE=%q' \
         "${make_jobs}" "${KAIROS_ARCH}" "${KAIROS_BUILD_ROOT}" "${extra_cflags}" \
         "${UEFI_BOOT_MODE:-}" "${QEMU_UEFI_BOOT_MODE:-}"
 

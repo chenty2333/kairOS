@@ -59,6 +59,7 @@ struct kchannel {
     size_t rxq_len;
     struct kchannel_msg rxq_slots[KCHANNEL_MAX_QUEUE];
     struct list_head poll_vnodes;
+    /* Lock order: self->lock must be acquired before peer->lock. */
     struct kchannel *peer;
     bool peer_closed;
     bool endpoint_closed;
@@ -89,6 +90,7 @@ struct kport {
     struct list_head queue;
     struct list_head poll_vnodes;
     size_t queue_len;
+    uint64_t dropped_count;
 };
 
 struct kfile {
@@ -99,6 +101,7 @@ struct kfile {
 struct ipc_registry_entry {
     struct list_head type_node;
     struct list_head all_node;
+    struct list_head hash_node;
     struct kobj *obj;
     struct sysfs_node *sysfs_dir;
     struct sysfs_attribute summary_attr;
@@ -116,6 +119,10 @@ static LIST_HEAD(ipc_port_registry);
 static LIST_HEAD(ipc_file_registry);
 static LIST_HEAD(ipc_vnode_registry);
 static LIST_HEAD(ipc_dentry_registry);
+#define IPC_REGISTRY_ID_HASH_BITS 8U
+#define IPC_REGISTRY_ID_HASH_SIZE (1U << IPC_REGISTRY_ID_HASH_BITS)
+static struct list_head ipc_registry_id_hash[IPC_REGISTRY_ID_HASH_SIZE];
+static bool ipc_registry_id_hash_ready;
 static struct mutex ipc_registry_lock;
 static bool ipc_registry_lock_ready;
 static spinlock_t ipc_registry_init_lock = SPINLOCK_INIT;
@@ -127,6 +134,10 @@ static struct sysfs_node *ipc_sysfs_root;
 static struct sysfs_node *ipc_sysfs_objects_dir;
 static bool ipc_sysfs_ready;
 static atomic_t kobj_id_next = ATOMIC_INIT(0);
+static uint64_t ipc_registry_register_oom_failures;
+static uint64_t ipc_port_queue_drops_total;
+static atomic_t ipc_registry_register_oom_warn_count = ATOMIC_INIT(0);
+static atomic_t ipc_port_queue_drop_warn_count = ATOMIC_INIT(0);
 
 #define IPC_SYSFS_PAGE_SIZE_DEFAULT 64U
 #define IPC_SYSFS_PAGE_SIZE_MAX     512U
@@ -142,6 +153,13 @@ static struct ipc_sysfs_page_state ipc_sysfs_page = {
     .cursor = 0,
     .page_size = IPC_SYSFS_PAGE_SIZE_DEFAULT,
 };
+
+static bool ipc_warn_ratelimited(atomic_t *warn_counter) {
+    if (!warn_counter)
+        return false;
+    uint32_t n = atomic_inc_return(warn_counter);
+    return n <= 4 || (n & (n - 1U)) == 0;
+}
 
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
@@ -285,9 +303,43 @@ static void ipc_registry_ensure_lock(void) {
     spin_lock_irqsave(&ipc_registry_init_lock, &irq_flags);
     if (!ipc_registry_lock_ready) {
         mutex_init(&ipc_registry_lock, "ipc_registry");
+        for (size_t i = 0; i < IPC_REGISTRY_ID_HASH_SIZE; i++)
+            INIT_LIST_HEAD(&ipc_registry_id_hash[i]);
+        ipc_registry_id_hash_ready = true;
         __atomic_store_n(&ipc_registry_lock_ready, true, __ATOMIC_RELEASE);
     }
     spin_unlock_irqrestore(&ipc_registry_init_lock, irq_flags);
+}
+
+static size_t ipc_registry_id_hash_bucket(uint32_t obj_id) {
+    return (size_t)(obj_id & (IPC_REGISTRY_ID_HASH_SIZE - 1U));
+}
+
+static void ipc_registry_id_hash_insert_locked(struct ipc_registry_entry *ent) {
+    if (!ent || !ent->obj || !ipc_registry_id_hash_ready)
+        return;
+    size_t idx = ipc_registry_id_hash_bucket(ent->obj->id);
+    list_add_tail(&ent->hash_node, &ipc_registry_id_hash[idx]);
+}
+
+static void ipc_registry_id_hash_remove_locked(struct ipc_registry_entry *ent) {
+    if (!ent || list_empty(&ent->hash_node))
+        return;
+    list_del(&ent->hash_node);
+    INIT_LIST_HEAD(&ent->hash_node);
+}
+
+static struct ipc_registry_entry *
+ipc_registry_find_by_obj_id_locked(uint32_t obj_id) {
+    if (obj_id == 0 || !ipc_registry_id_hash_ready)
+        return NULL;
+    size_t idx = ipc_registry_id_hash_bucket(obj_id);
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_registry_id_hash[idx], hash_node) {
+        if (ent->obj && ent->obj->id == obj_id)
+            return ent;
+    }
+    return NULL;
 }
 
 static struct list_head *ipc_registry_list_for_type(uint32_t type) {
@@ -308,8 +360,8 @@ static struct list_head *ipc_registry_list_for_type(uint32_t type) {
 }
 
 static bool ipc_registry_should_auto_ensure_sysfs(uint32_t type) {
-    (void)type;
-    return true;
+    return type == KOBJ_TYPE_CHANNEL || type == KOBJ_TYPE_PORT ||
+           type == KOBJ_TYPE_FILE;
 }
 
 static bool ipc_registry_register_suppressed_for_current(void) {
@@ -984,7 +1036,7 @@ static ssize_t ipc_sysfs_show_ports(void *priv __attribute__((unused)), char *bu
         return -EINVAL;
 
     size_t len = 0;
-    int n = snprintf(buf, bufsz, "id refcount queue_len\n");
+    int n = snprintf(buf, bufsz, "id refcount queue_len dropped_count\n");
     if (n < 0)
         return -EINVAL;
     if ((size_t)n >= bufsz)
@@ -1002,12 +1054,15 @@ static ssize_t ipc_sysfs_show_ports(void *priv __attribute__((unused)), char *bu
             continue;
 
         size_t queue_len = 0;
+        uint64_t dropped_count = 0;
         mutex_lock(&port->lock);
         queue_len = port->queue_len;
+        dropped_count = port->dropped_count;
         mutex_unlock(&port->lock);
 
-        n = snprintf(buf + len, bufsz - len, "%u %u %zu\n", obj->id,
-                     atomic_read(&obj->refcount), queue_len);
+        n = snprintf(buf + len, bufsz - len, "%u %u %zu %llu\n", obj->id,
+                     atomic_read(&obj->refcount), queue_len,
+                     (unsigned long long)dropped_count);
         if (n < 0 || (size_t)n >= bufsz - len) {
             len = bufsz;
             break;
@@ -1017,6 +1072,33 @@ static ssize_t ipc_sysfs_show_ports(void *priv __attribute__((unused)), char *bu
 
     mutex_unlock(&ipc_registry_lock);
     return (ssize_t)((len < bufsz) ? len : bufsz);
+}
+
+static ssize_t ipc_sysfs_show_stats(void *priv __attribute__((unused)), char *buf,
+                                    size_t bufsz) {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    uint64_t reg_oom = __atomic_load_n(&ipc_registry_register_oom_failures,
+                                       __ATOMIC_RELAXED);
+    uint64_t port_drops =
+        __atomic_load_n(&ipc_port_queue_drops_total, __ATOMIC_RELAXED);
+    uint32_t reg_oom_warns = atomic_read(&ipc_registry_register_oom_warn_count);
+    uint32_t port_drop_warns = atomic_read(&ipc_port_queue_drop_warn_count);
+
+    int n = snprintf(buf, bufsz,
+                     "schema=sysfs_ipc_stats_v1\n"
+                     "registry_register_oom_failures=%llu\n"
+                     "registry_register_oom_warns=%u\n"
+                     "port_queue_drops_total=%llu\n"
+                     "port_queue_drop_warns=%u\n",
+                     (unsigned long long)reg_oom, reg_oom_warns,
+                     (unsigned long long)port_drops, port_drop_warns);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz)
+        return (ssize_t)bufsz;
+    return (ssize_t)n;
 }
 
 static ssize_t ipc_sysfs_show_files(void *priv __attribute__((unused)), char *buf,
@@ -1204,6 +1286,7 @@ static const struct sysfs_attribute ipc_sysfs_attrs[] = {
     {.name = "vnodes", .mode = 0444, .show = ipc_sysfs_show_vnodes},
     {.name = "dentries", .mode = 0444, .show = ipc_sysfs_show_dentries},
     {.name = "transfers", .mode = 0444, .show = ipc_sysfs_show_transfers},
+    {.name = "stats", .mode = 0444, .show = ipc_sysfs_show_stats},
 };
 
 static const struct sysfs_attribute ipc_sysfs_objects_attrs[] = {
@@ -1352,8 +1435,16 @@ static void ipc_registry_register_obj(struct kobj *obj) {
 
     ipc_registry_ensure_lock();
     struct ipc_registry_entry *ent = kzalloc(sizeof(*ent));
-    if (!ent)
+    if (!ent) {
+        uint64_t total = __atomic_add_fetch(&ipc_registry_register_oom_failures,
+                                            1, __ATOMIC_RELAXED);
+        if (ipc_warn_ratelimited(&ipc_registry_register_oom_warn_count)) {
+            pr_warn("ipc: registry alloc failed obj_id=%u type=%s total=%llu\n",
+                    obj->id, kobj_type_name(obj->type),
+                    (unsigned long long)total);
+        }
         return;
+    }
     ent->obj = obj;
     ent->sysfs_dir = NULL;
     memset(&ent->summary_attr, 0, sizeof(ent->summary_attr));
@@ -1366,10 +1457,12 @@ static void ipc_registry_register_obj(struct kobj *obj) {
     ent->transfers_page_size = IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE;
     INIT_LIST_HEAD(&ent->type_node);
     INIT_LIST_HEAD(&ent->all_node);
+    INIT_LIST_HEAD(&ent->hash_node);
 
     mutex_lock(&ipc_registry_lock);
     list_add_tail(&ent->type_node, list);
     list_add_tail(&ent->all_node, &ipc_registry_all);
+    ipc_registry_id_hash_insert_locked(ent);
     mutex_unlock(&ipc_registry_lock);
 
     if (ipc_registry_should_auto_ensure_sysfs(obj->type))
@@ -1379,11 +1472,6 @@ static void ipc_registry_register_obj(struct kobj *obj) {
 static void ipc_registry_unregister_obj(struct kobj *obj) {
     if (!obj)
         return;
-    if ((obj->type == VFS_KOBJ_TYPE_VNODE ||
-         obj->type == VFS_KOBJ_TYPE_DENTRY) &&
-        ipc_registry_register_suppressed_for_current()) {
-        return;
-    }
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
         return;
@@ -1397,6 +1485,7 @@ static void ipc_registry_unregister_obj(struct kobj *obj) {
         ipc_sysfs_remove_object_dir_locked(ent);
         list_del(&ent->type_node);
         list_del(&ent->all_node);
+        ipc_registry_id_hash_remove_locked(ent);
         mutex_unlock(&ipc_registry_lock);
         kfree(ent);
         return;
@@ -1439,6 +1528,7 @@ static void kchannel_on_last_handle_release(struct kchannel *ch) {
     if (!ch)
         return;
 
+    /* Keep channel lock ordering explicit: self->lock then peer->lock. */
     struct kchannel *peer = NULL;
     struct kport *bound = NULL;
 
@@ -1769,12 +1859,125 @@ size_t kobj_transfer_history_snapshot(struct kobj *obj,
     return available;
 }
 
+int kobj_lookup_type_by_id(uint32_t obj_id, uint32_t *out_type) {
+    if (!out_type || obj_id == 0)
+        return -EINVAL;
+    *out_type = 0;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    struct ipc_registry_entry *ent = ipc_registry_find_by_obj_id_locked(obj_id);
+    if (ent && ent->obj)
+        *out_type = ent->obj->type;
+    mutex_unlock(&ipc_registry_lock);
+    return *out_type ? 0 : -ENOENT;
+}
+
+int kobj_registry_get_nth(size_t index, uint32_t *out_id, uint32_t *out_type) {
+    if (!out_id)
+        return -EINVAL;
+    *out_id = 0;
+    if (out_type)
+        *out_type = 0;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    size_t nth = 0;
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_registry_all, all_node) {
+        struct kobj *obj = ent->obj;
+        if (!obj)
+            continue;
+        if (nth != index) {
+            nth++;
+            continue;
+        }
+        *out_id = obj->id;
+        if (out_type)
+            *out_type = obj->type;
+        mutex_unlock(&ipc_registry_lock);
+        return 0;
+    }
+    mutex_unlock(&ipc_registry_lock);
+    return -ENOENT;
+}
+
+int kobj_transfer_history_page_by_id(
+    uint32_t obj_id, uint32_t cursor, uint32_t page_size,
+    struct kobj_transfer_history_entry *out, size_t out_cap,
+    uint32_t *out_returned, uint32_t *out_next_cursor, bool *out_end,
+    uint32_t *out_type) {
+    if (!out_returned || !out_next_cursor || !out_end || !out_type ||
+        page_size == 0 || obj_id == 0) {
+        return -EINVAL;
+    }
+
+    *out_returned = 0;
+    *out_next_cursor = cursor;
+    *out_end = true;
+    *out_type = 0;
+
+    if (out_cap > 0 && !out)
+        return -EINVAL;
+
+    struct kobj *obj = NULL;
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    struct ipc_registry_entry *ent = ipc_registry_find_by_obj_id_locked(obj_id);
+    if (ent && ent->obj) {
+        obj = ent->obj;
+        kobj_get(obj);
+        *out_type = obj->type;
+    }
+    mutex_unlock(&ipc_registry_lock);
+
+    if (!obj)
+        return -ENOENT;
+
+    struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+    size_t count =
+        kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+    kobj_put(obj);
+
+    uint32_t scanned = 0;
+    uint32_t returned = 0;
+    bool has_more = false;
+    for (size_t i = 0; i < count; i++) {
+        if (hist[i].seq == 0)
+            continue;
+        if (scanned < cursor) {
+            scanned++;
+            continue;
+        }
+        if (returned >= page_size) {
+            has_more = true;
+            break;
+        }
+        if (returned >= out_cap) {
+            has_more = true;
+            break;
+        }
+        out[returned++] = hist[i];
+        scanned++;
+    }
+
+    uint64_t next_cursor64 = (uint64_t)cursor + (uint64_t)returned;
+    if (next_cursor64 > 0xFFFFFFFFULL)
+        next_cursor64 = 0xFFFFFFFFULL;
+
+    *out_returned = returned;
+    *out_next_cursor = (uint32_t)next_cursor64;
+    *out_end = !has_more;
+    return 0;
+}
+
 #define KHANDLE_CACHE_SLOTS 16U
 _Static_assert((KHANDLE_CACHE_SLOTS & (KHANDLE_CACHE_SLOTS - 1U)) == 0,
                "KHANDLE_CACHE_SLOTS must be power-of-two");
 
 struct kcap_node {
     struct list_head all_node;
+    struct list_head hash_node;
     struct list_head sibling_node;
     struct list_head children;
     struct kcap_node *parent;
@@ -1800,6 +2003,10 @@ struct khandle_lookup_cache_cpu {
 };
 
 static LIST_HEAD(kcap_nodes);
+#define KCAP_ID_HASH_BITS 10U
+#define KCAP_ID_HASH_SIZE (1U << KCAP_ID_HASH_BITS)
+static struct list_head kcap_id_hash[KCAP_ID_HASH_SIZE];
+static bool kcap_id_hash_ready;
 static spinlock_t kcap_lock = SPINLOCK_INIT;
 static uint64_t kcap_next_id = 1;
 static uint64_t khandle_cache_epoch_next = 1;
@@ -1815,10 +2022,38 @@ static uint64_t khandle_alloc_cache_epoch(void) {
                               __ATOMIC_RELAXED);
 }
 
+static size_t kcap_hash_bucket(uint64_t cap_id) {
+    return (size_t)(cap_id & (KCAP_ID_HASH_SIZE - 1U));
+}
+
+static void kcap_hash_ensure_locked(void) {
+    if (kcap_id_hash_ready)
+        return;
+    for (size_t i = 0; i < KCAP_ID_HASH_SIZE; i++)
+        INIT_LIST_HEAD(&kcap_id_hash[i]);
+    kcap_id_hash_ready = true;
+}
+
+static void kcap_hash_insert_locked(struct kcap_node *node) {
+    if (!node || !kcap_id_hash_ready)
+        return;
+    size_t idx = kcap_hash_bucket(node->id);
+    list_add_tail(&node->hash_node, &kcap_id_hash[idx]);
+}
+
+static void kcap_hash_remove_locked(struct kcap_node *node) {
+    if (!node || list_empty(&node->hash_node))
+        return;
+    list_del(&node->hash_node);
+    INIT_LIST_HEAD(&node->hash_node);
+}
+
 static struct kcap_node *kcap_find_locked(uint64_t cap_id) {
-    struct list_head *pos = NULL;
-    list_for_each(pos, &kcap_nodes) {
-        struct kcap_node *node = list_entry(pos, struct kcap_node, all_node);
+    if (cap_id == KHANDLE_INVALID_CAP_ID || !kcap_id_hash_ready)
+        return NULL;
+    size_t idx = kcap_hash_bucket(cap_id);
+    struct kcap_node *node;
+    list_for_each_entry(node, &kcap_id_hash[idx], hash_node) {
         if (node->id == cap_id)
             return node;
     }
@@ -1841,6 +2076,7 @@ static void kcap_prune_locked(struct kcap_node *node,
         struct kcap_node *parent = node->parent;
         if (parent)
             list_del(&node->sibling_node);
+        kcap_hash_remove_locked(node);
         list_del(&node->all_node);
         list_add(&node->all_node, free_nodes);
         node = parent;
@@ -1854,6 +2090,7 @@ static uint64_t kcap_create(uint64_t parent_cap_id, struct handletable *owner_ht
         return KHANDLE_INVALID_CAP_ID;
 
     INIT_LIST_HEAD(&node->all_node);
+    INIT_LIST_HEAD(&node->hash_node);
     INIT_LIST_HEAD(&node->sibling_node);
     INIT_LIST_HEAD(&node->children);
     node->owner_ht = owner_ht;
@@ -1861,6 +2098,7 @@ static uint64_t kcap_create(uint64_t parent_cap_id, struct handletable *owner_ht
     node->live = true;
 
     spin_lock(&kcap_lock);
+    kcap_hash_ensure_locked();
     if (parent_cap_id != KHANDLE_INVALID_CAP_ID) {
         struct kcap_node *parent = kcap_find_locked(parent_cap_id);
         if (!parent) {
@@ -1873,6 +2111,7 @@ static uint64_t kcap_create(uint64_t parent_cap_id, struct handletable *owner_ht
     }
     node->id = kcap_alloc_id();
     list_add_tail(&node->all_node, &kcap_nodes);
+    kcap_hash_insert_locked(node);
     spin_unlock(&kcap_lock);
     return node->id;
 }
@@ -1883,6 +2122,7 @@ static int kcap_bind_existing(uint64_t cap_id, struct handletable *owner_ht,
         return -EINVAL;
 
     spin_lock(&kcap_lock);
+    kcap_hash_ensure_locked();
     struct kcap_node *node = kcap_find_locked(cap_id);
     if (!node) {
         spin_unlock(&kcap_lock);
@@ -1906,6 +2146,7 @@ static void kcap_detach_owner(uint64_t cap_id, struct handletable *owner_ht,
 
     LIST_HEAD(free_nodes);
     spin_lock(&kcap_lock);
+    kcap_hash_ensure_locked();
     struct kcap_node *node = kcap_find_locked(cap_id);
     if (node && node->live && node->owner_ht == owner_ht &&
         node->owner_handle == owner_handle) {
@@ -1925,6 +2166,7 @@ static void kcap_drop_detached(uint64_t cap_id) {
 
     LIST_HEAD(free_nodes);
     spin_lock(&kcap_lock);
+    kcap_hash_ensure_locked();
     struct kcap_node *node = kcap_find_locked(cap_id);
     if (node && !node->live)
         kcap_prune_locked(node, &free_nodes);
@@ -1963,6 +2205,7 @@ static int kcap_pick_live_descendant(uint64_t root_cap_id,
     *out_cap_id = KHANDLE_INVALID_CAP_ID;
 
     spin_lock(&kcap_lock);
+    kcap_hash_ensure_locked();
     struct kcap_node *root = kcap_find_locked(root_cap_id);
     if (!root) {
         spin_unlock(&kcap_lock);
@@ -2575,6 +2818,14 @@ static void kport_enqueue_locked(struct kport *port, uint64_t key,
         list_del(&old->node);
         if (port->queue_len > 0)
             port->queue_len--;
+        port->dropped_count++;
+        uint64_t total =
+            __atomic_add_fetch(&ipc_port_queue_drops_total, 1, __ATOMIC_RELAXED);
+        if (ipc_warn_ratelimited(&ipc_port_queue_drop_warn_count)) {
+            pr_warn("ipc: port queue overflow id=%u port_drops=%llu total_drops=%llu\n",
+                    port->obj.id, (unsigned long long)port->dropped_count,
+                    (unsigned long long)total);
+        }
         kfree(old);
     }
 
@@ -2662,6 +2913,7 @@ int kchannel_create_pair(struct kobj **out0, struct kobj **out1) {
         return -ENOMEM;
     }
 
+    /* Pair initialization follows the canonical self->lock -> peer->lock order. */
     mutex_lock(&a->lock);
     mutex_lock(&b->lock);
     a->peer = b;
@@ -3010,6 +3262,7 @@ int kport_create(struct kobj **out) {
     INIT_LIST_HEAD(&port->queue);
     INIT_LIST_HEAD(&port->poll_vnodes);
     port->queue_len = 0;
+    port->dropped_count = 0;
 
     *out = &port->obj;
     return 0;
@@ -3476,6 +3729,7 @@ static void kchannel_release_obj(struct kobj *obj) {
         kobj_put(&bound->obj);
 
     if (peer) {
+        /* Release path also observes self->lock -> peer->lock order. */
         mutex_lock(&peer->lock);
         if (peer->peer == ch)
             peer->peer = NULL;
