@@ -86,20 +86,22 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
     ctx->byte_len = count * dev->sector_size;
 
     struct virtq_desc descs[3];
-    ctx->dma_hdr = dma_map_single(&ctx->hdr, sizeof(ctx->hdr), DMA_TO_DEVICE);
+    ctx->dma_hdr = dma_map_single(&vb->vdev->dev, &ctx->hdr, sizeof(ctx->hdr),
+                                  DMA_TO_DEVICE);
     descs[0].addr = ctx->dma_hdr;
     descs[0].len = sizeof(ctx->hdr);
     descs[0].flags = VIRTQ_DESC_F_NEXT;
     descs[0].next = 0;
 
-    ctx->dma_buf = dma_map_single(buf, ctx->byte_len,
-                                 write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+    ctx->dma_buf = dma_map_single(&vb->vdev->dev, buf, ctx->byte_len,
+                                  write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
     descs[1].addr = ctx->dma_buf;
     descs[1].len = (uint32_t)ctx->byte_len;
     descs[1].flags = (write ? 0 : VIRTQ_DESC_F_WRITE) | VIRTQ_DESC_F_NEXT;
     descs[1].next = 0;
 
-    ctx->dma_status = dma_map_single(&ctx->status, 1, DMA_FROM_DEVICE);
+    ctx->dma_status = dma_map_single(&vb->vdev->dev, &ctx->status, 1,
+                                     DMA_FROM_DEVICE);
     descs[2].addr = ctx->dma_status;
     descs[2].len = 1;
     descs[2].flags = VIRTQ_DESC_F_WRITE;
@@ -109,10 +111,11 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
     int ret = virtqueue_add_buf(vb->vq, descs, 3, ctx);
     if (ret < 0) {
         mutex_unlock(&vb->lock);
-        dma_unmap_single(ctx->dma_hdr, sizeof(ctx->hdr), DMA_TO_DEVICE);
-        dma_unmap_single(ctx->dma_buf, ctx->byte_len,
+        dma_unmap_single(&vb->vdev->dev, ctx->dma_hdr, sizeof(ctx->hdr),
+                         DMA_TO_DEVICE);
+        dma_unmap_single(&vb->vdev->dev, ctx->dma_buf, ctx->byte_len,
                          write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-        dma_unmap_single(ctx->dma_status, 1, DMA_FROM_DEVICE);
+        dma_unmap_single(&vb->vdev->dev, ctx->dma_status, 1, DMA_FROM_DEVICE);
         kfree(ctx);
         return ret;
     }
@@ -138,10 +141,11 @@ static int virtio_blk_transfer(struct blkdev *dev, uint64_t lba, void *buf,
 
     mutex_unlock(&vb->lock);
 
-    dma_unmap_single(ctx->dma_hdr, sizeof(ctx->hdr), DMA_TO_DEVICE);
-    dma_unmap_single(ctx->dma_buf, ctx->byte_len,
+    dma_unmap_single(&vb->vdev->dev, ctx->dma_hdr, sizeof(ctx->hdr),
+                     DMA_TO_DEVICE);
+    dma_unmap_single(&vb->vdev->dev, ctx->dma_buf, ctx->byte_len,
                      write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-    dma_unmap_single(ctx->dma_status, 1, DMA_FROM_DEVICE);
+    dma_unmap_single(&vb->vdev->dev, ctx->dma_status, 1, DMA_FROM_DEVICE);
 
     int status = (ctx->status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
     kfree(ctx);

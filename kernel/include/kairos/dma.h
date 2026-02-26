@@ -18,6 +18,18 @@
 #define DMA_FROM_DEVICE   2
 
 typedef paddr_t dma_addr_t;
+struct device;
+
+struct dma_ops {
+    dma_addr_t (*map_single)(struct device *dev, void *ptr, size_t size,
+                             int direction);
+    void (*unmap_single)(struct device *dev, dma_addr_t addr, size_t size,
+                         int direction);
+    void *(*alloc_coherent)(struct device *dev, size_t size,
+                            dma_addr_t *dma_handle);
+    void (*free_coherent)(struct device *dev, void *cpu_addr, size_t size,
+                          dma_addr_t dma_handle);
+};
 
 #ifdef ARCH_aarch64
 static inline size_t dma_cache_line_size(void) {
@@ -64,83 +76,13 @@ static inline void dma_cache_inval_range(void *ptr, size_t size) {
 }
 #endif
 
-/**
- * dma_map_single - Map a virtual address for DMA
- * @ptr: Virtual address of the buffer
- * @size: Size of the buffer
- * @direction: Data direction
- *
- * Returns physical address (dma_addr_t) accessible by the device.
- */
-static inline dma_addr_t dma_map_single(void *ptr, size_t size, int direction) {
-#ifdef ARCH_aarch64
-    if (direction == DMA_TO_DEVICE) {
-        dma_cache_clean_range(ptr, size);
-    } else if (direction == DMA_FROM_DEVICE) {
-        dma_cache_clean_inval_range(ptr, size);
-    } else if (direction == DMA_BIDIRECTIONAL) {
-        dma_cache_clean_inval_range(ptr, size);
-    }
-#else
-    (void)size;
-    (void)direction;
-#endif
-    return (dma_addr_t)virt_to_phys(ptr);
-}
+void dma_set_ops(struct device *dev, const struct dma_ops *ops);
+const struct dma_ops *dma_get_ops(struct device *dev);
 
-/**
- * dma_unmap_single - Unmap a DMA buffer
- * @addr: Physical address returned by dma_map_single
- * @size: Size of the buffer
- * @direction: Data direction
- */
-static inline void dma_unmap_single(dma_addr_t addr, size_t size, int direction) {
-    void *ptr = phys_to_virt((paddr_t)addr);
-#ifdef ARCH_aarch64
-    if (direction == DMA_FROM_DEVICE) {
-        dma_cache_inval_range(ptr, size);
-    } else if (direction == DMA_BIDIRECTIONAL) {
-        dma_cache_clean_inval_range(ptr, size);
-    } else {
-        (void)ptr;
-    }
-#else
-    (void)ptr;
-    (void)size;
-    (void)direction;
-#endif
-}
-
-static inline void *dma_alloc_coherent(size_t size, dma_addr_t *dma_handle) {
-    if (!size)
-        return NULL;
-
-    size_t alloc_size = ALIGN_UP(size, CONFIG_PAGE_SIZE);
-    size_t page_count = alloc_size / CONFIG_PAGE_SIZE;
-    paddr_t pa = pmm_alloc_pages(page_count);
-    if (!pa)
-        return NULL;
-
-    void *ptr = phys_to_virt(pa);
-    memset(ptr, 0, alloc_size);
-#ifdef ARCH_aarch64
-    dma_cache_clean_inval_range(ptr, alloc_size);
-#endif
-    if (dma_handle)
-        *dma_handle = (dma_addr_t)pa;
-    return ptr;
-}
-
-static inline void dma_free_coherent(void *cpu_addr, size_t size) {
-    if (!cpu_addr || !size)
-        return;
-
-    size_t alloc_size = ALIGN_UP(size, CONFIG_PAGE_SIZE);
-    size_t page_count = alloc_size / CONFIG_PAGE_SIZE;
-    paddr_t pa = virt_to_phys(cpu_addr);
-    if (!pa)
-        return;
-    pmm_free_pages(pa, page_count);
-}
+dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, int direction);
+void dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size, int direction);
+void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle);
+void dma_free_coherent(struct device *dev, void *cpu_addr, size_t size,
+                       dma_addr_t dma_handle);
 
 #endif

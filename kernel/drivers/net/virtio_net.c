@@ -96,7 +96,8 @@ static int virtio_net_post_rx(struct virtio_net_dev *vn, uint16_t idx) {
     struct virtq_desc desc;
     struct virtio_net_rx_slot *slot = &vn->rx_slots[idx];
 
-    desc.addr = dma_map_single(&slot->hdr, sizeof(*slot), DMA_FROM_DEVICE);
+    desc.addr = dma_map_single(&vn->vdev->dev, &slot->hdr, sizeof(*slot),
+                               DMA_FROM_DEVICE);
     desc.len = sizeof(*slot);
     desc.flags = VIRTQ_DESC_F_WRITE;
     desc.next = 0;
@@ -109,7 +110,8 @@ static int virtio_net_post_rx(struct virtio_net_dev *vn, uint16_t idx) {
     if (ret == 0) {
         virtqueue_kick(vn->rx_vq);
     } else {
-        dma_unmap_single(slot->dma_buf, sizeof(*slot), DMA_FROM_DEVICE);
+        dma_unmap_single(&vn->vdev->dev, slot->dma_buf, sizeof(*slot),
+                         DMA_FROM_DEVICE);
     }
     return ret;
 }
@@ -125,8 +127,10 @@ static void virtio_net_intr(struct virtio_device *vdev) {
         if (cookie && cookie->type == 0 && cookie->idx < VIRTQ_SIZE) {
             struct virtio_net_tx_slot *slot = &vn->tx_slots[cookie->idx];
             if (slot->in_use) {
-                dma_unmap_single(slot->dma_hdr, sizeof(slot->hdr), DMA_TO_DEVICE);
-                dma_unmap_single(slot->dma_data, slot->len, DMA_TO_DEVICE);
+                dma_unmap_single(&vn->vdev->dev, slot->dma_hdr,
+                                 sizeof(slot->hdr), DMA_TO_DEVICE);
+                dma_unmap_single(&vn->vdev->dev, slot->dma_data, slot->len,
+                                 DMA_TO_DEVICE);
                 slot->in_use = false;
             }
         }
@@ -139,7 +143,8 @@ static void virtio_net_intr(struct virtio_device *vdev) {
         struct virtio_net_cookie *cookie = virtqueue_get_buf(vn->rx_vq, &len);
         if (cookie && cookie->type == 1 && cookie->idx < VIRTQ_SIZE) {
             struct virtio_net_rx_slot *slot = &vn->rx_slots[cookie->idx];
-            dma_unmap_single(slot->dma_buf, sizeof(*slot), DMA_FROM_DEVICE);
+            dma_unmap_single(&vn->vdev->dev, slot->dma_buf, sizeof(*slot),
+                             DMA_FROM_DEVICE);
             virtio_net_rx_deliver(slot, len);
             virtio_net_post_rx(vn, cookie->idx);
         }
@@ -185,13 +190,15 @@ static int virtio_net_xmit(struct netdev *dev, const void *data, size_t len) {
     slot->len = (uint32_t)len;
 
     struct virtq_desc descs[2];
-    slot->dma_hdr = dma_map_single(&slot->hdr, sizeof(slot->hdr), DMA_TO_DEVICE);
+    slot->dma_hdr = dma_map_single(&vn->vdev->dev, &slot->hdr,
+                                   sizeof(slot->hdr), DMA_TO_DEVICE);
     descs[0].addr = slot->dma_hdr;
     descs[0].len = sizeof(slot->hdr);
     descs[0].flags = VIRTQ_DESC_F_NEXT;
     descs[0].next = 0;
 
-    slot->dma_data = dma_map_single(slot->data, len, DMA_TO_DEVICE);
+    slot->dma_data = dma_map_single(&vn->vdev->dev, slot->data, len,
+                                    DMA_TO_DEVICE);
     descs[1].addr = slot->dma_data;
     descs[1].len = (uint32_t)len;
     descs[1].flags = 0;
@@ -202,8 +209,10 @@ static int virtio_net_xmit(struct netdev *dev, const void *data, size_t len) {
 
     int ret = virtqueue_add_buf(vn->tx_vq, descs, 2, &vn->tx_cookie[slot_idx]);
     if (ret < 0) {
-        dma_unmap_single(slot->dma_hdr, sizeof(slot->hdr), DMA_TO_DEVICE);
-        dma_unmap_single(slot->dma_data, slot->len, DMA_TO_DEVICE);
+        dma_unmap_single(&vn->vdev->dev, slot->dma_hdr, sizeof(slot->hdr),
+                         DMA_TO_DEVICE);
+        dma_unmap_single(&vn->vdev->dev, slot->dma_data, slot->len,
+                         DMA_TO_DEVICE);
         slot->in_use = false;
         mutex_unlock(&vn->lock);
         return ret;

@@ -13,6 +13,7 @@
 struct device;
 struct driver;
 struct sysfs_node;
+struct dma_ops;
 
 /* 
  * Bus Type: Describes how to match devices on this bus.
@@ -35,6 +36,7 @@ struct device {
     void *platform_data;        /* Bus-specific data (e.g., MMIO addr, IRQ) */
     struct resource *resources; /* Resource array */
     size_t num_resources;
+    const struct dma_ops *dma_ops; /* DMA backend (NULL => direct mapping) */
     void *driver_data;          /* Driver private data */
     struct sysfs_node *sysfs_node; /* sysfs directory for this device */
     struct list_head list;      /* Global device list node */

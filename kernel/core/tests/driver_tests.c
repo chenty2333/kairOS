@@ -348,14 +348,14 @@ static void test_netdev_registry(void) {
 static void test_dma_coherent_alloc_free(void) {
     dma_addr_t dma = 0;
     size_t sz = CONFIG_PAGE_SIZE + 128;
-    uint8_t *buf = dma_alloc_coherent(sz, &dma);
+    uint8_t *buf = dma_alloc_coherent(NULL, sz, &dma);
     test_check(buf != NULL, "dma coherent alloc");
     if (!buf)
         return;
 
     test_check(dma == (dma_addr_t)virt_to_phys(buf), "dma coherent addr mapping");
     test_check(buf[0] == 0 && buf[sz - 1] == 0, "dma coherent zeroed");
-    dma_free_coherent(buf, sz);
+    dma_free_coherent(NULL, buf, sz, dma);
 }
 
 static volatile uint32_t irq_deferred_hits;

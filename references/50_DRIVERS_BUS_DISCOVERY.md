@@ -65,7 +65,7 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - blkdev partition probing registers child block devices for valid MBR/GPT entries (child I/O is translated to parent LBA range)
 - blkdev_read() / blkdev_write(): dispatched through blkdev_ops to specific driver
 - Current implementation: virtio_blk (drivers/block/virtio_blk.c)
-- DMA mapping path uses `dma_map_single()/dma_unmap_single()`; on aarch64 this now performs cache clean/invalidate for non-coherent DMA directions (TO/FROM/BIDIRECTIONAL)
+- DMA mapping path is device-aware (`dma_map_single(dev, ...)/dma_unmap_single(dev, ...)`) and dispatched through `dma_ops`; default direct backend keeps current behavior, and aarch64 still performs cache clean/invalidate for non-coherent DMA directions (TO/FROM/BIDIRECTIONAL)
 
 ## Driver Overview
 
