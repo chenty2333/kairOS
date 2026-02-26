@@ -29,6 +29,7 @@ struct futex_waiter {
     struct list_head node;
     struct futex_bucket *bucket;
     struct poll_wait_source *wait_src;
+    struct mutex *wait_lock;
     vaddr_t uaddr;
     int index;
     int *wake_index;
@@ -171,6 +172,7 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
     waiter.uaddr = uaddr;
     waiter.index = -1;
     waiter.wake_index = NULL;
+    waiter.wait_lock = NULL;
     waiter.active = false;
     waiter.woken = false;
 
@@ -248,6 +250,9 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
             continue;
         futex_waiter_dequeue_locked(waiter);
         waiter->woken = true;
+        struct mutex *wait_lock = waiter->wait_lock;
+        if (wait_lock)
+            mutex_lock(wait_lock);
         if (waiter->wake_index && waiter->index >= 0) {
             int expected = -1;
             (void)__atomic_compare_exchange_n(waiter->wake_index, &expected,
@@ -257,6 +262,8 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
         }
         if (waiter->wait_src)
             poll_wait_source_wake_one(waiter->wait_src, 0);
+        if (wait_lock)
+            mutex_unlock(wait_lock);
         woken++;
         if (woken >= nr_wake)
             break;
@@ -294,6 +301,8 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         return -ENOMEM;
 
     int wake_index = -1;
+    struct mutex wait_lock;
+    mutex_init(&wait_lock, "futex_waitv_lock");
     for (uint32_t i = 0; i < nr_waiters; i++) {
         const struct futex_waitv *w = &waiters[i];
         if (w->__reserved != 0) {
@@ -328,6 +337,7 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         kwaiters[i].uaddr = uaddr;
         kwaiters[i].index = (int)i;
         kwaiters[i].wake_index = &wake_index;
+        kwaiters[i].wait_lock = &wait_lock;
         kwaiters[i].active = false;
         kwaiters[i].woken = false;
     }
@@ -353,8 +363,10 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
             }
         }
 
+        mutex_lock(&wait_lock);
         int idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {
+            mutex_unlock(&wait_lock);
             poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_WAKES);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
@@ -362,6 +374,7 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         }
 
         if (deadline && arch_timer_get_ticks() >= deadline) {
+            mutex_unlock(&wait_lock);
             poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_TIMEOUTS);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
@@ -369,16 +382,19 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         }
 
         poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_BLOCKS);
-        int sleep_rc = poll_wait_source_block(&wait_src, deadline, kwaiters, NULL);
+        int sleep_rc =
+            poll_wait_source_block(&wait_src, deadline, kwaiters, &wait_lock);
 
         idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {
+            mutex_unlock(&wait_lock);
             poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_WAKES);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return idx;
         }
         if (sleep_rc == -EINTR) {
+            mutex_unlock(&wait_lock);
             poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_INTERRUPTS);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
@@ -386,15 +402,18 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         }
         if (sleep_rc == -ETIMEDOUT ||
             (deadline && arch_timer_get_ticks() >= deadline)) {
+            mutex_unlock(&wait_lock);
             poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_TIMEOUTS);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return -ETIMEDOUT;
         }
         if (sleep_rc < 0) {
+            mutex_unlock(&wait_lock);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return sleep_rc;
         }
+        mutex_unlock(&wait_lock);
     }
 }
