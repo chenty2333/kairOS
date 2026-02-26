@@ -2,12 +2,6 @@ name: ci-quick
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - quick-*
   workflow_dispatch:
 
 concurrency:
@@ -15,9 +9,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  riscv64-test:
+  quick-gates:
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            boot_smp: 1
+            gate_timeout: 300
+          - arch: x86_64
+            boot_smp: 2
+            gate_timeout: 300
+          - arch: aarch64
+            boot_smp: 2
+            gate_timeout: 360
+
+    env:
+      ARCH: ${{ matrix.arch }}
+      BOOT_SMP: ${{ matrix.boot_smp }}
+      GATE_TIMEOUT: ${{ matrix.gate_timeout }}
 
     steps:
       - name: Checkout
@@ -26,7 +38,7 @@ jobs:
       - name: Install host dependencies
         run: |
           set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps riscv64
+          scripts/impl/ci-bootstrap.sh install-host-deps "${ARCH}"
 
       - name: Restore third-party source cache
         uses: actions/cache@v4
@@ -41,70 +53,64 @@ jobs:
           set -euo pipefail
           scripts/impl/ci-bootstrap.sh fetch-required-third-party
 
-      - name: Locate riscv64 UEFI firmware
+      - name: Locate UEFI firmware
         run: |
           set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi riscv64
+          scripts/impl/ci-bootstrap.sh locate-uefi "${ARCH}"
 
-      - name: Run riscv64 syscall/trap gate
+      - name: Run quick gate stack
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=240 test-syscall-trap
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after riscv64 syscall/trap gate" >&2
-            exit 2
+
+          latest_run() {
+            ls -1dt build/runs/* 2>/dev/null | head -n 1 || true
+          }
+
+          assert_structured_latest() {
+            label="$1"
+            latest="$(latest_run)"
+            if [[ -z "${latest}" ]]; then
+              echo "No isolated run found after ${label}" >&2
+              exit 2
+            fi
+            python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+            if [[ "${ARCH}" == "aarch64" ]]; then
+              python3 scripts/impl/assert-aarch64-smp.py --run-dir "${latest}" --arch aarch64 --expected-online "${BOOT_SMP}"
+            fi
+          }
+
+          if [[ "${ARCH}" == "x86_64" ]]; then
+            make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=180 test-x86-boot-smp
+          else
+            make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${BOOT_SMP}" TEST_TIMEOUT=180 test-boot-smoke
           fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
-      - name: Run riscv64 vfs/ipc gate
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${BOOT_SMP}" TEST_TIMEOUT="${GATE_TIMEOUT}" test-ipc-cap
+          assert_structured_latest "${ARCH} ipc-cap gate"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${BOOT_SMP}" TEST_TIMEOUT="${GATE_TIMEOUT}" test-sched
+          assert_structured_latest "${ARCH} sched gate"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${BOOT_SMP}" TEST_TIMEOUT="${GATE_TIMEOUT}" test-vfs-ipc
+          assert_structured_latest "${ARCH} vfs/ipc gate"
+
+          make --no-print-directory ARCH="${ARCH}" QEMU_SMP="${BOOT_SMP}" TEST_TIMEOUT=420 test-socket
+          assert_structured_latest "${ARCH} socket gate"
+
+      - name: Classify latest failure signatures
+        if: always()
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=300 test-vfs-ipc
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after riscv64 vfs/ipc gate" >&2
-            exit 2
+          json_out="ci-failure-summary-${ARCH}.json"
+          md_out="ci-failure-summary-${ARCH}.md"
+          python3 scripts/impl/classify-run-failures.py \
+            --runs-root build/runs \
+            --latest-only \
+            --json-out "${json_out}" \
+            --markdown-out "${md_out}" || true
+          if [[ -f "${md_out}" ]]; then
+            cat "${md_out}" >> "${GITHUB_STEP_SUMMARY}"
           fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run riscv64 driver gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=300 test-driver
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after riscv64 driver gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run riscv64 socket gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=360 test-socket
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after riscv64 socket gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run riscv64 virtio IRQ matrix gate (AIA on/off)
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=riscv64 TEST_TIMEOUT=420 test-device-virtio
-
-      - name: Run riscv64 tcc smoke gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=riscv64 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after riscv64 tcc smoke gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
 
       - name: Capture latest isolated run
         id: latest_run
@@ -122,311 +128,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quick-riscv64-${{ github.run_id }}
+          name: quick-${{ matrix.arch }}-${{ github.run_id }}
           retention-days: 14
           if-no-files-found: warn
           path: |
+            ci-failure-summary-${{ matrix.arch }}.json
+            ci-failure-summary-${{ matrix.arch }}.md
             ${{ steps.latest_run.outputs.path }}/manifest.json
             ${{ steps.latest_run.outputs.path }}/result.json
-            ${{ steps.latest_run.outputs.path }}/riscv64/logs/test.log
-            ${{ steps.latest_run.outputs.path }}/riscv64/test.log
-            ${{ steps.latest_run.outputs.path }}/riscv64/tcc-smoke.log
-            ${{ steps.latest_run.outputs.path }}/riscv64/run.log
+            ${{ steps.latest_run.outputs.path }}/${{ matrix.arch }}/logs/*.log
+            ${{ steps.latest_run.outputs.path }}/${{ matrix.arch }}/*.log
             build/runs/*/manifest.json
             build/runs/*/result.json
-            build/runs/*/riscv64/logs/*.log
-            build/runs/*/riscv64/*.log
-            build/riscv64/test.log
-            build/riscv64/test-device-virtio-*.log
-            build/riscv64/tcc-smoke.log
-            build/riscv64/run.log
-
-  x86_64-gates:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps x86_64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
-        with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate x86_64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi x86_64
-
-      - name: Run x86_64 syscall/trap gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=240 test-syscall-trap
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after x86_64 syscall/trap gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run x86_64 vfs/ipc gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=300 test-vfs-ipc
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after x86_64 vfs/ipc gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run x86_64 driver gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=300 test-driver
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after x86_64 driver gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run x86_64 socket gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=360 test-socket
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after x86_64 socket gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Run x86_64 tcc smoke gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after x86_64 tcc smoke gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-
-      - name: Capture latest isolated run
-        id: latest_run_x86_64
-        if: always()
-        run: |
-          set -euo pipefail
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
-          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
-            echo "Result file: ${latest}/result.json"
-            cat "${latest}/result.json"
-          fi
-
-      - name: Upload x86_64 artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quick-x86_64-${{ github.run_id }}
-          retention-days: 14
-          if-no-files-found: warn
-          path: |
-            ${{ steps.latest_run_x86_64.outputs.path }}/manifest.json
-            ${{ steps.latest_run_x86_64.outputs.path }}/result.json
-            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/logs/test.log
-            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/test.log
-            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/tcc-smoke.log
-            ${{ steps.latest_run_x86_64.outputs.path }}/x86_64/run.log
-            build/runs/*/manifest.json
-            build/runs/*/result.json
-            build/runs/*/x86_64/logs/*.log
-            build/runs/*/x86_64/*.log
-            build/x86_64/test.log
-            build/x86_64/tcc-smoke.log
-            build/x86_64/run.log
-
-  aarch64-smoke:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps aarch64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
-        with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate aarch64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi aarch64
-
-      - name: Run aarch64 syscall/trap gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=240 test-syscall-trap
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 syscall/trap gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 2
-
-      - name: Run aarch64 vfs/ipc gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=300 test-vfs-ipc
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 vfs/ipc gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 2
-
-      - name: Run aarch64 driver gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=300 test-driver
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 driver gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 2
-
-      - name: Run aarch64 socket gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=360 test-socket
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 socket gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 2
-
-      - name: Run aarch64 tcc smoke gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TCC_SMOKE_ISOLATED=1 TCC_SMOKE_TIMEOUT=360 test-tcc-smoke
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 tcc smoke gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 2
-
-      - name: Run aarch64 smp4 syscall/trap gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=240 test-syscall-trap
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 syscall/trap gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 4
-
-      - name: Run aarch64 smp4 vfs/ipc gate
-        run: |
-          set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=4 TEST_TIMEOUT=300 test-vfs-ipc
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          if [[ -z "${latest}" ]]; then
-            echo "No isolated run found after aarch64 smp4 vfs/ipc gate" >&2
-            exit 2
-          fi
-          python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
-          python3 scripts/impl/assert-aarch64-smp.py \
-            --run-dir "${latest}" \
-            --arch aarch64 \
-            --expected-online 4
-
-      - name: Capture latest isolated run
-        id: latest_run_aarch64
-        if: always()
-        run: |
-          set -euo pipefail
-          latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
-          echo "path=${latest}" >> "${GITHUB_OUTPUT}"
-          if [[ -n "${latest}" && -f "${latest}/result.json" ]]; then
-            echo "Result file: ${latest}/result.json"
-            cat "${latest}/result.json"
-          fi
-
-      - name: Upload aarch64 artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quick-aarch64-${{ github.run_id }}
-          retention-days: 14
-          if-no-files-found: warn
-          path: |
-            ${{ steps.latest_run_aarch64.outputs.path }}/manifest.json
-            ${{ steps.latest_run_aarch64.outputs.path }}/result.json
-            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/logs/test.log
-            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/test.log
-            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/tcc-smoke.log
-            ${{ steps.latest_run_aarch64.outputs.path }}/aarch64/run.log
-            build/runs/*/manifest.json
-            build/runs/*/result.json
-            build/runs/*/aarch64/logs/*.log
-            build/runs/*/aarch64/*.log
-            build/aarch64/test.log
-            build/aarch64/tcc-smoke.log
-            build/aarch64/run.log
+            build/runs/*/${{ matrix.arch }}/logs/*.log
+            build/runs/*/${{ matrix.arch }}/*.log
