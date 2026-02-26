@@ -22,6 +22,8 @@ static const char *const poll_wait_stat_names[POLL_WAIT_STAT_COUNT] = {
     [POLL_WAIT_STAT_EPOLL_TIMEOUTS] = "epoll_timeouts",
     [POLL_WAIT_STAT_EPOLL_INTERRUPTS] = "epoll_interrupts",
     [POLL_WAIT_STAT_EPOLL_RESCANS] = "epoll_rescans",
+    [POLL_WAIT_STAT_POLL_HEAD_WAKE_CALLS] = "poll_head_wake_calls",
+    [POLL_WAIT_STAT_POLL_HEAD_DIRECT_SWITCH] = "poll_head_direct_switch",
     [POLL_WAIT_STAT_FDEVENT_EVENTFD_R_BLOCKS] = "fdevent_eventfd_read_blocks",
     [POLL_WAIT_STAT_FDEVENT_EVENTFD_W_BLOCKS] = "fdevent_eventfd_write_blocks",
     [POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES] = "fdevent_eventfd_read_wakes",
@@ -33,6 +35,14 @@ static const char *const poll_wait_stat_names[POLL_WAIT_STAT_COUNT] = {
     [POLL_WAIT_STAT_FDEVENT_SIGNALFD_RD_WAKES] = "fdevent_signalfd_read_wakes",
     [POLL_WAIT_STAT_FDEVENT_INOTIFY_R_BLOCKS] = "fdevent_inotify_read_blocks",
     [POLL_WAIT_STAT_FDEVENT_INOTIFY_RD_WAKES] = "fdevent_inotify_read_wakes",
+    [POLL_WAIT_STAT_FUTEX_WAIT_BLOCKS] = "futex_wait_blocks",
+    [POLL_WAIT_STAT_FUTEX_WAIT_WAKES] = "futex_wait_wakes",
+    [POLL_WAIT_STAT_FUTEX_WAIT_TIMEOUTS] = "futex_wait_timeouts",
+    [POLL_WAIT_STAT_FUTEX_WAIT_INTERRUPTS] = "futex_wait_interrupts",
+    [POLL_WAIT_STAT_FUTEX_WAITV_BLOCKS] = "futex_waitv_blocks",
+    [POLL_WAIT_STAT_FUTEX_WAITV_WAKES] = "futex_waitv_wakes",
+    [POLL_WAIT_STAT_FUTEX_WAITV_TIMEOUTS] = "futex_waitv_timeouts",
+    [POLL_WAIT_STAT_FUTEX_WAITV_INTERRUPTS] = "futex_waitv_interrupts",
 };
 
 void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta) {
@@ -269,6 +279,8 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
     if (!head)
         return;
 
+    poll_wait_stat_inc(POLL_WAIT_STAT_POLL_HEAD_WAKE_CALLS);
+
     LIST_HEAD(wake_list);
     LIST_HEAD(notify_list);
 
@@ -303,6 +315,7 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
         struct wait_queue_entry *entry =
             list_first_entry(&wake_list, struct wait_queue_entry, node);
         list_del(&entry->node);
+        poll_wait_stat_inc(POLL_WAIT_STAT_POLL_HEAD_DIRECT_SWITCH);
         if (entry->proc)
             proc_wakeup_ex(entry->proc, true);
     }

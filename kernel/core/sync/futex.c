@@ -192,16 +192,19 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
             return (rc < 0) ? rc : -EAGAIN;
         }
 
+        poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_BLOCKS);
         int sleep_rc = poll_wait_source_block(&wait_src, deadline, (void *)uaddr,
                                               &waiter.bucket->lock);
 
         if (waiter.woken) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_WAKES);
             futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return 0;
         }
 
         if (sleep_rc == -EINTR) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_INTERRUPTS);
             futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return -EINTR;
@@ -209,6 +212,7 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
 
         if (sleep_rc == -ETIMEDOUT ||
             (deadline && arch_timer_get_ticks() >= deadline)) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_TIMEOUTS);
             futex_waiter_dequeue_locked(&waiter);
             mutex_unlock(&waiter.bucket->lock);
             return -ETIMEDOUT;
@@ -235,7 +239,6 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
     struct futex_bucket *bucket = futex_bucket_for(uaddr);
 
     int woken = 0;
-    LIST_HEAD(wake_list);
 
     mutex_lock(&bucket->lock);
     struct futex_waiter *waiter, *tmp;
@@ -251,19 +254,13 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
                                               __ATOMIC_ACQ_REL,
                                               __ATOMIC_ACQUIRE);
         }
-        list_add_tail(&waiter->node, &wake_list);
+        if (waiter->wait_src)
+            poll_wait_source_wake_one(waiter->wait_src, 0);
         woken++;
         if (woken >= nr_wake)
             break;
     }
     mutex_unlock(&bucket->lock);
-
-    while (!list_empty(&wake_list)) {
-        waiter = list_first_entry(&wake_list, struct futex_waiter, node);
-        list_del(&waiter->node);
-        if (waiter->wait_src)
-            poll_wait_source_wake_one(waiter->wait_src, 0);
-    }
 
     return woken;
 }
@@ -356,32 +353,38 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
 
         int idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_WAKES);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return idx;
         }
 
         if (deadline && arch_timer_get_ticks() >= deadline) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_TIMEOUTS);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return -ETIMEDOUT;
         }
 
+        poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_BLOCKS);
         int sleep_rc = poll_wait_source_block(&wait_src, deadline, kwaiters, NULL);
 
         idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_WAKES);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return idx;
         }
         if (sleep_rc == -EINTR) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_INTERRUPTS);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return -EINTR;
         }
         if (sleep_rc == -ETIMEDOUT ||
             (deadline && arch_timer_get_ticks() >= deadline)) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_TIMEOUTS);
             futex_waiters_remove_all(kwaiters, nr_waiters);
             kfree(kwaiters);
             return -ETIMEDOUT;

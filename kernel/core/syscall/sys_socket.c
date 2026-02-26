@@ -1129,18 +1129,22 @@ int64_t sys_sendmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
     int sent = 0;
     for (uint32_t i = 0; i < uvlen; i++) {
         uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
-        struct socket_mmsghdr msg;
-        if (copy_from_user(&msg, (const void *)ent_ptr, sizeof(msg)) < 0) {
+        struct socket_msghdr msg_hdr;
+        if (copy_from_user(&msg_hdr, (const void *)ent_ptr,
+                           sizeof(msg_hdr)) < 0) {
             file_put(sock_file);
             return sent ? sent : -EFAULT;
         }
+        uint32_t msg_len = 0;
         int64_t ret =
-            socket_sendmsg(sock, &msg.msg_hdr, uflags, &msg.msg_len);
+            socket_sendmsg(sock, &msg_hdr, uflags, &msg_len);
         if (ret < 0) {
             file_put(sock_file);
             return sent ? sent : ret;
         }
-        if (copy_to_user((void *)ent_ptr, &msg, sizeof(msg)) < 0) {
+        if (copy_to_user((void *)(ent_ptr + offsetof(struct socket_mmsghdr,
+                                                     msg_len)),
+                         &msg_len, sizeof(msg_len)) < 0) {
             file_put(sock_file);
             return sent ? sent : -EFAULT;
         }
@@ -1183,8 +1187,9 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
     int recved = 0;
     for (uint32_t i = 0; i < uvlen; i++) {
         uint64_t ent_ptr = msgvec_ptr + i * sizeof(struct socket_mmsghdr);
-        struct socket_mmsghdr msg;
-        if (copy_from_user(&msg, (const void *)ent_ptr, sizeof(msg)) < 0) {
+        struct socket_mmsghdr msg = {0};
+        if (copy_from_user(&msg.msg_hdr, (const void *)ent_ptr,
+                           sizeof(msg.msg_hdr)) < 0) {
             file_put(sock_file);
             return recved ? recved : -EFAULT;
         }
@@ -1217,7 +1222,11 @@ int64_t sys_recvmmsg(uint64_t fd, uint64_t msgvec_ptr, uint64_t vlen,
             file_put(sock_file);
             return recved ? recved : ret;
         }
-        if (copy_to_user((void *)ent_ptr, &msg, sizeof(msg)) < 0) {
+        if (copy_to_user((void *)ent_ptr, &msg.msg_hdr,
+                         sizeof(msg.msg_hdr)) < 0 ||
+            copy_to_user((void *)(ent_ptr + offsetof(struct socket_mmsghdr,
+                                                     msg_len)),
+                         &msg.msg_len, sizeof(msg.msg_len)) < 0) {
             file_put(sock_file);
             return recved ? recved : -EFAULT;
         }
