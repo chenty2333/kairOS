@@ -197,7 +197,7 @@ jobs:
       - name: Run x86_64 driver gate
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=x86_64 TEST_TIMEOUT=300 test-driver
+          make --no-print-directory ARCH=x86_64 QEMU_IOMMU=virtio TEST_TIMEOUT=300 test-driver
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
             echo "No isolated run found after x86_64 driver gate" >&2
@@ -332,7 +332,7 @@ jobs:
       - name: Run aarch64 driver gate
         run: |
           set -euo pipefail
-          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 TEST_TIMEOUT=300 test-driver
+          make --no-print-directory ARCH=aarch64 QEMU_SMP=2 QEMU_IOMMU=virtio TEST_TIMEOUT=300 test-driver
           latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
           if [[ -z "${latest}" ]]; then
             echo "No isolated run found after aarch64 driver gate" >&2

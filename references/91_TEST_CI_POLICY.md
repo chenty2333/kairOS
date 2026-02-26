@@ -10,6 +10,7 @@
 - `make test-isolated` — isolated test alias
 - `make test-driver` — driver module only
 - `test-driver` includes `virtio_iommu_health` checks; strict backend-required mode is controlled by `VIRTIO_IOMMU_HEALTH_REQUIRED` (default auto-derived from `QEMU_IOMMU_EFFECTIVE`, so PCI arches running with `virtio-iommu-pci` fail instead of skipping when backend is unavailable)
+- In `ci-quick`, `x86_64` and `aarch64` driver gates pin `QEMU_IOMMU=virtio` to avoid host-dependent `auto -> off` fallback and keep `virtio_iommu_health` gate deterministic.
 - `make test-mm` — memory module only
 - `make test-sync` — sync module only
 - `make test-vfork` — vfork module only
