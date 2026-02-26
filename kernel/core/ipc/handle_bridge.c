@@ -171,18 +171,17 @@ int handle_bridge_dup_fd(struct process *src, int src_fd, struct process *dst,
     if (!src || !dst || !out_fd)
         return -EINVAL;
 
-    struct file *src_file = NULL;
-    uint32_t src_rights = 0;
-    int rc =
-        handle_bridge_pin_fd(src, src_fd, FD_RIGHT_DUP, &src_file, &src_rights);
+    struct kobj *obj = NULL;
+    uint32_t rights = 0;
+    int rc = handle_bridge_transfer_from_fd(src, src_fd, 0, &obj, &rights);
     if (rc < 0)
         return rc;
 
-    int new_fd = fd_alloc_rights(dst, src_file, fd_flags, src_rights);
-    if (new_fd < 0) {
-        file_put(src_file);
-        return new_fd;
-    }
+    int new_fd = -1;
+    rc = handle_bridge_fd_from_kobj(dst, obj, rights, fd_flags, &new_fd);
+    kobj_put(obj);
+    if (rc < 0)
+        return rc;
 
     *out_fd = new_fd;
     return 0;
