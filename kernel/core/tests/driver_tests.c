@@ -2740,24 +2740,7 @@ static void test_vfs_umount_busy_with_child_mount(void) {
     test_check(ret == 0, "vfs umount child mount cleanup");
 }
 
-static void run_driver_suite_once(void) {
-    test_ringbuf();
-    test_virtqueue();
-    test_virtqueue_dma_addresses();
-    test_blkdev_registry();
-    test_blkdev_partition_children();
-    test_blkdev_gpt_partition_bounds();
-    test_netdev_registry();
-    test_dma_coherent_alloc_free();
-    test_dma_constraints_direct_backend();
-    test_iommu_domain_dma_ops();
-    test_iommu_domain_granule();
-    test_dma_constraints_iommu_backend();
-    test_iommu_default_domain_attach();
-    test_iommu_hw_ops_priority_match();
-    test_iommu_hw_ops_default_attach();
-    test_iommu_attach_replaces_owned_domain();
-    test_iommu_domain_release_callback();
+static void run_driver_irq_suite_once(void) {
     test_irq_deferred_dispatch();
     test_irq_shared_actions();
     test_irq_unregister_actions();
@@ -2783,6 +2766,31 @@ static void run_driver_suite_once(void) {
     test_irq_domain_cascade_mapped();
     test_irq_domain_lifecycle();
     test_irq_domain_dynamic_capacity();
+}
+
+static void run_driver_suite_once(void) {
+#if CONFIG_DRIVER_TEST_IRQ_SOAK_ONLY
+    run_driver_irq_suite_once();
+    return;
+#endif
+    test_ringbuf();
+    test_virtqueue();
+    test_virtqueue_dma_addresses();
+    test_blkdev_registry();
+    test_blkdev_partition_children();
+    test_blkdev_gpt_partition_bounds();
+    test_netdev_registry();
+    test_dma_coherent_alloc_free();
+    test_dma_constraints_direct_backend();
+    test_iommu_domain_dma_ops();
+    test_iommu_domain_granule();
+    test_dma_constraints_iommu_backend();
+    test_iommu_default_domain_attach();
+    test_iommu_hw_ops_priority_match();
+    test_iommu_hw_ops_default_attach();
+    test_iommu_attach_replaces_owned_domain();
+    test_iommu_domain_release_callback();
+    run_driver_irq_suite_once();
 #if CONFIG_KERNEL_TESTS
     test_virtio_net_rx_to_lwip_bridge();
 #endif

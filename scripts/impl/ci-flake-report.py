@@ -115,6 +115,14 @@ WORKFLOW_GATES = {
             step="Run aarch64 soak-pr profile",
         ),
     ],
+    "ci-irq-soak.yml": [
+        GateSpec(gate="x86_64-irq-soak", job="x86_64-irq-soak"),
+        GateSpec(
+            gate="x86_64-irq-soak-step",
+            job="x86_64-irq-soak",
+            step="Run x86_64 irq soak gate",
+        ),
+    ],
 }
 
 

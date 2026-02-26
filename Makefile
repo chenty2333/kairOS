@@ -77,6 +77,7 @@ RISCV_AIA ?= 0
 
 # Optional subsystems (set to 0 to disable)
 CONFIG_DRM_LITE ?= 1
+CONFIG_VIRTIO_IOMMU ?= 1
 
 ifeq ($(ARCH),riscv64)
   CROSS_COMPILE ?= riscv64-unknown-elf-
@@ -145,6 +146,7 @@ CFLAGS += -I kernel/arch/$(ARCH)/include
 CFLAGS += -D__KAIROS__ -DARCH_$(ARCH)
 CFLAGS += -DCONFIG_EMBEDDED_INIT=$(EMBEDDED_INIT)
 CFLAGS += -DCONFIG_DRM_LITE=$(CONFIG_DRM_LITE)
+CFLAGS += -DCONFIG_VIRTIO_IOMMU=$(CONFIG_VIRTIO_IOMMU)
 CFLAGS += -DCONFIG_KERNEL_TESTS=$(KERNEL_TESTS)
 CFLAGS += $(EXTRA_CFLAGS)
 
@@ -189,6 +191,10 @@ CORE_SRCS += kernel/boot/boot.c kernel/boot/limine.c
 
 ifeq ($(CONFIG_DRM_LITE),0)
 CORE_SRCS := $(filter-out kernel/drivers/gpu/drm_lite.c,$(CORE_SRCS))
+endif
+
+ifeq ($(CONFIG_VIRTIO_IOMMU),0)
+CORE_SRCS := $(filter-out kernel/drivers/iommu/virtio_iommu.c,$(CORE_SRCS))
 endif
 
 ifeq ($(KERNEL_TESTS),0)
@@ -282,7 +288,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-isolated test-driver test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -774,6 +780,8 @@ ERRNO_SMOKE_EXTRA_CFLAGS ?=
 SOAK_TIMEOUT ?= 600
 SOAK_LOG ?= $(BUILD_DIR)/soak.log
 SOAK_EXTRA_CFLAGS ?= -DCONFIG_PMM_PCP_MODE=2
+IRQ_SOAK_TEST_TIMEOUT ?= 420
+IRQ_SOAK_TEST_EXTRA_CFLAGS ?=
 SOAK_PR_TIMEOUT ?= 1800
 SOAK_PR_EXTRA_CFLAGS ?= -DCONFIG_KERNEL_FAULT_INJECT=1 -DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=900 -DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=3
 TEST_RUNS_ROOT ?= build/runs
@@ -954,6 +962,11 @@ test-isolated:
 test-driver:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x01" test
+
+test-irq-soak:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(IRQ_SOAK_TEST_TIMEOUT)" \
+		CONFIG_VIRTIO_IOMMU=0 \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x01 -DCONFIG_DRIVER_TEST_IRQ_SOAK_ONLY=1 $(IRQ_SOAK_TEST_EXTRA_CFLAGS)" test
 
 test-mm:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_TIMEOUT="$(TEST_TIMEOUT)" \
@@ -1257,6 +1270,7 @@ help:
 	@echo "  test-sched - Run scheduler test module only"
 	@echo "  test-vfs-ipc - Run vfs/tmpfs/pipe/epoll test module only"
 	@echo "  test-device-virtio - Run device model + virtio probe-path tests (IRQ matrix on aarch64/riscv64)"
+	@echo "  test-irq-soak - Run IRQ-only long-run soak gate (virtio_iommu forced off)"
 	@echo "  test-concurrent-vfs-ipc - Concurrent smoke preset for test-vfs-ipc"
 	@echo "  print-config - Show effective build/run/test configuration"
 	@echo "  gc-runs  - Keep only latest N isolated runs"
@@ -1311,6 +1325,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-tcc-smoke - Run tcc interactive smoke regression"
 	@echo "  test-isolated - Alias of isolated test mode"
 	@echo "  test-driver - Run driver test module only"
+	@echo "  test-irq-soak - Run IRQ-only long-run soak gate (virtio_iommu forced off)"
 	@echo "  test-mm  - Run memory test module only"
 	@echo "  test-sync - Run sync test module only"
 	@echo "  test-vfork - Run vfork test module only"
@@ -1356,6 +1371,8 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  TEST_LOCK_WAIT - Seconds to wait for test qemu lock before lock_busy (default: 0)"
 	@echo "  TOOLCHAIN_LOCK_WAIT - Seconds to wait for global toolchain lock (default: 900)"
 	@echo "  SOAK_PR_LOG - test-soak-pr log path (isolated default: <TEST_BUILD_ROOT>/<arch>/test.log)"
+	@echo "  IRQ_SOAK_TEST_TIMEOUT - Timeout seconds for test-irq-soak (default: 420)"
+	@echo "  IRQ_SOAK_TEST_EXTRA_CFLAGS - Extra CFLAGS appended by test-irq-soak"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
 	@echo "  HELP_ADVANCED - Show advanced help sections (set 1)"
 	@echo ""
