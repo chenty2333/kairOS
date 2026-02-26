@@ -146,6 +146,7 @@ static int drm_buffer_kobj_poll(struct kobj *obj, uint32_t events,
 static int drm_buffer_kobj_read(struct kobj *obj, void *buf, size_t len,
                                 size_t *out_len, uint32_t options)
 {
+    (void)options;
     struct drm_buffer_kobj *bkobj = drm_buffer_kobj_from_obj(obj);
     if (!bkobj) {
         return -EINVAL;
