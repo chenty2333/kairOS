@@ -22,6 +22,7 @@ extern struct driver virtio_mmio_driver;
 extern struct pci_driver virtio_pci_driver;
 extern struct virtio_driver virtio_blk_driver;
 extern struct virtio_driver virtio_net_driver;
+extern struct virtio_driver virtio_iommu_driver;
 #if CONFIG_DRM_LITE
 extern struct driver drm_lite_driver;
 #endif
@@ -69,6 +70,7 @@ void init_devices(void) {
     pci_register_driver(&virtio_pci_driver);
     virtio_register_driver(&virtio_blk_driver);
     virtio_register_driver(&virtio_net_driver);
+    virtio_register_driver(&virtio_iommu_driver);
 #if CONFIG_DRM_LITE
     driver_register(&drm_lite_driver);
 #endif

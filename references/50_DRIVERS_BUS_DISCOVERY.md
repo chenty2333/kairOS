@@ -53,7 +53,7 @@ VirtIO bus:
 
 init_devices() execution order:
 1. Register buses: platform_bus_init(), pci_bus_init(), bus_register(&virtio_bus_type)
-2. Register drivers: virtio_mmio_driver, virtio_pci_driver, virtio_blk_driver, virtio_net_driver, drm_lite_driver (optional)
+2. Register drivers: virtio_mmio_driver, virtio_pci_driver, virtio_blk_driver, virtio_net_driver, virtio_iommu_driver, drm_lite_driver (optional)
 3. Firmware descriptors: fw_init(), register_limine_framebuffers(), acpi_init()
 4. Device tree scan: fdt_scan_devices() (if DTB present)
 5. Enumerate devices: platform_bus_enumerate(), pci_enumerate()
@@ -75,13 +75,16 @@ Full chain: firmware (FDT/Limine) → fw_register_desc() → platform_bus_enumer
 - IOMMU core now provides `iommu_domain` + basic IOVA allocation and an IOMMU DMA backend (`iommu_get_dma_ops()`); PCI enumeration uses `iommu_attach_default_domain()`, which currently falls back to a global passthrough domain and can later be redirected by registering `iommu_hw_ops`
 - IOMMU hardware provider registration supports multiple backends with `priority` + optional `match(dev, priv)` selection; default-domain attach walks providers in priority order, then falls back to passthrough
 - IOMMU DMA domains now expose configurable mapping granularity (`iommu_domain_set_granule()`), so backend-required page size (for example 64K) can be enforced in IOVA allocation/map size alignment
+- IOMMU domain ops now include an optional `release()` lifecycle callback so hardware backends can tear down per-domain resources (for example endpoint detach) at `iommu_domain_destroy()` time
 - IOMMU IOVA allocation also honors the same per-device DMA mask/aperture checks, so translated DMA addresses stay inside the declared device-visible window
 - Re-attaching a device to another IOMMU domain now auto-detaches the previous domain attachment and reclaims any per-device DMA mappings from the old domain before switching
 - Device init now runs `iommu_init()` before PCI enumeration; architecture code can provide `arch_iommu_init()` to register hardware-backed domain allocation
+- A `virtio-iommu` backend driver is wired as an `iommu_hw_ops` provider: it matches PCI endpoints, allocates per-device IOMMU domains, and issues ATTACH/MAP/UNMAP/DETACH requests through virtqueue 0
 
 ## Driver Overview
 
 - drivers/virtio/: VirtIO transport layer (virtio_mmio, virtio_ring)
+- drivers/iommu/: IOMMU backend drivers (virtio_iommu)
 - drivers/block/: block device framework + virtio_blk
 - drivers/net/: virtio_net
 - drivers/tty/: terminal subsystem (tty_core, console_tty, n_tty line discipline, pty)

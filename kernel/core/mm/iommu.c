@@ -375,6 +375,8 @@ void iommu_domain_destroy(struct iommu_domain *domain) {
         kfree(m);
     }
     spin_unlock_irqrestore(&domain->lock, irq_flags);
+    if (domain->ops && domain->ops->release)
+        domain->ops->release(domain);
     kfree(domain);
 }
 

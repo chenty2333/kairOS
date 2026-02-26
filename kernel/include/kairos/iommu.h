@@ -29,6 +29,7 @@ struct iommu_domain_ops {
     int (*map)(struct iommu_domain *domain, dma_addr_t iova, paddr_t paddr,
                size_t size, uint32_t prot);
     void (*unmap)(struct iommu_domain *domain, dma_addr_t iova, size_t size);
+    void (*release)(struct iommu_domain *domain);
 };
 
 struct iommu_hw_ops {
