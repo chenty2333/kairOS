@@ -116,6 +116,7 @@ Special:
 - epoll.c: epoll implementation, epoll instances are VNODE_EPOLL type vnodes
 - poll/epoll/futex/socket timeout waits share a common wait-core deadline/block helper path (`poll_timeout_to_deadline_ms` + `poll_block_current`)
 - eventfd/timerfd/inotify wakeups now use unified ready-wake bridge (`poll_ready_wake_all`) to keep wait_queue + poll watcher wake paths consistent
+- eventfd/timerfd/inotify/signalfd blocking waits now go through wait-core helpers (`poll_block_current`/`poll_block_current_mutex`) instead of direct `proc_sleep_on*`
 - Event modes: level-trigger default, plus `EPOLLET` and `EPOLLONESHOT` (oneshot requires `EPOLL_CTL_MOD` rearm)
 - Linux ABI compatibility includes `epoll_pwait2` (timespec timeout + strict `sigsetsize == sizeof(sigset_t)` checks), `accept4` (`SOCK_NONBLOCK`/`SOCK_CLOEXEC`), and socket message syscalls (`sendmsg`/`recvmsg`/`sendmmsg`/`recvmmsg`)
 - Linux ABI compatibility also includes `eventfd2`, `timerfd_create/settime/gettime`, and `signalfd4` via anon-vnode pollable file descriptors

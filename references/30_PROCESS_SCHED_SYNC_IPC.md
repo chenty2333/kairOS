@@ -109,8 +109,9 @@ futex.c:
 pollwait.c:
 - poll_wait_head: unified poll wait infrastructure, supports waiters (process waiting) and watches (callback notification)
 - poll_sleep: global timed sleep queue, tick interrupt drives expiry wakeups
-- Unified wait-core helpers: `poll_timeout_to_deadline_ms`, `poll_deadline_expired`, `poll_block_current`
+- Unified wait-core helpers: `poll_timeout_to_deadline_ms`, `poll_deadline_expired`, `poll_block_current`, `poll_block_current_mutex` (supports wait_queue + mutex sleep sites)
 - Unified ready wake bridge: `poll_ready_wake_one/all` wakes wait_queue waiters and poll watchers on one path
+- `eventfd`/`timerfd`/`inotify`/`signalfd` blocking waits are routed through wait-core helpers instead of direct `proc_sleep_on*` call sites
 - `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
 

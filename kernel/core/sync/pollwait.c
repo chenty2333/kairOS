@@ -40,6 +40,11 @@ bool poll_deadline_expired(uint64_t deadline) {
 }
 
 int poll_block_current(uint64_t deadline, void *channel) {
+    return poll_block_current_mutex(NULL, deadline, channel, NULL);
+}
+
+int poll_block_current_mutex(struct wait_queue *wq, uint64_t deadline,
+                             void *channel, struct mutex *mtx) {
     struct process *curr = proc_current();
     if (!curr)
         return -EINVAL;
@@ -49,12 +54,26 @@ int poll_block_current(uint64_t deadline, void *channel) {
     tracepoint_emit(TRACE_WAIT_BLOCK, deadline ? 1U : 0U, deadline,
                     (uint64_t)(uintptr_t)channel);
 
+    bool use_poll_sleep = (deadline != 0) && (wq == NULL) && (mtx == NULL);
     struct poll_sleep sleep = {0};
-    INIT_LIST_HEAD(&sleep.node);
-    if (deadline)
+    if (use_poll_sleep) {
+        INIT_LIST_HEAD(&sleep.node);
         poll_sleep_arm(&sleep, curr, deadline);
-    int rc = proc_sleep_on(NULL, channel, true);
-    if (deadline)
+    }
+
+    int rc = 0;
+    if (deadline) {
+        if (use_poll_sleep)
+            rc = proc_sleep_on(NULL, channel, true);
+        else
+            rc = proc_sleep_on_mutex_timeout(wq, channel, mtx, true, deadline);
+    } else if (mtx) {
+        rc = proc_sleep_on_mutex(wq, channel, mtx, true);
+    } else {
+        rc = proc_sleep_on(wq, channel, true);
+    }
+
+    if (use_poll_sleep)
         poll_sleep_cancel(&sleep);
 
     if (rc < 0)

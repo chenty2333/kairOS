@@ -232,7 +232,7 @@ static int eventfd_close(struct vnode *vn) {
         ctx->closed = true;
         spin_unlock_irqrestore(&ctx->lock, irq);
         poll_ready_wake_all(&ctx->rd_wait, vn, POLLIN | POLLOUT | POLLHUP);
-        wait_queue_wakeup_all(&ctx->wr_wait);
+        poll_ready_wake_all(&ctx->wr_wait, NULL, 0);
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -293,7 +293,7 @@ static ssize_t eventfd_fread(struct file *file, void *buf, size_t len) {
         spin_unlock_irqrestore(&ctx->lock, irq);
         if (nonblock)
             return -EAGAIN;
-        int rc = proc_sleep_on_mutex(&ctx->rd_wait, ctx, &file->lock, true);
+        int rc = poll_block_current_mutex(&ctx->rd_wait, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
     }
@@ -336,7 +336,7 @@ static ssize_t eventfd_fwrite(struct file *file, const void *buf, size_t len) {
         spin_unlock_irqrestore(&ctx->lock, irq);
         if (nonblock)
             return -EAGAIN;
-        int rc = proc_sleep_on_mutex(&ctx->wr_wait, ctx, &file->lock, true);
+        int rc = poll_block_current_mutex(&ctx->wr_wait, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
     }
@@ -504,7 +504,7 @@ static ssize_t signalfd_fread(struct file *file, void *buf, size_t len) {
 
         if (file->flags & O_NONBLOCK)
             return -EAGAIN;
-        int rc = proc_sleep_on(NULL, p, true);
+        int rc = poll_block_current(0, p);
         if (rc < 0)
             return rc;
     }
@@ -786,7 +786,7 @@ static ssize_t inotify_fread(struct file *file, void *buf, size_t len) {
         if (nonblock)
             return -EAGAIN;
 
-        int rc = proc_sleep_on_mutex(&ctx->rd_wait, ctx, &file->lock, true);
+        int rc = poll_block_current_mutex(&ctx->rd_wait, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
     }
@@ -1049,7 +1049,7 @@ static ssize_t timerfd_fread(struct file *file, void *buf, size_t len) {
         spin_unlock_irqrestore(&ctx->lock, irq);
         if (nonblock)
             return -EAGAIN;
-        int rc = proc_sleep_on_mutex(&ctx->rd_wait, ctx, &file->lock, true);
+        int rc = poll_block_current_mutex(&ctx->rd_wait, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
     }
