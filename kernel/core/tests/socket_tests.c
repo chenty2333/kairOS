@@ -1312,6 +1312,7 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
     struct socket *rx = NULL;
     int txfd = -1;
     int rxfd = -1;
+    int rights_src_fd = -1;
     struct user_map_ctx um = {0};
     bool mapped = false;
 
@@ -1387,12 +1388,22 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
         .msg_iovlen = 1,
     };
 
+    uint32_t rights_mask = FD_RIGHT_READ | FD_RIGHT_DUP;
+    rights_src_fd = fd_dup(proc_current(), txfd);
+    test_check(rights_src_fd >= 0, "sockmsg_stream dup rights source");
+    if (rights_src_fd < 0)
+        goto out;
+    ret = fd_limit_rights(proc_current(), rights_src_fd, rights_mask, NULL);
+    test_check(ret == 0, "sockmsg_stream limit rights source");
+    if (ret < 0)
+        goto out;
+
     struct test_socket_cmsghdr ctrl_rights = {
         .cmsg_len = sizeof(struct test_socket_cmsghdr) + sizeof(int32_t),
         .cmsg_level = SOL_SOCKET,
         .cmsg_type = TEST_SCM_RIGHTS,
     };
-    int32_t rights_fd = txfd;
+    int32_t rights_fd = rights_src_fd;
     struct test_socket_cmsghdr ctrl_cred = {
         .cmsg_len = sizeof(struct test_socket_cmsghdr) +
                     sizeof(struct test_socket_ucred),
@@ -1466,6 +1477,18 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
                     file_put(srcf);
                 if (gotf)
                     file_put(gotf);
+                uint32_t src_rights = 0;
+                uint32_t got_rights = 0;
+                int rc0 = fd_get_rights(proc_current(), rights_src_fd, &src_rights);
+                int rc1 = fd_get_rights(proc_current(), got_fd, &got_rights);
+                test_check(rc0 == 0 && rc1 == 0,
+                           "sockmsg_stream rights read rights mask");
+                if (rc0 == 0 && rc1 == 0) {
+                    test_check(src_rights == rights_mask,
+                               "sockmsg_stream rights src mask limited");
+                    test_check(got_rights == src_rights,
+                               "sockmsg_stream rights mask preserved");
+                }
                 (void)fd_close(proc_current(), got_fd);
             }
         }
@@ -1916,6 +1939,7 @@ static void test_unix_stream_msg_control_semantics_phase(uint32_t phases) {
     }
 
 out:
+    close_fd_if_open(&rights_src_fd);
     close_fd_if_open(&txfd);
     close_fd_if_open(&rxfd);
     close_socket_if_open(&tx);
