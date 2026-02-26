@@ -103,6 +103,8 @@ Pseudo filesystems:
   - exposes `/proc/mounts` and `/proc/<pid>/mounts`
   - exposes `/proc/<pid>/handles` for per-process handle-to-kobj table snapshots
   - exposes `/proc/<pid>/handle_transfers` for per-process handle-to-transfer-history snapshots
+  - exposes `/proc/<pid>/handle_transfers_v2[.<cursor>[.<page_size>]]` for cursor-paged transfer-history snapshots (`returned/next_cursor/end` metadata)
+  - generated procfs read path now uses growable staging buffer (up to 256 KiB) rather than fixed 4 KiB
   - `/proc/self` symlink target is generated per lookup from current task pid
 - sysfs (fs/sysfs/): device model filesystem
   - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers}`)

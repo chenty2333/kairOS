@@ -44,6 +44,7 @@
 #define TEST_STATX__RESERVED 0x80000000U
 #define TEST_AT_STATX_SYNC_AS_STAT 0x0000
 #define TEST_MONO_PROGRESS_MAX_SPINS 200000U
+#define PROCFS_XFER_BULK_PAIRS 96U
 
 static int tests_failed;
 
@@ -3398,6 +3399,111 @@ out:
     test_check(reaped, "procfs control child reaped");
 }
 
+static size_t procfs_seed_transfer_events(struct process *self,
+                                          struct kobj **ch0, struct kobj **ch1,
+                                          int32_t *handles, size_t max_pairs,
+                                          uint32_t *first_obj_id) {
+    if (!self || !ch0 || !ch1 || !handles || max_pairs == 0)
+        return 0;
+
+    size_t created = 0;
+    for (size_t i = 0; i < max_pairs; i++) {
+        ch0[i] = NULL;
+        ch1[i] = NULL;
+        handles[i] = -1;
+
+        int rc = kchannel_create_pair(&ch0[i], &ch1[i]);
+        if (rc < 0)
+            break;
+
+        int32_t h = khandle_alloc(self, ch0[i], KRIGHT_CHANNEL_DEFAULT);
+        if (h < 0) {
+            kobj_put(ch1[i]);
+            kobj_put(ch0[i]);
+            ch0[i] = NULL;
+            ch1[i] = NULL;
+            break;
+        }
+        handles[i] = h;
+        bool handle_live = true;
+
+        struct kobj *taken_obj = NULL;
+        uint32_t taken_rights = 0;
+        rc = khandle_take(self, h, KRIGHT_TRANSFER, &taken_obj, &taken_rights);
+        if (rc < 0 || !taken_obj) {
+            if (handle_live)
+                (void)khandle_close(self, h);
+            handles[i] = -1;
+            if (taken_obj)
+                khandle_transfer_drop_with_rights(taken_obj, taken_rights);
+            kobj_put(ch1[i]);
+            kobj_put(ch0[i]);
+            ch0[i] = NULL;
+            ch1[i] = NULL;
+            break;
+        }
+        handle_live = false;
+
+        rc = khandle_restore(self, h, taken_obj, taken_rights);
+        if (rc < 0) {
+            khandle_transfer_drop_with_rights(taken_obj, taken_rights);
+            handles[i] = -1;
+            kobj_put(ch1[i]);
+            kobj_put(ch0[i]);
+            ch0[i] = NULL;
+            ch1[i] = NULL;
+            break;
+        }
+
+        handle_live = true;
+        if (handle_live && created == 0 && first_obj_id)
+            *first_obj_id = kobj_id(ch0[i]);
+        created++;
+    }
+
+    return created;
+}
+
+static void procfs_release_transfer_events(struct process *self,
+                                           struct kobj **ch0,
+                                           struct kobj **ch1,
+                                           int32_t *handles,
+                                           size_t count) {
+    if (!self || !ch0 || !ch1 || !handles)
+        return;
+
+    for (size_t i = 0; i < count; i++) {
+        if (handles[i] >= 0)
+            (void)khandle_close(self, handles[i]);
+        if (ch1[i])
+            kobj_put(ch1[i]);
+        if (ch0[i])
+            kobj_put(ch0[i]);
+    }
+}
+
+static bool procfs_first_data_row(const char *snapshot, char *out, size_t outsz) {
+    if (!snapshot || !out || outsz < 2)
+        return false;
+
+    const char *line = snapshot;
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line) : strlen(line);
+        if (len > 0 && line[0] >= '0' && line[0] <= '9') {
+            size_t copy = (len < (outsz - 1)) ? len : (outsz - 1);
+            memcpy(out, line, copy);
+            out[copy] = '\0';
+            return true;
+        }
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    out[0] = '\0';
+    return false;
+}
+
 static void test_procfs_pid_handle_transfers_readonly(void) {
     struct process *self = proc_current();
     test_check(self != NULL, "procfs xfer self present");
@@ -3477,6 +3583,180 @@ out:
         kobj_put(ch1);
     if (ch0)
         kobj_put(ch0);
+}
+
+static void test_procfs_pid_handle_transfers_large_not_truncated(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs xfer large self present");
+    if (!self)
+        return;
+
+    struct kobj *ch0[PROCFS_XFER_BULK_PAIRS] = {0};
+    struct kobj *ch1[PROCFS_XFER_BULK_PAIRS] = {0};
+    int32_t handles[PROCFS_XFER_BULK_PAIRS];
+    for (size_t i = 0; i < PROCFS_XFER_BULK_PAIRS; i++)
+        handles[i] = -1;
+
+    uint32_t first_obj_id = 0;
+    size_t created = procfs_seed_transfer_events(
+        self, ch0, ch1, handles, PROCFS_XFER_BULK_PAIRS, &first_obj_id);
+    test_check(created >= 48, "procfs xfer large seeded");
+    if (created < 48) {
+        procfs_release_transfer_events(self, ch0, ch1, handles, created);
+        return;
+    }
+
+    struct file *f = NULL;
+    int rc = vfs_open("/proc/self/handle_transfers", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer large open");
+    if (rc == 0) {
+        char head[512];
+        ssize_t rd = vfs_read(f, head, sizeof(head) - 1);
+        test_check(rd > 0, "procfs xfer large head read");
+        if (rd > 0) {
+            head[rd] = '\0';
+            test_check(strstr(head, "schema=procfs_pid_handle_transfers_v1\n") !=
+                           NULL,
+                       "procfs xfer large schema");
+        }
+
+        off_t off = vfs_seek(f, 0, SEEK_SET);
+        test_check(off == 0, "procfs xfer large seek zero");
+
+        size_t total = 0;
+        char chunk[256];
+        while ((rd = vfs_read(f, chunk, sizeof(chunk))) > 0)
+            total += (size_t)rd;
+        test_check(rd == 0, "procfs xfer large eof");
+        test_check(total > 4096U, "procfs xfer large beyond legacy 4k");
+
+        if (first_obj_id != 0) {
+            off = vfs_seek(f, 0, SEEK_SET);
+            test_check(off == 0, "procfs xfer large seek verify");
+            char verify[4096];
+            rd = vfs_read(f, verify, sizeof(verify) - 1);
+            test_check(rd > 0, "procfs xfer large verify read");
+            if (rd > 0) {
+                verify[rd] = '\0';
+                char needle[48];
+                int n = snprintf(needle, sizeof(needle), " %u channel ",
+                                 first_obj_id);
+                test_check(n > 0 && (size_t)n < sizeof(needle) &&
+                               strstr(verify, needle) != NULL,
+                           "procfs xfer large includes first object");
+            }
+        }
+    }
+    close_file_if_open(&f);
+    procfs_release_transfer_events(self, ch0, ch1, handles, created);
+}
+
+static void test_procfs_pid_handle_transfers_v2_cursor(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs xfer v2 self present");
+    if (!self)
+        return;
+
+    struct kobj *ch0[PROCFS_XFER_BULK_PAIRS] = {0};
+    struct kobj *ch1[PROCFS_XFER_BULK_PAIRS] = {0};
+    int32_t handles[PROCFS_XFER_BULK_PAIRS];
+    for (size_t i = 0; i < PROCFS_XFER_BULK_PAIRS; i++)
+        handles[i] = -1;
+
+    size_t created =
+        procfs_seed_transfer_events(self, ch0, ch1, handles, 20, NULL);
+    test_check(created >= 20, "procfs xfer v2 seeded");
+    if (created < 20) {
+        procfs_release_transfer_events(self, ch0, ch1, handles, created);
+        return;
+    }
+
+    struct file *f = NULL;
+    char page0[4096];
+    char page1[4096];
+    char tail[1024];
+    char first0[192];
+    char first1[192];
+
+    int rc = vfs_open("/proc/self/handle_transfers_v2.0.16", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer v2 open page0");
+    if (rc == 0) {
+        ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
+        test_check(rd > 0, "procfs xfer v2 read page0");
+        if (rd > 0) {
+            test_snapshot_expect_str(page0, "schema",
+                                     "procfs_pid_handle_transfers_v2",
+                                     "procfs xfer v2 schema");
+            test_snapshot_expect_u64(page0, "cursor", 0,
+                                     "procfs xfer v2 cursor0");
+            test_snapshot_expect_u64(page0, "page_size", 16,
+                                     "procfs xfer v2 page_size0");
+            test_snapshot_expect_u64(page0, "returned", 16,
+                                     "procfs xfer v2 returned0");
+            test_snapshot_expect_u64(page0, "next_cursor", 16,
+                                     "procfs xfer v2 next0");
+            test_snapshot_expect_u64(page0, "end", 0, "procfs xfer v2 end0");
+            test_check(procfs_first_data_row(page0, first0, sizeof(first0)),
+                       "procfs xfer v2 first row page0");
+        }
+    }
+    close_file_if_open(&f);
+
+    rc = vfs_open("/proc/self/handle_transfers_v2.16.16", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer v2 open page1");
+    if (rc == 0) {
+        ssize_t rd = proc_control_read_snapshot(f, page1, sizeof(page1));
+        test_check(rd > 0, "procfs xfer v2 read page1");
+        if (rd > 0) {
+            test_snapshot_expect_u64(page1, "cursor", 16,
+                                     "procfs xfer v2 cursor1");
+            test_snapshot_expect_u64(page1, "page_size", 16,
+                                     "procfs xfer v2 page_size1");
+            test_check(strstr(page1, "returned=0\n") == NULL,
+                       "procfs xfer v2 page1 has data");
+            test_check(procfs_first_data_row(page1, first1, sizeof(first1)),
+                       "procfs xfer v2 first row page1");
+            if (first0[0] != '\0' && first1[0] != '\0')
+                test_check(strcmp(first0, first1) != 0,
+                           "procfs xfer v2 cursor advances");
+        }
+    }
+    close_file_if_open(&f);
+
+    rc = vfs_open("/proc/self/handle_transfers_v2.999999.16", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer v2 open tail");
+    if (rc == 0) {
+        ssize_t rd = proc_control_read_snapshot(f, tail, sizeof(tail));
+        test_check(rd > 0, "procfs xfer v2 read tail");
+        if (rd > 0) {
+            test_snapshot_expect_u64(tail, "returned", 0,
+                                     "procfs xfer v2 tail empty");
+            test_snapshot_expect_u64(tail, "end", 1,
+                                     "procfs xfer v2 tail end");
+        }
+    }
+    close_file_if_open(&f);
+
+    rc = vfs_open("/proc/self/handle_transfers_v2", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer v2 open default");
+    if (rc == 0) {
+        ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
+        test_check(rd > 0, "procfs xfer v2 read default");
+        if (rd > 0)
+            test_snapshot_expect_u64(page0, "cursor", 0,
+                                     "procfs xfer v2 default cursor");
+    }
+    close_file_if_open(&f);
+
+    rc = vfs_open("/proc/self/handle_transfers_v2.0.16", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer v2 reopen");
+    if (rc == 0) {
+        ssize_t wr = vfs_write(f, "x", 1);
+        test_check(wr == -EPERM, "procfs xfer v2 readonly");
+    }
+    close_file_if_open(&f);
+
+    procfs_release_transfer_events(self, ch0, ch1, handles, created);
 }
 
 struct stop_cont_timing_ctx {
@@ -4333,6 +4613,8 @@ int run_vfs_ipc_tests(void) {
     test_inotify_mask_update_functional();
     test_sysfs_ipc_visibility();
     test_procfs_pid_handle_transfers_readonly();
+    test_procfs_pid_handle_transfers_large_not_truncated();
+    test_procfs_pid_handle_transfers_v2_cursor();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");

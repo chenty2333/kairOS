@@ -24,7 +24,10 @@
 #include <kairos/vfs.h>
 
 #define PROC_SUPER_MAGIC 0x9FA0
-#define PROCFS_BUF_SIZE  4096
+#define PROCFS_GEN_BUF_INIT_SIZE 4096U
+#define PROCFS_GEN_BUF_MAX_SIZE  (256U * 1024U)
+#define PROCFS_TRANSFER_V2_DEFAULT_PAGE 128U
+#define PROCFS_TRANSFER_V2_MAX_PAGE     512U
 
 /* Entry types */
 enum procfs_type {
@@ -126,7 +129,14 @@ static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_handles(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz);
+static int gen_pid_handle_transfers_v2(struct procfs_entry *ent,
+                                       char *buf, size_t bufsz);
 static int gen_pid_control(struct procfs_entry *ent, char *buf, size_t bufsz);
+static bool procfs_parse_handle_transfers_v2_name(const char *name,
+                                                  uint32_t *cursor,
+                                                  uint32_t *page_size);
+static int procfs_generate_entry(struct procfs_entry *ent, char *buf,
+                                 size_t bufsz);
 
 static size_t procfs_self_target(char *buf, size_t bufsz) {
     struct process *cur = proc_current();
@@ -575,6 +585,81 @@ static const char *procfs_transfer_event_name(uint16_t event) {
     }
 }
 
+static bool procfs_parse_u32_component(const char *s, size_t len, uint32_t *out) {
+    if (!s || !out || len == 0)
+        return false;
+
+    uint64_t value = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c < '0' || c > '9')
+            return false;
+        value = value * 10U + (uint64_t)(c - '0');
+        if (value > 0xFFFFFFFFULL)
+            return false;
+    }
+    *out = (uint32_t)value;
+    return true;
+}
+
+static bool procfs_parse_handle_transfers_v2_name(const char *name,
+                                                  uint32_t *cursor,
+                                                  uint32_t *page_size) {
+    static const char prefix[] = "handle_transfers_v2";
+    const size_t prefix_len = sizeof(prefix) - 1;
+
+    if (!name || !cursor || !page_size)
+        return false;
+
+    if (strcmp(name, prefix) == 0) {
+        *cursor = 0;
+        *page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+        return true;
+    }
+
+    if (strncmp(name, prefix, prefix_len) != 0 || name[prefix_len] != '.')
+        return false;
+
+    const char *cursor_part = name + prefix_len + 1;
+    if (!*cursor_part)
+        return false;
+
+    const char *dot = strchr(cursor_part, '.');
+    uint32_t parsed_cursor = 0;
+    if (!dot) {
+        if (!procfs_parse_u32_component(cursor_part, strlen(cursor_part),
+                                        &parsed_cursor)) {
+            return false;
+        }
+        *cursor = parsed_cursor;
+        *page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+        return true;
+    }
+
+    if (!procfs_parse_u32_component(cursor_part, (size_t)(dot - cursor_part),
+                                    &parsed_cursor)) {
+        return false;
+    }
+
+    const char *page_part = dot + 1;
+    if (!*page_part || strchr(page_part, '.'))
+        return false;
+
+    uint32_t parsed_page_size = 0;
+    if (!procfs_parse_u32_component(page_part, strlen(page_part),
+                                    &parsed_page_size)) {
+        return false;
+    }
+    if (parsed_page_size == 0)
+        parsed_page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+    if (parsed_page_size > PROCFS_TRANSFER_V2_MAX_PAGE)
+        parsed_page_size = PROCFS_TRANSFER_V2_MAX_PAGE;
+
+    *cursor = parsed_cursor;
+    *page_size = parsed_page_size;
+    return true;
+}
+
 static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz) {
     struct process *p = pid_to_proc(pid);
     if (!p)
@@ -642,6 +727,102 @@ static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz) {
     return len;
 }
 
+static int gen_pid_handle_transfers_v2(struct procfs_entry *ent, char *buf,
+                                       size_t bufsz) {
+    if (!ent || !buf || bufsz == 0)
+        return -EINVAL;
+
+    uint32_t cursor = 0;
+    uint32_t page_size = PROCFS_TRANSFER_V2_DEFAULT_PAGE;
+    if (!procfs_parse_handle_transfers_v2_name(ent->name, &cursor, &page_size))
+        return -EINVAL;
+
+    struct process *p = pid_to_proc(ent->pid);
+    if (!p)
+        return -ENOENT;
+
+    int len = snprintf(buf, bufsz,
+                       "schema=procfs_pid_handle_transfers_v2\n"
+                       "pid=%d\n"
+                       "cursor=%u\n"
+                       "page_size=%u\n"
+                       "columns=handle cap_id obj_id type rights seq event "
+                       "from_pid to_pid transfer_rights cpu ticks\n",
+                       ent->pid, cursor, page_size);
+    if (len < 0)
+        return -EINVAL;
+    if ((size_t)len >= bufsz)
+        return (int)bufsz - 1;
+
+    struct handletable *ht = p->handletable;
+    uint32_t emitted = 0;
+    bool has_more = false;
+    uint64_t scanned = 0;
+
+    if (ht) {
+        mutex_lock(&ht->lock);
+        for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC && !has_more; i++) {
+            struct kobj *obj = ht->entries[i].obj;
+            if (!obj)
+                continue;
+
+            struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+            size_t count = kobj_transfer_history_snapshot(
+                obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+            for (size_t j = 0; j < count; j++) {
+                if (hist[j].seq == 0)
+                    continue;
+                if (scanned < (uint64_t)cursor) {
+                    scanned++;
+                    continue;
+                }
+                if (emitted >= page_size) {
+                    has_more = true;
+                    break;
+                }
+                int n = snprintf(
+                    buf + len, bufsz - (size_t)len,
+                    "%d %llu %u %s 0x%x %u %s %d %d 0x%x %u %llu\n", i,
+                    (unsigned long long)ht->entries[i].cap_id, obj->id,
+                    kobj_type_name(obj->type), ht->entries[i].rights,
+                    hist[j].seq, procfs_transfer_event_name(hist[j].event),
+                    hist[j].from_pid, hist[j].to_pid, hist[j].rights,
+                    hist[j].cpu, (unsigned long long)hist[j].ticks);
+                if (n < 0) {
+                    mutex_unlock(&ht->lock);
+                    return -EINVAL;
+                }
+                if ((size_t)n >= bufsz - (size_t)len) {
+                    mutex_unlock(&ht->lock);
+                    return (int)bufsz - 1;
+                }
+                len += n;
+                emitted++;
+                scanned++;
+            }
+        }
+        mutex_unlock(&ht->lock);
+    }
+
+    uint64_t next_cursor64 = (uint64_t)cursor + (uint64_t)emitted;
+    if (next_cursor64 > 0xFFFFFFFFULL)
+        next_cursor64 = 0xFFFFFFFFULL;
+    uint32_t next_cursor = (uint32_t)next_cursor64;
+
+    int n = snprintf(buf + len, bufsz - (size_t)len,
+                     "returned=%u\n"
+                     "next_cursor=%u\n"
+                     "end=%u\n",
+                     emitted, next_cursor, has_more ? 0U : 1U);
+    if (n < 0)
+        return -EINVAL;
+    if ((size_t)n >= bufsz - (size_t)len)
+        return (int)bufsz - 1;
+    len += n;
+
+    return len;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Symlink support for /proc/self                                     */
 /* ------------------------------------------------------------------ */
@@ -673,25 +854,39 @@ static ssize_t procfs_read(struct vnode *vn, void *buf, size_t len,
     struct procfs_entry *ent = vn->fs_data;
     if (!ent)
         return -EINVAL;
+    if (off < 0)
+        return -EINVAL;
 
-    char *kbuf = kmalloc(PROCFS_BUF_SIZE);
+    size_t kbuf_size = PROCFS_GEN_BUF_INIT_SIZE;
+    char *kbuf = kmalloc(kbuf_size);
     if (!kbuf)
         return -ENOMEM;
 
-    int total = 0;
-    if (ent->type == PROCFS_PID_ENTRY && strcmp(ent->name, "control") == 0) {
-        total = gen_pid_control(ent, kbuf, PROCFS_BUF_SIZE);
-    } else {
-        if (!ent->generate) {
+    int total = procfs_generate_entry(ent, kbuf, kbuf_size);
+    while (total >= 0 && kbuf_size < PROCFS_GEN_BUF_MAX_SIZE &&
+           (size_t)total >= (kbuf_size - 1)) {
+        size_t next_size = kbuf_size * 2U;
+        if (next_size > PROCFS_GEN_BUF_MAX_SIZE)
+            next_size = PROCFS_GEN_BUF_MAX_SIZE;
+        if (next_size <= kbuf_size)
+            break;
+
+        char *next_buf = kmalloc(next_size);
+        if (!next_buf) {
             kfree(kbuf);
-            return -EINVAL;
+            return -ENOMEM;
         }
-        total = ent->generate(ent->pid, kbuf, PROCFS_BUF_SIZE);
+        kfree(kbuf);
+        kbuf = next_buf;
+        kbuf_size = next_size;
+        total = procfs_generate_entry(ent, kbuf, kbuf_size);
     }
     if (total < 0) {
         kfree(kbuf);
         return total;
     }
+    if ((size_t)total > kbuf_size)
+        total = (int)kbuf_size;
 
     if (off >= total) {
         kfree(kbuf);
@@ -738,6 +933,27 @@ static int procfs_parse_u32(const char *s, uint32_t *out) {
     }
     *out = (uint32_t)v;
     return 0;
+}
+
+static int procfs_generate_entry(struct procfs_entry *ent, char *buf,
+                                 size_t bufsz) {
+    if (!ent || !buf || bufsz == 0)
+        return -EINVAL;
+
+    if (ent->type == PROCFS_PID_ENTRY && strcmp(ent->name, "control") == 0)
+        return gen_pid_control(ent, buf, bufsz);
+
+    uint32_t cursor = 0;
+    uint32_t page_size = 0;
+    if (ent->type == PROCFS_PID_ENTRY &&
+        procfs_parse_handle_transfers_v2_name(ent->name, &cursor,
+                                              &page_size)) {
+        return gen_pid_handle_transfers_v2(ent, buf, bufsz);
+    }
+
+    if (!ent->generate)
+        return -EINVAL;
+    return ent->generate(ent->pid, buf, bufsz);
 }
 
 struct procfs_control_cmd {
@@ -1037,6 +1253,7 @@ static const struct pid_entry_def pid_entries[] = {
     {"maps",    gen_pid_maps,    S_IFREG | 0444},
     {"handles", gen_pid_handles, S_IFREG | 0444},
     {"handle_transfers", gen_pid_handle_transfers, S_IFREG | 0444},
+    {"handle_transfers_v2", NULL, S_IFREG | 0444},
     {"control", NULL,            S_IFREG | 0600},
 };
 
@@ -1276,6 +1493,27 @@ static struct vnode *procfs_lookup(struct vnode *dir, const char *name) {
                 vnode_get(&e->vn);
                 return &e->vn;
             }
+        }
+
+        uint32_t cursor = 0;
+        uint32_t page_size = 0;
+        if (procfs_parse_handle_transfers_v2_name(name, &cursor, &page_size)) {
+            spin_lock(&pm->lock);
+            for (struct procfs_entry *e = pm->entries; e; e = e->next) {
+                if (e->type == PROCFS_PID_ENTRY && e->pid == pe->pid &&
+                    strcmp(e->name, name) == 0) {
+                    vnode_get(&e->vn);
+                    spin_unlock(&pm->lock);
+                    return &e->vn;
+                }
+            }
+            struct procfs_entry *e = procfs_create_pid_entry(
+                pm, pe->pid, name, NULL, S_IFREG | 0444);
+            spin_unlock(&pm->lock);
+            if (!e)
+                return NULL;
+            vnode_get(&e->vn);
+            return &e->vn;
         }
         return NULL;
     }
