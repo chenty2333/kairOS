@@ -230,6 +230,7 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
 int futex_wake(uint64_t uaddr_u64, int nr_wake) {
     if (!futex_ready)
         futex_init();
+    poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAKE_CALLS);
     if (nr_wake <= 0)
         return 0;
 
@@ -262,6 +263,7 @@ int futex_wake(uint64_t uaddr_u64, int nr_wake) {
     }
     mutex_unlock(&bucket->lock);
 
+    poll_wait_stat_add(POLL_WAIT_STAT_FUTEX_WAKE_WOKEN, (uint64_t)woken);
     return woken;
 }
 

@@ -43,6 +43,8 @@ static const char *const poll_wait_stat_names[POLL_WAIT_STAT_COUNT] = {
     [POLL_WAIT_STAT_FUTEX_WAITV_WAKES] = "futex_waitv_wakes",
     [POLL_WAIT_STAT_FUTEX_WAITV_TIMEOUTS] = "futex_waitv_timeouts",
     [POLL_WAIT_STAT_FUTEX_WAITV_INTERRUPTS] = "futex_waitv_interrupts",
+    [POLL_WAIT_STAT_FUTEX_WAKE_CALLS] = "futex_wake_calls",
+    [POLL_WAIT_STAT_FUTEX_WAKE_WOKEN] = "futex_wake_woken",
 };
 
 void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta) {
