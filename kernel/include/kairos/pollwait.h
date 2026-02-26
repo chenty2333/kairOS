@@ -19,6 +19,11 @@ struct poll_wait_head {
     struct list_head watches;
 };
 
+struct poll_wait_source {
+    struct wait_queue wq;
+    struct vnode *vn;
+};
+
 struct poll_waiter {
     struct wait_queue_entry entry;
     struct poll_wait_head *head;
@@ -57,6 +62,12 @@ void poll_ready_wake_one(struct wait_queue *wq, struct vnode *vn,
                          uint32_t events);
 void poll_ready_wake_all(struct wait_queue *wq, struct vnode *vn,
                          uint32_t events);
+void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn);
+void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn);
+int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
+                           void *channel, struct mutex *mtx);
+void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events);
+void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events);
 
 void poll_wait_head_init(struct poll_wait_head *head);
 void poll_wait_add(struct poll_wait_head *head, struct poll_waiter *waiter);

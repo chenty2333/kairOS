@@ -110,6 +110,39 @@ void poll_ready_wake_all(struct wait_queue *wq, struct vnode *vn,
         vfs_poll_wake(vn, events);
 }
 
+void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn) {
+    if (!src)
+        return;
+    wait_queue_init(&src->wq);
+    src->vn = vn;
+}
+
+void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn) {
+    if (!src)
+        return;
+    src->vn = vn;
+}
+
+int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
+                           void *channel, struct mutex *mtx) {
+    if (!src)
+        return -EINVAL;
+    return poll_block_current_ex(&src->wq, deadline, channel ? channel : src,
+                                 mtx, true);
+}
+
+void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events) {
+    if (!src)
+        return;
+    poll_ready_wake_one(&src->wq, src->vn, events);
+}
+
+void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events) {
+    if (!src)
+        return;
+    poll_ready_wake_all(&src->wq, src->vn, events);
+}
+
 static void poll_sleep_head_init(void) {
     if (poll_sleep_head_init_done)
         return;

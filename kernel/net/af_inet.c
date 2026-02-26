@@ -15,7 +15,6 @@
 #include <kairos/string.h>
 #include <kairos/sync.h>
 #include <kairos/vfs.h>
-#include <kairos/wait.h>
 
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -41,21 +40,21 @@ struct inet_sock {
     size_t recv_head;
     size_t recv_tail;
     size_t recv_count;
-    struct wait_queue recv_wait;
+    struct poll_wait_source recv_src;
 
     /* TCP connect completion */
     int connect_err;
     bool connect_done;
-    struct wait_queue connect_wait;
+    struct poll_wait_source connect_src;
 
     /* TCP accept queue */
     struct list_head accept_queue;
     int accept_count;
     int accept_backlog;
-    struct wait_queue accept_wait;
+    struct poll_wait_source accept_src;
 
     /* Send wait (TCP flow control) */
-    struct wait_queue send_wait;
+    struct poll_wait_source send_src;
     bool send_ready;
 
     /* UDP: per-message source address tracking */
@@ -106,15 +105,15 @@ static struct inet_sock *inet_sock_alloc(struct socket *sock, int proto) {
     is->recv_head = 0;
     is->recv_tail = 0;
     is->recv_count = 0;
-    wait_queue_init(&is->recv_wait);
+    poll_wait_source_init(&is->recv_src, NULL);
     is->connect_err = 0;
     is->connect_done = false;
-    wait_queue_init(&is->connect_wait);
+    poll_wait_source_init(&is->connect_src, NULL);
     INIT_LIST_HEAD(&is->accept_queue);
     is->accept_count = 0;
     is->accept_backlog = INET_ACCEPT_BACKLOG;
-    wait_queue_init(&is->accept_wait);
-    wait_queue_init(&is->send_wait);
+    poll_wait_source_init(&is->accept_src, NULL);
+    poll_wait_source_init(&is->send_src, NULL);
     is->send_ready = true;
     is->has_last_src = false;
     is->so_reuseaddr = 0;
@@ -201,7 +200,7 @@ static err_t inet_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
         /* Peer closed the connection */
         is->peer_closed = true;
         mutex_unlock(&is->lock);
-        wait_queue_wakeup_all(&is->recv_wait);
+        poll_wait_source_wake_all(&is->recv_src, 0);
         poll_wait_wake(&is->sock->pollers, POLLIN | POLLHUP);
         return ERR_OK;
     }
@@ -214,7 +213,7 @@ static err_t inet_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
     mutex_unlock(&is->lock);
     pbuf_free(p);
 
-    wait_queue_wakeup_all(&is->recv_wait);
+    poll_wait_source_wake_all(&is->recv_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLIN);
     return ERR_OK;
 }
@@ -224,7 +223,7 @@ static err_t inet_tcp_sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len) {
     (void)pcb; (void)len;
 
     is->send_ready = true;
-    wait_queue_wakeup_all(&is->send_wait);
+    poll_wait_source_wake_all(&is->send_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLOUT);
     return ERR_OK;
 }
@@ -242,7 +241,7 @@ static err_t inet_tcp_connected_cb(void *arg, struct tcp_pcb *pcb,
     else if (is->sock->state == SS_CONNECTING)
         is->sock->state = SS_UNCONNECTED;
     mutex_unlock(&is->lock);
-    wait_queue_wakeup_all(&is->connect_wait);
+    poll_wait_source_wake_all(&is->connect_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLOUT | POLLERR);
     return ERR_OK;
 }
@@ -261,9 +260,9 @@ static void inet_tcp_err_cb(void *arg, err_t err) {
         is->sock->state = SS_UNCONNECTED;
     mutex_unlock(&is->lock);
 
-    wait_queue_wakeup_all(&is->recv_wait);
-    wait_queue_wakeup_all(&is->send_wait);
-    wait_queue_wakeup_all(&is->connect_wait);
+    poll_wait_source_wake_all(&is->recv_src, 0);
+    poll_wait_source_wake_all(&is->send_src, 0);
+    poll_wait_source_wake_all(&is->connect_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLERR | POLLHUP);
 }
 
@@ -293,7 +292,7 @@ static err_t inet_tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     is->accept_count++;
     mutex_unlock(&is->lock);
 
-    wait_queue_wakeup_one(&is->accept_wait);
+    poll_wait_source_wake_one(&is->accept_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLIN);
     return ERR_OK;
 }
@@ -323,7 +322,7 @@ static void inet_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     mutex_unlock(&is->lock);
     pbuf_free(p);
 
-    wait_queue_wakeup_all(&is->recv_wait);
+    poll_wait_source_wake_all(&is->recv_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLIN);
 }
 
@@ -452,8 +451,8 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
             return -EALREADY;
         }
         while (!is->connect_done) {
-            int rc = proc_sleep_on_mutex(&is->connect_wait, &is->connect_wait,
-                                         &is->lock, true);
+            int rc = poll_wait_source_block(&is->connect_src, 0, &is->connect_src,
+                                            &is->lock);
             if (rc == -EINTR) {
                 mutex_unlock(&is->lock);
                 return -EINTR;
@@ -508,8 +507,8 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
     /* Wait for connection completion */
     mutex_lock(&is->lock);
     while (!is->connect_done) {
-        int rc = proc_sleep_on_mutex(&is->connect_wait, &is->connect_wait,
-                                     &is->lock, true);
+        int rc = poll_wait_source_block(&is->connect_src, 0, &is->connect_src,
+                                        &is->lock);
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -542,8 +541,8 @@ static int inet_tcp_accept(struct socket *sock, struct socket **newsock,
             mutex_unlock(&is->lock);
             return -EAGAIN;
         }
-        int rc = proc_sleep_on_mutex(&is->accept_wait, &is->accept_wait,
-                                     &is->lock, true);
+        int rc =
+            poll_wait_source_block(&is->accept_src, 0, &is->accept_src, &is->lock);
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -642,8 +641,8 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
             is->send_ready = false;
             mutex_lock(&is->lock);
             while (!is->send_ready && !is->peer_closed) {
-                int rc = proc_sleep_on_mutex(&is->send_wait, &is->send_wait,
-                                             &is->lock, true);
+                int rc = poll_wait_source_block(&is->send_src, 0, &is->send_src,
+                                                &is->lock);
                 if (rc == -EINTR) {
                     mutex_unlock(&is->lock);
                     return total ? (ssize_t)total : -EINTR;
@@ -702,8 +701,8 @@ static ssize_t inet_tcp_recvfrom(struct socket *sock, void *buf, size_t len,
             mutex_unlock(&is->lock);
             return -EAGAIN;
         }
-        int rc = proc_sleep_on_mutex(&is->recv_wait, &is->recv_wait,
-                                     &is->lock, true);
+        int rc =
+            poll_wait_source_block(&is->recv_src, 0, &is->recv_src, &is->lock);
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -898,8 +897,8 @@ static ssize_t inet_udp_recvfrom(struct socket *sock, void *buf, size_t len,
             mutex_unlock(&is->lock);
             return -EAGAIN;
         }
-        int rc = proc_sleep_on_mutex(&is->recv_wait, &is->recv_wait,
-                                     &is->lock, true);
+        int rc =
+            poll_wait_source_block(&is->recv_src, 0, &is->recv_src, &is->lock);
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -954,8 +953,8 @@ static int inet_shutdown(struct socket *sock, int how) {
         tcp_shutdown(is->pcb.tcp, shut_rx, shut_tx);
         inet_lwip_unlock();
     }
-    wait_queue_wakeup_all(&is->recv_wait);
-    wait_queue_wakeup_all(&is->send_wait);
+    poll_wait_source_wake_all(&is->recv_src, 0);
+    poll_wait_source_wake_all(&is->send_src, 0);
     poll_wait_wake(&sock->pollers, POLLHUP);
     return 0;
 }

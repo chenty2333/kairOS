@@ -175,6 +175,7 @@ struct sigcontext {
 struct process;
 int signal_send(pid_t pid, int sig);
 int signal_send_pgrp(pid_t pgrp, int sig);
+void signalfd_notify_pending_signal(struct process *p, int sig);
 void signal_deliver_pending(void);
 void signal_init_process(struct process *p);
 

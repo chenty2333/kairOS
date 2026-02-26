@@ -13,7 +13,6 @@
 #include <kairos/string.h>
 #include <kairos/pipe.h>
 #include <kairos/vfs.h>
-#include <kairos/wait.h>
 
 #define PIPE_SIZE 4096
 #define PIPE_BUF 4096
@@ -25,8 +24,8 @@ struct pipe {
     size_t count;
     int readers;
     int writers;
-    struct wait_queue rwait;
-    struct wait_queue wwait;
+    struct poll_wait_source rd_src;
+    struct poll_wait_source wr_src;
     struct poll_wait_head pollers;
     struct mutex lock;
 };
@@ -58,8 +57,8 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
                 mutex_unlock(&p->lock);
                 return read ? (ssize_t)read : -EAGAIN;
             }
-            int rc = proc_sleep_on_mutex(&p->rwait, &p->rwait,
-                                         &p->lock, true);
+            int rc =
+                poll_wait_source_block(&p->rd_src, 0, &p->rd_src, &p->lock);
             if (rc == -EINTR) {
                 return read ? (ssize_t)read : -EINTR;
             }
@@ -82,7 +81,7 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
             read += n2;
         }
 
-        wait_queue_wakeup_one(&p->wwait);
+        poll_wait_source_wake_one(&p->wr_src, 0);
         uint32_t revents = pipe_poll_events_locked(p);
         mutex_unlock(&p->lock);
         poll_wait_wake(&p->pollers, revents);
@@ -120,8 +119,8 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
                     mutex_unlock(&p->lock);
                     return written ? (ssize_t)written : -EAGAIN;
                 }
-                int rc = proc_sleep_on_mutex(&p->wwait, &p->wwait,
-                                             &p->lock, true);
+                int rc =
+                    poll_wait_source_block(&p->wr_src, 0, &p->wr_src, &p->lock);
                 if (rc == -EINTR) {
                     mutex_unlock(&p->lock);
                     return written ? (ssize_t)written : -EINTR;
@@ -133,8 +132,8 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
                 mutex_unlock(&p->lock);
                 return written ? (ssize_t)written : -EAGAIN;
             }
-            int rc = proc_sleep_on_mutex(&p->wwait, &p->wwait,
-                                         &p->lock, true);
+            int rc =
+                poll_wait_source_block(&p->wr_src, 0, &p->wr_src, &p->lock);
             if (rc == -EINTR) {
                 mutex_unlock(&p->lock);
                 return written ? (ssize_t)written : -EINTR;
@@ -159,7 +158,7 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
             written += n2;
         }
 
-        wait_queue_wakeup_one(&p->rwait);
+        poll_wait_source_wake_one(&p->rd_src, 0);
         uint32_t revents = pipe_poll_events_locked(p);
         mutex_unlock(&p->lock);
         poll_wait_wake(&p->pollers, revents);
@@ -215,8 +214,8 @@ int pipe_create(struct file **read_pipe, struct file **write_pipe) {
     p->count = 0;
     p->readers = 1;
     p->writers = 1;
-    wait_queue_init(&p->rwait);
-    wait_queue_init(&p->wwait);
+    poll_wait_source_init(&p->rd_src, NULL);
+    poll_wait_source_init(&p->wr_src, NULL);
     poll_wait_head_init(&p->pollers);
     mutex_init(&p->lock, "pipe_lock");
     
@@ -285,9 +284,9 @@ void pipe_close_end(struct file *file) {
     mutex_unlock(&p->lock);
 
     if (dec_reader && writers == 0)
-        wait_queue_wakeup_all(&p->rwait);
+        poll_wait_source_wake_all(&p->rd_src, 0);
     if (dec_writer && readers == 0)
-        wait_queue_wakeup_all(&p->wwait);
+        poll_wait_source_wake_all(&p->wr_src, 0);
     poll_wait_wake(&p->pollers, POLLIN | POLLOUT | POLLHUP | POLLERR);
 }
 

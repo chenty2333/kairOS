@@ -21,6 +21,7 @@ MUSL_SRC="${MUSL_SRC:-$ROOT_DIR/third_party/musl}"
 BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build}"
 SYSROOT="${SYSROOT:-$BUILD_ROOT/${ARCH}/sysroot}"
 BUILD_DIR="${BUILD_DIR:-$BUILD_ROOT/${ARCH}/musl}"
+STAMP_FILE="${STAMP_FILE:-$SYSROOT/.kairos-musl.stamp}"
 JOBS="${JOBS:-$(nproc)}"
 USE_GCC="${USE_GCC:-0}"
 
@@ -97,17 +98,67 @@ fi
 #   compiler-rt needs musl headers + libc.a
 MUSL_STATIC_ONLY="${MUSL_STATIC_ONLY:-0}"
 
+musl_build_stamp() {
+  local musl_tree_hash getcwd_patch_hash
+  musl_tree_hash="$(
+    (
+      cd "$MUSL_SRC"
+      find arch include src -type f -print0 | sort -z | xargs -0 sha256sum
+    ) | sha256sum | awk '{print $1}'
+  )"
+  if [[ -f "$ROOT_DIR/scripts/patches/musl/getcwd.c" ]]; then
+    getcwd_patch_hash="$(sha256sum "$ROOT_DIR/scripts/patches/musl/getcwd.c" | awk '{print $1}')"
+  else
+    getcwd_patch_hash="missing"
+  fi
+  printf '%s\n' \
+    "arch=$ARCH" \
+    "target=$TARGET" \
+    "musl_src=$MUSL_SRC" \
+    "musl_hash=$musl_tree_hash" \
+    "cc=$CC" \
+    "ar=$AR" \
+    "ranlib=$RANLIB" \
+    "strip=$STRIP" \
+    "cflags=$CFLAGS" \
+    "ldflags=$LDFLAGS" \
+    "libcc=${LIBCC:-}" \
+    "static_only=$MUSL_STATIC_ONLY" \
+    "getcwd_patch=$getcwd_patch_hash" \
+    | sha256sum | awk '{print $1}'
+}
+
+MUSL_BUILD_STAMP="$(musl_build_stamp)"
+MUSL_STAMP_MATCH=0
+if [[ -f "$STAMP_FILE" ]]; then
+  stored_stamp="$(sed -n 's/^stamp=//p' "$STAMP_FILE" | head -n1)"
+  if [[ "$stored_stamp" == "$MUSL_BUILD_STAMP" ]]; then
+    MUSL_STAMP_MATCH=1
+  fi
+fi
+
+MUSL_FORCE_CLEAN=0
+
 if [[ "$MUSL_STATIC_ONLY" == "1" ]]; then
   # For static-only, check if headers + libc.a already exist
-  if [[ -f "$SYSROOT/lib/libc.a" ]] && [[ -f "$SYSROOT/include/stdlib.h" ]]; then
+  if [[ -f "$SYSROOT/lib/libc.a" ]] && [[ -f "$SYSROOT/include/stdlib.h" ]] &&
+     [[ "$MUSL_STAMP_MATCH" == "1" ]]; then
     [[ "$QUIET" != "1" ]] && echo "musl static already installed: $SYSROOT"
     exit 0
   fi
+  if [[ -f "$SYSROOT/lib/libc.a" ]] && [[ -f "$SYSROOT/include/stdlib.h" ]]; then
+    MUSL_FORCE_CLEAN=1
+    [[ "$QUIET" != "1" ]] && echo "musl static stamp changed; rebuilding: $SYSROOT"
+  fi
 else
   # For full build, check if libc.so exists (libc.a alone means static-only was done)
-  if [[ -f "$SYSROOT/lib/libc.so" ]]; then
+  if [[ -f "$SYSROOT/lib/libc.so" ]] && [[ "$MUSL_STAMP_MATCH" == "1" ]]; then
     [[ "$QUIET" != "1" ]] && echo "musl already installed: $SYSROOT"
     exit 0
+  fi
+  if [[ -f "$SYSROOT/lib/libc.so" ]]; then
+    MUSL_FORCE_CLEAN=1
+    [[ "$QUIET" != "1" ]] && echo "musl stamp changed; rebuilding: $SYSROOT"
   fi
 fi
 
@@ -115,7 +166,7 @@ fi
 # - Fresh start: rsync source tree, clean any leaked artifacts.
 # - Resuming after static-only: keep obj/ but force re-configure
 #   (full build needs -resource-dir for compiler-rt builtins).
-if [[ ! -f "$BUILD_DIR/Makefile" ]]; then
+if [[ "$MUSL_FORCE_CLEAN" == "1" ]] || [[ ! -f "$BUILD_DIR/Makefile" ]]; then
   rm -rf "$BUILD_DIR"
   mkdir -p "$BUILD_DIR" "$SYSROOT"
   rsync -a "$MUSL_SRC"/ "$BUILD_DIR"/
@@ -183,6 +234,17 @@ pushd "$BUILD_DIR" >/dev/null
     DESTDIR="$SYSROOT" make install >"$_out"
   fi
 popd >/dev/null
+
+cat >"$STAMP_FILE" <<EOF
+stamp=$MUSL_BUILD_STAMP
+arch=$ARCH
+target=$TARGET
+musl_src=$MUSL_SRC
+cc=$CC
+cflags=$CFLAGS
+ldflags=$LDFLAGS
+static_only=$MUSL_STATIC_ONLY
+EOF
 
 if [[ "$QUIET" == "1" ]]; then
   if [[ "$MUSL_STATIC_ONLY" == "1" ]]; then

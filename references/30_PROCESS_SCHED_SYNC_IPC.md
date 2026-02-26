@@ -39,7 +39,7 @@ Other:
 - signal.c: signal delivery, sighand sharing/copying, sigaction, sigaltstack
 - Linux ABI process compatibility: `wait`/`wait4`/`waitid` decode `options` as 32-bit `int`; `execveat` decodes `flags` and `dirfd` as 32-bit `int`; `setuid`/`setgid` and `setre*id`/`setres*id` decode uid/gid arguments as 32-bit values (`-1` sentinel is `0xffffffff`)
 - Linux ABI process compatibility also normalizes `pid`/`signal`/`priority` scalar args to 32-bit ABI width for `tgkill`/`tkill`, `getpriority`/`setpriority`, `prlimit64`, `sched_{get,set}affinity`, `setpgid`, `getpgid`, and `getsid`
-- Linux ABI pidfd baseline: `pidfd_open`, `pidfd_send_signal`, and `pidfd_getfd` are wired; pidfd is pollable (`POLLIN|POLLHUP` after target exit), `pidfd_open` enforces Linux-style `O_CLOEXEC` on returned fd, `pidfd_send_signal` currently supports `flags=0` and `info=NULL` path, `waitid(P_PIDFD, ...)` resolves pidfd targets through the fd table for child reaping, and `pidfd_getfd` duplicates target fds with `FD_CLOEXEC`
+- Linux ABI pidfd baseline: `pidfd_open`, `pidfd_send_signal`, and `pidfd_getfd` are wired; pidfd is pollable (`POLLIN|POLLHUP` after target exit), `pidfd_open` enforces Linux-style `O_CLOEXEC` on returned fd, `pidfd_send_signal` supports `flags=0` plus optional `siginfo_t *info` user-pointer validation, `waitid(P_PIDFD, ...)` resolves pidfd targets through the fd table (including `WNOWAIT` no-reap path for exited children), and `pidfd_getfd` duplicates target fds with `FD_CLOEXEC`
 
 ## Scheduler (core/sched/sched.c)
 
@@ -108,10 +108,14 @@ futex.c:
 
 pollwait.c:
 - poll_wait_head: unified poll wait infrastructure, supports waiters (process waiting) and watches (callback notification)
+- poll_wait_source: unified wait source object (`wait_queue` + optional pollable vnode), used to route block/wake through one kernel-internal interface
 - poll_sleep: global timed sleep queue, tick interrupt drives expiry wakeups
 - Unified wait-core helpers: `poll_timeout_to_deadline_ms`, `poll_deadline_expired`, `poll_block_current_ex`, `poll_block_current`, `poll_block_current_mutex` (supports wait_queue + mutex sleep sites and interruptible policy)
 - Unified ready wake bridge: `poll_ready_wake_one/all` wakes wait_queue waiters and poll watchers on one path
-- `eventfd`/`timerfd`/`inotify`/`signalfd` blocking waits are routed through wait-core helpers instead of direct `proc_sleep_on*` call sites
+- `eventfd`/`timerfd`/`inotify`/`signalfd`/`pidfd` block+wake paths now use `poll_wait_source_*` wrappers over wait-core helpers instead of direct `proc_sleep_on*` call sites
+- pipe read/write blocking queues and close wakeups now route through `poll_wait_source` (pipe poll fanout remains on `poll_wait_head`)
+- AF_UNIX and AF_INET stream/listen/datagram wait queues now route through `poll_wait_source` while socket poll readiness fanout remains on socket poll heads
+- epoll internal detach wait (`epoll_item` teardown rendezvous) also routes through `poll_wait_source` instead of raw `wait_queue`
 - `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
 - tracepoint ring snapshot uses release/acquire `seq` stabilization (double-sample verify) to avoid torn entries under concurrent writers
@@ -133,16 +137,19 @@ Current IPC mechanisms:
 - Signals: inter-process notification
 - Event FDs: `eventfd2` and `timerfd_*` are exposed as anon-vnode file descriptors (pollable, Linux ABI wiring)
 - Signal FDs: `signalfd4` is wired; read consumes matching pending signals from the task signal bitmap
-- PID FDs: `pidfd_open` creates pollable process handles; `pidfd_send_signal` supports liveness probe (`sig=0`) and signal delivery via pidfd; `waitid(P_PIDFD, ...)` is wired for child wait/reap semantics; `pidfd_getfd` duplicates a target fd into the caller with CLOEXEC
+- PID FDs: `pidfd_open` creates pollable process handles; `pidfd_send_signal` supports liveness probe (`sig=0`), signal delivery via pidfd, and `info!=NULL` pointer validation; `waitid(P_PIDFD, ...)` is wired for child wait/reap semantics and supports `WNOWAIT` for exited-child observation without immediate reap (`WSTOPPED/WCONTINUED` currently only accepted in nonblocking no-event polling path); `pidfd_getfd` duplicates a target fd into the caller with CLOEXEC
 - Inotify: `inotify_init1/add_watch/rm_watch` is wired with vnode-based watches and pollable event queue delivery
 - Capability handles: per-process `handletable` (refcounted; cloned with `CLONE_FILES` sharing or copied otherwise), rights-mask model (`READ/WRITE/TRANSFER/DUPLICATE/WAIT/MANAGE`), and generic `kobj` refcounted object lifetime
 - Capability file bridge: Linux fd/file objects can be wrapped as `KOBJ_TYPE_FILE` handles and converted back to fd without changing Linux ABI syscalls; `fd_alloc_rights()` preserves rights attenuation when materializing fd from a handle
 - Internal bridge helpers (`handle_bridge`) centralize fd-rights <-> handle-rights mapping plus fd<->`KOBJ_TYPE_FILE` conversion, so non-syscall kernel paths can reuse one capability conversion entrypoint
+- `handle_bridge` also provides cross-process fd duplication helper used by `pidfd_getfd`, so fd-rights-preserving duplication no longer reimplements per-call rights/copy glue
 - FD capability rights: fdtable entries carry independent rights mask (`FD_RIGHT_READ/WRITE/IOCTL/DUP`); `read*`/`write*`/`copy_file_range`/`ioctl` enforce required rights, and `dup*`/`fcntl(F_DUPFD*)` require `FD_RIGHT_DUP`
 - Socket message data paths now use fd-right checks internally: `send*` requires `FD_RIGHT_WRITE`, `recv*` requires `FD_RIGHT_READ`
 - FD rights coverage also gates mutating descriptor/file operations: `ftruncate`/`fchmod`/`fchown` require `FD_RIGHT_WRITE`, `fcntl(F_SETFL)` requires `FD_RIGHT_IOCTL`, and file-backed `mmap` enforces `FD_RIGHT_READ` (+ `FD_RIGHT_WRITE` for `MAP_SHARED|PROT_WRITE`)
 - Channel IPC (Kairos extension): message-oriented pair endpoints with bounded queue (`KCHANNEL_MAX_QUEUE`), blocking/nonblocking send/recv, and handle transfer (`KRIGHT_TRANSFER`) with move semantics
 - Port wait queue (Kairos extension): channel endpoint can bind to a port key; events currently include `READABLE` and `PEER_CLOSED`, consumed through blocking/nonblocking `port_wait` with optional timeout
+- Channel/port internal sleep+wake paths now share `poll_wait_source` for waiter blocking and wakeup; port fd poll fanout to multiple vnodes remains unchanged
+- Port fd bridge: `kairos_fd_from_handle` supports `KOBJ_TYPE_PORT`; resulting fd is pollable (`POLLIN`) and `read()` consumes one `kairos_port_packet_user`
 - Kairos extension syscalls (custom Linux ABI numbers): `kairos_handle_close`(4600), `kairos_handle_duplicate`(4601), `kairos_channel_create/send/recv`(4602-4604), `kairos_port_create/bind/wait`(4605-4607), `kairos_cap_rights_get`(4608), `kairos_cap_rights_limit`(4609), `kairos_handle_from_fd`(4610), `kairos_fd_from_handle`(4611)
 
 Related references:

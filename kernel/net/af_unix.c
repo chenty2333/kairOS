@@ -19,7 +19,6 @@
 #include <kairos/string.h>
 #include <kairos/sync.h>
 #include <kairos/vfs.h>
-#include <kairos/wait.h>
 
 #define UNIX_BUF_SIZE 16384
 #define UNIX_DGRAM_MAX 65536
@@ -35,8 +34,8 @@ struct unix_buf {
     size_t head;
     size_t tail;
     size_t count;
-    struct wait_queue rwait;
-    struct wait_queue wwait;
+    struct poll_wait_source rd_src;
+    struct poll_wait_source wr_src;
 };
 
 /* Datagram message in receive queue */
@@ -83,12 +82,12 @@ struct unix_sock {
     struct list_head accept_queue;
     int backlog;
     int pending_count;
-    struct wait_queue accept_wait;
+    struct poll_wait_source accept_src;
 
     /* DGRAM receive queue */
     struct list_head dgram_queue;
     int dgram_count;
-    struct wait_queue dgram_wait;
+    struct poll_wait_source dgram_src;
     struct list_head stream_ctrl_queue;
     int stream_ctrl_count;
     uint64_t stream_rx_write_off;
@@ -196,8 +195,8 @@ static int unix_buf_init(struct unix_buf *b) {
     b->head = 0;
     b->tail = 0;
     b->count = 0;
-    wait_queue_init(&b->rwait);
-    wait_queue_init(&b->wwait);
+    poll_wait_source_init(&b->rd_src, NULL);
+    poll_wait_source_init(&b->wr_src, NULL);
     return 0;
 }
 
@@ -221,16 +220,16 @@ static struct unix_sock *unix_sock_alloc(struct socket *sock) {
     us->buf.head = 0;
     us->buf.tail = 0;
     us->buf.count = 0;
-    wait_queue_init(&us->buf.rwait);
-    wait_queue_init(&us->buf.wwait);
+    poll_wait_source_init(&us->buf.rd_src, NULL);
+    poll_wait_source_init(&us->buf.wr_src, NULL);
     us->shutdown_flags = 0;
     INIT_LIST_HEAD(&us->accept_queue);
     us->backlog = 0;
     us->pending_count = 0;
-    wait_queue_init(&us->accept_wait);
+    poll_wait_source_init(&us->accept_src, NULL);
     INIT_LIST_HEAD(&us->dgram_queue);
     us->dgram_count = 0;
-    wait_queue_init(&us->dgram_wait);
+    poll_wait_source_init(&us->dgram_src, NULL);
     INIT_LIST_HEAD(&us->stream_ctrl_queue);
     us->stream_ctrl_count = 0;
     us->stream_rx_write_off = 0;
@@ -266,8 +265,8 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
                 mutex_unlock(lock);
                 return total ? (ssize_t)total : -EAGAIN;
             }
-            int rc = proc_sleep_on_mutex(&b->rwait, &b->rwait,
-                                         lock, true);
+            int rc =
+                poll_wait_source_block(&b->rd_src, 0, &b->rd_src, lock);
             if (rc == -EINTR) {
                 mutex_unlock(lock);
                 return total ? (ssize_t)total : -EINTR;
@@ -305,7 +304,7 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
                 total += n2;
             }
 
-            wait_queue_wakeup_one(&b->wwait);
+            poll_wait_source_wake_one(&b->wr_src, 0);
         }
         break; /* STREAM: return as soon as we have data */
     }
@@ -332,8 +331,8 @@ static ssize_t unix_buf_write_locked(struct unix_buf *b, struct mutex *lock,
             if (nonblock) {
                 return total ? (ssize_t)total : -EAGAIN;
             }
-            int rc = proc_sleep_on_mutex(&b->wwait, &b->wwait,
-                                         lock, true);
+            int rc =
+                poll_wait_source_block(&b->wr_src, 0, &b->wr_src, lock);
             if (rc == -EINTR) {
                 return total ? (ssize_t)total : -EINTR;
             }
@@ -357,7 +356,7 @@ static ssize_t unix_buf_write_locked(struct unix_buf *b, struct mutex *lock,
             total += n2;
         }
 
-        wait_queue_wakeup_one(&b->rwait);
+        poll_wait_source_wake_one(&b->rd_src, 0);
     }
     return (ssize_t)total;
 }
@@ -592,8 +591,8 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
             return -EALREADY;
         }
         while (!us->peer && us->connect_err == 0 && !us->closing) {
-            int rc = proc_sleep_on_mutex(&us->buf.rwait, &us->buf.rwait,
-                                         &us->lock, true);
+            int rc = poll_wait_source_block(&us->buf.rd_src, 0, &us->buf.rd_src,
+                                            &us->lock);
             if (rc == -EINTR) {
                 mutex_unlock(&us->lock);
                 return -EINTR;
@@ -658,7 +657,7 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
     }
     list_add_tail(&pend->node, &listener->accept_queue);
     listener->pending_count++;
-    wait_queue_wakeup_one(&listener->accept_wait);
+    poll_wait_source_wake_one(&listener->accept_src, 0);
     if (listener->sock)
         poll_wait_wake(&listener->sock->pollers, POLLIN);
     mutex_unlock(&listener->lock);
@@ -680,8 +679,8 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
             ret = us->connect_err;
             break;
         }
-        int rc = proc_sleep_on_mutex(&us->buf.rwait, &us->buf.rwait,
-                                     &us->lock, true);
+        int rc =
+            poll_wait_source_block(&us->buf.rd_src, 0, &us->buf.rd_src, &us->lock);
         if (rc == -EINTR) {
             mutex_unlock(&us->lock);
             unix_sock_put(listener);
@@ -713,8 +712,8 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                 mutex_unlock(&us->lock);
                 return -EAGAIN;
             }
-            int rc = proc_sleep_on_mutex(&us->accept_wait, &us->accept_wait,
-                                         &us->lock, true);
+            int rc = poll_wait_source_block(&us->accept_src, 0, &us->accept_src,
+                                            &us->lock);
             if (rc == -EINTR) {
                 mutex_unlock(&us->lock);
                 return -EINTR;
@@ -750,7 +749,7 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                 if (client->sock)
                     client->sock->state = SS_UNCONNECTED;
             }
-            wait_queue_wakeup_all(&client->buf.rwait);
+            poll_wait_source_wake_all(&client->buf.rd_src, 0);
             if (client->sock)
                 poll_wait_wake(&client->sock->pollers, POLLOUT | POLLERR);
             mutex_unlock(&client->lock);
@@ -769,7 +768,7 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                     if (client->sock)
                         client->sock->state = SS_UNCONNECTED;
                 }
-                wait_queue_wakeup_all(&client->buf.rwait);
+                poll_wait_source_wake_all(&client->buf.rd_src, 0);
                 if (client->sock)
                     poll_wait_wake(&client->sock->pollers, POLLOUT | POLLERR);
                 mutex_unlock(&client->lock);
@@ -787,7 +786,7 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                 if (client->sock)
                     client->sock->state = SS_UNCONNECTED;
             }
-            wait_queue_wakeup_all(&client->buf.rwait);
+            poll_wait_source_wake_all(&client->buf.rd_src, 0);
             if (client->sock)
                 poll_wait_wake(&client->sock->pollers, POLLOUT | POLLERR);
             mutex_unlock(&client->lock);
@@ -810,7 +809,7 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
         unix_sock_get(client);
         svr_us->peer = client;
         svr->state = SS_CONNECTED;
-        wait_queue_wakeup_all(&client->buf.rwait);
+        poll_wait_source_wake_all(&client->buf.rd_src, 0);
         if (client->sock)
             poll_wait_wake(&client->sock->pollers, POLLOUT | POLLIN);
         mutex_unlock(&client->lock);
@@ -1046,7 +1045,7 @@ static ssize_t unix_dgram_sendmsg(struct socket *sock, const void *buf,
     }
     list_add_tail(&msg->node, &target->dgram_queue);
     target->dgram_count++;
-    wait_queue_wakeup_one(&target->dgram_wait);
+    poll_wait_source_wake_one(&target->dgram_src, 0);
     if (target->sock)
         poll_wait_wake(&target->sock->pollers, POLLIN);
     mutex_unlock(&target->lock);
@@ -1082,8 +1081,8 @@ static ssize_t unix_dgram_recvmsg(struct socket *sock, void *buf,
             mutex_unlock(&us->lock);
             return -EAGAIN;
         }
-        int rc = proc_sleep_on_mutex(&us->dgram_wait, &us->dgram_wait,
-                                     &us->lock, true);
+        int rc =
+            poll_wait_source_block(&us->dgram_src, 0, &us->dgram_src, &us->lock);
         if (rc == -EINTR) {
             mutex_unlock(&us->lock);
             return -EINTR;
@@ -1215,14 +1214,14 @@ static int unix_shutdown(struct socket *sock, int how) {
     peer = us->peer;
     if (peer)
         unix_sock_get(peer);
-    wait_queue_wakeup_all(&us->buf.rwait);
-    wait_queue_wakeup_all(&us->buf.wwait);
+    poll_wait_source_wake_all(&us->buf.rd_src, 0);
+    poll_wait_source_wake_all(&us->buf.wr_src, 0);
     mutex_unlock(&us->lock);
 
     if (peer) {
         mutex_lock(&peer->lock);
-        wait_queue_wakeup_all(&peer->buf.rwait);
-        wait_queue_wakeup_all(&peer->buf.wwait);
+        poll_wait_source_wake_all(&peer->buf.rd_src, 0);
+        poll_wait_source_wake_all(&peer->buf.wr_src, 0);
         if (peer->sock)
             poll_wait_wake(&peer->sock->pollers, POLLHUP);
         mutex_unlock(&peer->lock);
@@ -1250,9 +1249,9 @@ static int unix_close(struct socket *sock) {
     us->closing = true;
     peer = us->peer;
     us->peer = NULL;
-    wait_queue_wakeup_all(&us->buf.rwait);
-    wait_queue_wakeup_all(&us->buf.wwait);
-    wait_queue_wakeup_all(&us->dgram_wait);
+    poll_wait_source_wake_all(&us->buf.rd_src, 0);
+    poll_wait_source_wake_all(&us->buf.wr_src, 0);
+    poll_wait_source_wake_all(&us->dgram_src, 0);
     mutex_unlock(&us->lock);
 
     if (us->bound) {
@@ -1270,8 +1269,8 @@ static int unix_close(struct socket *sock) {
             peer->peer = NULL;
             drop_peer_ref_on_us = true;
         }
-        wait_queue_wakeup_all(&peer->buf.rwait);
-        wait_queue_wakeup_all(&peer->buf.wwait);
+        poll_wait_source_wake_all(&peer->buf.rd_src, 0);
+        poll_wait_source_wake_all(&peer->buf.wr_src, 0);
         if (peer->sock)
             poll_wait_wake(&peer->sock->pollers, POLLHUP | POLLIN);
         mutex_unlock(&peer->lock);
@@ -1294,7 +1293,7 @@ static int unix_close(struct socket *sock) {
                 if (pend->client->sock)
                     pend->client->sock->state = SS_UNCONNECTED;
             }
-            wait_queue_wakeup_all(&pend->client->buf.rwait);
+            poll_wait_source_wake_all(&pend->client->buf.rd_src, 0);
             if (pend->client->sock)
                 poll_wait_wake(&pend->client->sock->pollers,
                                POLLOUT | POLLERR);

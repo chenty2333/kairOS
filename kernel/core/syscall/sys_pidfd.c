@@ -21,9 +21,8 @@
 struct pidfd_ctx {
     uint32_t magic;
     spinlock_t lock;
-    struct wait_queue waitq;
+    struct poll_wait_source wait_src;
     struct list_head node;
-    struct vnode *vnode;
     pid_t pid;
     uint64_t start_time;
     bool exited;
@@ -66,7 +65,7 @@ static void pidfd_on_process_exit(struct process *p) {
         spin_lock_irqsave(&ctx->lock, &ctx_irq);
         if (!ctx->closed && !ctx->exited) {
             ctx->exited = true;
-            poll_ready_wake_all(&ctx->waitq, ctx->vnode, POLLIN | POLLHUP);
+            poll_wait_source_wake_all(&ctx->wait_src, POLLIN | POLLHUP);
         }
         spin_unlock_irqrestore(&ctx->lock, ctx_irq);
     }
@@ -140,9 +139,8 @@ static int pidfd_create_file(pid_t pid, uint32_t open_flags, struct file **out) 
 
     ctx->magic = PIDFD_MAGIC;
     spin_init(&ctx->lock);
-    wait_queue_init(&ctx->waitq);
+    poll_wait_source_init(&ctx->wait_src, vn);
     INIT_LIST_HEAD(&ctx->node);
-    ctx->vnode = vn;
     ctx->pid = pid;
     ctx->start_time = target->start_time;
     ctx->exited = (target->state == PROC_ZOMBIE || target->state == PROC_REAPING);
@@ -294,7 +292,7 @@ int64_t sys_pidfd_send_signal(uint64_t pidfd, uint64_t sig, uint64_t info,
             spin_lock_irqsave(&ctx->lock, &irq);
             if (alive == -ESRCH && !ctx->closed && !ctx->exited) {
                 ctx->exited = true;
-                poll_ready_wake_all(&ctx->waitq, ctx->vnode, POLLIN | POLLHUP);
+                poll_wait_source_wake_all(&ctx->wait_src, POLLIN | POLLHUP);
             }
             spin_unlock_irqrestore(&ctx->lock, irq);
             ret = alive;

@@ -65,6 +65,7 @@ void signal_init_process(struct process *p) {
 /* Deliver signal to a known process — set pending bit and wake if sleeping. */
 static void signal_send_to(struct process *p, int sig) {
     __atomic_fetch_or(&p->sig_pending, (1ULL << (sig - 1)), __ATOMIC_RELEASE);
+    signalfd_notify_pending_signal(p, sig);
     proc_lock(p);
     if (p->state == PROC_SLEEPING) {
         proc_unlock(p);
@@ -107,8 +108,14 @@ int signal_send_pgrp(pid_t pgrp, int sig) {
 
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         struct process *p = &proc_table[i];
-        if (p->state == PROC_SLEEPING && p->pgid == pgrp &&
-            (__atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & mask))
+        if (p->state == PROC_UNUSED || p->state == PROC_EMBRYO)
+            continue;
+        if (p->pgid != pgrp)
+            continue;
+        if (!(__atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & mask))
+            continue;
+        signalfd_notify_pending_signal(p, sig);
+        if (p->state == PROC_SLEEPING)
             proc_wakeup(p);
     }
     return 0;

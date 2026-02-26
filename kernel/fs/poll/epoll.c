@@ -29,7 +29,7 @@ struct epoll_item {
     bool oneshot_armed;
     struct list_head list;
     struct list_head ready_node;
-    struct wait_queue detach_wait;
+    struct poll_wait_source detach_src;
 };
 
 struct epoll_instance {
@@ -90,7 +90,7 @@ static void epoll_item_put(struct epoll_item *item) {
     uint32_t old = atomic_fetch_sub(&item->refcount, 1);
     if (old == 2) {
         /* Last external ref dropped — wake detach waiter */
-        wait_queue_wakeup_all(&item->detach_wait);
+        poll_wait_source_wake_all(&item->detach_src, 0);
     }
     if (old == 1) {
         file_put(item->file);
@@ -154,7 +154,8 @@ static void epoll_item_detach(struct epoll_item *item) {
     }
     vfs_poll_unwatch(&item->watch);
     while (epoll_item_refs(item) > 1) {
-        int rc = poll_block_current_ex(&item->detach_wait, 0, item, NULL, false);
+        int rc =
+            poll_block_current_ex(&item->detach_src.wq, 0, item, NULL, false);
         if (rc < 0)
             break;
     }
@@ -295,7 +296,7 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
         item->watch.data = item;
         INIT_LIST_HEAD(&item->list);
         INIT_LIST_HEAD(&item->ready_node);
-        wait_queue_init(&item->detach_wait);
+        poll_wait_source_init(&item->detach_src, NULL);
         file_get(item->file);
         epoll_item_get(item);
         list_add_tail(&item->list, &ep->items);

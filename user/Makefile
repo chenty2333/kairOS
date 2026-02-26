@@ -67,25 +67,36 @@ else
   Q :=
 endif
 
+SYSROOT_CRT_DEPS := $(wildcard \
+	$(SYSROOT)/lib/crt1.o \
+	$(SYSROOT)/lib/crti.o \
+	$(SYSROOT)/lib/crtn.o \
+	$(SYSROOT)/lib/rcrt1.o \
+	$(SYSROOT)/lib/Scrt1.o)
+SYSROOT_LINK_DEPS := $(SYSROOT)/lib/libc.a $(SYSROOT_CRT_DEPS)
+ifneq ($(RTLIB_BUILTINS),)
+SYSROOT_LINK_DEPS += $(RTLIB_BUILTINS)
+endif
+
 .PHONY: all clean initramfs errno-smoke
 
 all: $(INIT) $(DOOM)
 
-$(INIT): init/main.c
+$(INIT): init/main.c $(SYSROOT_LINK_DEPS)
 	@mkdir -p $(OUT_DIR)
 	@echo "  CC      user/init"
 	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 initramfs: $(INITRAMFS)
 
-$(INITRAMFS): initramfs/init.c
+$(INITRAMFS): initramfs/init.c $(SYSROOT_LINK_DEPS)
 	@mkdir -p $(dir $@)
 	@echo "  CC      user/initramfs/init"
 	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 errno-smoke: $(ERRNO_SMOKE)
 
-$(ERRNO_SMOKE): errno_smoke.c
+$(ERRNO_SMOKE): errno_smoke.c $(SYSROOT_LINK_DEPS)
 	@mkdir -p $(OUT_DIR)
 	@echo "  CC      user/errno_smoke"
 	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
