@@ -49,6 +49,37 @@ struct poll_sleep {
     bool active;
 };
 
+enum poll_wait_stat {
+    POLL_WAIT_STAT_EPOLL_WAIT_CALLS = 0,
+    POLL_WAIT_STAT_EPOLL_READY_RETURNS,
+    POLL_WAIT_STAT_EPOLL_READY_EVENTS,
+    POLL_WAIT_STAT_EPOLL_BLOCKS,
+    POLL_WAIT_STAT_EPOLL_WAKEUPS,
+    POLL_WAIT_STAT_EPOLL_TIMEOUTS,
+    POLL_WAIT_STAT_EPOLL_INTERRUPTS,
+    POLL_WAIT_STAT_EPOLL_RESCANS,
+    POLL_WAIT_STAT_FDEVENT_EVENTFD_R_BLOCKS,
+    POLL_WAIT_STAT_FDEVENT_EVENTFD_W_BLOCKS,
+    POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES,
+    POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES,
+    POLL_WAIT_STAT_FDEVENT_TIMERFD_R_BLOCKS,
+    POLL_WAIT_STAT_FDEVENT_TIMERFD_RD_WAKES,
+    POLL_WAIT_STAT_FDEVENT_SIGNALFD_R_BLOCKS,
+    POLL_WAIT_STAT_FDEVENT_SIGNALFD_RD_WAKES,
+    POLL_WAIT_STAT_FDEVENT_INOTIFY_R_BLOCKS,
+    POLL_WAIT_STAT_FDEVENT_INOTIFY_RD_WAKES,
+    POLL_WAIT_STAT_COUNT,
+};
+
+void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta);
+static inline void poll_wait_stat_inc(enum poll_wait_stat stat) {
+    poll_wait_stat_add(stat, 1);
+}
+uint64_t poll_wait_stat_read(enum poll_wait_stat stat);
+const char *poll_wait_stat_name(enum poll_wait_stat stat);
+void poll_wait_stats_snapshot(uint64_t out[POLL_WAIT_STAT_COUNT]);
+void poll_wait_stats_reset(void);
+
 int poll_timeout_to_deadline_ms(int timeout_ms, uint64_t *deadline_out);
 bool poll_deadline_expired(uint64_t deadline);
 int poll_block_current_ex(struct wait_queue *wq, uint64_t deadline,

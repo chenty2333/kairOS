@@ -5,12 +5,14 @@
 #include <kairos/epoll_internal.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/handle_bridge.h>
 #include <kairos/mm.h>
 #include <kairos/process.h>
 #include <kairos/pollwait.h>
 #include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/sync.h>
+#include <kairos/tracepoint.h>
 #include <kairos/vfs.h>
 
 struct epoll_item {
@@ -41,6 +43,13 @@ struct epoll_instance {
 };
 
 #define EPOLL_EVENT_MASK (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP)
+#define EPOLL_WAIT_TP_CALL 0x0001U
+#define EPOLL_WAIT_TP_READY 0x0002U
+#define EPOLL_WAIT_TP_BLOCK 0x0004U
+#define EPOLL_WAIT_TP_WAKE 0x0008U
+#define EPOLL_WAIT_TP_TIMEOUT 0x0010U
+#define EPOLL_WAIT_TP_INTR 0x0020U
+#define EPOLL_WAIT_TP_RESCAN 0x0040U
 
 static inline uint32_t epoll_event_watch_mask(uint32_t events) {
     return events & EPOLL_EVENT_MASK;
@@ -57,7 +66,9 @@ static inline uint32_t epoll_item_watch_events(const struct epoll_item *item) {
 }
 
 static struct epoll_instance *epoll_from_fd(int epfd, struct file **filep) {
-    struct file *file = fd_get(proc_current(), epfd);
+    struct file *file = NULL;
+    if (handle_bridge_pin_fd(proc_current(), epfd, 0, &file, NULL) < 0)
+        return NULL;
     if (!file || !file->vnode || file->vnode->type != VNODE_EPOLL) {
         if (file) file_put(file);
         return NULL;
@@ -245,8 +256,8 @@ int epoll_ctl_fd(int epfd, int op, int fd, const struct epoll_event *ev) {
     if (!ep)
         return -EBADF;
 
-    struct file *target = fd_get(proc_current(), fd);
-    if (!target) {
+    struct file *target = NULL;
+    if (handle_bridge_pin_fd(proc_current(), fd, 0, &target, NULL) < 0) {
         file_put(ep_file);
         return -EBADF;
     }
@@ -544,22 +555,50 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         goto out;
     }
 
+    poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_WAIT_CALLS);
+    tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_CALL, (uint64_t)maxevents,
+                    (uint64_t)(int64_t)timeout_ms);
+
+    bool blocked_once = false;
     while (1) {
         int ready = epoll_collect_ready(ep, events, maxevents);
         if (ready != 0 || timeout_ms == 0) {
+            if (ready > 0) {
+                poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_READY_RETURNS);
+                poll_wait_stat_add(POLL_WAIT_STAT_EPOLL_READY_EVENTS,
+                                   (uint64_t)ready);
+                uint32_t flags = EPOLL_WAIT_TP_READY;
+                if (blocked_once)
+                    flags |= EPOLL_WAIT_TP_WAKE;
+                tracepoint_emit(TRACE_WAIT_EPOLL, flags, (uint64_t)ready,
+                                (uint64_t)maxevents);
+            } else if (timeout_ms == 0) {
+                poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_TIMEOUTS);
+                tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_TIMEOUT, 0, 0);
+            }
             ret = ready;
             goto out;
         }
 
         /* Rescan once before blocking to cover non-event-driven vnodes. */
+        poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_RESCANS);
+        tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_RESCAN, 0, 0);
         epoll_rescan(ep);
         ready = epoll_collect_ready(ep, events, maxevents);
         if (ready) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_READY_RETURNS);
+            poll_wait_stat_add(POLL_WAIT_STAT_EPOLL_READY_EVENTS,
+                               (uint64_t)ready);
+            tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_READY,
+                            (uint64_t)ready, (uint64_t)maxevents);
             ret = ready;
             goto out;
         }
 
         if (poll_deadline_expired(deadline)) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_TIMEOUTS);
+            tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_TIMEOUT, deadline,
+                            0);
             ret = 0;
             goto out;
         }
@@ -578,23 +617,39 @@ int epoll_wait_events(int epfd, struct epoll_event *events, size_t maxevents,
         }
 
         /* One more rescan after registering the waiter to close the race. */
+        poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_RESCANS);
+        tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_RESCAN, 1, 0);
         epoll_rescan(ep);
         ready = epoll_collect_ready(ep, events, maxevents);
         if (ready) {
             poll_wait_remove(&waiter);
+            poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_READY_RETURNS);
+            poll_wait_stat_add(POLL_WAIT_STAT_EPOLL_READY_EVENTS,
+                               (uint64_t)ready);
+            tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_READY,
+                            (uint64_t)ready, (uint64_t)maxevents);
             ret = ready;
             goto out;
         }
 
+        poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_BLOCKS);
+        tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_BLOCK, deadline, 0);
         int sleep_rc = poll_block_current(deadline, curr);
+        blocked_once = true;
         poll_wait_remove(&waiter);
         if (sleep_rc == -EINTR) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_INTERRUPTS);
+            tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_INTR, 0, 0);
             ret = -EINTR;
             goto out;
         }
         if (sleep_rc < 0 && sleep_rc != -ETIMEDOUT) {
             ret = sleep_rc;
             goto out;
+        }
+        if (sleep_rc == 0) {
+            poll_wait_stat_inc(POLL_WAIT_STAT_EPOLL_WAKEUPS);
+            tracepoint_emit(TRACE_WAIT_EPOLL, EPOLL_WAIT_TP_WAKE, 0, 0);
         }
     }
 out:

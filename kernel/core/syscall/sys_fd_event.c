@@ -11,6 +11,7 @@
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/time.h>
+#include <kairos/tracepoint.h>
 #include <kairos/uaccess.h>
 #include <kairos/vfs.h>
 #include <kairos/wait.h>
@@ -196,6 +197,51 @@ static struct file_ops inotify_file_ops = {
     .poll = inotify_poll,
 };
 
+enum fd_event_wait_kind {
+    FD_EVENT_WAIT_EVENTFD_READ = 1,
+    FD_EVENT_WAIT_EVENTFD_WRITE = 2,
+    FD_EVENT_WAIT_TIMERFD_READ = 3,
+    FD_EVENT_WAIT_SIGNALFD_READ = 4,
+    FD_EVENT_WAIT_INOTIFY_READ = 5,
+};
+
+#define FD_EVENT_TRACE_BLOCK 0x0001U
+#define FD_EVENT_TRACE_WAKE 0x0002U
+#define FD_EVENT_TRACE_KIND_SHIFT 8
+
+static inline uint32_t
+fd_event_trace_flags(uint32_t action, enum fd_event_wait_kind kind) {
+    return action | ((uint32_t)kind << FD_EVENT_TRACE_KIND_SHIFT);
+}
+
+static inline void fd_event_note_block(enum poll_wait_stat stat,
+                                       enum fd_event_wait_kind kind,
+                                       const void *ctx) {
+    poll_wait_stat_inc(stat);
+    tracepoint_emit(TRACE_WAIT_FD_EVENT,
+                    fd_event_trace_flags(FD_EVENT_TRACE_BLOCK, kind), 0,
+                    (uint64_t)(uintptr_t)ctx);
+}
+
+static inline void fd_event_note_wake(enum poll_wait_stat stat,
+                                      enum fd_event_wait_kind kind,
+                                      uint32_t events, const void *ctx) {
+    poll_wait_stat_inc(stat);
+    tracepoint_emit(TRACE_WAIT_FD_EVENT,
+                    fd_event_trace_flags(FD_EVENT_TRACE_WAKE, kind),
+                    (uint64_t)events, (uint64_t)(uintptr_t)ctx);
+}
+
+static inline void fd_event_wake_all(struct poll_wait_source *src,
+                                     uint32_t events, enum poll_wait_stat stat,
+                                     enum fd_event_wait_kind kind,
+                                     const void *ctx) {
+    if (!src)
+        return;
+    fd_event_note_wake(stat, kind, events, ctx);
+    poll_wait_source_wake_all(src, events);
+}
+
 static uint64_t u64_add_sat(uint64_t lhs, uint64_t rhs) {
     if (UINT64_MAX - lhs < rhs)
         return UINT64_MAX;
@@ -233,8 +279,12 @@ static int eventfd_close(struct vnode *vn) {
         spin_lock_irqsave(&ctx->lock, &irq);
         ctx->closed = true;
         spin_unlock_irqrestore(&ctx->lock, irq);
-        poll_wait_source_wake_all(&ctx->rd_src, POLLIN | POLLOUT | POLLHUP);
-        poll_wait_source_wake_all(&ctx->wr_src, 0);
+        fd_event_wake_all(&ctx->rd_src, POLLIN | POLLOUT | POLLHUP,
+                          POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES,
+                          FD_EVENT_WAIT_EVENTFD_READ, ctx);
+        fd_event_wake_all(&ctx->wr_src, 0,
+                          POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES,
+                          FD_EVENT_WAIT_EVENTFD_WRITE, ctx);
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -284,7 +334,9 @@ static ssize_t eventfd_fread(struct file *file, void *buf, size_t len) {
             }
             spin_unlock_irqrestore(&ctx->lock, irq);
             memcpy(buf, &val, sizeof(val));
-            poll_wait_source_wake_all(&ctx->wr_src, POLLOUT);
+            fd_event_wake_all(&ctx->wr_src, POLLOUT,
+                              POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES,
+                              FD_EVENT_WAIT_EVENTFD_WRITE, ctx);
             return (ssize_t)sizeof(uint64_t);
         }
         if (ctx->closed) {
@@ -295,6 +347,8 @@ static ssize_t eventfd_fread(struct file *file, void *buf, size_t len) {
         spin_unlock_irqrestore(&ctx->lock, irq);
         if (nonblock)
             return -EAGAIN;
+        fd_event_note_block(POLL_WAIT_STAT_FDEVENT_EVENTFD_R_BLOCKS,
+                            FD_EVENT_WAIT_EVENTFD_READ, ctx);
         int rc = poll_wait_source_block(&ctx->rd_src, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
@@ -330,7 +384,9 @@ static ssize_t eventfd_fwrite(struct file *file, const void *buf, size_t len) {
             wake_readers = (val > 0) && was_empty;
             spin_unlock_irqrestore(&ctx->lock, irq);
             if (wake_readers) {
-                poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+                fd_event_wake_all(&ctx->rd_src, POLLIN,
+                                  POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES,
+                                  FD_EVENT_WAIT_EVENTFD_READ, ctx);
             }
             return (ssize_t)sizeof(uint64_t);
         }
@@ -338,6 +394,8 @@ static ssize_t eventfd_fwrite(struct file *file, const void *buf, size_t len) {
         spin_unlock_irqrestore(&ctx->lock, irq);
         if (nonblock)
             return -EAGAIN;
+        fd_event_note_block(POLL_WAIT_STAT_FDEVENT_EVENTFD_W_BLOCKS,
+                            FD_EVENT_WAIT_EVENTFD_WRITE, ctx);
         int rc = poll_wait_source_block(&ctx->wr_src, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
@@ -429,7 +487,9 @@ static int signalfd_close(struct vnode *vn) {
         spin_lock_irqsave(&ctx->lock, &irq);
         ctx->closed = true;
         spin_unlock_irqrestore(&ctx->lock, irq);
-        poll_wait_source_wake_all(&ctx->rd_src, POLLIN | POLLHUP);
+        fd_event_wake_all(&ctx->rd_src, POLLIN | POLLHUP,
+                          POLL_WAIT_STAT_FDEVENT_SIGNALFD_RD_WAKES,
+                          FD_EVENT_WAIT_SIGNALFD_READ, ctx);
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -512,6 +572,8 @@ static ssize_t signalfd_fread(struct file *file, void *buf, size_t len) {
 
         if (file->flags & O_NONBLOCK)
             return -EAGAIN;
+        fd_event_note_block(POLL_WAIT_STAT_FDEVENT_SIGNALFD_R_BLOCKS,
+                            FD_EVENT_WAIT_SIGNALFD_READ, ctx);
         int rc = poll_wait_source_block(&ctx->rd_src, 0, p, &file->lock);
         if (rc < 0)
             return rc;
@@ -577,7 +639,9 @@ void signalfd_notify_pending_signal(struct process *p, int sig) {
             wake = true;
         spin_unlock_irqrestore(&ctx->lock, ctx_irq);
         if (wake)
-            poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+            fd_event_wake_all(&ctx->rd_src, POLLIN,
+                              POLL_WAIT_STAT_FDEVENT_SIGNALFD_RD_WAKES,
+                              FD_EVENT_WAIT_SIGNALFD_READ, ctx);
     }
     spin_unlock_irqrestore(&signalfd_instances_lock, irq);
 }
@@ -663,7 +727,9 @@ static void inotify_queue_event_locked(struct inotify_ctx *ctx, int wd,
         list_add_tail(&overflow->node, &ctx->events);
         ctx->queued_bytes += sizeof(struct linux_inotify_event);
         ctx->overflow_pending = true;
-        poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+        fd_event_wake_all(&ctx->rd_src, POLLIN,
+                          POLL_WAIT_STAT_FDEVENT_INOTIFY_RD_WAKES,
+                          FD_EVENT_WAIT_INOTIFY_READ, ctx);
         return;
     }
 
@@ -683,7 +749,9 @@ static void inotify_queue_event_locked(struct inotify_ctx *ctx, int wd,
 
     list_add_tail(&ev->node, &ctx->events);
     ctx->queued_bytes += need;
-    poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+    fd_event_wake_all(&ctx->rd_src, POLLIN,
+                      POLL_WAIT_STAT_FDEVENT_INOTIFY_RD_WAKES,
+                      FD_EVENT_WAIT_INOTIFY_READ, ctx);
 }
 
 static void inotify_watch_destroy(struct inotify_watch *watch) {
@@ -739,7 +807,9 @@ static int inotify_close(struct vnode *vn) {
         inotify_drop_all_locked(ctx);
         mutex_unlock(&ctx->lock);
 
-        poll_wait_source_wake_all(&ctx->rd_src, POLLIN | POLLHUP);
+        fd_event_wake_all(&ctx->rd_src, POLLIN | POLLHUP,
+                          POLL_WAIT_STAT_FDEVENT_INOTIFY_RD_WAKES,
+                          FD_EVENT_WAIT_INOTIFY_READ, ctx);
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -821,6 +891,8 @@ static ssize_t inotify_fread(struct file *file, void *buf, size_t len) {
         if (nonblock)
             return -EAGAIN;
 
+        fd_event_note_block(POLL_WAIT_STAT_FDEVENT_INOTIFY_R_BLOCKS,
+                            FD_EVENT_WAIT_INOTIFY_READ, ctx);
         int rc = poll_wait_source_block(&ctx->rd_src, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
@@ -1021,7 +1093,9 @@ static int timerfd_close(struct vnode *vn) {
         spin_lock_irqsave(&ctx->lock, &irq);
         ctx->closed = true;
         spin_unlock_irqrestore(&ctx->lock, irq);
-        poll_wait_source_wake_all(&ctx->rd_src, POLLIN | POLLHUP);
+        fd_event_wake_all(&ctx->rd_src, POLLIN | POLLHUP,
+                          POLL_WAIT_STAT_FDEVENT_TIMERFD_RD_WAKES,
+                          FD_EVENT_WAIT_TIMERFD_READ, ctx);
 
         ctx->magic = 0;
         kfree(ctx);
@@ -1083,6 +1157,8 @@ static ssize_t timerfd_fread(struct file *file, void *buf, size_t len) {
         spin_unlock_irqrestore(&ctx->lock, irq);
         if (nonblock)
             return -EAGAIN;
+        fd_event_note_block(POLL_WAIT_STAT_FDEVENT_TIMERFD_R_BLOCKS,
+                            FD_EVENT_WAIT_TIMERFD_READ, ctx);
         int rc = poll_wait_source_block(&ctx->rd_src, 0, ctx, &file->lock);
         if (rc < 0)
             return rc;
@@ -1153,7 +1229,9 @@ void timerfd_tick(uint64_t now_ticks) {
         wake = timerfd_refresh_locked(ctx, mono_ns, realtime_ns);
         spin_unlock(&ctx->lock);
         if (wake) {
-            poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+            fd_event_wake_all(&ctx->rd_src, POLLIN,
+                              POLL_WAIT_STAT_FDEVENT_TIMERFD_RD_WAKES,
+                              FD_EVENT_WAIT_TIMERFD_READ, ctx);
         }
     }
     spin_unlock_irqrestore(&timerfd_list_lock, irq);
@@ -1297,7 +1375,9 @@ int64_t sys_timerfd_settime(uint64_t fd, uint64_t flags, uint64_t new_ptr,
         return -EFAULT;
     }
     if (wake) {
-        poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+        fd_event_wake_all(&ctx->rd_src, POLLIN,
+                          POLL_WAIT_STAT_FDEVENT_TIMERFD_RD_WAKES,
+                          FD_EVENT_WAIT_TIMERFD_READ, ctx);
     }
     file_put(file);
     return 0;
@@ -1392,7 +1472,9 @@ int64_t sys_signalfd4(uint64_t fd, uint64_t mask_ptr, uint64_t sigsetsize,
     spin_lock_irqsave(&ctx->lock, &irq);
     ctx->mask = mask;
     spin_unlock_irqrestore(&ctx->lock, irq);
-    poll_wait_source_wake_all(&ctx->rd_src, POLLIN);
+    fd_event_wake_all(&ctx->rd_src, POLLIN,
+                      POLL_WAIT_STAT_FDEVENT_SIGNALFD_RD_WAKES,
+                      FD_EVENT_WAIT_SIGNALFD_READ, ctx);
     file_put(file);
     return (int64_t)kfd;
 }

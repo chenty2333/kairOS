@@ -124,6 +124,8 @@ pollwait.c:
 - lwIP `sys_arch` semaphore/mailbox waits now also route through `poll_wait_source` with non-interruptible policy
 - `ppoll`/`pselect6` temporarily swap task signal mask via atomic exchange around the wait path and restore original mask on return (Linux-style per-call temporary mask window)
 - Lightweight tracepoint emit points are attached on wait block/wake helpers (per-CPU ring buffer)
+- wait-core epoll/fd-event paths now expose dedicated observability: `TRACE_WAIT_EPOLL` / `TRACE_WAIT_FD_EVENT`, plus unified wait-core counters (`poll_wait_stat_*`) for epoll wait cycles and fd-event block/wake hot paths
+- `/sys/kernel/tracepoint/wait_core_events` exports wait-core traces (including epoll/fd-event), and `/sys/kernel/tracepoint/wait_core_stats` exports wait-core counters; `reset` clears both trace rings and wait-core counters
 - tracepoint ring snapshot uses release/acquire `seq` stabilization (double-sample verify) to avoid torn entries under concurrent writers
 
 lockdep.c (when CONFIG_LOCKDEP enabled):

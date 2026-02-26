@@ -119,6 +119,8 @@ Special:
 - poll wait-core `poll_wait_wake` now uses a single-waiter direct-switch fastpath when no poll-watch callback fanout is pending
 - eventfd/timerfd/inotify/signalfd/pidfd wakeups now route through `poll_wait_source_wake_*` (built on `poll_ready_wake_all`) to keep wait_queue + poll watcher wake paths consistent
 - eventfd/timerfd/inotify/signalfd blocking waits now go through `poll_wait_source_block` (wait-core wrapper) instead of direct `proc_sleep_on*`
+- wait-core now tracks epoll/fd-event hot-path counters (`poll_wait_stat_*`) and emits dedicated tracepoint events (`TRACE_WAIT_EPOLL` / `TRACE_WAIT_FD_EVENT`) for block/wake/rescan observability
+- `/sys/kernel/tracepoint` adds `wait_core_events` (extended wait-core trace stream) and `wait_core_stats` (counter snapshot); `reset` clears both trace ring and wait-core counters
 - pipe read/write blocking and close-end waiter wakeups now also use `poll_wait_source`; pipe poll readiness fanout still uses `poll_wait_head`
 - AF_UNIX/AF_INET stream/listen/datagram wait queues now also use `poll_wait_source`; socket readiness notifications still route through socket poll heads
 - futex wakeups are now also routed via `poll_wait_source_wake_one` (per-waiter source) rather than direct process wake calls

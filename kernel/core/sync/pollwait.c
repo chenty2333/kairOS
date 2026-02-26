@@ -11,6 +11,62 @@
 
 static struct poll_wait_head poll_sleep_head;
 static bool poll_sleep_head_init_done;
+static uint64_t poll_wait_stats[POLL_WAIT_STAT_COUNT];
+
+static const char *const poll_wait_stat_names[POLL_WAIT_STAT_COUNT] = {
+    [POLL_WAIT_STAT_EPOLL_WAIT_CALLS] = "epoll_wait_calls",
+    [POLL_WAIT_STAT_EPOLL_READY_RETURNS] = "epoll_ready_returns",
+    [POLL_WAIT_STAT_EPOLL_READY_EVENTS] = "epoll_ready_events",
+    [POLL_WAIT_STAT_EPOLL_BLOCKS] = "epoll_blocks",
+    [POLL_WAIT_STAT_EPOLL_WAKEUPS] = "epoll_wakeups",
+    [POLL_WAIT_STAT_EPOLL_TIMEOUTS] = "epoll_timeouts",
+    [POLL_WAIT_STAT_EPOLL_INTERRUPTS] = "epoll_interrupts",
+    [POLL_WAIT_STAT_EPOLL_RESCANS] = "epoll_rescans",
+    [POLL_WAIT_STAT_FDEVENT_EVENTFD_R_BLOCKS] = "fdevent_eventfd_read_blocks",
+    [POLL_WAIT_STAT_FDEVENT_EVENTFD_W_BLOCKS] = "fdevent_eventfd_write_blocks",
+    [POLL_WAIT_STAT_FDEVENT_EVENTFD_RD_WAKES] = "fdevent_eventfd_read_wakes",
+    [POLL_WAIT_STAT_FDEVENT_EVENTFD_WR_WAKES] = "fdevent_eventfd_write_wakes",
+    [POLL_WAIT_STAT_FDEVENT_TIMERFD_R_BLOCKS] = "fdevent_timerfd_read_blocks",
+    [POLL_WAIT_STAT_FDEVENT_TIMERFD_RD_WAKES] = "fdevent_timerfd_read_wakes",
+    [POLL_WAIT_STAT_FDEVENT_SIGNALFD_R_BLOCKS] =
+        "fdevent_signalfd_read_blocks",
+    [POLL_WAIT_STAT_FDEVENT_SIGNALFD_RD_WAKES] = "fdevent_signalfd_read_wakes",
+    [POLL_WAIT_STAT_FDEVENT_INOTIFY_R_BLOCKS] = "fdevent_inotify_read_blocks",
+    [POLL_WAIT_STAT_FDEVENT_INOTIFY_RD_WAKES] = "fdevent_inotify_read_wakes",
+};
+
+void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta) {
+    if ((uint32_t)stat >= POLL_WAIT_STAT_COUNT || delta == 0)
+        return;
+    __atomic_fetch_add(&poll_wait_stats[stat], delta, __ATOMIC_RELAXED);
+}
+
+uint64_t poll_wait_stat_read(enum poll_wait_stat stat) {
+    if ((uint32_t)stat >= POLL_WAIT_STAT_COUNT)
+        return 0;
+    return __atomic_load_n(&poll_wait_stats[stat], __ATOMIC_RELAXED);
+}
+
+const char *poll_wait_stat_name(enum poll_wait_stat stat) {
+    if ((uint32_t)stat >= POLL_WAIT_STAT_COUNT)
+        return "unknown";
+    const char *name = poll_wait_stat_names[stat];
+    return name ? name : "unknown";
+}
+
+void poll_wait_stats_snapshot(uint64_t out[POLL_WAIT_STAT_COUNT]) {
+    if (!out)
+        return;
+    for (uint32_t i = 0; i < POLL_WAIT_STAT_COUNT; i++) {
+        out[i] = __atomic_load_n(&poll_wait_stats[i], __ATOMIC_RELAXED);
+    }
+}
+
+void poll_wait_stats_reset(void) {
+    for (uint32_t i = 0; i < POLL_WAIT_STAT_COUNT; i++) {
+        __atomic_store_n(&poll_wait_stats[i], 0, __ATOMIC_RELAXED);
+    }
+}
 
 int poll_timeout_to_deadline_ms(int timeout_ms, uint64_t *deadline_out) {
     if (!deadline_out)

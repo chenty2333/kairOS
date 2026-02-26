@@ -23,6 +23,8 @@ enum tracepoint_event {
     TRACE_IO_COPY_RANGE_FALLBACK = 4,
     TRACE_SOCKET_INLINE_BUF = 5,
     TRACE_SOCKET_HEAP_BUF = 6,
+    TRACE_WAIT_EPOLL = 7,
+    TRACE_WAIT_FD_EVENT = 8,
 };
 
 struct tracepoint_entry {
@@ -41,5 +43,6 @@ void tracepoint_emit(enum tracepoint_event event, uint32_t flags,
 size_t tracepoint_snapshot_cpu(int cpu, struct tracepoint_entry *out,
                                size_t max_entries);
 void tracepoint_reset_all(void);
+void tracepoint_sysfs_init(void);
 
 #endif
