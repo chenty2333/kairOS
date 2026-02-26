@@ -3398,6 +3398,87 @@ out:
     test_check(reaped, "procfs control child reaped");
 }
 
+static void test_procfs_pid_handle_transfers_readonly(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs xfer self present");
+    if (!self)
+        return;
+
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    struct kobj *taken_obj = NULL;
+    uint32_t taken_rights = 0;
+    int32_t h = -1;
+    bool handle_live = false;
+    struct file *f = NULL;
+    char buf[2048] = {0};
+
+    int rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0, "procfs xfer create channel pair");
+    if (rc < 0)
+        goto out;
+
+    uint32_t obj_id = kobj_id(ch0);
+    h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+    test_check(h >= 0, "procfs xfer alloc handle");
+    if (h < 0)
+        goto out;
+    handle_live = true;
+
+    rc = khandle_take(self, h, KRIGHT_TRANSFER, &taken_obj, &taken_rights);
+    test_check(rc == 0 && taken_obj != NULL, "procfs xfer take");
+    if (rc < 0 || !taken_obj)
+        goto out;
+
+    rc = khandle_restore(self, h, taken_obj, taken_rights);
+    test_check(rc == 0, "procfs xfer restore");
+    if (rc == 0)
+        taken_obj = NULL;
+    else
+        goto out;
+
+    rc = vfs_open("/proc/self/handle_transfers", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer open");
+    if (rc == 0) {
+        ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+        test_check(n > 0, "procfs xfer read");
+        if (n > 0) {
+            char obj_needle[48];
+            int nn = snprintf(obj_needle, sizeof(obj_needle), " %u channel ",
+                              obj_id);
+            buf[n] = '\0';
+            test_check(strstr(buf, "schema=procfs_pid_handle_transfers_v1\n") !=
+                           NULL,
+                       "procfs xfer schema");
+            test_check(nn > 0 && (size_t)nn < sizeof(obj_needle) &&
+                           strstr(buf, obj_needle) != NULL,
+                       "procfs xfer includes object");
+            test_check(strstr(buf, " restore ") != NULL ||
+                           strstr(buf, " take ") != NULL,
+                       "procfs xfer includes event");
+        }
+    }
+    close_file_if_open(&f);
+
+    rc = vfs_open("/proc/self/handle_transfers", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs xfer reopen");
+    if (rc == 0) {
+        ssize_t wr = vfs_write(f, "x", 1);
+        test_check(wr == -EPERM, "procfs xfer readonly");
+    }
+
+out:
+    close_file_if_open(&f);
+    if (handle_live && h >= 0)
+        (void)khandle_close(self, h);
+    if (taken_obj)
+        khandle_transfer_drop_with_rights(taken_obj, taken_rights);
+    if (ch1)
+        kobj_put(ch1);
+    if (ch0)
+        kobj_put(ch0);
+}
+
 struct stop_cont_timing_ctx {
     volatile int entered;
     volatile int returned;
@@ -4251,6 +4332,7 @@ int run_vfs_ipc_tests(void) {
     test_inotify_syscall_functional();
     test_inotify_mask_update_functional();
     test_sysfs_ipc_visibility();
+    test_procfs_pid_handle_transfers_readonly();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");

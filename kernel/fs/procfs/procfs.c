@@ -125,6 +125,7 @@ static int gen_pid_status(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_cmdline(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_maps(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_handles(pid_t pid, char *buf, size_t bufsz);
+static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz);
 static int gen_pid_control(struct procfs_entry *ent, char *buf, size_t bufsz);
 
 static size_t procfs_self_target(char *buf, size_t bufsz) {
@@ -555,6 +556,92 @@ static int gen_pid_handles(pid_t pid, char *buf, size_t bufsz) {
     return len;
 }
 
+static const char *procfs_transfer_event_name(uint16_t event) {
+    switch (event) {
+    case KOBJ_TRANSFER_TAKE:
+        return "take";
+    case KOBJ_TRANSFER_ENQUEUE:
+        return "enqueue";
+    case KOBJ_TRANSFER_DELIVER:
+        return "deliver";
+    case KOBJ_TRANSFER_INSTALL:
+        return "install";
+    case KOBJ_TRANSFER_RESTORE:
+        return "restore";
+    case KOBJ_TRANSFER_DROP:
+        return "drop";
+    default:
+        return "unknown";
+    }
+}
+
+static int gen_pid_handle_transfers(pid_t pid, char *buf, size_t bufsz) {
+    struct process *p = pid_to_proc(pid);
+    if (!p)
+        return -ENOENT;
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    int len = snprintf(buf, bufsz,
+                       "schema=procfs_pid_handle_transfers_v1\n"
+                       "pid=%d\n"
+                       "handle cap_id obj_id type rights seq event from_pid "
+                       "to_pid transfer_rights cpu ticks\n",
+                       pid);
+    if (len < 0)
+        return -EINVAL;
+    if ((size_t)len >= bufsz)
+        return (int)bufsz - 1;
+
+    struct handletable *ht = p->handletable;
+    if (!ht)
+        return len;
+
+    mutex_lock(&ht->lock);
+    for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
+        if ((size_t)len >= bufsz - 1)
+            break;
+
+        struct kobj *obj = ht->entries[i].obj;
+        if (!obj)
+            continue;
+
+        struct kobj_transfer_history_entry hist[KOBJ_TRANSFER_HISTORY_DEPTH] = {0};
+        size_t count =
+            kobj_transfer_history_snapshot(obj, hist, KOBJ_TRANSFER_HISTORY_DEPTH);
+        if (count == 0)
+            continue;
+
+        for (size_t j = 0; j < count; j++) {
+            if ((size_t)len >= bufsz - 1)
+                break;
+            if (hist[j].seq == 0)
+                continue;
+
+            int n = snprintf(
+                buf + len, bufsz - (size_t)len,
+                "%d %llu %u %s 0x%x %u %s %d %d 0x%x %u %llu\n", i,
+                (unsigned long long)ht->entries[i].cap_id, obj->id,
+                kobj_type_name(obj->type), ht->entries[i].rights, hist[j].seq,
+                procfs_transfer_event_name(hist[j].event), hist[j].from_pid,
+                hist[j].to_pid, hist[j].rights, hist[j].cpu,
+                (unsigned long long)hist[j].ticks);
+            if (n < 0) {
+                mutex_unlock(&ht->lock);
+                return -EINVAL;
+            }
+            if ((size_t)n >= bufsz - (size_t)len) {
+                len = (int)bufsz - 1;
+                break;
+            }
+            len += n;
+        }
+    }
+    mutex_unlock(&ht->lock);
+
+    return len;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Symlink support for /proc/self                                     */
 /* ------------------------------------------------------------------ */
@@ -949,6 +1036,7 @@ static const struct pid_entry_def pid_entries[] = {
     {"mounts",  gen_mounts,      S_IFREG | 0444},
     {"maps",    gen_pid_maps,    S_IFREG | 0444},
     {"handles", gen_pid_handles, S_IFREG | 0444},
+    {"handle_transfers", gen_pid_handle_transfers, S_IFREG | 0444},
     {"control", NULL,            S_IFREG | 0600},
 };
 
