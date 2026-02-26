@@ -90,6 +90,11 @@ WORKFLOW_GATES = {
         GateSpec(gate="x86_64-soak-pr", job="x86_64-soak-pr"),
         GateSpec(gate="aarch64-soak-pr", job="aarch64-soak-pr"),
         GateSpec(
+            gate="aarch64-driver-loop-smp2",
+            job="aarch64-soak-pr",
+            step="Run aarch64 directed driver loop profile (smp2)",
+        ),
+        GateSpec(
             gate="aarch64-vfs-ipc-loop",
             job="aarch64-soak-pr",
             step="Run aarch64 directed vfs/ipc loop profile",
