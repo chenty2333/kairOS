@@ -21,14 +21,69 @@ struct process proc_table[CONFIG_MAX_PROCESSES];
 spinlock_t proc_table_lock = SPINLOCK_INIT;
 pid_t next_pid = 1;
 struct process *reaper_proc = NULL;
+#define PROC_PID_HASH_BITS 8U
+#define PROC_PID_HASH_SIZE (1U << PROC_PID_HASH_BITS)
+static struct list_head proc_pid_hash[PROC_PID_HASH_SIZE];
+
+static size_t proc_pid_hash_bucket(pid_t pid) {
+    return (size_t)(((uint32_t)pid) & (PROC_PID_HASH_SIZE - 1U));
+}
+
+static void proc_pid_hash_init(void) {
+    for (size_t i = 0; i < PROC_PID_HASH_SIZE; i++)
+        INIT_LIST_HEAD(&proc_pid_hash[i]);
+}
+
+static void proc_pid_hash_insert_locked(struct process *p) {
+    if (!p || p->pid <= 0)
+        return;
+    if (!list_empty(&p->pid_hash_node))
+        return;
+    size_t idx = proc_pid_hash_bucket(p->pid);
+    list_add_tail(&p->pid_hash_node, &proc_pid_hash[idx]);
+}
+
+static void proc_pid_hash_remove_locked(struct process *p) {
+    if (!p || list_empty(&p->pid_hash_node))
+        return;
+    list_del(&p->pid_hash_node);
+    INIT_LIST_HEAD(&p->pid_hash_node);
+}
+
+struct process *proc_find_locked(pid_t pid) {
+    if (pid <= 0)
+        return NULL;
+    size_t idx = proc_pid_hash_bucket(pid);
+    struct process *p = NULL;
+    list_for_each_entry(p, &proc_pid_hash[idx], pid_hash_node) {
+        if (p->pid == pid && p->state != PROC_UNUSED &&
+            p->state != PROC_EMBRYO) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static void proc_mark_unused(struct process *p) {
+    if (!p)
+        return;
+    bool flags;
+    spin_lock_irqsave(&proc_table_lock, &flags);
+    proc_pid_hash_remove_locked(p);
+    p->state = PROC_UNUSED;
+    p->pid = 0;
+    spin_unlock_irqrestore(&proc_table_lock, flags);
+}
 
 void proc_init(void) {
     memset(proc_table, 0, sizeof(proc_table));
+    proc_pid_hash_init();
     for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
         proc_table[i].state = PROC_UNUSED;
         INIT_LIST_HEAD(&proc_table[i].children);
         INIT_LIST_HEAD(&proc_table[i].sibling);
         INIT_LIST_HEAD(&proc_table[i].thread_group);
+        INIT_LIST_HEAD(&proc_table[i].pid_hash_node);
         wait_queue_entry_init(&proc_table[i].wait_entry, &proc_table[i]);
         wait_queue_init(&proc_table[i].exit_wait);
         completion_init(&proc_table[i].vfork_completion);
@@ -89,6 +144,7 @@ struct process *proc_alloc(void) {
             p = &proc_table[i];
             p->state = PROC_EMBRYO;
             p->pid = next_pid++;
+            proc_pid_hash_insert_locked(p);
             break;
         }
     }
@@ -117,14 +173,14 @@ struct process *proc_alloc(void) {
     p->sleep_deadline = 0;
     p->fdtable = fdtable_alloc();
     if (!p->fdtable) {
-        p->state = PROC_UNUSED;
+        proc_mark_unused(p);
         return NULL;
     }
     p->handletable = handletable_alloc();
     if (!p->handletable) {
         fdtable_put(p->fdtable);
         p->fdtable = NULL;
-        p->state = PROC_UNUSED;
+        proc_mark_unused(p);
         return NULL;
     }
     strcpy(p->cwd, "/");
@@ -173,7 +229,7 @@ struct process *proc_alloc(void) {
         p->handletable = NULL;
         fdtable_put(p->fdtable);
         p->fdtable = NULL;
-        p->state = PROC_UNUSED;
+        proc_mark_unused(p);
         return NULL;
     }
     p->kstack_top = arch_context_kernel_stack(p->context);
@@ -237,8 +293,7 @@ void proc_free_internal(struct process *p) {
             list_del(&p->thread_group);
             INIT_LIST_HEAD(&p->thread_group);
         }
-        p->state = PROC_UNUSED;
-        p->pid = 0;
+        proc_mark_unused(p);
     }
 }
 
@@ -332,16 +387,9 @@ struct process *proc_find(pid_t pid) {
         return NULL;
     bool flags;
     spin_lock_irqsave(&proc_table_lock, &flags);
-    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        if (proc_table[i].pid == pid &&
-            proc_table[i].state != PROC_UNUSED &&
-            proc_table[i].state != PROC_EMBRYO) {
-            spin_unlock_irqrestore(&proc_table_lock, flags);
-            return &proc_table[i];
-        }
-    }
+    struct process *p = proc_find_locked(pid);
     spin_unlock_irqrestore(&proc_table_lock, flags);
-    return NULL;
+    return p;
 }
 
 pid_t proc_get_nth_pid(int n) {

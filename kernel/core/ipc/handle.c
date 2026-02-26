@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/completion.h>
 #include <kairos/dentry.h>
 #include <kairos/handle.h>
 #include <kairos/list.h>
@@ -11,6 +12,7 @@
 #include <kairos/pollwait.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
+#include <kairos/sched.h>
 #include <kairos/string.h>
 #include <kairos/sysfs.h>
 #include <kairos/vfs.h>
@@ -102,7 +104,12 @@ struct ipc_registry_entry {
     struct list_head type_node;
     struct list_head all_node;
     struct list_head hash_node;
+    struct list_head project_node;
     struct kobj *obj;
+    uint32_t generation;
+    uint8_t lifecycle;
+    uint8_t pending_proj_ops;
+    bool project_queued;
     struct sysfs_node *sysfs_dir;
     struct sysfs_attribute summary_attr;
     struct sysfs_attribute transfers_attr;
@@ -119,6 +126,8 @@ static LIST_HEAD(ipc_port_registry);
 static LIST_HEAD(ipc_file_registry);
 static LIST_HEAD(ipc_vnode_registry);
 static LIST_HEAD(ipc_dentry_registry);
+static LIST_HEAD(ipc_buffer_registry);
+static LIST_HEAD(ipc_sysfs_project_queue);
 #define IPC_REGISTRY_ID_HASH_BITS 8U
 #define IPC_REGISTRY_ID_HASH_SIZE (1U << IPC_REGISTRY_ID_HASH_BITS)
 static struct list_head ipc_registry_id_hash[IPC_REGISTRY_ID_HASH_SIZE];
@@ -126,14 +135,14 @@ static bool ipc_registry_id_hash_ready;
 static struct mutex ipc_registry_lock;
 static bool ipc_registry_lock_ready;
 static spinlock_t ipc_registry_init_lock = SPINLOCK_INIT;
-/* Suppress only reentrant register/unregister from the ensure() call chain. */
-static struct process *ipc_registry_register_suppress_proc;
-static int ipc_registry_register_suppress_cpu = -1;
-static uint32_t ipc_registry_register_suppress_depth;
+static struct completion ipc_sysfs_project_completion;
+static bool ipc_sysfs_project_completion_ready;
+static bool ipc_sysfs_projector_started;
 static struct sysfs_node *ipc_sysfs_root;
 static struct sysfs_node *ipc_sysfs_objects_dir;
 static bool ipc_sysfs_ready;
 static atomic_t kobj_id_next = ATOMIC_INIT(0);
+static atomic_t ipc_registry_generation_next = ATOMIC_INIT(0);
 static uint64_t ipc_registry_register_oom_failures;
 static uint64_t ipc_port_queue_drops_total;
 static atomic_t ipc_registry_register_oom_warn_count = ATOMIC_INIT(0);
@@ -143,6 +152,10 @@ static atomic_t ipc_port_queue_drop_warn_count = ATOMIC_INIT(0);
 #define IPC_SYSFS_PAGE_SIZE_MAX     512U
 #define IPC_SYSFS_TRANSFER_V2_DEFAULT_PAGE 128U
 #define IPC_SYSFS_TRANSFER_V2_MAX_PAGE     512U
+#define IPC_REG_ENTRY_LIVE   1U
+#define IPC_REG_ENTRY_DYING  2U
+#define IPC_PROJ_OP_ADD      (1U << 0)
+#define IPC_PROJ_OP_DEL      (1U << 1)
 
 struct ipc_sysfs_page_state {
     uint32_t cursor;
@@ -160,6 +173,8 @@ static bool ipc_warn_ratelimited(atomic_t *warn_counter) {
     uint32_t n = atomic_inc_return(warn_counter);
     return n <= 4 || (n & (n - 1U)) == 0;
 }
+
+extern bool sysfs_is_vnode(const struct vnode *vn);
 
 static void kchannel_release_obj(struct kobj *obj);
 static void kport_release_obj(struct kobj *obj);
@@ -192,6 +207,11 @@ static void ipc_registry_unregister_obj(struct kobj *obj);
 static void ipc_sysfs_ensure_ready(void);
 static void ipc_sysfs_create_object_dir_locked(struct ipc_registry_entry *ent);
 static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent);
+static bool ipc_sysfs_project_mark_locked(struct ipc_registry_entry *ent,
+                                          uint8_t ops);
+static bool ipc_sysfs_project_drain_once(void);
+static int ipc_sysfs_projector_main(void *arg);
+static void ipc_sysfs_projector_start(void);
 
 static const struct kobj_ops kchannel_ops = {
     .release = kchannel_release_obj,
@@ -246,6 +266,8 @@ const char *kobj_type_name(uint32_t type) {
         return "port";
     case KOBJ_TYPE_FILE:
         return "file";
+    case KOBJ_TYPE_BUFFER:
+        return "buffer";
     case VFS_KOBJ_TYPE_VNODE:
         return "vnode";
     case VFS_KOBJ_TYPE_DENTRY:
@@ -306,6 +328,8 @@ static void ipc_registry_ensure_lock(void) {
         for (size_t i = 0; i < IPC_REGISTRY_ID_HASH_SIZE; i++)
             INIT_LIST_HEAD(&ipc_registry_id_hash[i]);
         ipc_registry_id_hash_ready = true;
+        completion_init(&ipc_sysfs_project_completion);
+        ipc_sysfs_project_completion_ready = true;
         __atomic_store_n(&ipc_registry_lock_ready, true, __ATOMIC_RELEASE);
     }
     spin_unlock_irqrestore(&ipc_registry_init_lock, irq_flags);
@@ -350,6 +374,8 @@ static struct list_head *ipc_registry_list_for_type(uint32_t type) {
         return &ipc_port_registry;
     case KOBJ_TYPE_FILE:
         return &ipc_file_registry;
+    case KOBJ_TYPE_BUFFER:
+        return &ipc_buffer_registry;
     case VFS_KOBJ_TYPE_VNODE:
         return &ipc_vnode_registry;
     case VFS_KOBJ_TYPE_DENTRY:
@@ -359,58 +385,121 @@ static struct list_head *ipc_registry_list_for_type(uint32_t type) {
     }
 }
 
-static bool ipc_registry_should_auto_ensure_sysfs(uint32_t type) {
-    return type == KOBJ_TYPE_CHANNEL || type == KOBJ_TYPE_PORT ||
-           type == KOBJ_TYPE_FILE;
+static bool ipc_registry_is_sysfs_mount(const struct mount *mnt) {
+    return mnt && mnt->ops && mnt->ops->name &&
+           strcmp(mnt->ops->name, "sysfs") == 0;
 }
 
-static bool ipc_registry_register_suppressed_for_current(void) {
-    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
-                                     __ATOMIC_ACQUIRE);
-    if (depth == 0)
+static bool ipc_registry_track_object(struct kobj *obj) {
+    if (!obj)
         return false;
 
-    struct process *owner = __atomic_load_n(
-        &ipc_registry_register_suppress_proc, __ATOMIC_ACQUIRE);
-    struct process *curr = proc_current();
-    if (owner)
-        return curr == owner;
-    if (curr)
-        return false;
-
-    int owner_cpu = __atomic_load_n(&ipc_registry_register_suppress_cpu,
-                                    __ATOMIC_ACQUIRE);
-    return owner_cpu == arch_cpu_id();
-}
-
-static void ipc_registry_register_suppress_enter(void) {
-    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
-                                     __ATOMIC_ACQUIRE);
-    if (depth == 0) {
-        struct process *curr = proc_current();
-        __atomic_store_n(&ipc_registry_register_suppress_proc, curr,
-                         __ATOMIC_RELAXED);
-        __atomic_store_n(&ipc_registry_register_suppress_cpu,
-                         curr ? -1 : arch_cpu_id(), __ATOMIC_RELAXED);
+    if (obj->type == VFS_KOBJ_TYPE_VNODE) {
+        struct vnode *vn = vnode_from_kobj(obj);
+        if (!vn)
+            return false;
+        return !sysfs_is_vnode(vn);
     }
-    __atomic_add_fetch(&ipc_registry_register_suppress_depth, 1,
-                       __ATOMIC_ACQ_REL);
+
+    if (obj->type == VFS_KOBJ_TYPE_DENTRY) {
+        struct dentry *d = dentry_from_kobj(obj);
+        if (!d)
+            return false;
+        if (ipc_registry_is_sysfs_mount(d->mnt))
+            return false;
+        if (d->vnode && sysfs_is_vnode(d->vnode))
+            return false;
+    }
+
+    return true;
 }
 
-static void ipc_registry_register_suppress_exit(void) {
-    uint32_t depth = __atomic_load_n(&ipc_registry_register_suppress_depth,
-                                     __ATOMIC_ACQUIRE);
-    if (depth == 0)
+static bool ipc_sysfs_project_mark_locked(struct ipc_registry_entry *ent,
+                                          uint8_t ops) {
+    if (!ent)
+        return false;
+    if (ops)
+        ent->pending_proj_ops |= ops;
+    if (!ent->project_queued) {
+        list_add_tail(&ent->project_node, &ipc_sysfs_project_queue);
+        ent->project_queued = true;
+    }
+    return ipc_sysfs_projector_started;
+}
+
+static bool ipc_sysfs_project_drain_once(void) {
+    struct ipc_registry_entry *ent = NULL;
+    uint8_t ops = 0;
+    bool do_free = false;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    if (list_empty(&ipc_sysfs_project_queue)) {
+        mutex_unlock(&ipc_registry_lock);
+        return false;
+    }
+
+    ent = list_first_entry(&ipc_sysfs_project_queue, struct ipc_registry_entry,
+                           project_node);
+    list_del(&ent->project_node);
+    INIT_LIST_HEAD(&ent->project_node);
+    ent->project_queued = false;
+    ops = ent->pending_proj_ops;
+    ent->pending_proj_ops = 0;
+
+    if (ipc_sysfs_ready) {
+        if ((ops & IPC_PROJ_OP_ADD) && ent->lifecycle == IPC_REG_ENTRY_LIVE)
+            ipc_sysfs_create_object_dir_locked(ent);
+        if ((ops & IPC_PROJ_OP_DEL) || ent->lifecycle == IPC_REG_ENTRY_DYING)
+            ipc_sysfs_remove_object_dir_locked(ent);
+    }
+
+    do_free = ent->lifecycle == IPC_REG_ENTRY_DYING && !ent->project_queued &&
+              ent->pending_proj_ops == 0;
+    mutex_unlock(&ipc_registry_lock);
+
+    if (do_free)
+        kfree(ent);
+    return true;
+}
+
+static int ipc_sysfs_projector_main(void *arg __attribute__((unused))) {
+    for (;;) {
+        wait_for_completion(&ipc_sysfs_project_completion);
+        while (ipc_sysfs_project_drain_once()) {
+        }
+    }
+    return 0;
+}
+
+static void ipc_sysfs_projector_start(void) {
+    bool do_start = false;
+
+    ipc_registry_ensure_lock();
+    mutex_lock(&ipc_registry_lock);
+    if (!ipc_sysfs_projector_started && ipc_sysfs_project_completion_ready) {
+        /*
+         * Mark started before dropping the lock so concurrent bootstrap paths
+         * cannot race and spawn duplicate projector workers.
+         */
+        ipc_sysfs_projector_started = true;
+        do_start = true;
+    }
+    mutex_unlock(&ipc_registry_lock);
+    if (!do_start)
         return;
 
-    depth = __atomic_sub_fetch(&ipc_registry_register_suppress_depth, 1,
-                               __ATOMIC_ACQ_REL);
-    if (depth == 0) {
-        __atomic_store_n(&ipc_registry_register_suppress_proc, NULL,
-                         __ATOMIC_RELAXED);
-        __atomic_store_n(&ipc_registry_register_suppress_cpu, -1,
-                         __ATOMIC_RELAXED);
+    struct process *task =
+        kthread_create(ipc_sysfs_projector_main, NULL, "ipcsysfs");
+    if (!task) {
+        ipc_registry_ensure_lock();
+        mutex_lock(&ipc_registry_lock);
+        ipc_sysfs_projector_started = false;
+        mutex_unlock(&ipc_registry_lock);
+        pr_warn("ipc: failed to start sysfs projector thread\n");
+        return;
     }
+    sched_enqueue(task);
 }
 
 static bool ipc_char_is_space(char c) {
@@ -481,13 +570,17 @@ static int ipc_sysfs_append_object_row(struct kobj *obj, char *buf, size_t bufsz
         struct kport *port = kport_from_obj(obj);
         if (port) {
             size_t queue_len = 0;
+            uint64_t dropped_count = 0;
             mutex_lock(&port->lock);
             queue_len = port->queue_len;
+            dropped_count = port->dropped_count;
             mutex_unlock(&port->lock);
 
-            n = snprintf(buf + len, bufsz - len, "%u %s %u queue_len=%zu\n",
+            n = snprintf(buf + len, bufsz - len,
+                         "%u %s %u queue_len=%zu dropped_count=%llu\n",
                          obj->id, kobj_type_name(obj->type),
-                         atomic_read(&obj->refcount), queue_len);
+                         atomic_read(&obj->refcount), queue_len,
+                         (unsigned long long)dropped_count);
         } else {
             struct kfile *kfile = kfile_from_obj(obj);
             if (kfile && kfile->file && kfile->file->vnode) {
@@ -1377,7 +1470,6 @@ static void ipc_sysfs_remove_object_dir_locked(struct ipc_registry_entry *ent) {
 static void ipc_sysfs_ensure_ready(void) {
     ipc_registry_ensure_lock();
     mutex_lock(&ipc_registry_lock);
-    ipc_registry_register_suppress_enter();
 
     if (!ipc_sysfs_ready) {
         struct sysfs_node *root = sysfs_root();
@@ -1413,22 +1505,39 @@ static void ipc_sysfs_ensure_ready(void) {
         __atomic_store_n(&ipc_sysfs_ready, true, __ATOMIC_RELEASE);
     }
 
-    struct ipc_registry_entry *ent;
-    list_for_each_entry(ent, &ipc_registry_all, all_node)
-        ipc_sysfs_create_object_dir_locked(ent);
 out_unlock:
-    ipc_registry_register_suppress_exit();
     mutex_unlock(&ipc_registry_lock);
 }
 
-static void ipc_registry_register_obj(struct kobj *obj) {
-    if (!obj)
-        return;
-    if ((obj->type == VFS_KOBJ_TYPE_VNODE ||
-         obj->type == VFS_KOBJ_TYPE_DENTRY) &&
-        ipc_registry_register_suppressed_for_current()) {
+void ipc_registry_sysfs_bootstrap(void) {
+    ipc_registry_ensure_lock();
+    ipc_sysfs_ensure_ready();
+    ipc_sysfs_projector_start();
+
+    bool wake_projector = false;
+    mutex_lock(&ipc_registry_lock);
+    if (!ipc_sysfs_ready) {
+        mutex_unlock(&ipc_registry_lock);
+        pr_warn("ipc: sysfs bootstrap deferred (sysfs root unavailable)\n");
         return;
     }
+    struct ipc_registry_entry *ent;
+    list_for_each_entry(ent, &ipc_registry_all, all_node) {
+        if (ent->lifecycle != IPC_REG_ENTRY_LIVE)
+            continue;
+        wake_projector |= ipc_sysfs_project_mark_locked(ent, IPC_PROJ_OP_ADD);
+    }
+    if (!list_empty(&ipc_sysfs_project_queue))
+        wake_projector = true;
+    mutex_unlock(&ipc_registry_lock);
+
+    if (wake_projector)
+        complete_one(&ipc_sysfs_project_completion);
+}
+
+static void ipc_registry_register_obj(struct kobj *obj) {
+    if (!ipc_registry_track_object(obj))
+        return;
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
         return;
@@ -1446,6 +1555,10 @@ static void ipc_registry_register_obj(struct kobj *obj) {
         return;
     }
     ent->obj = obj;
+    ent->generation = atomic_inc_return(&ipc_registry_generation_next);
+    ent->lifecycle = IPC_REG_ENTRY_LIVE;
+    ent->pending_proj_ops = 0;
+    ent->project_queued = false;
     ent->sysfs_dir = NULL;
     memset(&ent->summary_attr, 0, sizeof(ent->summary_attr));
     memset(&ent->transfers_attr, 0, sizeof(ent->transfers_attr));
@@ -1458,36 +1571,42 @@ static void ipc_registry_register_obj(struct kobj *obj) {
     INIT_LIST_HEAD(&ent->type_node);
     INIT_LIST_HEAD(&ent->all_node);
     INIT_LIST_HEAD(&ent->hash_node);
+    INIT_LIST_HEAD(&ent->project_node);
 
+    bool wake_projector = false;
     mutex_lock(&ipc_registry_lock);
     list_add_tail(&ent->type_node, list);
     list_add_tail(&ent->all_node, &ipc_registry_all);
     ipc_registry_id_hash_insert_locked(ent);
+    wake_projector |= ipc_sysfs_project_mark_locked(ent, IPC_PROJ_OP_ADD);
     mutex_unlock(&ipc_registry_lock);
 
-    if (ipc_registry_should_auto_ensure_sysfs(obj->type))
-        ipc_sysfs_ensure_ready();
+    if (wake_projector)
+        complete_one(&ipc_sysfs_project_completion);
 }
 
 static void ipc_registry_unregister_obj(struct kobj *obj) {
-    if (!obj)
+    if (!ipc_registry_track_object(obj))
         return;
     struct list_head *list = ipc_registry_list_for_type(obj->type);
     if (!list)
         return;
 
     ipc_registry_ensure_lock();
+    bool wake_projector = false;
     mutex_lock(&ipc_registry_lock);
     struct ipc_registry_entry *ent, *tmp;
     list_for_each_entry_safe(ent, tmp, list, type_node) {
         if (ent->obj != obj)
             continue;
-        ipc_sysfs_remove_object_dir_locked(ent);
         list_del(&ent->type_node);
         list_del(&ent->all_node);
         ipc_registry_id_hash_remove_locked(ent);
+        ent->lifecycle = IPC_REG_ENTRY_DYING;
+        wake_projector |= ipc_sysfs_project_mark_locked(ent, IPC_PROJ_OP_DEL);
         mutex_unlock(&ipc_registry_lock);
-        kfree(ent);
+        if (wake_projector)
+            complete_one(&ipc_sysfs_project_completion);
         return;
     }
     mutex_unlock(&ipc_registry_lock);

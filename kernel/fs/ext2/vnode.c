@@ -163,6 +163,10 @@ static int ext2_vnode_close(struct vnode *vn) {
             list_del(&id->cache_node);
             INIT_LIST_HEAD(&id->cache_node);
         }
+        if (!list_empty(&id->hash_node)) {
+            list_del(&id->hash_node);
+            INIT_LIST_HEAD(&id->hash_node);
+        }
         mutex_unlock(&mnt->icache_lock);
     }
     if (id)
@@ -254,6 +258,7 @@ struct vnode *ext2_create_vnode(struct ext2_mount *mnt, ino_t ino) {
     poll_wait_head_init(&vn->pollers);
     id->vn = vn;
     INIT_LIST_HEAD(&id->cache_node);
+    INIT_LIST_HEAD(&id->hash_node);
     ext2_cache_add(id);
     return vn;
 }

@@ -23,6 +23,7 @@ struct pidfd_ctx {
     spinlock_t lock;
     struct poll_wait_source wait_src;
     struct list_head node;
+    struct list_head pid_hash_node;
     pid_t pid;
     uint64_t start_time;
     bool exited;
@@ -30,6 +31,10 @@ struct pidfd_ctx {
 };
 
 static LIST_HEAD(pidfd_instances);
+#define PIDFD_PID_HASH_BITS 8U
+#define PIDFD_PID_HASH_SIZE (1U << PIDFD_PID_HASH_BITS)
+static struct list_head pidfd_pid_hash[PIDFD_PID_HASH_SIZE];
+static bool pidfd_pid_hash_ready;
 static spinlock_t pidfd_instances_lock = SPINLOCK_INIT;
 static spinlock_t pidfd_init_lock = SPINLOCK_INIT;
 static bool pidfd_ready;
@@ -50,6 +55,32 @@ static inline int syspidfd_abi_int32(uint64_t v) {
     return (int32_t)(uint32_t)v;
 }
 
+static size_t pidfd_pid_hash_bucket(pid_t pid) {
+    return (size_t)(((uint32_t)pid) & (PIDFD_PID_HASH_SIZE - 1U));
+}
+
+static void pidfd_pid_hash_init(void) {
+    if (pidfd_pid_hash_ready)
+        return;
+    for (size_t i = 0; i < PIDFD_PID_HASH_SIZE; i++)
+        INIT_LIST_HEAD(&pidfd_pid_hash[i]);
+    pidfd_pid_hash_ready = true;
+}
+
+static void pidfd_pid_hash_insert_locked(struct pidfd_ctx *ctx) {
+    if (!ctx || !pidfd_pid_hash_ready)
+        return;
+    size_t idx = pidfd_pid_hash_bucket(ctx->pid);
+    list_add_tail(&ctx->pid_hash_node, &pidfd_pid_hash[idx]);
+}
+
+static void pidfd_pid_hash_remove_locked(struct pidfd_ctx *ctx) {
+    if (!ctx || list_empty(&ctx->pid_hash_node))
+        return;
+    list_del(&ctx->pid_hash_node);
+    INIT_LIST_HEAD(&ctx->pid_hash_node);
+}
+
 static void pidfd_on_process_exit(struct process *p) {
     if (!p)
         return;
@@ -57,7 +88,8 @@ static void pidfd_on_process_exit(struct process *p) {
     bool irq;
     spin_lock_irqsave(&pidfd_instances_lock, &irq);
     struct pidfd_ctx *ctx;
-    list_for_each_entry(ctx, &pidfd_instances, node) {
+    size_t idx = pidfd_pid_hash_bucket(p->pid);
+    list_for_each_entry(ctx, &pidfd_pid_hash[idx], pid_hash_node) {
         if (ctx->pid != p->pid || ctx->start_time != p->start_time)
             continue;
 
@@ -78,6 +110,7 @@ static void pidfd_init_once(void) {
 
     spin_lock(&pidfd_init_lock);
     if (!pidfd_ready) {
+        pidfd_pid_hash_init();
         proc_register_exit_callback(pidfd_on_process_exit);
         __atomic_store_n(&pidfd_ready, true, __ATOMIC_RELEASE);
     }
@@ -141,6 +174,7 @@ static int pidfd_create_file(pid_t pid, uint32_t open_flags, struct file **out) 
     spin_init(&ctx->lock);
     poll_wait_source_init(&ctx->wait_src, vn);
     INIT_LIST_HEAD(&ctx->node);
+    INIT_LIST_HEAD(&ctx->pid_hash_node);
     ctx->pid = pid;
     ctx->start_time = target->start_time;
     ctx->exited = (target->state == PROC_ZOMBIE || target->state == PROC_REAPING);
@@ -166,6 +200,7 @@ static int pidfd_create_file(pid_t pid, uint32_t open_flags, struct file **out) 
     bool irq;
     spin_lock_irqsave(&pidfd_instances_lock, &irq);
     list_add_tail(&ctx->node, &pidfd_instances);
+    pidfd_pid_hash_insert_locked(ctx);
     spin_unlock_irqrestore(&pidfd_instances_lock, irq);
 
     *out = file;
@@ -182,6 +217,7 @@ static int pidfd_close(struct vnode *vn) {
         spin_lock_irqsave(&pidfd_instances_lock, &irq);
         if (!list_empty(&ctx->node))
             list_del(&ctx->node);
+        pidfd_pid_hash_remove_locked(ctx);
         spin_unlock_irqrestore(&pidfd_instances_lock, irq);
 
         bool ctx_irq;

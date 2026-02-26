@@ -147,6 +147,7 @@ struct process {
     struct completion vfork_completion;
     struct wait_queue_entry wait_entry;
     struct list_head children, sibling;
+    struct list_head pid_hash_node;
     struct process *parent;
     struct process *vfork_parent;
     struct arch_context *context;

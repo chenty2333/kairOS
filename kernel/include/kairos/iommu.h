@@ -14,6 +14,8 @@ struct device;
 
 #define IOMMU_IOVA_DEFAULT_BASE 0x0000000100000000ULL
 #define IOMMU_IOVA_DEFAULT_SIZE (1ULL << 30)
+#define IOMMU_MAPPING_HASH_BITS 6U
+#define IOMMU_MAPPING_HASH_SIZE (1U << IOMMU_MAPPING_HASH_BITS)
 
 enum iommu_domain_type {
     IOMMU_DOMAIN_BYPASS = 0,
@@ -87,6 +89,7 @@ struct iommu_domain {
     void *ops_priv;
     spinlock_t lock;
     struct list_head mappings;
+    struct list_head mapping_hash[IOMMU_MAPPING_HASH_SIZE];
     dma_addr_t iova_base;
     dma_addr_t iova_limit;
     dma_addr_t iova_cursor;

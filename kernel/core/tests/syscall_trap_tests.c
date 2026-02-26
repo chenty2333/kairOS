@@ -3750,6 +3750,51 @@ out:
 #endif
 }
 
+static void test_kcap_duplicate_close_stress(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "kcap_stress self");
+    if (!self)
+        return;
+
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    int32_t root_handle = -1;
+
+    int rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0, "kcap_stress create pair");
+    if (rc < 0)
+        return;
+
+    root_handle = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+    test_check(root_handle >= 0, "kcap_stress root handle");
+    if (root_handle < 0)
+        goto out;
+
+    for (size_t i = 0; i < 1024; i++) {
+        int32_t dup = -1;
+        rc = khandle_duplicate(self, root_handle, KRIGHT_CHANNEL_DEFAULT, &dup);
+        test_check(rc == 0 && dup >= 0, "kcap_stress duplicate");
+        if (rc < 0 || dup < 0)
+            break;
+
+        rc = khandle_close(self, dup);
+        test_check(rc == 0, "kcap_stress close duplicate");
+        if (rc < 0)
+            break;
+    }
+
+    rc = khandle_revoke_descendants(self, root_handle);
+    test_check(rc == 0, "kcap_stress revoke descendants");
+
+out:
+    if (root_handle >= 0)
+        (void)khandle_close(self, root_handle);
+    if (ch1)
+        kobj_put(ch1);
+    if (ch0)
+        kobj_put(ch0);
+}
+
 static void run_syscall_trap_tests_full(void) {
     test_syscall_table_slot_coverage();
     test_syscall_invalid_num_legacy();
@@ -3779,6 +3824,7 @@ static void run_syscall_trap_tests_full(void) {
     test_kobj_ops_refcount_history();
     test_kchannel_inline_queue_zero_heap();
     test_sys_kchannel_inline_queue_zero_heap();
+    test_kcap_duplicate_close_stress();
     test_syscall_user_e2e();
 }
 
@@ -3790,6 +3836,7 @@ static void run_syscall_trap_tests_ipc_cap_only(void) {
     test_kobj_ops_refcount_history();
     test_kchannel_inline_queue_zero_heap();
     test_sys_kchannel_inline_queue_zero_heap();
+    test_kcap_duplicate_close_stress();
 }
 
 int run_syscall_trap_tests(void) {

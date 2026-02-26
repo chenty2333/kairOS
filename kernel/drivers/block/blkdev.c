@@ -18,6 +18,10 @@
  */
 static LIST_HEAD(blkdev_list);
 static spinlock_t blkdev_lock = SPINLOCK_INIT;
+#define BLKDEV_NAME_HASH_BITS 7U
+#define BLKDEV_NAME_HASH_SIZE (1U << BLKDEV_NAME_HASH_BITS)
+static struct list_head blkdev_name_hash[BLKDEV_NAME_HASH_SIZE];
+static bool blkdev_name_hash_ready;
 
 #define MBR_SIGNATURE_OFFSET 510U
 #define MBR_SIGNATURE 0xAA55U
@@ -87,6 +91,51 @@ static bool name_ends_with_digit(const char *name) {
 
 static bool blkdev_is_partition(const struct blkdev *dev) {
     return dev && dev->parent && dev->ops == &blkpart_ops;
+}
+
+static uint32_t blkdev_name_hash_key(const char *name) {
+    if (!name)
+        return 0;
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+    return h & (BLKDEV_NAME_HASH_SIZE - 1U);
+}
+
+static void blkdev_name_hash_init_locked(void) {
+    if (blkdev_name_hash_ready)
+        return;
+    for (size_t i = 0; i < BLKDEV_NAME_HASH_SIZE; i++)
+        INIT_LIST_HEAD(&blkdev_name_hash[i]);
+    blkdev_name_hash_ready = true;
+}
+
+static struct blkdev *blkdev_find_by_name_locked(const char *name) {
+    if (!name || !name[0] || !blkdev_name_hash_ready)
+        return NULL;
+    uint32_t idx = blkdev_name_hash_key(name);
+    struct blkdev *dev = NULL;
+    list_for_each_entry(dev, &blkdev_name_hash[idx], hash) {
+        if (strcmp(dev->name, name) == 0)
+            return dev;
+    }
+    return NULL;
+}
+
+static void blkdev_name_hash_insert_locked(struct blkdev *dev) {
+    if (!dev || !dev->name[0] || !blkdev_name_hash_ready)
+        return;
+    uint32_t idx = blkdev_name_hash_key(dev->name);
+    list_add_tail(&dev->hash, &blkdev_name_hash[idx]);
+}
+
+static void blkdev_name_hash_remove_locked(struct blkdev *dev) {
+    if (!dev || list_empty(&dev->hash))
+        return;
+    list_del(&dev->hash);
+    INIT_LIST_HEAD(&dev->hash);
 }
 
 static int make_partition_name(const struct blkdev *parent, uint32_t part_index,
@@ -219,6 +268,7 @@ static int blkdev_drop_partition_children(struct blkdev *parent) {
             return -EBUSY;
         }
         list_del(&child->list);
+        blkdev_name_hash_remove_locked(child);
         spin_unlock(&blkdev_lock);
 
         pr_debug("blkdev: unregistered %s\n", child->name);
@@ -411,21 +461,21 @@ int blkdev_register(struct blkdev *dev)
     }
 
     spin_lock(&blkdev_lock);
+    blkdev_name_hash_init_locked();
 
     /* Check for duplicate names */
-    struct blkdev *existing;
-    list_for_each_entry(existing, &blkdev_list, list) {
-        if (strcmp(existing->name, dev->name) == 0) {
-            spin_unlock(&blkdev_lock);
-            pr_err("blkdev: %s already registered\n", dev->name);
-            return -EEXIST;
-        }
+    if (blkdev_find_by_name_locked(dev->name)) {
+        spin_unlock(&blkdev_lock);
+        pr_err("blkdev: %s already registered\n", dev->name);
+        return -EEXIST;
     }
 
     /* Add to list */
     INIT_LIST_HEAD(&dev->list);
+    INIT_LIST_HEAD(&dev->hash);
     dev->refcount = 0;
     list_add_tail(&dev->list, &blkdev_list);
+    blkdev_name_hash_insert_locked(dev);
 
     spin_unlock(&blkdev_lock);
 
@@ -466,6 +516,7 @@ void blkdev_unregister(struct blkdev *dev)
             return;
         }
         list_del(&dev->list);
+        blkdev_name_hash_remove_locked(dev);
         spin_unlock(&blkdev_lock);
         pr_debug("blkdev: unregistered %s\n", dev->name);
         kfree(dev);
@@ -498,6 +549,7 @@ void blkdev_unregister(struct blkdev *dev)
 
     /* Remove from list */
     list_del(&dev->list);
+    blkdev_name_hash_remove_locked(dev);
 
     spin_unlock(&blkdev_lock);
 
@@ -520,13 +572,12 @@ struct blkdev *blkdev_get(const char *name)
     }
 
     spin_lock(&blkdev_lock);
-
-    list_for_each_entry(dev, &blkdev_list, list) {
-        if (strcmp(dev->name, name) == 0) {
-            dev->refcount++;
-            spin_unlock(&blkdev_lock);
-            return dev;
-        }
+    blkdev_name_hash_init_locked();
+    dev = blkdev_find_by_name_locked(name);
+    if (dev) {
+        dev->refcount++;
+        spin_unlock(&blkdev_lock);
+        return dev;
     }
 
     spin_unlock(&blkdev_lock);

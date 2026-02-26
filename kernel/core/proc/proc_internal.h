@@ -17,5 +17,6 @@ void proc_free(struct process *p);
 void proc_adopt_child(struct process *parent, struct process *child);
 struct process *proc_spawn_from_vfs(const char *path,
                                     struct process *parent);
+struct process *proc_find_locked(pid_t pid);
 
 #endif

@@ -17,6 +17,8 @@
 #define EXT2_NAME_LEN 255
 #define EXT2_MOUNT_MAGIC 0x45585432U
 #define EXT2_INODE_DATA_MAGIC 0x49444E32U
+#define EXT2_ICACHE_HASH_BITS 6U
+#define EXT2_ICACHE_HASH_SIZE (1U << EXT2_ICACHE_HASH_BITS)
 
 #define EXT2_FEATURE_COMPAT_HAS_JOURNAL 0x0004U
 
@@ -104,6 +106,7 @@ struct ext2_mount {
     struct mutex lock;
     struct mutex icache_lock;
     struct list_head inode_cache;
+    struct list_head inode_cache_hash[EXT2_ICACHE_HASH_SIZE];
     uint32_t s_last_alloc_group_blk;
     uint32_t s_last_alloc_group_ino;
 };
@@ -115,6 +118,7 @@ struct ext2_inode_data {
     struct ext2_mount *mnt;
     struct vnode *vn;
     struct list_head cache_node;
+    struct list_head hash_node;
 };
 
 static inline int ext2_vnode_ctx(struct vnode *vn,

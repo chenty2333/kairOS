@@ -14,24 +14,41 @@
 #include <kairos/procfs.h>
 #include <kairos/tmpfs.h>
 #include <kairos/sysfs.h>
+#include <kairos/tracepoint.h>
 
 extern int dev_tty_init(void);
 extern int pty_driver_init(void);
 extern int console_tty_driver_init(void);
+extern void ipc_registry_sysfs_bootstrap(void);
 
 void init_fs(void) {
+    pr_debug("init_fs: begin\n");
     binit();
+    pr_debug("init_fs: after binit\n");
     vfs_init();
+    pr_debug("init_fs: after vfs_init\n");
     devfs_init();
+    pr_debug("init_fs: after devfs_init\n");
     console_tty_driver_init();
+    pr_debug("init_fs: after console_tty_driver_init\n");
     dev_tty_init();
+    pr_debug("init_fs: after dev_tty_init\n");
     pty_driver_init();
+    pr_debug("init_fs: after pty_driver_init\n");
     procfs_init();
+    pr_debug("init_fs: after procfs_init\n");
     tmpfs_init();
+    pr_debug("init_fs: after tmpfs_init\n");
     sysfs_init();
+    pr_debug("init_fs: after sysfs_init\n");
+    tracepoint_sysfs_init();
+    pr_debug("init_fs: after tracepoint_sysfs_init\n");
     initramfs_init();
+    pr_debug("init_fs: after initramfs_init\n");
     ext2_init();
+    pr_debug("init_fs: after ext2_init\n");
     fat32_init();
+    pr_debug("init_fs: after fat32_init\n");
 
     int ret = -1;
     bool root_ok = false;
@@ -102,4 +119,7 @@ void init_fs(void) {
             pr_info("devfs: mounted as root (no disk root)\n");
         }
     }
+
+    ipc_registry_sysfs_bootstrap();
+    pr_debug("init_fs: after ipc_registry_sysfs_bootstrap\n");
 }

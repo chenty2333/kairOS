@@ -3409,6 +3409,34 @@ static void test_snapshot_expect_str(const char *snapshot, const char *key,
     test_check(ok, name);
 }
 
+static bool test_snapshot_read_u64(const char *snapshot, const char *key,
+                                   uint64_t *out_value) {
+    if (!snapshot || !key || !out_value)
+        return false;
+    char needle[96];
+    int n = snprintf(needle, sizeof(needle), "%s=", key);
+    if (n <= 0 || (size_t)n >= sizeof(needle))
+        return false;
+    const char *p = strstr(snapshot, needle);
+    if (!p)
+        return false;
+    p += (size_t)n;
+    if (*p < '0' || *p > '9')
+        return false;
+    uint64_t value = 0;
+    while (*p >= '0' && *p <= '9') {
+        uint64_t digit = (uint64_t)(*p - '0');
+        if (value > (UINT64_MAX - digit) / 10ULL)
+            return false;
+        value = value * 10ULL + digit;
+        p++;
+    }
+    if (*p != '\n' && *p != '\0')
+        return false;
+    *out_value = value;
+    return true;
+}
+
 static void test_procfs_pid_control_write_semantics(void) {
     struct process *self = proc_current();
     test_check(self != NULL, "procfs control self present");
@@ -5096,6 +5124,103 @@ static void test_sysfs_ipc_visibility(void) {
     kobj_put(ch0);
 }
 
+static void test_sysfs_ipc_port_drop_stats(void) {
+    struct file *f = NULL;
+    char snapshot[512] = {0};
+    uint64_t drops_before = 0;
+    uint64_t drops_after = 0;
+    bool have_before = false;
+    bool have_after = false;
+
+    int rc = vfs_open("/sys/ipc/ports", O_RDONLY, 0, &f);
+    if (rc < 0) {
+        pr_warn("vfs_ipc_tests: skip ipc port drop stats (/sys unavailable)\n");
+        return;
+    }
+    ssize_t rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+    test_check(rd > 0, "sysfs_ipc_drop read ports");
+    if (rd > 0) {
+        test_check(strstr(snapshot, "dropped_count") != NULL,
+                   "sysfs_ipc_drop ports header");
+    }
+    close_file_if_open(&f);
+
+    memset(snapshot, 0, sizeof(snapshot));
+    rc = vfs_open("/sys/ipc/stats", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc_drop open stats before");
+    if (rc == 0) {
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "sysfs_ipc_drop read stats before");
+        if (rd > 0) {
+            have_before = test_snapshot_read_u64(
+                snapshot, "port_queue_drops_total", &drops_before);
+            test_check(have_before, "sysfs_ipc_drop parse stats before");
+        }
+    }
+    close_file_if_open(&f);
+
+    struct kobj *port = NULL;
+    struct kobj *tx[KPORT_MAX_QUEUE + 1] = {0};
+    struct kobj *rx[KPORT_MAX_QUEUE + 1] = {0};
+    size_t created = 0;
+
+    rc = kport_create(&port);
+    test_check(rc == 0, "sysfs_ipc_drop create port");
+    if (rc < 0)
+        goto out;
+
+    for (size_t i = 0; i < KPORT_MAX_QUEUE + 1; i++) {
+        rc = kchannel_create_pair(&tx[i], &rx[i]);
+        test_check(rc == 0, "sysfs_ipc_drop create channel pair");
+        if (rc < 0)
+            goto out;
+        created++;
+
+        rc = kport_bind_channel(port, rx[i], (uint64_t)(i + 1U),
+                                KPORT_BIND_READABLE);
+        test_check(rc == 0, "sysfs_ipc_drop bind channel");
+        if (rc < 0)
+            goto out;
+
+        rc = kobj_signal(rx[i], KPORT_BIND_READABLE, 0);
+        test_check(rc == 0, "sysfs_ipc_drop signal channel");
+        if (rc < 0)
+            goto out;
+    }
+
+    memset(snapshot, 0, sizeof(snapshot));
+    rc = vfs_open("/sys/ipc/stats", O_RDONLY, 0, &f);
+    test_check(rc == 0, "sysfs_ipc_drop open stats after");
+    if (rc == 0) {
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "sysfs_ipc_drop read stats after");
+        if (rd > 0) {
+            have_after = test_snapshot_read_u64(
+                snapshot, "port_queue_drops_total", &drops_after);
+            test_check(have_after, "sysfs_ipc_drop parse stats after");
+        }
+    }
+    close_file_if_open(&f);
+
+    if (have_before && have_after) {
+        test_check(drops_after >= drops_before + 1,
+                   "sysfs_ipc_drop stats increment");
+    } else if (have_after) {
+        test_check(drops_after > 0, "sysfs_ipc_drop stats nonzero");
+    }
+
+out:
+    close_file_if_open(&f);
+    for (size_t i = 0; i < created; i++) {
+        if (rx[i])
+            kobj_put(rx[i]);
+        if (tx[i])
+            kobj_put(tx[i]);
+    }
+    if (port)
+        kobj_put(port);
+}
+
 int run_vfs_ipc_tests(void) {
     tests_failed = 0;
     pr_info("\n=== VFS/IPC Tests ===\n");
@@ -5136,6 +5261,7 @@ int run_vfs_ipc_tests(void) {
     test_inotify_syscall_functional();
     test_inotify_mask_update_functional();
     test_sysfs_ipc_visibility();
+    test_sysfs_ipc_port_drop_stats();
     test_procfs_pid_handle_transfers_readonly();
     test_procfs_pid_handle_transfers_large_not_truncated();
     test_procfs_pid_handle_transfers_v2_cursor();

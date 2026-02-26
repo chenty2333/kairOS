@@ -17,6 +17,7 @@ struct blkdev {
     struct blkdev *parent;
     uint64_t start_lba;
     struct list_head list;
+    struct list_head hash;
     uint32_t refcount;
 };
 

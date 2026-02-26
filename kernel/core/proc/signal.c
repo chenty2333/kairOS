@@ -85,18 +85,10 @@ static int signal_send_core(pid_t pid, int sig, uid_t sender_uid,
     struct process *target = NULL;
     bool flags;
     spin_lock_irqsave(&proc_table_lock, &flags);
-    for (int i = 0; i < CONFIG_MAX_PROCESSES; i++) {
-        struct process *p = &proc_table[i];
-        if (p->state == PROC_UNUSED || p->state == PROC_EMBRYO)
-            continue;
-        if (p->pid != pid)
-            continue;
-        if (enforce_uid && sender_uid != 0 && sender_uid != p->uid) {
-            spin_unlock_irqrestore(&proc_table_lock, flags);
-            return -EPERM;
-        }
-        target = p;
-        break;
+    target = proc_find_locked(pid);
+    if (target && enforce_uid && sender_uid != 0 && sender_uid != target->uid) {
+        spin_unlock_irqrestore(&proc_table_lock, flags);
+        return -EPERM;
     }
     spin_unlock_irqrestore(&proc_table_lock, flags);
     if (!target)

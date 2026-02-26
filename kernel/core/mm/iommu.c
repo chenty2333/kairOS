@@ -11,6 +11,7 @@
 
 struct iommu_mapping {
     struct list_head list;
+    struct list_head hash_node;
     struct device *dev;
     dma_addr_t dma_addr;
     dma_addr_t iova_base;
@@ -70,6 +71,39 @@ static void iommu_direct_unmap_rollback(const struct dma_ops *direct,
     if (!direct || !direct->unmap_single || !phys_dma)
         return;
     direct->unmap_single(dev, phys_dma, size, direction);
+}
+
+static size_t iommu_mapping_hash_bucket(dma_addr_t dma_addr) {
+    return (size_t)(((uint64_t)dma_addr) & (IOMMU_MAPPING_HASH_SIZE - 1U));
+}
+
+static void iommu_mapping_hash_insert_locked(struct iommu_domain *domain,
+                                             struct iommu_mapping *mapping) {
+    if (!domain || !mapping)
+        return;
+    size_t idx = iommu_mapping_hash_bucket(mapping->dma_addr);
+    list_add_tail(&mapping->hash_node, &domain->mapping_hash[idx]);
+}
+
+static void iommu_mapping_hash_remove_locked(struct iommu_mapping *mapping) {
+    if (!mapping || list_empty(&mapping->hash_node))
+        return;
+    list_del(&mapping->hash_node);
+    INIT_LIST_HEAD(&mapping->hash_node);
+}
+
+static struct iommu_mapping *
+iommu_mapping_find_locked(struct iommu_domain *domain, struct device *dev,
+                          dma_addr_t dma_addr) {
+    if (!domain || !dev || dma_addr == 0)
+        return NULL;
+    size_t idx = iommu_mapping_hash_bucket(dma_addr);
+    struct iommu_mapping *iter = NULL;
+    list_for_each_entry(iter, &domain->mapping_hash[idx], hash_node) {
+        if (iter->dev == dev && iter->dma_addr == dma_addr)
+            return iter;
+    }
+    return NULL;
 }
 
 static bool iommu_iova_conflict_locked(struct iommu_domain *domain, dma_addr_t start,
@@ -169,6 +203,7 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
         iommu_direct_unmap_rollback(direct, dev, phys_dma, size, direction);
         return 0;
     }
+    INIT_LIST_HEAD(&mapping->hash_node);
 
     bool irq_flags;
     spin_lock_irqsave(&domain->lock, &irq_flags);
@@ -205,6 +240,7 @@ static dma_addr_t iommu_dma_map_single_impl(struct device *dev, void *ptr, size_
     mapping->req_size = size;
     mapping->direction = direction;
     list_add_tail(&mapping->list, &domain->mappings);
+    iommu_mapping_hash_insert_locked(domain, mapping);
 
     domain->iova_cursor = iova_base + (dma_addr_t)map_size;
     if (domain->iova_cursor >= domain->iova_limit)
@@ -228,13 +264,10 @@ static void iommu_dma_unmap_single_impl(struct device *dev, dma_addr_t addr, siz
     bool irq_flags;
     struct iommu_mapping *mapping = NULL;
     spin_lock_irqsave(&domain->lock, &irq_flags);
-    struct iommu_mapping *iter;
-    list_for_each_entry(iter, &domain->mappings, list) {
-        if (iter->dev == dev && iter->dma_addr == addr) {
-            mapping = iter;
-            list_del(&iter->list);
-            break;
-        }
+    mapping = iommu_mapping_find_locked(domain, dev, addr);
+    if (mapping) {
+        iommu_mapping_hash_remove_locked(mapping);
+        list_del(&mapping->list);
     }
     if (mapping && domain->ops && domain->ops->unmap)
         domain->ops->unmap(domain, mapping->iova_base, mapping->map_size);
@@ -329,6 +362,8 @@ struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
     domain->fault_policy = IOMMU_FAULT_POLICY_REPORT;
     spin_init(&domain->lock);
     INIT_LIST_HEAD(&domain->mappings);
+    for (size_t i = 0; i < IOMMU_MAPPING_HASH_SIZE; i++)
+        INIT_LIST_HEAD(&domain->mapping_hash[i]);
     return domain;
 }
 
@@ -349,6 +384,8 @@ struct iommu_domain *iommu_get_passthrough_domain(void) {
         iommu_passthrough_domain.fault_policy = IOMMU_FAULT_POLICY_REPORT;
         spin_init(&iommu_passthrough_domain.lock);
         INIT_LIST_HEAD(&iommu_passthrough_domain.mappings);
+        for (size_t i = 0; i < IOMMU_MAPPING_HASH_SIZE; i++)
+            INIT_LIST_HEAD(&iommu_passthrough_domain.mapping_hash[i]);
         __atomic_store_n(&iommu_passthrough_domain_init_done, true,
                          __ATOMIC_RELEASE);
     }
@@ -382,6 +419,7 @@ void iommu_domain_destroy(struct iommu_domain *domain) {
     struct list_head *pos, *n;
     list_for_each_safe(pos, n, &domain->mappings) {
         struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
+        iommu_mapping_hash_remove_locked(m);
         list_del(&m->list);
         if (domain->ops && domain->ops->unmap)
             domain->ops->unmap(domain, m->iova_base, m->map_size);
@@ -457,6 +495,8 @@ int iommu_domain_bind_pasid(struct iommu_domain *domain, struct device *dev,
                             uint32_t pasid, uint32_t flags) {
     if (!domain || !dev)
         return -EINVAL;
+    if (!iommu_domain_has_cap(domain, IOMMU_CAP_PASID))
+        return -EOPNOTSUPP;
     if (!domain->ops || !domain->ops->bind_pasid)
         return -EOPNOTSUPP;
     return domain->ops->bind_pasid(domain, dev, pasid, flags);
@@ -466,6 +506,8 @@ int iommu_domain_unbind_pasid(struct iommu_domain *domain, struct device *dev,
                               uint32_t pasid) {
     if (!domain || !dev)
         return -EINVAL;
+    if (!iommu_domain_has_cap(domain, IOMMU_CAP_PASID))
+        return -EOPNOTSUPP;
     if (!domain->ops || !domain->ops->unbind_pasid)
         return -EOPNOTSUPP;
     return domain->ops->unbind_pasid(domain, dev, pasid);
@@ -475,6 +517,8 @@ int iommu_domain_enable_pri(struct iommu_domain *domain, struct device *dev,
                             uint32_t queue_depth) {
     if (!domain || !dev || queue_depth == 0)
         return -EINVAL;
+    if (!iommu_domain_has_cap(domain, IOMMU_CAP_PRI))
+        return -EOPNOTSUPP;
     if (!domain->ops || !domain->ops->enable_pri)
         return -EOPNOTSUPP;
     return domain->ops->enable_pri(domain, dev, queue_depth);
@@ -484,6 +528,8 @@ int iommu_domain_enable_ats(struct iommu_domain *domain, struct device *dev,
                             uint32_t flags) {
     if (!domain || !dev)
         return -EINVAL;
+    if (!iommu_domain_has_cap(domain, IOMMU_CAP_ATS))
+        return -EOPNOTSUPP;
     if (!domain->ops || !domain->ops->enable_ats)
         return -EOPNOTSUPP;
     return domain->ops->enable_ats(domain, dev, flags);
@@ -497,6 +543,9 @@ int iommu_domain_set_fault_policy(struct iommu_domain *domain,
         policy > IOMMU_FAULT_POLICY_RECOVER)
         return -EINVAL;
 
+    if (policy == IOMMU_FAULT_POLICY_DISABLE &&
+        !iommu_domain_has_cap(domain, IOMMU_CAP_FAULT_DISABLE))
+        return -EOPNOTSUPP;
     if (policy == IOMMU_FAULT_POLICY_RECOVER &&
         !iommu_domain_has_cap(domain, IOMMU_CAP_FAULT_RECOVER))
         return -EOPNOTSUPP;
@@ -550,6 +599,7 @@ static void iommu_release_detached_domain(struct iommu_domain *domain, bool owne
             struct iommu_mapping *m = list_entry(pos, struct iommu_mapping, list);
             if (m->dev != dev)
                 continue;
+            iommu_mapping_hash_remove_locked(m);
             list_del(&m->list);
             list_add_tail(&m->list, &reclaimed);
         }

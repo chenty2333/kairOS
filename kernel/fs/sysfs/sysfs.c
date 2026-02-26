@@ -518,6 +518,13 @@ struct sysfs_node *sysfs_root(void) { return sysfs_root_node; }
 struct sysfs_node *sysfs_bus_dir(void) { return sysfs_bus_node; }
 struct sysfs_node *sysfs_class_dir(void) { return sysfs_class_node; }
 struct sysfs_node *sysfs_devices_dir(void) { return sysfs_devices_node; }
+struct sysfs_node *sysfs_kernel_dir(void) { return sysfs_kernel_node; }
+bool sysfs_is_vnode(const struct vnode *vn) {
+    if (!vn || !vn->ops)
+        return false;
+    return vn->ops == &sysfs_dir_ops || vn->ops == &sysfs_file_fops ||
+           vn->ops == &sysfs_link_fops;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Initialization                                                     */

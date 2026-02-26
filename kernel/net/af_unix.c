@@ -103,11 +103,17 @@ struct unix_sock {
     int so_rcvbuf;
 };
 
-/* Global bound socket registry (simple linear scan) */
+/* Global bound socket registry */
 #define UNIX_BIND_TABLE_SIZE 64
+struct unix_bind_entry {
+    struct list_head node;
+    struct unix_sock *us;
+};
+
 static struct {
     struct mutex lock;
-    struct unix_sock *entries[UNIX_BIND_TABLE_SIZE];
+    struct list_head buckets[UNIX_BIND_TABLE_SIZE];
+    size_t entries;
     bool init;
 } unix_bind_table;
 
@@ -145,16 +151,31 @@ static void unix_bind_table_init(void) {
         return;
     }
     mutex_init(&unix_bind_table.lock, "unix_bind");
-    memset(unix_bind_table.entries, 0, sizeof(unix_bind_table.entries));
+    for (size_t i = 0; i < UNIX_BIND_TABLE_SIZE; i++)
+        INIT_LIST_HEAD(&unix_bind_table.buckets[i]);
+    unix_bind_table.entries = 0;
     unix_bind_table.init = true;
 }
 
+static uint32_t unix_bind_hash_path(const char *path) {
+    if (!path)
+        return 0;
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        h ^= (uint32_t)(*p);
+        h *= 16777619u;
+    }
+    return h & (UNIX_BIND_TABLE_SIZE - 1U);
+}
+
 static struct unix_sock *unix_find_bound_locked(const char *path) {
-    for (int i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
-        struct unix_sock *us = unix_bind_table.entries[i];
-        if (us && strcmp(us->path, path) == 0) {
-            return us;
-        }
+    if (!path || !path[0])
+        return NULL;
+    uint32_t idx = unix_bind_hash_path(path);
+    struct unix_bind_entry *ent;
+    list_for_each_entry(ent, &unix_bind_table.buckets[idx], node) {
+        if (ent->us && strcmp(ent->us->path, path) == 0)
+            return ent->us;
     }
     return NULL;
 }
@@ -167,21 +188,48 @@ static struct unix_sock *unix_find_bound_get_locked(const char *path) {
 }
 
 static int unix_add_bound(struct unix_sock *us) {
-    for (int i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
-        if (!unix_bind_table.entries[i]) {
-            unix_bind_table.entries[i] = us;
-            unix_sock_get(us);
-            return 0;
-        }
-    }
-    return -ENOMEM;
+    if (!us || !us->path[0])
+        return -EINVAL;
+    if (unix_bind_table.entries >= UNIX_BIND_TABLE_SIZE)
+        return -ENOMEM;
+    struct unix_bind_entry *ent = kzalloc(sizeof(*ent));
+    if (!ent)
+        return -ENOMEM;
+    ent->us = us;
+    uint32_t idx = unix_bind_hash_path(us->path);
+    list_add_tail(&ent->node, &unix_bind_table.buckets[idx]);
+    unix_bind_table.entries++;
+    unix_sock_get(us);
+    return 0;
 }
 
 static void unix_remove_bound(struct unix_sock *us) {
-    for (int i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
-        if (unix_bind_table.entries[i] == us) {
-            unix_bind_table.entries[i] = NULL;
+    if (!us)
+        return;
+
+    uint32_t idx = unix_bind_hash_path(us->path);
+    struct unix_bind_entry *ent = NULL;
+    struct unix_bind_entry *tmp = NULL;
+    list_for_each_entry_safe(ent, tmp, &unix_bind_table.buckets[idx], node) {
+        if (ent->us == us) {
+            list_del(&ent->node);
+            if (unix_bind_table.entries > 0)
+                unix_bind_table.entries--;
             unix_sock_put(us);
+            kfree(ent);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < UNIX_BIND_TABLE_SIZE; i++) {
+        list_for_each_entry_safe(ent, tmp, &unix_bind_table.buckets[i], node) {
+            if (ent->us != us)
+                continue;
+            list_del(&ent->node);
+            if (unix_bind_table.entries > 0)
+                unix_bind_table.entries--;
+            unix_sock_put(us);
+            kfree(ent);
             return;
         }
     }
