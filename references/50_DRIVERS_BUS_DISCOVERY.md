@@ -22,6 +22,9 @@ Platform bus (bus/platform.c):
 - For MMIO devices (virtio-mmio, framebuffer, etc.)
 - Match strategy: exact name match first, then compatible string match
 - platform_bus_enumerate(): iterates firmware descriptor table (fw_for_each_desc), creates a platform device for each descriptor and registers it
+- Driver-facing IRQ helpers are available for platform devices:
+  `platform_device_get_irq()`, `platform_device_request_irq()`,
+  `platform_device_free_irq()`, `platform_device_free_irq_sync()`
 
 PCI bus (bus/pci.c):
 - ECAM config space access (pci_read/write_config_8/16/32)
@@ -40,6 +43,7 @@ PCI bus (bus/pci.c):
 VirtIO bus:
 - Registered as a separate bus_type (virtio_bus_type)
 - virtio_mmio.c: VirtIO MMIO transport layer, probed as a platform driver, discovers VirtIO devices and registers them on the virtio bus
+- virtio_mmio now takes IRQ from platform resource helpers and registers/free IRQ through `platform_device_request_irq()` / `platform_device_free_irq()`
 - virtio_pci.c: VirtIO PCI transport layer, probed as a PCI driver, parses VirtIO vendor capabilities (common/notify/isr/device config) and registers child virtio devices on the virtio bus
   - probe path attempts MSI-X first (`min=1, max=requested`), then MSI, then falls back to INTx
   - when MSI-X is active, common config and queue vector bindings are explicitly programmed

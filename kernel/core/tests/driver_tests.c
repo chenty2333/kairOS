@@ -8,6 +8,7 @@
 #include <kairos/dma.h>
 #include <kairos/iommu.h>
 #include <kairos/net.h>
+#include <kairos/platform.h>
 #include <kairos/platform_core.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -580,6 +581,7 @@ static volatile uint32_t irq_concurrent_hits;
 static volatile uint32_t irq_blocking_entered;
 static volatile uint32_t irq_blocking_release;
 static volatile uint32_t irq_blocking_hits;
+static volatile uint32_t irq_platform_helper_hits;
 
 struct irq_concurrency_ctx {
     int irq;
@@ -659,6 +661,10 @@ static void test_irq_blocking_handler(void *arg __unused,
     __atomic_store_n(&irq_blocking_entered, 1, __ATOMIC_RELAXED);
     while (!__atomic_load_n(&irq_blocking_release, __ATOMIC_RELAXED))
         proc_yield();
+}
+
+static void test_irq_platform_helper_handler(void *arg __unused) {
+    __atomic_add_fetch(&irq_platform_helper_hits, 1, __ATOMIC_RELAXED);
 }
 
 static int irq_dispatch_storm_thread(void *arg) {
@@ -829,6 +835,46 @@ static void test_irq_request_free_actions(void) {
     test_check(__atomic_load_n(&irq_shared_hits_a, __ATOMIC_RELAXED) ==
                    hits_before,
                "irq free disables empty irq");
+}
+
+static void test_platform_device_irq_helpers(void) {
+    const int irq = 908;
+    irq_platform_helper_hits = 0;
+
+    struct resource res = {
+        .start = (uint64_t)irq,
+        .end = (uint64_t)irq,
+        .flags = IORESOURCE_IRQ,
+    };
+    struct device dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.bus = &platform_bus_type;
+    dev.resources = &res;
+    dev.num_resources = 1;
+
+    int got_irq = platform_device_get_irq(&dev, 0);
+    test_check(got_irq == irq, "platform irq helper get irq");
+    got_irq = platform_device_get_irq(&dev, 1);
+    test_check(got_irq == -ENOENT, "platform irq helper get irq invalid index");
+
+    int ret = platform_device_request_irq(
+        &dev, 0, test_irq_platform_helper_handler, NULL,
+        IRQ_FLAG_TRIGGER_LEVEL | IRQ_FLAG_NO_CHIP);
+    test_check(ret == 0, "platform irq helper request");
+    if (ret < 0)
+        return;
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_platform_helper_hits, __ATOMIC_RELAXED) == 1,
+               "platform irq helper dispatch");
+
+    ret = platform_device_free_irq(&dev, 0, test_irq_platform_helper_handler,
+                                   NULL);
+    test_check(ret == 0, "platform irq helper free");
+
+    platform_irq_dispatch_nr((uint32_t)irq);
+    test_check(__atomic_load_n(&irq_platform_helper_hits, __ATOMIC_RELAXED) == 1,
+               "platform irq helper free removed");
 }
 
 static void test_irq_stats_export(void) {
@@ -2164,6 +2210,7 @@ static void run_driver_suite_once(void) {
     test_irq_unregister_actions();
     test_irq_enable_disable_gate();
     test_irq_request_free_actions();
+    test_platform_device_irq_helpers();
     test_irq_stats_export();
     test_irq_stats_snapshot_and_procfs();
     test_irq_unregister_dispatch_concurrency();

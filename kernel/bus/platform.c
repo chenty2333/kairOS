@@ -3,6 +3,8 @@
  */
 
 #include <kairos/platform.h>
+#include <kairos/platform_irq.h>
+#include <kairos/arch.h>
 #include <kairos/firmware.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
@@ -73,4 +75,49 @@ static int platform_register_desc(struct fw_device_desc *desc, void *arg) {
 
 int platform_bus_enumerate(void) {
     return fw_for_each_desc(platform_register_desc, NULL);
+}
+
+int platform_device_get_irq(const struct device *dev, size_t index) {
+    if (!dev || !is_platform_device((struct device *)dev))
+        return -EINVAL;
+
+    const struct resource *res =
+        device_get_resource((struct device *)dev, IORESOURCE_IRQ, index);
+    if (!res)
+        return -ENOENT;
+    if (res->start > 0x7fffffffULL)
+        return -ERANGE;
+
+    int irq = (int)res->start;
+    if (irq <= 0)
+        return -EINVAL;
+    return irq;
+}
+
+int platform_device_request_irq(struct device *dev, size_t index,
+                                void (*handler)(void *), void *arg,
+                                uint32_t flags)
+{
+    int irq = platform_device_get_irq(dev, index);
+    if (irq < 0)
+        return irq;
+    return arch_request_irq(irq, handler, arg, flags);
+}
+
+int platform_device_free_irq(struct device *dev, size_t index,
+                             void (*handler)(void *), void *arg)
+{
+    int irq = platform_device_get_irq(dev, index);
+    if (irq < 0)
+        return irq;
+    return arch_free_irq(irq, handler, arg);
+}
+
+int platform_device_free_irq_sync(struct device *dev, size_t index,
+                                  void (*handler)(void *), void *arg)
+{
+    int irq = platform_device_get_irq(dev, index);
+    if (irq < 0)
+        return irq;
+    return arch_free_irq_sync(irq, handler, arg);
 }

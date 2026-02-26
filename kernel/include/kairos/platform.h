@@ -17,12 +17,14 @@ extern struct bus_type platform_bus_type;
  * @base: MMIO base address
  * @size: MMIO size
  * @irq: Interrupt number
+ * @fwnode: Firmware node id (DT phandle)
  * @compatible: Compatible string (e.g., "virtio,mmio")
  */
 struct platform_device_info {
     paddr_t base;
     size_t size;
     int irq;
+    uint32_t fwnode;
     char compatible[64];
 };
 

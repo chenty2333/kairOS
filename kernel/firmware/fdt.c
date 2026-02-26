@@ -603,6 +603,8 @@ struct fdt_node_ctx {
     char name[64];
     const char *compatible;
     uint32_t compatible_len;
+    uint32_t phandle;
+    bool interrupt_controller;
     const uint32_t *reg;
     uint32_t reg_len;
     const uint32_t *interrupts;
@@ -1251,6 +1253,7 @@ static void fdt_handle_virtio_mmio(
         info->base = base;
         info->size = size;
         info->irq = irq;
+        info->fwnode = ctx->phandle;
         strncpy(info->compatible, "virtio,mmio",
                 sizeof(info->compatible) - 1);
 
@@ -1332,6 +1335,76 @@ static void fdt_handle_pci_ecam(
     fw_register_desc(desc);
 }
 
+static void fdt_handle_irq_controller(
+    const struct fdt_node_ctx *ctx,
+    const struct fdt_irq_domain_entry *irq_domains, size_t irq_domain_count)
+{
+    if (!ctx || !ctx->interrupt_controller || !ctx->phandle)
+        return;
+    if (!ctx->compatible || ctx->compatible_len == 0)
+        return;
+
+    int parent_irq = fdt_parse_uart_irq(
+        ctx->interrupts, ctx->interrupts_len, ctx->interrupts_extended,
+        ctx->interrupts_extended_len, ctx->irq_parent, ctx->irq_cells_hint,
+        irq_domains, irq_domain_count);
+    if (parent_irq <= 0)
+        return;
+
+    paddr_t base = 0;
+    size_t size = 0;
+    bool has_mem = false;
+    if (ctx->reg && ctx->reg_len >= (ctx->address_cells + ctx->size_cells) * 4 &&
+        fdt_read_reg(ctx->reg, ctx->reg_len, ctx->address_cells, ctx->size_cells,
+                     &base, &size) == 0 && size > 0) {
+        has_mem = true;
+    }
+
+    char first_compat[64];
+    fdt_copy_first_compat(ctx->compatible, ctx->compatible_len, first_compat,
+                          sizeof(first_compat));
+    if (!first_compat[0])
+        return;
+
+    struct fw_device_desc *desc = kzalloc(sizeof(*desc));
+    struct platform_device_info *info = kzalloc(sizeof(*info));
+    size_t num_res = has_mem ? 2 : 1;
+    struct resource *res = kzalloc(num_res * sizeof(*res));
+    if (!desc || !info || !res) {
+        kfree(desc);
+        kfree(info);
+        kfree(res);
+        return;
+    }
+
+    strncpy(desc->name, ctx->name, sizeof(desc->name) - 1);
+    strncpy(desc->compatible, first_compat, sizeof(desc->compatible) - 1);
+    info->base = base;
+    info->size = size;
+    info->irq = parent_irq;
+    info->fwnode = ctx->phandle;
+    strncpy(info->compatible, first_compat, sizeof(info->compatible) - 1);
+
+    size_t idx = 0;
+    if (has_mem) {
+        res[idx].start = base;
+        res[idx].end = base + size - 1;
+        res[idx].flags = IORESOURCE_MEM;
+        idx++;
+    }
+    res[idx].start = (uint64_t)parent_irq;
+    res[idx].end = (uint64_t)parent_irq;
+    res[idx].flags = IORESOURCE_IRQ;
+
+    desc->resources = res;
+    desc->num_resources = num_res;
+    desc->fw_data = info;
+
+    pr_info("fdt: found cascaded irq controller %s fwnode=0x%x parent_irq=%d\n",
+            first_compat, ctx->phandle, parent_irq);
+    fw_register_desc(desc);
+}
+
 int fdt_scan_devices(const void *fdt) {
     struct fdt_view view;
     if (fdt_init_view(fdt, &view))
@@ -1384,6 +1457,8 @@ int fdt_scan_devices(const void *fdt) {
             ctx.name[sizeof(ctx.name) - 1] = '\0';
             ctx.compatible = NULL;
             ctx.compatible_len = 0;
+            ctx.phandle = 0;
+            ctx.interrupt_controller = false;
             ctx.reg = NULL;
             ctx.reg_len = 0;
             ctx.interrupts = NULL;
@@ -1397,10 +1472,13 @@ int fdt_scan_devices(const void *fdt) {
             break;
         }
         case FDT_END_NODE:
+            fdt_handle_irq_controller(&ctx, irq_domains, irq_domain_count);
             fdt_handle_virtio_mmio(&ctx, irq_domains, irq_domain_count);
             fdt_handle_pci_ecam(&ctx, irq_domains, irq_domain_count);
             ctx.compatible = NULL;
             ctx.compatible_len = 0;
+            ctx.phandle = 0;
+            ctx.interrupt_controller = false;
             ctx.reg = NULL;
             ctx.reg_len = 0;
             ctx.interrupts = NULL;
@@ -1416,6 +1494,12 @@ int fdt_scan_devices(const void *fdt) {
                 addr_cells_stack[it.depth] = fdt_be32(*(const uint32_t *)prop_data);
             } else if (strcmp(prop_name, "#size-cells") == 0 && prop_len >= 4) {
                 size_cells_stack[it.depth] = fdt_be32(*(const uint32_t *)prop_data);
+            } else if ((strcmp(prop_name, "phandle") == 0 ||
+                        strcmp(prop_name, "linux,phandle") == 0) &&
+                       prop_len >= 4) {
+                ctx.phandle = fdt_be32(*(const uint32_t *)prop_data);
+            } else if (strcmp(prop_name, "interrupt-controller") == 0) {
+                ctx.interrupt_controller = true;
             } else if (strcmp(prop_name, "#interrupt-cells") == 0 &&
                        prop_len >= 4) {
                 irq_cells_stack[it.depth] =

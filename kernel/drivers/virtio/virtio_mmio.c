@@ -5,6 +5,7 @@
 #include <kairos/virtio.h>
 #include <kairos/arch.h>
 #include <kairos/platform.h>
+#include <kairos/platform_core.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
@@ -128,10 +129,9 @@ static void virtio_mmio_intr(void *arg) {
 
 static int virtio_mmio_probe(struct device *dev) {
     void *base = dev_ioremap_resource(dev, 0);
-    const struct resource *irq_res = device_get_resource(dev, IORESOURCE_IRQ, 0);
-    int irq = irq_res ? (int)irq_res->start : 0;
+    int irq = platform_device_get_irq(dev, 0);
 
-    if (!base || irq <= 0)
+    if (!base || irq < 0)
         return -ENODEV;
     if (readl(base + VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976)
         return -ENODEV;
@@ -152,7 +152,8 @@ static int virtio_mmio_probe(struct device *dev) {
     snprintf(mdev->vdev.dev.name, sizeof(mdev->vdev.dev.name), "virtio-mmio.%p", base);
     
     /* Register physical interrupt */
-    (void)arch_request_irq(mdev->irq, virtio_mmio_intr, mdev, 0);
+    (void)platform_device_request_irq(dev, 0, virtio_mmio_intr, mdev,
+                                      IRQ_FLAG_TRIGGER_LEVEL);
 
     pr_info("virtio-mmio: found device %d at %p, irq %d\n", virtio_id, base, mdev->irq);
 
@@ -171,7 +172,7 @@ static void virtio_mmio_remove(struct device *dev) {
     if (!mdev)
         return;
 
-    (void)arch_free_irq(mdev->irq, virtio_mmio_intr, mdev);
+    (void)platform_device_free_irq(dev, 0, virtio_mmio_intr, mdev);
     device_unregister(&mdev->vdev.dev);
     dev_set_drvdata(dev, NULL);
     iounmap(mdev->base);
