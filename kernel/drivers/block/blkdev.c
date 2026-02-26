@@ -110,10 +110,10 @@ static void log_partition_bounds(const char *dev_name, uint32_t idx,
                 (unsigned long long)last_lba);
         return;
     }
-    pr_info("blkdev: %s partition %u lba=%llu..%llu (%llu sectors)\n",
-            dev_name, idx, (unsigned long long)first_lba,
-            (unsigned long long)last_lba,
-            (unsigned long long)(last_lba - first_lba + 1ULL));
+    pr_debug("blkdev: %s partition %u lba=%llu..%llu (%llu sectors)\n",
+             dev_name, idx, (unsigned long long)first_lba,
+             (unsigned long long)last_lba,
+             (unsigned long long)(last_lba - first_lba + 1ULL));
 }
 
 static int blkpart_read(struct blkdev *dev, uint64_t lba, void *buf, size_t count) {
@@ -221,7 +221,7 @@ static int blkdev_drop_partition_children(struct blkdev *parent) {
         list_del(&child->list);
         spin_unlock(&blkdev_lock);
 
-        pr_info("blkdev: unregistered %s\n", child->name);
+        pr_debug("blkdev: unregistered %s\n", child->name);
         kfree(child);
     }
 }
@@ -429,10 +429,10 @@ int blkdev_register(struct blkdev *dev)
 
     spin_unlock(&blkdev_lock);
 
-    pr_info("blkdev: registered %s (%lu MB, %u byte sectors)\n",
-            dev->name,
-            (dev->sector_count * dev->sector_size) / (1024 * 1024),
-            dev->sector_size);
+    pr_debug("blkdev: registered %s (%lu MB, %u byte sectors)\n",
+             dev->name,
+             (dev->sector_count * dev->sector_size) / (1024 * 1024),
+             dev->sector_size);
 
     if (dev->parent)
         return 0;
@@ -467,7 +467,7 @@ void blkdev_unregister(struct blkdev *dev)
         }
         list_del(&dev->list);
         spin_unlock(&blkdev_lock);
-        pr_info("blkdev: unregistered %s\n", dev->name);
+        pr_debug("blkdev: unregistered %s\n", dev->name);
         kfree(dev);
         return;
     }
@@ -501,7 +501,7 @@ void blkdev_unregister(struct blkdev *dev)
 
     spin_unlock(&blkdev_lock);
 
-    pr_info("blkdev: unregistered %s\n", dev->name);
+    pr_debug("blkdev: unregistered %s\n", dev->name);
 }
 
 /**
@@ -658,13 +658,13 @@ int blkdev_probe_partitions(struct blkdev *dev)
     }
 
     if (gpt_count > 0) {
-        pr_info("blkdev: %s GPT partitions discovered: %u\n",
-                dev->name, gpt_count);
+        pr_debug("blkdev: %s GPT partitions discovered: %u\n",
+                 dev->name, gpt_count);
     } else if (mbr_count > 0) {
-        pr_info("blkdev: %s MBR partitions discovered: %u\n",
-                dev->name, mbr_count);
+        pr_debug("blkdev: %s MBR partitions discovered: %u\n",
+                 dev->name, mbr_count);
     } else {
-        pr_info("blkdev: %s no partition table entries found\n", dev->name);
+        pr_debug("blkdev: %s no partition table entries found\n", dev->name);
     }
 
     return first_err;

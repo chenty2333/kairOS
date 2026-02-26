@@ -422,11 +422,11 @@ static int virtio_pci_probe(struct pci_device *pdev) {
                 if (aff_ret < 0) {
                     pr_warn("virtio-pci: MSI-X affinity set failed on %02x:%02x.%x vec=%u mask=0x%x ret=%d\n",
                             pdev->bus, pdev->slot, pdev->func, i, mask, aff_ret);
-                    pr_info("VIRTIO_IRQ_AFFINITY:fail:%u:0x%x bdf=%02x:%02x.%x\n",
-                            i, mask, pdev->bus, pdev->slot, pdev->func);
+                    pr_debug("VIRTIO_IRQ_AFFINITY:fail:%u:0x%x bdf=%02x:%02x.%x\n",
+                             i, mask, pdev->bus, pdev->slot, pdev->func);
                 } else {
-                    pr_info("VIRTIO_IRQ_AFFINITY:ok:%u:0x%x bdf=%02x:%02x.%x\n",
-                            i, mask, pdev->bus, pdev->slot, pdev->func);
+                    pr_debug("VIRTIO_IRQ_AFFINITY:ok:%u:0x%x bdf=%02x:%02x.%x\n",
+                             i, mask, pdev->bus, pdev->slot, pdev->func);
                 }
             }
         }
@@ -451,13 +451,9 @@ static int virtio_pci_probe(struct pci_device *pdev) {
     const char *irq_mode =
         pdev->msix_enabled ? "msix" : (pdev->msi_enabled ? "msi" : "intx");
     uint16_t irq_vectors = pdev->msix_enabled ? vp->msix_nvec : 1U;
-    pr_info("virtio-pci: %02x:%02x.%x device_id=0x%04x virtio_id=%u irq=%d mode=%s vectors=%u\n",
+    pr_info("virtio-pci: %02x:%02x.%x device_id=0x%04x virtio_id=%u irq=%d mode=%s vectors=%u msi_state=%s\n",
             pdev->bus, pdev->slot, pdev->func, pdev->device_id,
-            virtio_id, vp->irq, irq_mode, irq_vectors);
-    pr_info("VIRTIO_IRQ_MODE:%s:%u bdf=%02x:%02x.%x\n", irq_mode, irq_vectors,
-            pdev->bus, pdev->slot, pdev->func);
-    pr_info("VIRTIO_IRQ_MSI_STATE:%s bdf=%02x:%02x.%x\n", msi_state, pdev->bus,
-            pdev->slot, pdev->func);
+            virtio_id, vp->irq, irq_mode, irq_vectors, msi_state);
     return 0;
 }
 

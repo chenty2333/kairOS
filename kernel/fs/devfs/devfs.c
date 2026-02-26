@@ -203,7 +203,7 @@ static int devfs_mount(struct mount *mnt) {
 
     mnt->fs_data = dm;
     mnt->root = &dm->root->vn;
-    pr_info("devfs: mounted (null, zero, console)\n");
+    pr_debug("devfs: mounted (null, zero, console)\n");
     return 0;
 }
 

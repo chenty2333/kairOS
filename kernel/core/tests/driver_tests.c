@@ -3546,11 +3546,11 @@ static void run_driver_suite_once(void) {
 
 int run_driver_tests(void) {
     tests_failed = 0;
-    pr_info("\n=== Driver Tests ===\n");
+    pr_debug("\n=== Driver Tests ===\n");
 
     run_driver_suite_once();
     int first_pass_failures = tests_failed;
-    pr_info("driver tests: rerun suite for isolation check\n");
+    pr_debug("driver tests: rerun suite for isolation check\n");
     run_driver_suite_once();
     test_check(tests_failed == first_pass_failures,
                "driver suite rerun in same kernel");

@@ -39,7 +39,7 @@ int netdev_register(struct netdev *dev) {
     list_add_tail(&dev->list, &netdev_list);
     spin_unlock(&netdev_lock);
 
-    pr_info("net: registered %s\n", dev->name);
+    pr_debug("net: registered %s\n", dev->name);
     return 0;
 }
 
@@ -49,7 +49,7 @@ int netdev_unregister(struct netdev *dev) {
     spin_lock(&netdev_lock);
     list_del(&dev->list);
     spin_unlock(&netdev_lock);
-    pr_info("net: unregistered %s\n", dev->name);
+    pr_debug("net: unregistered %s\n", dev->name);
     return 0;
 }
 

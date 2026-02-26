@@ -804,7 +804,7 @@ static int tmpfs_mount_op(struct mount *mnt) {
 
     mnt->fs_data = tm;
     mnt->root = &tm->root->vn;
-    pr_info("tmpfs: mounted\n");
+    pr_debug("tmpfs: mounted\n");
     return 0;
 }
 
