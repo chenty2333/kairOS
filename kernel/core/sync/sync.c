@@ -81,6 +81,64 @@ void mutex_init(struct mutex *m, const char *name) {
     wait_queue_init(&m->wq);
 }
 
+static int sync_sleep_queued(void *channel, bool interruptible,
+                             bool use_deadline, uint64_t deadline) {
+    struct process *curr = proc_current();
+    if (!curr)
+        return -EINVAL;
+
+    if (interruptible && proc_has_unblocked_signal(curr)) {
+        if (curr->wait_entry.active)
+            wait_queue_remove_entry(&curr->wait_entry);
+        return -EINTR;
+    }
+
+    proc_lock(curr);
+    if (!curr->wait_entry.active) {
+        curr->wait_channel = NULL;
+        curr->sleep_deadline = 0;
+        curr->state = PROC_RUNNING;
+        proc_unlock(curr);
+        if (interruptible && proc_has_unblocked_signal(curr))
+            return -EINTR;
+        return 0;
+    }
+
+    if (use_deadline && arch_timer_get_ticks() >= deadline) {
+        wait_queue_remove_entry(&curr->wait_entry);
+        curr->wait_channel = NULL;
+        curr->sleep_deadline = 0;
+        curr->state = PROC_RUNNING;
+        proc_unlock(curr);
+        return -ETIMEDOUT;
+    }
+
+    curr->wait_channel = channel;
+    curr->sleep_deadline = use_deadline ? deadline : 0;
+    curr->state = PROC_SLEEPING;
+    sched_trace_event(SCHED_TRACE_SLEEP, curr, (uint64_t)channel,
+                      use_deadline ? deadline : 0);
+    proc_unlock(curr);
+
+    schedule();
+
+    proc_lock(curr);
+    if (curr->wait_entry.active)
+        wait_queue_remove_entry(&curr->wait_entry);
+    curr->wait_channel = NULL;
+    uint64_t dl = curr->sleep_deadline;
+    curr->sleep_deadline = 0;
+    if (curr->state == PROC_SLEEPING)
+        curr->state = PROC_RUNNING;
+    proc_unlock(curr);
+
+    if (interruptible && proc_has_unblocked_signal(curr))
+        return -EINTR;
+    if (use_deadline && dl != 0 && arch_timer_get_ticks() >= dl)
+        return -ETIMEDOUT;
+    return 0;
+}
+
 void mutex_lock(struct mutex *m) {
     SLEEP_LOCK_DEBUG_CHECK();
     struct process *curr = proc_current();
@@ -103,8 +161,9 @@ void mutex_lock(struct mutex *m) {
 
     spin_lock(&m->lock);
     while (m->locked) {
+        wait_queue_add(&m->wq, curr);
         spin_unlock(&m->lock);
-        proc_sleep_on(&m->wq, m, true);
+        (void)sync_sleep_queued(m, false, false, 0);
         spin_lock(&m->lock);
     }
     m->locked = true;
@@ -139,8 +198,9 @@ int mutex_lock_interruptible(struct mutex *m) {
             spin_unlock(&m->lock);
             return -EINTR;
         }
+        wait_queue_add(&m->wq, curr);
         spin_unlock(&m->lock);
-        int rc = proc_sleep_on(&m->wq, m, true);
+        int rc = sync_sleep_queued(m, true, false, 0);
         if (rc < 0)
             return rc;
         spin_lock(&m->lock);
@@ -206,8 +266,9 @@ void sem_wait(struct semaphore *s) {
 
     spin_lock(&s->lock);
     while (s->count <= 0) {
+        wait_queue_add(&s->wq, curr);
         spin_unlock(&s->lock);
-        proc_sleep_on(&s->wq, s, true);
+        (void)sync_sleep_queued(s, false, false, 0);
         spin_lock(&s->lock);
     }
     s->count--;
@@ -238,8 +299,9 @@ int sem_wait_interruptible(struct semaphore *s) {
             return -EINTR;
         }
 
+        wait_queue_add(&s->wq, curr);
         spin_unlock(&s->lock);
-        int rc = proc_sleep_on(&s->wq, s, true);
+        int rc = sync_sleep_queued(s, true, false, 0);
         if (rc < 0)
             return rc;
         spin_lock(&s->lock);
@@ -303,8 +365,9 @@ void rwlock_read_lock(struct rwlock *rw) {
 
     spin_lock(&rw->lock);
     while (rw->write_locked || rw->writers_waiting) {
+        wait_queue_add(&rw->rd_wq, curr);
         spin_unlock(&rw->lock);
-        proc_sleep_on(&rw->rd_wq, rw, true);
+        (void)sync_sleep_queued(rw, false, false, 0);
         spin_lock(&rw->lock);
     }
     rw->readers++;
@@ -335,8 +398,9 @@ int rwlock_read_lock_interruptible(struct rwlock *rw) {
             spin_unlock(&rw->lock);
             return -EINTR;
         }
+        wait_queue_add(&rw->rd_wq, curr);
         spin_unlock(&rw->lock);
-        int rc = proc_sleep_on(&rw->rd_wq, rw, true);
+        int rc = sync_sleep_queued(rw, true, false, 0);
         if (rc < 0)
             return rc;
         spin_lock(&rw->lock);
@@ -388,8 +452,9 @@ void rwlock_write_lock(struct rwlock *rw) {
     spin_lock(&rw->lock);
     rw->writers_waiting++;
     while (rw->write_locked || rw->readers > 0) {
+        wait_queue_add(&rw->wr_wq, curr);
         spin_unlock(&rw->lock);
-        proc_sleep_on(&rw->wr_wq, rw, true);
+        (void)sync_sleep_queued(rw, false, false, 0);
         spin_lock(&rw->lock);
     }
     rw->writers_waiting--;
@@ -432,8 +497,9 @@ int rwlock_write_lock_interruptible(struct rwlock *rw) {
             spin_unlock(&rw->lock);
             return -EINTR;
         }
+        wait_queue_add(&rw->wr_wq, curr);
         spin_unlock(&rw->lock);
-        int rc = proc_sleep_on(&rw->wr_wq, rw, true);
+        int rc = sync_sleep_queued(rw, true, false, 0);
         if (rc < 0) {
             spin_lock(&rw->lock);
             rw->writers_waiting--;
@@ -518,8 +584,13 @@ int mutex_lock_timeout(struct mutex *m, uint64_t timeout_ticks) {
     uint64_t deadline = arch_timer_get_ticks() + timeout_ticks;
     spin_lock(&m->lock);
     while (m->locked) {
+        if (arch_timer_get_ticks() >= deadline) {
+            spin_unlock(&m->lock);
+            return -ETIMEDOUT;
+        }
+        wait_queue_add(&m->wq, curr);
         spin_unlock(&m->lock);
-        int rc = proc_sleep_on_mutex_timeout(&m->wq, m, NULL, false, deadline);
+        int rc = sync_sleep_queued(m, false, true, deadline);
         if (rc == -ETIMEDOUT)
             return -ETIMEDOUT;
         spin_lock(&m->lock);
