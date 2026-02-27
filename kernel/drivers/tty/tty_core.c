@@ -196,11 +196,12 @@ void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count) {
 
     bool pushed = false;
     uint32_t sig_mask = 0;
+    pid_t fg = 0;
 
     bool irq_state = arch_irq_save();
     spin_lock(&tty->lock);
     tty->ldisc.ops->receive_buf(tty, buf, count, &pushed, &sig_mask);
-    pid_t fg = tty->fg_pgrp;
+    fg = tty->fg_pgrp;
     struct vnode *vn = tty->vnode;
     spin_unlock(&tty->lock);
     arch_irq_restore(irq_state);
@@ -210,14 +211,6 @@ void tty_receive_buf(struct tty_struct *tty, const uint8_t *buf, size_t count) {
             for (int s = 1; s < 32; s++) {
                 if (sig_mask & (1U << s))
                     signal_send_pgrp(fg, s);
-            }
-        } else {
-            struct process *p = proc_current();
-            if (p) {
-                for (int s = 1; s < 32; s++) {
-                    if (sig_mask & (1U << s))
-                        signal_send(p->pid, s);
-                }
             }
         }
     }

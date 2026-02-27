@@ -17,6 +17,81 @@
 #include "proc_internal.h"
 
 #define NS_PER_SEC 1000000000ULL
+#define LINUX_RT_SIGSET_BYTES (sizeof(uint32_t) * 2U)
+
+struct linux_rt_sigaction {
+    void (*handler)(int);
+    unsigned long flags;
+    void (*restorer)(void);
+    uint32_t mask_words[2];
+};
+
+static sigset_t linux_rt_sigset_import(const uint32_t words[2]) {
+    if (!words)
+        return 0;
+    return (sigset_t)(((uint64_t)words[1] << 32) | (uint64_t)words[0]);
+}
+
+static void linux_rt_sigset_export(sigset_t set, uint32_t words[2]) {
+    if (!words)
+        return;
+    words[0] = (uint32_t)(set & 0xffffffffu);
+    words[1] = (uint32_t)((set >> 32) & 0xffffffffu);
+}
+
+static int sigaction_copy_from_user(struct process *p, uint64_t ptr,
+                                    struct sigaction *out) {
+    if (!out)
+        return -EINVAL;
+    if (!ptr)
+        return -EFAULT;
+    if (p && p->syscall_abi == SYSCALL_ABI_LINUX) {
+        struct linux_rt_sigaction kact;
+        if (copy_from_user(&kact, (void *)ptr, sizeof(kact)) < 0)
+            return -EFAULT;
+        memset(out, 0, sizeof(*out));
+        out->sa_handler = kact.handler;
+        out->sa_mask = linux_rt_sigset_import(kact.mask_words);
+        out->sa_flags = (int)(kact.flags & 0xfffffffful);
+        if (out->sa_flags & SA_RESTORER)
+            out->sa_restorer = kact.restorer;
+        return 0;
+    }
+    if (copy_from_user(out, (void *)ptr, sizeof(*out)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int sigaction_copy_to_user(struct process *p, uint64_t ptr,
+                                  const struct sigaction *in) {
+    if (!ptr)
+        return 0;
+    if (!in)
+        return -EINVAL;
+    if (p && p->syscall_abi == SYSCALL_ABI_LINUX) {
+        struct linux_rt_sigaction kact = {
+            .handler = in->sa_handler,
+            .flags = (unsigned long)(uint32_t)in->sa_flags,
+            .restorer = in->sa_restorer,
+            .mask_words = {0, 0},
+        };
+        linux_rt_sigset_export(in->sa_mask, kact.mask_words);
+        if (copy_to_user((void *)ptr, &kact, sizeof(kact)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    if (copy_to_user((void *)ptr, in, sizeof(*in)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static bool signal_default_ignore(int sig) {
+    return sig == SIGCHLD || sig == SIGCONT || sig == SIGWINCH;
+}
+
+static bool signal_default_stop(int sig) {
+    return sig == SIGSTOP || sig == SIGTSTP;
+}
 
 /* sighand helpers */
 
@@ -166,14 +241,14 @@ void signal_deliver_pending(void) {
         }
         void (*handler)(int) = action.sa_handler ? action.sa_handler : SIG_DFL;
 
-        if (handler == SIG_IGN || (handler == SIG_DFL && sig == SIGCHLD)) {
+        if (handler == SIG_IGN || (handler == SIG_DFL && signal_default_ignore(sig))) {
             __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
             pending &= ~mask;
             continue;
         }
 
         if (handler == SIG_DFL) {
-            if (sig == SIGSTOP) {
+            if (signal_default_stop(sig)) {
                 __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
                 while (1) {
                     uint64_t now_pending =
@@ -192,18 +267,8 @@ void signal_deliver_pending(void) {
                 i = -1;
                 continue;
             }
-            if (sig == SIGCONT) {
-                __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
-                pending &= ~mask;
-                continue;
-            }
-            if (sig == SIGKILL || sig == SIGILL || sig == SIGSEGV || sig == SIGTERM) {
-                pr_info("Process %d killed by signal %d\n", p->pid, sig);
-                proc_exit(-sig);
-            }
-            __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
-            pending &= ~mask;
-            continue;
+            pr_info("Process %d killed by signal %d\n", p->pid, sig);
+            proc_exit(-sig);
         }
 
         /* User handler defined: Setup stack trampoline */
@@ -307,6 +372,12 @@ void signal_deliver_pending(void) {
         tf->tf_sp = sp;
         tf->sepc = (uint64_t)handler;
         tf->tf_a0 = sig;
+        if ((action.sa_flags & SA_RESTORER) && action.sa_restorer) {
+            tf->regs[30] = (uint64_t)action.sa_restorer;
+        } else {
+            tf->regs[30] =
+                sp + __builtin_offsetof(struct sigcontext, trampoline);
+        }
 
         __atomic_fetch_and(&p->sig_pending, ~mask, __ATOMIC_RELEASE);
         return;
@@ -395,7 +466,7 @@ int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
     if (!p)
         return -EINVAL;
     if (p->syscall_abi == SYSCALL_ABI_LINUX &&
-        a3 != sizeof(sigset_t))
+        a3 != LINUX_RT_SIGSET_BYTES)
         return -EINVAL;
     if (sig == 0 || sig > NSIG) return -EINVAL;
     if ((sig == SIGKILL || sig == SIGSTOP) && act_ptr) return -EINVAL;
@@ -404,7 +475,9 @@ int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
 
     struct sigaction act = {0};
     if (act_ptr) {
-        if (copy_from_user(&act, (void *)act_ptr, sizeof(act)) < 0) return -EFAULT;
+        int rc = sigaction_copy_from_user(p, act_ptr, &act);
+        if (rc < 0)
+            return rc;
     }
 
     struct sigaction old = {0};
@@ -417,9 +490,8 @@ int64_t sys_sigaction(uint64_t sig, uint64_t act_ptr, uint64_t old_ptr,
     }
     spin_unlock(&p->sighand->lock);
 
-    if (old_ptr) {
-        if (copy_to_user((void *)old_ptr, &old, sizeof(old)) < 0) return -EFAULT;
-    }
+    if (old_ptr)
+        return sigaction_copy_to_user(p, old_ptr, &old);
 
     return 0;
 }
