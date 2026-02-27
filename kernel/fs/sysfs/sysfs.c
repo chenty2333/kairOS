@@ -6,6 +6,7 @@
  */
 
 #include <kairos/config.h>
+#include <kairos/atomic.h>
 #include <kairos/list.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
@@ -26,14 +27,24 @@
 
 enum sysfs_node_type { SYSFS_DIR, SYSFS_FILE, SYSFS_LINK };
 
+enum sysfs_node_lifecycle_state {
+    SYSFS_NODE_INIT = 1,
+    SYSFS_NODE_LIVE = 2,
+    SYSFS_NODE_DETACHED = 3,
+    SYSFS_NODE_DYING = 4,
+    SYSFS_NODE_FREED = 5,
+};
+
 struct sysfs_node {
     struct vnode vn;
     char name[CONFIG_NAME_MAX];
     enum sysfs_node_type type;
     ino_t ino;
+    struct sysfs_attribute attr_copy;     /* SYSFS_FILE */
     const struct sysfs_attribute *attr;   /* SYSFS_FILE */
     struct sysfs_node *link_target;       /* SYSFS_LINK */
     struct sysfs_node *parent;
+    enum sysfs_node_lifecycle_state lifecycle;
     struct list_head children;
     struct list_head sibling;
 };
@@ -52,6 +63,7 @@ static struct sysfs_node *sysfs_bus_node;
 static struct sysfs_node *sysfs_class_node;
 static struct sysfs_node *sysfs_devices_node;
 static struct sysfs_node *sysfs_kernel_node;
+static atomic_t sysfs_lifecycle_warn_count = ATOMIC_INIT(0);
 
 /* Forward declarations */
 static struct vnode *sysfs_lookup(struct vnode *dir, const char *name);
@@ -65,6 +77,54 @@ static ssize_t sysfs_link_read(struct vnode *vn, void *buf, size_t len,
 static int sysfs_close(struct vnode *vn);
 static int sysfs_dir_poll(struct file *file, uint32_t events);
 static int sysfs_file_poll(struct file *file, uint32_t events);
+
+static const char *
+sysfs_node_lifecycle_name(enum sysfs_node_lifecycle_state state) {
+    switch (state) {
+    case SYSFS_NODE_INIT:
+        return "init";
+    case SYSFS_NODE_LIVE:
+        return "live";
+    case SYSFS_NODE_DETACHED:
+        return "detached";
+    case SYSFS_NODE_DYING:
+        return "dying";
+    case SYSFS_NODE_FREED:
+        return "freed";
+    default:
+        return "unknown";
+    }
+}
+
+static bool sysfs_warn_ratelimited(void) {
+    uint32_t n = atomic_inc_return(&sysfs_lifecycle_warn_count);
+    return n <= 4 || (n & (n - 1U)) == 0;
+}
+
+static bool sysfs_lifecycle_transition_allowed(
+    enum sysfs_node_lifecycle_state from, enum sysfs_node_lifecycle_state to) {
+    if (from == to)
+        return true;
+    return (from == SYSFS_NODE_INIT && to == SYSFS_NODE_LIVE) ||
+           (from == SYSFS_NODE_LIVE && to == SYSFS_NODE_DETACHED) ||
+           (from == SYSFS_NODE_DETACHED && to == SYSFS_NODE_DYING) ||
+           (from == SYSFS_NODE_DYING && to == SYSFS_NODE_FREED);
+}
+
+static void sysfs_node_set_lifecycle(struct sysfs_node *sn,
+                                     enum sysfs_node_lifecycle_state next,
+                                     const char *site) {
+    if (!sn)
+        return;
+    enum sysfs_node_lifecycle_state prev = sn->lifecycle;
+    if (!sysfs_lifecycle_transition_allowed(prev, next) &&
+        sysfs_warn_ratelimited()) {
+        pr_warn("sysfs_lifecycle: node=%s ino=%lu %s->%s site=%s\n", sn->name,
+                (unsigned long)sn->ino, sysfs_node_lifecycle_name(prev),
+                sysfs_node_lifecycle_name(next), site ? site : "?");
+    }
+    sn->lifecycle = next;
+}
 
 static struct file_ops sysfs_dir_ops = {
     .readdir = sysfs_readdir,
@@ -111,8 +171,8 @@ static void sysfs_init_vnode(struct vnode *vn, struct sysfs_node *sn,
     poll_wait_head_init(&vn->pollers);
 }
 
-static struct sysfs_node *sysfs_find_child(struct sysfs_node *dir,
-                                           const char *name) {
+static struct sysfs_node *sysfs_find_child_locked(struct sysfs_node *dir,
+                                                  const char *name) {
     struct sysfs_node *child;
     list_for_each_entry(child, &dir->children, sibling) {
         if (strcmp(child->name, name) == 0)
@@ -134,8 +194,10 @@ static struct sysfs_node *sysfs_alloc_node(struct sysfs_node *parent,
     sn->type = type;
     sn->ino = sysfs_sb.next_ino++;
     sn->attr = NULL;
+    memset(&sn->attr_copy, 0, sizeof(sn->attr_copy));
     sn->link_target = NULL;
     sn->parent = parent;
+    sn->lifecycle = SYSFS_NODE_INIT;
     INIT_LIST_HEAD(&sn->children);
     INIT_LIST_HEAD(&sn->sibling);
 
@@ -165,18 +227,77 @@ static struct sysfs_node *sysfs_alloc_node(struct sysfs_node *parent,
         list_add_tail(&sn->sibling, &parent->children);
         vnode_set_parent(&sn->vn, &parent->vn, sn->name);
     }
+    sysfs_node_set_lifecycle(sn, SYSFS_NODE_LIVE, "sysfs_alloc_node");
     return sn;
 }
 
 static void sysfs_free_node(struct sysfs_node *sn) {
     if (!sn)
         return;
+    if (sn->lifecycle != SYSFS_NODE_DYING)
+        sysfs_node_set_lifecycle(sn, SYSFS_NODE_DYING, "sysfs_free_node:enter");
     struct sysfs_node *child, *tmp;
     list_for_each_entry_safe(child, tmp, &sn->children, sibling) {
         list_del(&child->sibling);
+        if (child->lifecycle != SYSFS_NODE_DYING)
+            sysfs_node_set_lifecycle(child, SYSFS_NODE_DYING,
+                                     "sysfs_free_node:child");
         sysfs_free_node(child);
     }
+    if (sn->type == SYSFS_FILE && sn->attr && sn->attr->release_priv &&
+        sn->attr->priv) {
+        sn->attr->release_priv(sn->attr->priv);
+    }
+    sysfs_node_set_lifecycle(sn, SYSFS_NODE_FREED, "sysfs_free_node:leave");
     kfree(sn);
+}
+
+static void sysfs_collect_subtree_postorder_locked(struct sysfs_node *node,
+                                                   struct list_head *reap) {
+    if (!node || !reap)
+        return;
+    while (!list_empty(&node->children)) {
+        struct sysfs_node *child =
+            list_first_entry(&node->children, struct sysfs_node, sibling);
+        list_del(&child->sibling);
+        INIT_LIST_HEAD(&child->sibling);
+        sysfs_node_set_lifecycle(child, SYSFS_NODE_DETACHED,
+                                 "sysfs_collect_subtree:child");
+        sysfs_collect_subtree_postorder_locked(child, reap);
+    }
+    list_add_tail(&node->sibling, reap);
+}
+
+static void sysfs_detach_subtree(struct sysfs_node *node) {
+    if (!node || !node->parent)
+        return;
+
+    LIST_HEAD(reap);
+
+    spin_lock(&sysfs_sb.lock);
+    if (node->lifecycle != SYSFS_NODE_LIVE) {
+        if (node->lifecycle != SYSFS_NODE_DETACHED && sysfs_warn_ratelimited()) {
+            pr_warn("sysfs_lifecycle: detach non-live node=%s ino=%lu state=%s\n",
+                    node->name, (unsigned long)node->ino,
+                    sysfs_node_lifecycle_name(node->lifecycle));
+        }
+        spin_unlock(&sysfs_sb.lock);
+        return;
+    }
+    list_del(&node->sibling);
+    INIT_LIST_HEAD(&node->sibling);
+    sysfs_node_set_lifecycle(node, SYSFS_NODE_DETACHED,
+                             "sysfs_detach_subtree:root");
+    sysfs_collect_subtree_postorder_locked(node, &reap);
+    spin_unlock(&sysfs_sb.lock);
+
+    while (!list_empty(&reap)) {
+        struct sysfs_node *cur =
+            list_first_entry(&reap, struct sysfs_node, sibling);
+        list_del(&cur->sibling);
+        INIT_LIST_HEAD(&cur->sibling);
+        vnode_put(&cur->vn);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -293,7 +414,12 @@ static ssize_t sysfs_link_read(struct vnode *vn, void *buf, size_t len,
     return (ssize_t)len;
 }
 
-static int sysfs_close(struct vnode *vn __attribute__((unused))) {
+static int sysfs_close(struct vnode *vn) {
+    struct sysfs_node *sn = vn ? (struct sysfs_node *)vn->fs_data : NULL;
+    if (sn && sn->lifecycle == SYSFS_NODE_DETACHED && list_empty(&sn->children)) {
+        sysfs_node_set_lifecycle(sn, SYSFS_NODE_DYING, "sysfs_close");
+        sysfs_free_node(sn);
+    }
     return 0;
 }
 
@@ -359,7 +485,7 @@ static struct vnode *sysfs_lookup(struct vnode *dir, const char *name) {
         return NULL;
 
     spin_lock(&sysfs_sb.lock);
-    struct sysfs_node *child = sysfs_find_child(d, name);
+    struct sysfs_node *child = sysfs_find_child_locked(d, name);
     if (child)
         vnode_get(&child->vn);
     spin_unlock(&sysfs_sb.lock);
@@ -424,7 +550,7 @@ struct sysfs_node *sysfs_mkdir(struct sysfs_node *parent, const char *name) {
         return NULL;
 
     spin_lock(&sysfs_sb.lock);
-    if (sysfs_find_child(parent, name)) {
+    if (sysfs_find_child_locked(parent, name)) {
         spin_unlock(&sysfs_sb.lock);
         return NULL;
     }
@@ -437,10 +563,7 @@ struct sysfs_node *sysfs_mkdir(struct sysfs_node *parent, const char *name) {
 void sysfs_rmdir(struct sysfs_node *node) {
     if (!node)
         return;
-    spin_lock(&sysfs_sb.lock);
-    list_del(&node->sibling);
-    sysfs_free_node(node);
-    spin_unlock(&sysfs_sb.lock);
+    sysfs_detach_subtree(node);
 }
 
 struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
@@ -449,15 +572,17 @@ struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
         return NULL;
 
     spin_lock(&sysfs_sb.lock);
-    if (sysfs_find_child(parent, attr->name)) {
+    if (sysfs_find_child_locked(parent, attr->name)) {
         spin_unlock(&sysfs_sb.lock);
         return NULL;
     }
     mode_t mode = S_IFREG | (attr->mode & 07777);
     struct sysfs_node *sn = sysfs_alloc_node(parent, attr->name, SYSFS_FILE,
                                              mode);
-    if (sn)
-        sn->attr = attr;
+    if (sn) {
+        sn->attr_copy = *attr;
+        sn->attr = &sn->attr_copy;
+    }
     spin_unlock(&sysfs_sb.lock);
     return sn;
 }
@@ -465,10 +590,7 @@ struct sysfs_node *sysfs_create_file(struct sysfs_node *parent,
 void sysfs_remove_file(struct sysfs_node *node) {
     if (!node)
         return;
-    spin_lock(&sysfs_sb.lock);
-    list_del(&node->sibling);
-    kfree(node);
-    spin_unlock(&sysfs_sb.lock);
+    sysfs_detach_subtree(node);
 }
 
 int sysfs_create_files(struct sysfs_node *parent,
@@ -476,15 +598,27 @@ int sysfs_create_files(struct sysfs_node *parent,
     for (size_t i = 0; i < count; i++) {
         if (!sysfs_create_file(parent, &attrs[i])) {
             /* Rollback previously created files */
+            LIST_HEAD(reap);
             spin_lock(&sysfs_sb.lock);
             while (i-- > 0) {
-                struct sysfs_node *f = sysfs_find_child(parent, attrs[i].name);
+                struct sysfs_node *f =
+                    sysfs_find_child_locked(parent, attrs[i].name);
                 if (f) {
                     list_del(&f->sibling);
-                    kfree(f);
+                    INIT_LIST_HEAD(&f->sibling);
+                    sysfs_node_set_lifecycle(f, SYSFS_NODE_DETACHED,
+                                             "sysfs_create_files:rollback");
+                    list_add_tail(&f->sibling, &reap);
                 }
             }
             spin_unlock(&sysfs_sb.lock);
+            while (!list_empty(&reap)) {
+                struct sysfs_node *f =
+                    list_first_entry(&reap, struct sysfs_node, sibling);
+                list_del(&f->sibling);
+                INIT_LIST_HEAD(&f->sibling);
+                vnode_put(&f->vn);
+            }
             return -ENOMEM;
         }
     }
@@ -498,7 +632,7 @@ struct sysfs_node *sysfs_create_link(struct sysfs_node *parent,
         return NULL;
 
     spin_lock(&sysfs_sb.lock);
-    if (sysfs_find_child(parent, name)) {
+    if (sysfs_find_child_locked(parent, name)) {
         spin_unlock(&sysfs_sb.lock);
         return NULL;
     }
@@ -519,6 +653,14 @@ struct sysfs_node *sysfs_bus_dir(void) { return sysfs_bus_node; }
 struct sysfs_node *sysfs_class_dir(void) { return sysfs_class_node; }
 struct sysfs_node *sysfs_devices_dir(void) { return sysfs_devices_node; }
 struct sysfs_node *sysfs_kernel_dir(void) { return sysfs_kernel_node; }
+struct sysfs_node *sysfs_find_child(struct sysfs_node *parent, const char *name) {
+    if (!parent || !name)
+        return NULL;
+    spin_lock(&sysfs_sb.lock);
+    struct sysfs_node *child = sysfs_find_child_locked(parent, name);
+    spin_unlock(&sysfs_sb.lock);
+    return child;
+}
 bool sysfs_is_vnode(const struct vnode *vn) {
     if (!vn || !vn->ops)
         return false;
@@ -546,10 +688,12 @@ void sysfs_init(void) {
     /* Single-threaded init context — no lock needed for root ino */
     sysfs_root_node->ino = sysfs_sb.next_ino++;
     sysfs_root_node->parent = NULL;
+    sysfs_root_node->lifecycle = SYSFS_NODE_INIT;
     INIT_LIST_HEAD(&sysfs_root_node->children);
     INIT_LIST_HEAD(&sysfs_root_node->sibling);
     sysfs_init_vnode(&sysfs_root_node->vn, sysfs_root_node, VNODE_DIR,
                      S_IFDIR | 0555, &sysfs_dir_ops);
+    sysfs_node_set_lifecycle(sysfs_root_node, SYSFS_NODE_LIVE, "sysfs_init:root");
     sysfs_sb.root = sysfs_root_node;
 
     /* Create top-level directories */
