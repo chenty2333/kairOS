@@ -46,6 +46,9 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - Supports negative caching (DENTRY_NEGATIVE) for non-existent paths
 - Dentry tree structure: parent/children/child linked lists, supports subtree traversal
 - dentry_put/vnode_put use iterative (not recursive) parent-chain release to avoid stack overflow on deep directory trees
+- dentry mount ownership is explicit: `dentry_set_mnt()` is the only assignment path for `dentry->mnt`, and performs `vfs_mount_hold()`/`vfs_mount_put()` balancing
+- dentry kobj setup is lazy (not done in `dentry_alloc`), avoiding early registration before mount/vnode binding is semantically ready
+- `dentry_prune_mount()` supports proactive dcache pruning for unmount/lazy-detach flows
 
 ## Mount System (fs/vfs/mount.c)
 
@@ -57,6 +60,8 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 - Mount namespace roots hold mount references; clone/set-root/put paths now maintain mount refcounts together with root_dentry refs
 - Unmount safety: `vfs_umount()` rejects unmount when child mounts exist or when mount refcount indicates external namespace/root users (returns `-EBUSY`)
 - `vfs_umount2(..., VFS_UMOUNT_DETACH)` detaches the mount subtree from namespace visibility (lazy unmount path), then reaps detached mounts when they become reclaimable
+- unmount paths proactively prune mount-associated dentries before refcount busy checks/reap, reducing stale dcache retention
+- `vfs_mount_is_live()` provides a defensive liveness check for non-owning readers (e.g., observability/sysfs paths)
 - Bind mounts reject unbindable sources (`MS_BIND` from `MOUNT_UNBINDABLE` source returns `EINVAL`)
 - Root mount strategy (init_fs): prefers initramfs, then tries ext2 on vda-vdz block devices, falls back to devfs on / if all fail
 - Mount order: root filesystem → /dev(devfs) → /proc(procfs) → /tmp(tmpfs) → /sys(sysfs)
@@ -103,12 +108,13 @@ Pseudo filesystems:
   - exposes `/proc/mounts` and `/proc/<pid>/mounts`
   - exposes `/proc/<pid>/handles` for per-process handle-to-kobj table snapshots
   - exposes `/proc/<pid>/handle_transfers` for per-process handle-to-transfer-history snapshots
-  - exposes `/proc/<pid>/handle_transfers_v2[.<cursor>[.<page_size>]]` for cursor-paged transfer-history snapshots (`token/next_token` + `returned/next_cursor/end` metadata)
-  - exposes `/proc/ipc/objects/<obj_id>/transfers_v2[.<cursor>[.<page_size>]]` for object-scoped, read-only cursor-token paging (`token/next_token`)
+  - exposes `/proc/<pid>/handle_transfers_v2[.<cursor>[.<page_size>]]` for cursor-paged transfer-history snapshots (`token/next_token` + `returned/next_cursor/end` metadata); tokenized v2 paths reuse canonical procfs entries instead of creating one persistent entry per token filename
+  - exposes `/proc/ipc/objects/<obj_id>/transfers_v2[.<cursor>[.<page_size>]]` for object-scoped, read-only cursor-token paging (`token/next_token`); tokenized object paths also reuse canonical entries
   - generated procfs read path now uses growable staging buffer (up to 256 KiB) rather than fixed 4 KiB
   - `/proc/self` symlink target is generated per lookup from current task pid
 - sysfs (fs/sysfs/): device model filesystem
-  - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers,transfers_v2,transfers_cursor,transfers_page_size}`)
+  - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`, `stats`, `hash_stats`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers,transfers_v2,transfers_cursor,transfers_page_size}`); detached sysfs nodes are reclaimed on last vnode close (not immediate free) under explicit node lifecycle state machine (`INIT/LIVE/DETACHED/DYING/FREED`), object-scoped IPC reads pin live objects by `obj_id` before snapshotting, object rows include `kobj` lifecycle text, and `hash_stats` reports bucket/load/average-chain/collision/depth diagnostics with default rehash recommendation flags for IPC hash tables
+  - init phase (`init_fs`) performs a lightweight read+format sanity check on `/sys/ipc/hash_stats` and logs warning-only on failure
 - tmpfs (fs/tmpfs/): in-memory filesystem
 
 Special:

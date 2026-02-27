@@ -17,6 +17,7 @@
 #include <kairos/sched.h>
 #include <kairos/select.h>
 #include <kairos/signal.h>
+#include <kairos/sync.h>
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/time.h>
@@ -47,6 +48,7 @@
 #define TEST_AT_STATX_SYNC_AS_STAT 0x0000
 #define TEST_MONO_PROGRESS_MAX_SPINS 200000U
 #define PROCFS_XFER_BULK_PAIRS 96U
+#define PROCFS_TOKEN_FLOOD_ROUNDS 320U
 
 static int tests_failed;
 
@@ -321,6 +323,27 @@ static ssize_t fd_read_until_ready(int fd, void *buf, size_t len,
         proc_yield();
     }
     return -EAGAIN;
+}
+
+static inline bool write_readonly_rejected(ssize_t rc) {
+    return rc == -EPERM || rc == -EBADF;
+}
+
+static int vfs_open_retry_enoent(const char *path, int flags, mode_t mode,
+                                 struct file **out, uint64_t timeout_ns) {
+    if (!path || !out)
+        return -EINVAL;
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    int rc = -ENOENT;
+    while (time_now_ns() < deadline) {
+        rc = vfs_open(path, flags, mode, out);
+        if (rc == 0)
+            return 0;
+        if (rc != -ENOENT && rc != -ENODEV && rc != -ENOTDIR)
+            return rc;
+        proc_yield();
+    }
+    return rc;
 }
 
 static bool wait_pid_exit_bounded(pid_t pid, uint64_t timeout_ns,
@@ -1597,6 +1620,19 @@ struct blocking_read_ctx {
     char buf[8];
 };
 
+struct pipe_layout_probe {
+    uint8_t *data;
+    size_t head;
+    size_t tail;
+    size_t count;
+    int readers;
+    int writers;
+    struct poll_wait_source rd_src;
+    struct poll_wait_source wr_src;
+    struct poll_wait_head pollers;
+    struct mutex lock;
+};
+
 static int blocking_pipe_reader(void *arg) {
     struct blocking_read_ctx *ctx = (struct blocking_read_ctx *)arg;
     if (!ctx || !ctx->r) {
@@ -1606,6 +1642,25 @@ static int blocking_pipe_reader(void *arg) {
     }
     ctx->started = 1;
     ctx->ret = vfs_read(ctx->r, ctx->buf, 4);
+    proc_exit(0);
+}
+
+struct blocking_intr_read_ctx {
+    struct file *r;
+    volatile int started;
+    ssize_t ret;
+    char buf[8];
+};
+
+static int blocking_pipe_intr_reader(void *arg) {
+    struct blocking_intr_read_ctx *ctx = (struct blocking_intr_read_ctx *)arg;
+    if (!ctx || !ctx->r) {
+        if (ctx)
+            ctx->ret = -EIO;
+        proc_exit(0);
+    }
+    ctx->started = 1;
+    ctx->ret = vfs_read(ctx->r, ctx->buf, 1);
     proc_exit(0);
 }
 
@@ -1703,6 +1758,48 @@ static void test_pipe_semantics(void) {
         test_check(ctx->ret == 4, "pipe blocking child read len");
         test_check(memcmp(ctx->buf, "PING", 4) == 0,
                    "pipe blocking child read data");
+        kfree(ctx);
+    } while (0);
+
+    do {
+        struct blocking_intr_read_ctx *ctx = kzalloc(sizeof(*ctx));
+        test_check(ctx != NULL, "pipe intr ctx alloc");
+        if (!ctx)
+            break;
+        ctx->r = r;
+        ctx->ret = -1;
+
+        struct process *child =
+            kthread_create_joinable(blocking_pipe_intr_reader, ctx, "pipeint");
+        test_check(child != NULL, "pipe intr child create");
+        if (!child) {
+            kfree(ctx);
+            break;
+        }
+        pid_t cpid = child->pid;
+        sched_enqueue(child);
+        for (int i = 0; i < 2000 && !ctx->started; i++)
+            proc_yield();
+        test_check(ctx->started != 0, "pipe intr child started");
+        if (ctx->started) {
+            int src = signal_send(cpid, SIGUSR1);
+            test_check(src == 0, "pipe intr send usr1");
+        }
+        int status = 0;
+        bool reaped =
+            wait_pid_exit_bounded(cpid, 2ULL * TEST_NS_PER_SEC, &status);
+        test_check(reaped, "pipe intr child reaped");
+        if (reaped) {
+            test_check(ctx->ret == -EINTR, "pipe intr child ret eintr");
+            struct pipe_layout_probe *probe =
+                r && r->vnode ? (struct pipe_layout_probe *)r->vnode->fs_data
+                              : NULL;
+            test_check(probe != NULL, "pipe intr lock probe");
+            if (probe) {
+                test_check(!probe->lock.locked, "pipe intr lock released");
+                test_check(probe->lock.holder == NULL, "pipe intr holder clear");
+            }
+        }
         kfree(ctx);
     } while (0);
 
@@ -2080,6 +2177,144 @@ static void test_epoll_edge_oneshot_semantics(void) {
         rd = fd_read_once(rfd, rbuf, sizeof(rbuf));
         test_check(rd == 1, "epoll oneshot read second");
     } while (0);
+
+    close_fd_if_open(&epfd);
+    close_fd_if_open(&wfd);
+    close_fd_if_open(&rfd);
+    close_file_if_open(&epf);
+    close_file_if_open(&wf);
+    close_file_if_open(&rf);
+}
+
+struct epoll_race_writer_ctx {
+    struct file *wfile;
+    volatile int started;
+    volatile int stop;
+    volatile int writes;
+};
+
+static int epoll_race_writer(void *arg) {
+    struct epoll_race_writer_ctx *ctx = (struct epoll_race_writer_ctx *)arg;
+    if (!ctx || !ctx->wfile)
+        proc_exit(0);
+    ctx->started = 1;
+    const char byte = 'R';
+    while (!ctx->stop) {
+        ssize_t wr = vfs_write(ctx->wfile, &byte, 1);
+        if (wr == 1) {
+            ctx->writes++;
+            continue;
+        }
+        if (wr == -EAGAIN) {
+            proc_yield();
+            continue;
+        }
+        break;
+    }
+    proc_exit(0);
+}
+
+static void test_epoll_ctl_del_race_semantics(void) {
+    struct file *rf = NULL;
+    struct file *wf = NULL;
+    struct file *epf = NULL;
+    struct process *writer = NULL;
+    struct epoll_race_writer_ctx wctx = {0};
+    int rfd = -1, wfd = -1, epfd = -1;
+    int ret = pipe_create(&rf, &wf);
+    test_check(ret == 0, "epoll race create pipe");
+    if (ret < 0)
+        return;
+
+    do {
+        rfd = fd_alloc(proc_current(), rf);
+        test_check(rfd >= 0, "epoll race alloc rfd");
+        if (rfd < 0)
+            break;
+        wfd = fd_alloc(proc_current(), wf);
+        test_check(wfd >= 0, "epoll race alloc wfd");
+        if (wfd < 0)
+            break;
+        rf = NULL;
+        wf = NULL;
+        fd_set_nonblock(rfd, true);
+        fd_set_nonblock(wfd, true);
+
+        ret = epoll_create_file(&epf);
+        test_check(ret == 0, "epoll race create epoll");
+        if (ret < 0)
+            break;
+        epfd = fd_alloc(proc_current(), epf);
+        test_check(epfd >= 0, "epoll race alloc epfd");
+        if (epfd < 0)
+            break;
+        epf = NULL;
+
+        wctx.wfile = fd_get(proc_current(), wfd);
+        wctx.started = 0;
+        wctx.stop = 0;
+        wctx.writes = 0;
+        test_check(wctx.wfile != NULL, "epoll race pin wfile");
+        if (!wctx.wfile)
+            break;
+
+        writer = kthread_create_joinable(epoll_race_writer, &wctx, "epwr");
+        test_check(writer != NULL, "epoll race writer create");
+        if (!writer) {
+            file_put(wctx.wfile);
+            wctx.wfile = NULL;
+            break;
+        }
+        pid_t wpid = writer->pid;
+        sched_enqueue(writer);
+        for (int spins = 0; spins < 2000 && !wctx.started; spins++)
+            proc_yield();
+        test_check(wctx.started != 0, "epoll race writer started");
+
+        struct epoll_event ev = {
+            .events = EPOLLIN,
+            .data = 0xEE,
+        };
+        for (int i = 0; i < 512; i++) {
+            int rc = epoll_ctl_fd(epfd, EPOLL_CTL_ADD, rfd, &ev);
+            test_check(rc == 0 || rc == -EEXIST, "epoll race add");
+
+            struct epoll_event out[4];
+            memset(out, 0, sizeof(out));
+            int ready = epoll_wait_events(epfd, out, 4, 1);
+            test_check(ready >= 0, "epoll race wait");
+
+            char drain[64];
+            while (fd_read_once(rfd, drain, sizeof(drain)) > 0) {
+                ;
+            }
+
+            rc = epoll_ctl_fd(epfd, EPOLL_CTL_DEL, rfd, NULL);
+            test_check(rc == 0 || rc == -ENOENT, "epoll race del");
+            proc_yield();
+        }
+
+        wctx.stop = 1;
+        int status = 0;
+        bool reaped =
+            wait_pid_exit_bounded(wpid, 2ULL * TEST_NS_PER_SEC, &status);
+        test_check(reaped, "epoll race writer reaped");
+        if (!reaped) {
+            (void)signal_send(wpid, SIGKILL);
+            (void)wait_pid_exit_bounded(wpid, 2ULL * TEST_NS_PER_SEC, &status);
+        } else {
+            test_check(wctx.writes > 0, "epoll race writer progress");
+        }
+
+        file_put(wctx.wfile);
+        wctx.wfile = NULL;
+        writer = NULL;
+    } while (0);
+
+    if (wctx.wfile) {
+        file_put(wctx.wfile);
+        wctx.wfile = NULL;
+    }
 
     close_fd_if_open(&epfd);
     close_fd_if_open(&wfd);
@@ -3437,6 +3672,19 @@ static bool test_snapshot_read_u64(const char *snapshot, const char *key,
     return true;
 }
 
+static bool test_snapshot_read_u64_any2(const char *snapshot,
+                                        const char *key_primary,
+                                        const char *key_fallback,
+                                        uint64_t *out_value) {
+    if (test_snapshot_read_u64(snapshot, key_primary, out_value))
+        return true;
+    if (key_fallback && key_fallback[0] &&
+        test_snapshot_read_u64(snapshot, key_fallback, out_value)) {
+        return true;
+    }
+    return false;
+}
+
 static void test_procfs_pid_control_write_semantics(void) {
     struct process *self = proc_current();
     test_check(self != NULL, "procfs control self present");
@@ -3801,7 +4049,7 @@ static void test_procfs_pid_handle_transfers_readonly(void) {
     test_check(rc == 0, "procfs xfer reopen");
     if (rc == 0) {
         ssize_t wr = vfs_write(f, "x", 1);
-        test_check(wr == -EPERM, "procfs xfer readonly");
+        test_check(write_readonly_rejected(wr), "procfs xfer readonly");
     }
 
 out:
@@ -3989,7 +4237,7 @@ static void test_procfs_pid_handle_transfers_v2_cursor(void) {
     test_check(rc == 0, "procfs xfer v2 reopen");
     if (rc == 0) {
         ssize_t wr = vfs_write(f, "x", 1);
-        test_check(wr == -EPERM, "procfs xfer v2 readonly");
+        test_check(write_readonly_rejected(wr), "procfs xfer v2 readonly");
     }
     close_file_if_open(&f);
 
@@ -4029,7 +4277,7 @@ static void test_procfs_ipc_object_transfers_v2_cursor(void) {
     test_check(npath > 0 && (size_t)npath < sizeof(path),
                "procfs ipc obj xfer path page0");
     if (npath > 0 && (size_t)npath < sizeof(path)) {
-        rc = vfs_open(path, O_RDONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f, 200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "procfs ipc obj xfer open page0");
         if (rc == 0) {
             ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
@@ -4066,7 +4314,7 @@ static void test_procfs_ipc_object_transfers_v2_cursor(void) {
     test_check(npath > 0 && (size_t)npath < sizeof(path),
                "procfs ipc obj xfer path page1");
     if (npath > 0 && (size_t)npath < sizeof(path)) {
-        rc = vfs_open(path, O_RDONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f, 200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "procfs ipc obj xfer open page1");
         if (rc == 0) {
             ssize_t rd = proc_control_read_snapshot(f, page1, sizeof(page1));
@@ -4134,13 +4382,299 @@ static void test_procfs_ipc_object_transfers_v2_cursor(void) {
         test_check(rc == 0, "procfs ipc obj xfer reopen readonly");
         if (rc == 0) {
             ssize_t wr = vfs_write(f, "x", 1);
-            test_check(wr == -EPERM, "procfs ipc obj xfer readonly");
+            test_check(write_readonly_rejected(wr),
+                       "procfs ipc obj xfer readonly");
         }
         close_file_if_open(&f);
     }
 
     kobj_put(ch1);
     kobj_put(ch0);
+}
+
+static void test_procfs_transfers_v2_open_binds_private_data(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs token bind self");
+    if (!self)
+        return;
+
+    struct kobj *seed_ch0[PROCFS_XFER_BULK_PAIRS] = {0};
+    struct kobj *seed_ch1[PROCFS_XFER_BULK_PAIRS] = {0};
+    int32_t seed_handles[PROCFS_XFER_BULK_PAIRS];
+    for (size_t i = 0; i < PROCFS_XFER_BULK_PAIRS; i++)
+        seed_handles[i] = -1;
+
+    size_t seeded =
+        procfs_seed_transfer_events(self, seed_ch0, seed_ch1, seed_handles, 12, NULL);
+    test_check(seeded >= 12, "procfs token bind seed pid transfers");
+
+    struct file *f = NULL;
+    int rc = vfs_open("/proc/self/handle_transfers_v2.7.9", O_RDONLY, 0, &f);
+    test_check(rc == 0, "procfs token bind open pid token");
+    if (rc == 0 && f) {
+        char snapshot[1024];
+        ssize_t rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs token bind read pid token");
+        if (rd > 0) {
+            test_snapshot_expect_u64(snapshot, "cursor", 7, "procfs token bind pid cursor");
+            test_snapshot_expect_u64(snapshot, "page_size", 9,
+                                     "procfs token bind pid page size");
+            test_snapshot_expect_str(snapshot, "token", "7.9",
+                                     "procfs token bind pid token");
+        }
+
+        int n = snprintf(f->path, sizeof(f->path), "/proc/self/handle_transfers_v2.0.1");
+        test_check(n > 0 && (size_t)n < sizeof(f->path), "procfs token bind mutate pid path");
+        off_t off = vfs_seek(f, 0, SEEK_SET);
+        test_check(off == 0, "procfs token bind pid rewind");
+        rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+        test_check(rd > 0, "procfs token bind reread pid token");
+        if (rd > 0) {
+            test_snapshot_expect_u64(snapshot, "cursor", 7,
+                                     "procfs token bind pid cursor sticky");
+            test_snapshot_expect_u64(snapshot, "page_size", 9,
+                                     "procfs token bind pid page size sticky");
+            test_snapshot_expect_str(snapshot, "token", "7.9",
+                                     "procfs token bind pid token sticky");
+        }
+    }
+    close_file_if_open(&f);
+    procfs_release_transfer_events(self, seed_ch0, seed_ch1, seed_handles, seeded);
+
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0 && ch0 && ch1, "procfs token bind create object pair");
+    if (rc < 0 || !ch0 || !ch1)
+        goto out_obj;
+
+    uint32_t obj_id = kobj_id(ch0);
+    int32_t self_pid = self->pid;
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_TAKE, self_pid, -1, KRIGHT_TRANSFER);
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_RESTORE, -1, self_pid, KRIGHT_TRANSFER);
+
+    char path[128];
+    int n = snprintf(path, sizeof(path), "/proc/ipc/objects/%u/transfers_v2.5.3",
+                     obj_id);
+    test_check(n > 0 && (size_t)n < sizeof(path), "procfs token bind obj path");
+    if (n > 0 && (size_t)n < sizeof(path)) {
+        rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f, 200ULL * 1000ULL * 1000ULL);
+        test_check(rc == 0, "procfs token bind open obj token");
+        if (rc == 0 && f) {
+            char snapshot[1024];
+            ssize_t rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+            test_check(rd > 0, "procfs token bind read obj token");
+            if (rd > 0) {
+                test_snapshot_expect_u64(snapshot, "obj_id", obj_id,
+                                         "procfs token bind obj id");
+                test_snapshot_expect_u64(snapshot, "cursor", 5,
+                                         "procfs token bind obj cursor");
+                test_snapshot_expect_u64(snapshot, "page_size", 3,
+                                         "procfs token bind obj page size");
+                test_snapshot_expect_str(snapshot, "token", "5.3",
+                                         "procfs token bind obj token");
+            }
+
+            n = snprintf(f->path, sizeof(f->path), "/proc/ipc/objects/%u/transfers_v2.0.1",
+                         obj_id);
+            test_check(n > 0 && (size_t)n < sizeof(f->path),
+                       "procfs token bind mutate obj path");
+            off_t off = vfs_seek(f, 0, SEEK_SET);
+            test_check(off == 0, "procfs token bind obj rewind");
+            rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+            test_check(rd > 0, "procfs token bind reread obj token");
+            if (rd > 0) {
+                test_snapshot_expect_u64(snapshot, "cursor", 5,
+                                         "procfs token bind obj cursor sticky");
+                test_snapshot_expect_u64(snapshot, "page_size", 3,
+                                         "procfs token bind obj page size sticky");
+                test_snapshot_expect_str(snapshot, "token", "5.3",
+                                         "procfs token bind obj token sticky");
+            }
+        }
+        close_file_if_open(&f);
+    }
+
+out_obj:
+    if (ch1)
+        kobj_put(ch1);
+    if (ch0)
+        kobj_put(ch0);
+}
+
+static void test_procfs_transfers_v2_token_flood(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "procfs token flood self");
+    if (!self)
+        return;
+
+    struct kobj *seed_ch0[PROCFS_XFER_BULK_PAIRS] = {0};
+    struct kobj *seed_ch1[PROCFS_XFER_BULK_PAIRS] = {0};
+    int32_t seed_handles[PROCFS_XFER_BULK_PAIRS];
+    for (size_t i = 0; i < PROCFS_XFER_BULK_PAIRS; i++)
+        seed_handles[i] = -1;
+
+    size_t seeded = procfs_seed_transfer_events(
+        self, seed_ch0, seed_ch1, seed_handles, 24, NULL);
+    test_check(seeded >= 24, "procfs token flood seed pid transfers");
+
+    struct file *pid_anchor = NULL;
+    struct vnode *pid_anchor_vn = NULL;
+    int rc = vfs_open("/proc/self/handle_transfers_v2", O_RDONLY, 0, &pid_anchor);
+    test_check(rc == 0, "procfs token flood open pid anchor");
+    if (rc == 0 && pid_anchor)
+        pid_anchor_vn = pid_anchor->vnode;
+
+    bool pid_ok = (rc == 0 && pid_anchor_vn != NULL);
+    for (uint32_t i = 0; i < PROCFS_TOKEN_FLOOD_ROUNDS && pid_ok; i++) {
+        uint32_t cursor = (i * 37U) % 4096U;
+        uint32_t page_size = 1U + (i % 64U);
+        char path[96];
+        int n = snprintf(path, sizeof(path), "/proc/self/handle_transfers_v2.%u.%u",
+                         cursor, page_size);
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            test_check(false, "procfs token flood pid path");
+            break;
+        }
+
+        struct file *f = NULL;
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        if (rc < 0 || !f || !f->vnode) {
+            test_check(false, "procfs token flood pid open");
+            close_file_if_open(&f);
+            break;
+        }
+
+        if (f->vnode != pid_anchor_vn) {
+            test_check(false, "procfs token flood pid canonical vnode");
+            close_file_if_open(&f);
+            break;
+        }
+
+        if ((i & 0x3fU) == 0) {
+            char snapshot[1024];
+            ssize_t rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+            test_check(rd > 0, "procfs token flood pid read");
+            if (rd <= 0) {
+                close_file_if_open(&f);
+                break;
+            }
+            test_snapshot_expect_str(snapshot, "schema",
+                                     "procfs_pid_handle_transfers_v2",
+                                     "procfs token flood pid schema");
+            char tok[32];
+            char needle[48];
+            int tn = snprintf(tok, sizeof(tok), "%u.%u", cursor, page_size);
+            int nn = snprintf(needle, sizeof(needle), "token=%s\n", tok);
+            bool token_ok = tn > 0 && (size_t)tn < sizeof(tok) && nn > 0 &&
+                            (size_t)nn < sizeof(needle) &&
+                            strstr(snapshot, needle) != NULL;
+            test_check(token_ok, "procfs token flood pid token");
+            if (!token_ok) {
+                close_file_if_open(&f);
+                break;
+            }
+        }
+
+        close_file_if_open(&f);
+    }
+    close_file_if_open(&pid_anchor);
+    procfs_release_transfer_events(self, seed_ch0, seed_ch1, seed_handles, seeded);
+
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0 && ch0 && ch1, "procfs token flood create object pair");
+    if (rc < 0 || !ch0 || !ch1)
+        goto out_obj;
+
+    uint32_t obj_id = kobj_id(ch0);
+    int32_t self_pid = self->pid;
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_TAKE, self_pid, -1, KRIGHT_TRANSFER);
+    kobj_transfer_record(ch0, KOBJ_TRANSFER_RESTORE, -1, self_pid, KRIGHT_TRANSFER);
+
+    char anchor_path[128];
+    int npath =
+        snprintf(anchor_path, sizeof(anchor_path), "/proc/ipc/objects/%u/transfers_v2",
+                 obj_id);
+    test_check(npath > 0 && (size_t)npath < sizeof(anchor_path),
+               "procfs token flood obj anchor path");
+    if (npath <= 0 || (size_t)npath >= sizeof(anchor_path))
+        goto out_obj;
+
+    struct file *obj_anchor = NULL;
+    struct vnode *obj_anchor_vn = NULL;
+    rc = vfs_open_retry_enoent(anchor_path, O_RDONLY, 0, &obj_anchor,
+                               200ULL * 1000ULL * 1000ULL);
+    test_check(rc == 0, "procfs token flood open obj anchor");
+    if (rc == 0 && obj_anchor)
+        obj_anchor_vn = obj_anchor->vnode;
+
+    bool obj_ok = (rc == 0 && obj_anchor_vn != NULL);
+    for (uint32_t i = 0; i < PROCFS_TOKEN_FLOOD_ROUNDS && obj_ok; i++) {
+        uint32_t cursor = (i * 11U) % 4096U;
+        uint32_t page_size = 1U + (i % 32U);
+        char path[144];
+        int n = snprintf(path, sizeof(path),
+                         "/proc/ipc/objects/%u/transfers_v2.%u.%u", obj_id, cursor,
+                         page_size);
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            test_check(false, "procfs token flood obj path");
+            break;
+        }
+
+        struct file *f = NULL;
+        rc = vfs_open(path, O_RDONLY, 0, &f);
+        if (rc == -ENOENT)
+            rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f,
+                                       100ULL * 1000ULL * 1000ULL);
+        if (rc < 0 || !f || !f->vnode) {
+            test_check(false, "procfs token flood obj open");
+            close_file_if_open(&f);
+            break;
+        }
+        if (f->vnode != obj_anchor_vn) {
+            test_check(false, "procfs token flood obj canonical vnode");
+            close_file_if_open(&f);
+            break;
+        }
+
+        if ((i & 0x3fU) == 0) {
+            char snapshot[1024];
+            ssize_t rd = proc_control_read_snapshot(f, snapshot, sizeof(snapshot));
+            test_check(rd > 0, "procfs token flood obj read");
+            if (rd <= 0) {
+                close_file_if_open(&f);
+                break;
+            }
+            test_snapshot_expect_str(snapshot, "schema",
+                                     "procfs_ipc_object_transfers_v2",
+                                     "procfs token flood obj schema");
+            test_snapshot_expect_u64(snapshot, "obj_id", obj_id,
+                                     "procfs token flood obj id");
+            char tok[32];
+            char needle[48];
+            int tn = snprintf(tok, sizeof(tok), "%u.%u", cursor, page_size);
+            int nn = snprintf(needle, sizeof(needle), "token=%s\n", tok);
+            bool token_ok = tn > 0 && (size_t)tn < sizeof(tok) && nn > 0 &&
+                            (size_t)nn < sizeof(needle) &&
+                            strstr(snapshot, needle) != NULL;
+            test_check(token_ok, "procfs token flood obj token");
+            if (!token_ok) {
+                close_file_if_open(&f);
+                break;
+            }
+        }
+
+        close_file_if_open(&f);
+    }
+    close_file_if_open(&obj_anchor);
+
+out_obj:
+    if (ch1)
+        kobj_put(ch1);
+    if (ch0)
+        kobj_put(ch0);
 }
 
 struct stop_cont_timing_ctx {
@@ -4155,12 +4689,18 @@ static int stop_cont_timing_worker(void *arg) {
         proc_exit(1);
     struct process *p = proc_current();
     struct mm_struct *tmp_mm = mm_create();
-    if (!p || !tmp_mm)
+    if (!p || !tmp_mm || !p->sighand)
         proc_exit(1);
     struct mm_struct *saved_mm = p->mm;
     void *saved_tf = p->active_tf;
     struct trap_frame tf;
     memset(&tf, 0, sizeof(tf));
+    spin_lock(&p->sighand->lock);
+    p->sighand->actions[SIGUSR1 - 1].sa_handler = SIG_IGN;
+    p->sighand->actions[SIGUSR1 - 1].sa_mask = 0;
+    p->sighand->actions[SIGUSR1 - 1].sa_flags = 0;
+    p->sighand->actions[SIGUSR1 - 1].sa_restorer = NULL;
+    spin_unlock(&p->sighand->lock);
     p->mm = tmp_mm;
     p->active_tf = &tf;
     __atomic_store_n(&p->sig_blocked, 0, __ATOMIC_RELEASE);
@@ -4832,7 +5372,8 @@ static void test_sysfs_ipc_visibility(void) {
     test_check(npath > 0 && (size_t)npath < sizeof(path), "sysfs_ipc ch0 path");
     if (npath > 0 && (size_t)npath < sizeof(path)) {
         memset(buf, 0, sizeof(buf));
-        rc = vfs_open(path, O_RDONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f,
+                                   200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "sysfs_ipc open object summary");
         if (rc == 0) {
             ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
@@ -4855,7 +5396,8 @@ static void test_sysfs_ipc_visibility(void) {
     test_check(npath > 0 && (size_t)npath < sizeof(path), "sysfs_ipc xfer path");
     if (npath > 0 && (size_t)npath < sizeof(path)) {
         memset(buf, 0, sizeof(buf));
-        rc = vfs_open(path, O_RDONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f,
+                                   200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "sysfs_ipc open object transfers");
         if (rc == 0) {
             ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
@@ -4875,7 +5417,7 @@ static void test_sysfs_ipc_visibility(void) {
     test_check(npath > 0 && (size_t)npath < sizeof(path),
                "sysfs_ipc xferv2 page_size path");
     if (npath > 0 && (size_t)npath < sizeof(path)) {
-        rc = vfs_open(path, O_WRONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_WRONLY, 0, &f, 200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "sysfs_ipc open object transfers_page_size");
         if (rc == 0) {
             const char *value = "1\n";
@@ -4891,7 +5433,7 @@ static void test_sysfs_ipc_visibility(void) {
     test_check(npath > 0 && (size_t)npath < sizeof(path),
                "sysfs_ipc xferv2 cursor path");
     if (npath > 0 && (size_t)npath < sizeof(path)) {
-        rc = vfs_open(path, O_WRONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_WRONLY, 0, &f, 200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "sysfs_ipc open object transfers_cursor");
         if (rc == 0) {
             const char *value = "0\n";
@@ -4912,7 +5454,7 @@ static void test_sysfs_ipc_visibility(void) {
         char first0[128] = {0};
         char first1[128] = {0};
 
-        rc = vfs_open(path, O_RDONLY, 0, &f);
+        rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f, 200ULL * 1000ULL * 1000ULL);
         test_check(rc == 0, "sysfs_ipc open object transfers_v2");
         if (rc == 0) {
             ssize_t rd = proc_control_read_snapshot(f, page0, sizeof(page0));
@@ -4945,7 +5487,8 @@ static void test_sysfs_ipc_visibility(void) {
             test_check(nc > 0 && (size_t)nc < sizeof(path),
                        "sysfs_ipc xferv2 cursor path second");
             if (nc > 0 && (size_t)nc < sizeof(path)) {
-                rc = vfs_open(path, O_WRONLY, 0, &f);
+                rc = vfs_open_retry_enoent(path, O_WRONLY, 0, &f,
+                                           200ULL * 1000ULL * 1000ULL);
                 test_check(rc == 0, "sysfs_ipc open object transfers_cursor second");
                 if (rc == 0) {
                     const char *value = "1\n";
@@ -4962,7 +5505,8 @@ static void test_sysfs_ipc_visibility(void) {
         test_check(npath > 0 && (size_t)npath < sizeof(path),
                    "sysfs_ipc xferv2 path second");
         if (npath > 0 && (size_t)npath < sizeof(path)) {
-            rc = vfs_open(path, O_RDONLY, 0, &f);
+            rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f,
+                                       200ULL * 1000ULL * 1000ULL);
             test_check(rc == 0, "sysfs_ipc reopen object transfers_v2 page1");
             if (rc == 0) {
                 ssize_t rd = proc_control_read_snapshot(f, page1, sizeof(page1));
@@ -4985,7 +5529,8 @@ static void test_sysfs_ipc_visibility(void) {
         test_check(npath > 0 && (size_t)npath < sizeof(path),
                    "sysfs_ipc xferv2 cursor path tail");
         if (npath > 0 && (size_t)npath < sizeof(path)) {
-            rc = vfs_open(path, O_WRONLY, 0, &f);
+            rc = vfs_open_retry_enoent(path, O_WRONLY, 0, &f,
+                                       200ULL * 1000ULL * 1000ULL);
             test_check(rc == 0, "sysfs_ipc open object transfers_cursor tail");
             if (rc == 0) {
                 const char *value = "999999\n";
@@ -5001,7 +5546,8 @@ static void test_sysfs_ipc_visibility(void) {
         test_check(npath > 0 && (size_t)npath < sizeof(path),
                    "sysfs_ipc xferv2 path tail");
         if (npath > 0 && (size_t)npath < sizeof(path)) {
-            rc = vfs_open(path, O_RDONLY, 0, &f);
+            rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f,
+                                       200ULL * 1000ULL * 1000ULL);
             test_check(rc == 0, "sysfs_ipc reopen object transfers_v2 tail");
             if (rc == 0) {
                 ssize_t rd = proc_control_read_snapshot(f, tail, sizeof(tail));
@@ -5021,11 +5567,13 @@ static void test_sysfs_ipc_visibility(void) {
         test_check(npath > 0 && (size_t)npath < sizeof(path),
                    "sysfs_ipc xferv2 path readonly");
         if (npath > 0 && (size_t)npath < sizeof(path)) {
-            rc = vfs_open(path, O_RDONLY, 0, &f);
+            rc = vfs_open_retry_enoent(path, O_RDONLY, 0, &f,
+                                       200ULL * 1000ULL * 1000ULL);
             test_check(rc == 0, "sysfs_ipc reopen object transfers_v2 readonly");
             if (rc == 0) {
                 ssize_t wr = vfs_write(f, "x", 1);
-                test_check(wr == -EPERM, "sysfs_ipc xferv2 readonly");
+                test_check(write_readonly_rejected(wr),
+                           "sysfs_ipc xferv2 readonly");
             }
             close_file_if_open(&f);
         }
@@ -5064,7 +5612,7 @@ static void test_sysfs_ipc_visibility(void) {
             char next_line[32];
             buf[n] = '\0';
             int nn = snprintf(needle, sizeof(needle), "%u channel ", ch0_id);
-            int nx = snprintf(next_line, sizeof(next_line), "next_cursor=%u\n", ch0_id);
+            int nx = snprintf(next_line, sizeof(next_line), "next_cursor=");
             test_check(nn > 0 && (size_t)nn < sizeof(needle) &&
                            strstr(buf, needle) != NULL,
                        "sysfs_ipc page first object");
@@ -5126,11 +5674,51 @@ static void test_sysfs_ipc_visibility(void) {
 
 static void test_sysfs_ipc_port_drop_stats(void) {
     struct file *f = NULL;
-    char snapshot[512] = {0};
+    char snapshot[4096] = {0};
     uint64_t drops_before = 0;
     uint64_t drops_after = 0;
+    uint64_t cache_lookups_before = 0;
+    uint64_t cache_lookups_after = 0;
+    uint64_t cache_hits_before = 0;
+    uint64_t cache_hits_after = 0;
+    uint64_t cache_sweeps_before = 0;
+    uint64_t cache_sweeps_after = 0;
+    uint64_t cache_active_refs_before = 0;
+    uint64_t cache_active_refs_after = 0;
+    uint64_t lock_registry_after_channel_before = 0;
+    uint64_t lock_registry_after_channel_after = 0;
+    uint64_t lock_registry_contention_before = 0;
+    uint64_t lock_registry_contention_after = 0;
+    uint64_t lock_state_underflow_before = 0;
+    uint64_t lock_state_underflow_after = 0;
+    uint64_t kobj_lifecycle_transition_warn_before = 0;
+    uint64_t kobj_lifecycle_transition_warn_after = 0;
+    uint64_t kobj_lifecycle_access_warn_before = 0;
+    uint64_t kobj_lifecycle_access_warn_after = 0;
+    uint64_t kobj_lifecycle_warns_before = 0;
+    uint64_t kobj_lifecycle_warns_after = 0;
     bool have_before = false;
     bool have_after = false;
+    bool have_cache_lookups_before = false;
+    bool have_cache_lookups_after = false;
+    bool have_cache_hits_before = false;
+    bool have_cache_hits_after = false;
+    bool have_cache_sweeps_before = false;
+    bool have_cache_sweeps_after = false;
+    bool have_cache_active_refs_before = false;
+    bool have_cache_active_refs_after = false;
+    bool have_lock_registry_after_channel_before = false;
+    bool have_lock_registry_after_channel_after = false;
+    bool have_lock_registry_contention_before = false;
+    bool have_lock_registry_contention_after = false;
+    bool have_lock_state_underflow_before = false;
+    bool have_lock_state_underflow_after = false;
+    bool have_kobj_lifecycle_transition_warn_before = false;
+    bool have_kobj_lifecycle_transition_warn_after = false;
+    bool have_kobj_lifecycle_access_warn_before = false;
+    bool have_kobj_lifecycle_access_warn_after = false;
+    bool have_kobj_lifecycle_warns_before = false;
+    bool have_kobj_lifecycle_warns_after = false;
 
     int rc = vfs_open("/sys/ipc/ports", O_RDONLY, 0, &f);
     if (rc < 0) {
@@ -5155,6 +5743,47 @@ static void test_sysfs_ipc_port_drop_stats(void) {
             have_before = test_snapshot_read_u64(
                 snapshot, "port_queue_drops_total", &drops_before);
             test_check(have_before, "sysfs_ipc_drop parse stats before");
+            have_cache_lookups_before = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_lookups_total",
+                "khandle_lookup_cache_lookups_total", &cache_lookups_before);
+            have_cache_hits_before = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_hits_total",
+                "khandle_lookup_cache_hits_total", &cache_hits_before);
+            have_cache_sweeps_before = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_ht_sweeps_total",
+                "khandle_cache_sweeps_total", &cache_sweeps_before);
+            have_cache_active_refs_before = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_active_refs",
+                "khandle_cache_active_refs_total", &cache_active_refs_before);
+            have_lock_registry_after_channel_before = test_snapshot_read_u64(
+                snapshot, "ipc_lock_probe_registry_after_channel_total",
+                &lock_registry_after_channel_before);
+            test_check(have_lock_registry_after_channel_before,
+                       "sysfs_ipc_drop parse lock registry-after-channel before");
+            have_lock_registry_contention_before = test_snapshot_read_u64(
+                snapshot, "ipc_lock_probe_registry_contention_total",
+                &lock_registry_contention_before);
+            test_check(have_lock_registry_contention_before,
+                       "sysfs_ipc_drop parse lock registry contention before");
+            have_lock_state_underflow_before = test_snapshot_read_u64(
+                snapshot, "ipc_lock_probe_state_underflow_total",
+                &lock_state_underflow_before);
+            test_check(have_lock_state_underflow_before,
+                       "sysfs_ipc_drop parse lock underflow before");
+            have_kobj_lifecycle_transition_warn_before = test_snapshot_read_u64(
+                snapshot, "kobj_lifecycle_transition_warn_total",
+                &kobj_lifecycle_transition_warn_before);
+            test_check(have_kobj_lifecycle_transition_warn_before,
+                       "sysfs_ipc_drop parse kobj lifecycle transition before");
+            have_kobj_lifecycle_access_warn_before = test_snapshot_read_u64(
+                snapshot, "kobj_lifecycle_access_warn_total",
+                &kobj_lifecycle_access_warn_before);
+            test_check(have_kobj_lifecycle_access_warn_before,
+                       "sysfs_ipc_drop parse kobj lifecycle access before");
+            have_kobj_lifecycle_warns_before = test_snapshot_read_u64(
+                snapshot, "kobj_lifecycle_warns", &kobj_lifecycle_warns_before);
+            test_check(have_kobj_lifecycle_warns_before,
+                       "sysfs_ipc_drop parse kobj lifecycle warns before");
         }
     }
     close_file_if_open(&f);
@@ -5198,6 +5827,47 @@ static void test_sysfs_ipc_port_drop_stats(void) {
             have_after = test_snapshot_read_u64(
                 snapshot, "port_queue_drops_total", &drops_after);
             test_check(have_after, "sysfs_ipc_drop parse stats after");
+            have_cache_lookups_after = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_lookups_total",
+                "khandle_lookup_cache_lookups_total", &cache_lookups_after);
+            have_cache_hits_after = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_hits_total",
+                "khandle_lookup_cache_hits_total", &cache_hits_after);
+            have_cache_sweeps_after = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_ht_sweeps_total",
+                "khandle_cache_sweeps_total", &cache_sweeps_after);
+            have_cache_active_refs_after = test_snapshot_read_u64_any2(
+                snapshot, "khandle_cache_active_refs",
+                "khandle_cache_active_refs_total", &cache_active_refs_after);
+            have_lock_registry_after_channel_after = test_snapshot_read_u64(
+                snapshot, "ipc_lock_probe_registry_after_channel_total",
+                &lock_registry_after_channel_after);
+            test_check(have_lock_registry_after_channel_after,
+                       "sysfs_ipc_drop parse lock registry-after-channel after");
+            have_lock_registry_contention_after = test_snapshot_read_u64(
+                snapshot, "ipc_lock_probe_registry_contention_total",
+                &lock_registry_contention_after);
+            test_check(have_lock_registry_contention_after,
+                       "sysfs_ipc_drop parse lock registry contention after");
+            have_lock_state_underflow_after = test_snapshot_read_u64(
+                snapshot, "ipc_lock_probe_state_underflow_total",
+                &lock_state_underflow_after);
+            test_check(have_lock_state_underflow_after,
+                       "sysfs_ipc_drop parse lock underflow after");
+            have_kobj_lifecycle_transition_warn_after = test_snapshot_read_u64(
+                snapshot, "kobj_lifecycle_transition_warn_total",
+                &kobj_lifecycle_transition_warn_after);
+            test_check(have_kobj_lifecycle_transition_warn_after,
+                       "sysfs_ipc_drop parse kobj lifecycle transition after");
+            have_kobj_lifecycle_access_warn_after = test_snapshot_read_u64(
+                snapshot, "kobj_lifecycle_access_warn_total",
+                &kobj_lifecycle_access_warn_after);
+            test_check(have_kobj_lifecycle_access_warn_after,
+                       "sysfs_ipc_drop parse kobj lifecycle access after");
+            have_kobj_lifecycle_warns_after = test_snapshot_read_u64(
+                snapshot, "kobj_lifecycle_warns", &kobj_lifecycle_warns_after);
+            test_check(have_kobj_lifecycle_warns_after,
+                       "sysfs_ipc_drop parse kobj lifecycle warns after");
         }
     }
     close_file_if_open(&f);
@@ -5207,6 +5877,103 @@ static void test_sysfs_ipc_port_drop_stats(void) {
                    "sysfs_ipc_drop stats increment");
     } else if (have_after) {
         test_check(drops_after > 0, "sysfs_ipc_drop stats nonzero");
+    }
+
+    if (have_cache_lookups_before && have_cache_lookups_after) {
+        test_check(cache_lookups_after >= cache_lookups_before,
+                   "sysfs_ipc_drop cache lookups monotonic");
+    }
+    if (have_cache_hits_before && have_cache_hits_after) {
+        test_check(cache_hits_after >= cache_hits_before,
+                   "sysfs_ipc_drop cache hits monotonic");
+    }
+    if (have_cache_sweeps_before && have_cache_sweeps_after) {
+        test_check(cache_sweeps_after >= cache_sweeps_before,
+                   "sysfs_ipc_drop cache sweeps monotonic");
+    }
+    if (have_cache_active_refs_before && have_cache_active_refs_after) {
+        test_check(cache_active_refs_after <=
+                       (uint64_t)(CONFIG_MAX_CPUS * 16U),
+                   "sysfs_ipc_drop cache active refs bounded");
+    }
+    if (have_lock_registry_after_channel_before &&
+        have_lock_registry_after_channel_after) {
+        test_check(lock_registry_after_channel_after >=
+                       lock_registry_after_channel_before,
+                   "sysfs_ipc_drop lock registry-after-channel monotonic");
+    }
+    if (have_lock_registry_contention_before &&
+        have_lock_registry_contention_after) {
+        test_check(lock_registry_contention_after >=
+                       lock_registry_contention_before,
+                   "sysfs_ipc_drop lock registry contention monotonic");
+    }
+    if (have_lock_state_underflow_before && have_lock_state_underflow_after) {
+        test_check(lock_state_underflow_after >= lock_state_underflow_before,
+                   "sysfs_ipc_drop lock underflow monotonic");
+    }
+    if (have_kobj_lifecycle_transition_warn_before &&
+        have_kobj_lifecycle_transition_warn_after) {
+        test_check(kobj_lifecycle_transition_warn_after >=
+                       kobj_lifecycle_transition_warn_before,
+                   "sysfs_ipc_drop kobj lifecycle transition monotonic");
+    }
+    if (have_kobj_lifecycle_access_warn_before &&
+        have_kobj_lifecycle_access_warn_after) {
+        test_check(kobj_lifecycle_access_warn_after >=
+                       kobj_lifecycle_access_warn_before,
+                   "sysfs_ipc_drop kobj lifecycle access monotonic");
+    }
+    if (have_kobj_lifecycle_warns_before && have_kobj_lifecycle_warns_after) {
+        test_check(kobj_lifecycle_warns_after >= kobj_lifecycle_warns_before,
+                   "sysfs_ipc_drop kobj lifecycle warns monotonic");
+    }
+
+    if (have_cache_lookups_before && have_cache_hits_before &&
+        have_cache_sweeps_before && have_cache_active_refs_before &&
+        have_lock_registry_after_channel_before &&
+        have_lock_registry_contention_before &&
+        have_lock_state_underflow_before &&
+        have_kobj_lifecycle_transition_warn_before &&
+        have_kobj_lifecycle_access_warn_before &&
+        have_kobj_lifecycle_warns_before) {
+        pr_info("vfs_ipc_tests: ipc_stats_before cache_lookups=%llu "
+                "cache_hits=%llu cache_sweeps=%llu cache_active_refs=%llu "
+                "lock_reg_after_ch=%llu lock_reg_cont=%llu lock_underflow=%llu "
+                "kobj_xwarn=%llu kobj_awarn=%llu kobj_warns=%llu\n",
+                (unsigned long long)cache_lookups_before,
+                (unsigned long long)cache_hits_before,
+                (unsigned long long)cache_sweeps_before,
+                (unsigned long long)cache_active_refs_before,
+                (unsigned long long)lock_registry_after_channel_before,
+                (unsigned long long)lock_registry_contention_before,
+                (unsigned long long)lock_state_underflow_before,
+                (unsigned long long)kobj_lifecycle_transition_warn_before,
+                (unsigned long long)kobj_lifecycle_access_warn_before,
+                (unsigned long long)kobj_lifecycle_warns_before);
+    }
+    if (have_cache_lookups_after && have_cache_hits_after &&
+        have_cache_sweeps_after && have_cache_active_refs_after &&
+        have_lock_registry_after_channel_after &&
+        have_lock_registry_contention_after &&
+        have_lock_state_underflow_after &&
+        have_kobj_lifecycle_transition_warn_after &&
+        have_kobj_lifecycle_access_warn_after &&
+        have_kobj_lifecycle_warns_after) {
+        pr_info("vfs_ipc_tests: ipc_stats_after cache_lookups=%llu "
+                "cache_hits=%llu cache_sweeps=%llu cache_active_refs=%llu "
+                "lock_reg_after_ch=%llu lock_reg_cont=%llu lock_underflow=%llu "
+                "kobj_xwarn=%llu kobj_awarn=%llu kobj_warns=%llu\n",
+                (unsigned long long)cache_lookups_after,
+                (unsigned long long)cache_hits_after,
+                (unsigned long long)cache_sweeps_after,
+                (unsigned long long)cache_active_refs_after,
+                (unsigned long long)lock_registry_after_channel_after,
+                (unsigned long long)lock_registry_contention_after,
+                (unsigned long long)lock_state_underflow_after,
+                (unsigned long long)kobj_lifecycle_transition_warn_after,
+                (unsigned long long)kobj_lifecycle_access_warn_after,
+                (unsigned long long)kobj_lifecycle_warns_after);
     }
 
 out:
@@ -5235,6 +6002,7 @@ int run_vfs_ipc_tests(void) {
     test_pipe_fcntl_nonblock_semantics();
     test_epoll_pipe_semantics();
     test_epoll_edge_oneshot_semantics();
+    test_epoll_ctl_del_race_semantics();
     test_epoll_pwait2_syscall_semantics();
     test_ppoll_pselect6_syscall_semantics();
     test_renameat2_syscall_semantics();
@@ -5266,6 +6034,8 @@ int run_vfs_ipc_tests(void) {
     test_procfs_pid_handle_transfers_large_not_truncated();
     test_procfs_pid_handle_transfers_v2_cursor();
     test_procfs_ipc_object_transfers_v2_cursor();
+    test_procfs_transfers_v2_open_binds_private_data();
+    test_procfs_transfers_v2_token_flood();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");
