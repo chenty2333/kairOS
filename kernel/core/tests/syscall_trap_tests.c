@@ -3,6 +3,7 @@
  */
 
 #include <kairos/arch.h>
+#include <kairos/epoll.h>
 #include <kairos/fault_inject.h>
 #include <kairos/futex.h>
 #include <kairos/handle.h>
@@ -77,6 +78,9 @@ struct futex_delay_waker_ctx {
 #define KH_STRESS_WAIT_SLICE_NS (50ULL * 1000ULL * 1000ULL)
 #define KH_STRESS_ACK_TIMEOUT_NS (2ULL * TEST_NS_PER_SEC)
 #define KH_STRESS_TAG 0x4B485354U
+#define KH_CLOSE_RACE_TIMEOUT_NS (5ULL * TEST_NS_PER_SEC)
+#define KH_FD_ONLY_ROUNDS 96U
+#define KH_EPOLL_ET_ROUNDS 96U
 
 struct kh_stress_msg {
     uint32_t producer_id;
@@ -119,6 +123,22 @@ struct kh_rendezvous_ctx {
     size_t got_handles;
     bool trunc;
     char payload[8];
+};
+
+struct kh_close_recv_ctx {
+    int32_t h_recv;
+    volatile int started;
+    int rc;
+    size_t got_bytes;
+    size_t got_handles;
+    bool trunc;
+    char payload[8];
+};
+
+struct kh_close_send_ctx {
+    int32_t h_send;
+    volatile int started;
+    int rc;
 };
 
 static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
@@ -272,6 +292,53 @@ static bool kh_wait_pid_bounded(pid_t pid, uint64_t timeout_ns) {
         proc_yield();
     }
     return proc_wait(pid, &status, WNOHANG) == pid;
+}
+
+static bool kh_wait_flag_bounded(volatile int *flag, uint64_t timeout_ns) {
+    if (!flag)
+        return false;
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    while (time_now_ns() < deadline) {
+        if (__atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0)
+            return true;
+        proc_yield();
+    }
+    return __atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0;
+}
+
+static int kh_close_recv_worker(void *arg) {
+    struct kh_close_recv_ctx *ctx = (struct kh_close_recv_ctx *)arg;
+    struct process *p = proc_current();
+    if (!ctx || !p)
+        proc_exit(1);
+
+    struct kobj *recv_obj = NULL;
+    if (khandle_get(p, ctx->h_recv, KRIGHT_READ, &recv_obj, NULL) < 0)
+        proc_exit(1);
+
+    __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+    ctx->rc = kchannel_recv(recv_obj, ctx->payload, sizeof(ctx->payload),
+                            &ctx->got_bytes, NULL, 0, &ctx->got_handles,
+                            &ctx->trunc, 0);
+    kobj_put(recv_obj);
+    proc_exit(0);
+}
+
+static int kh_close_send_worker(void *arg) {
+    struct kh_close_send_ctx *ctx = (struct kh_close_send_ctx *)arg;
+    struct process *p = proc_current();
+    if (!ctx || !p)
+        proc_exit(1);
+
+    struct kobj *send_obj = NULL;
+    if (khandle_get(p, ctx->h_send, KRIGHT_WRITE, &send_obj, NULL) < 0)
+        proc_exit(1);
+
+    __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+    uint8_t byte = 'S';
+    ctx->rc = kchannel_send(send_obj, &byte, sizeof(byte), NULL, 0, 0);
+    kobj_put(send_obj);
+    proc_exit(0);
 }
 
 static int kh_stress_producer_worker(void *arg) {
@@ -3436,6 +3503,389 @@ out:
     }
 }
 
+static void test_kairos_channel_close_last_handle_races(void) {
+    {
+        struct kobj *tx_obj = NULL;
+        struct kobj *rx_obj = NULL;
+        struct process *worker = NULL;
+        struct kh_close_recv_ctx ctx = {
+            .h_recv = -1,
+        };
+        bool worker_done = false;
+
+        int rc = kchannel_create_pair(&tx_obj, &rx_obj);
+        test_check(rc == 0, "kh close-race recv create pair");
+        if (rc < 0)
+            goto recv_out;
+
+        worker = kthread_create_joinable(kh_close_recv_worker, &ctx, "khclrcv");
+        test_check(worker != NULL, "kh close-race recv worker create");
+        if (!worker)
+            goto recv_out;
+
+        ctx.h_recv = khandle_alloc(worker, rx_obj, KRIGHT_CHANNEL_DEFAULT);
+        test_check(ctx.h_recv >= 0, "kh close-race recv alloc handle");
+        if (ctx.h_recv < 0)
+            goto recv_out;
+
+        sched_enqueue(worker);
+        test_check(kh_wait_flag_bounded(&ctx.started, KH_CLOSE_RACE_TIMEOUT_NS),
+                   "kh close-race recv worker armed");
+
+        rc = khandle_close(worker, ctx.h_recv);
+        test_check(rc == 0, "kh close-race recv close last handle");
+        if (rc == 0)
+            ctx.h_recv = -1;
+
+        worker_done = kh_wait_pid_bounded(worker->pid, KH_CLOSE_RACE_TIMEOUT_NS);
+        test_check(worker_done, "kh close-race recv worker reaped");
+        if (worker_done) {
+            test_check(ctx.rc == 0, "kh close-race recv returns eof");
+            test_check(ctx.got_bytes == 0, "kh close-race recv eof bytes");
+            test_check(ctx.got_handles == 0, "kh close-race recv eof handles");
+            test_check(!ctx.trunc, "kh close-race recv eof trunc");
+        }
+
+    recv_out:
+        if (!worker_done && worker)
+            (void)kh_wait_pid_bounded(worker->pid, KH_CLOSE_RACE_TIMEOUT_NS);
+        if (worker && ctx.h_recv >= 0)
+            (void)khandle_close(worker, ctx.h_recv);
+        if (rx_obj)
+            kobj_put(rx_obj);
+        if (tx_obj)
+            kobj_put(tx_obj);
+    }
+
+    {
+        struct kobj *tx_obj = NULL;
+        struct kobj *rx_obj = NULL;
+        struct process *worker = NULL;
+        struct kh_close_send_ctx ctx = {
+            .h_send = -1,
+        };
+        int32_t rx_close_h = -1;
+        bool worker_done = false;
+        uint8_t fill = 0xCC;
+
+        int rc = kchannel_create_pair(&tx_obj, &rx_obj);
+        test_check(rc == 0, "kh close-race send create pair");
+        if (rc < 0)
+            goto send_out;
+
+        while (1) {
+            rc = kchannel_send(tx_obj, &fill, sizeof(fill), NULL, 0,
+                               KCHANNEL_OPT_NONBLOCK);
+            if (rc == 0)
+                continue;
+            test_check(rc == -EAGAIN, "kh close-race send fill queue");
+            if (rc != -EAGAIN)
+                goto send_out;
+            break;
+        }
+
+        worker = kthread_create_joinable(kh_close_send_worker, &ctx, "khclsnd");
+        test_check(worker != NULL, "kh close-race send worker create");
+        if (!worker)
+            goto send_out;
+
+        ctx.h_send = khandle_alloc(worker, tx_obj, KRIGHT_CHANNEL_DEFAULT);
+        test_check(ctx.h_send >= 0, "kh close-race send alloc tx handle");
+        if (ctx.h_send < 0)
+            goto send_out;
+
+        rx_close_h = khandle_alloc(proc_current(), rx_obj, KRIGHT_CHANNEL_DEFAULT);
+        test_check(rx_close_h >= 0, "kh close-race send alloc rx close handle");
+        if (rx_close_h < 0)
+            goto send_out;
+
+        sched_enqueue(worker);
+        test_check(kh_wait_flag_bounded(&ctx.started, KH_CLOSE_RACE_TIMEOUT_NS),
+                   "kh close-race send worker armed");
+
+        rc = khandle_close(proc_current(), rx_close_h);
+        test_check(rc == 0, "kh close-race send close peer last handle");
+        if (rc == 0)
+            rx_close_h = -1;
+
+        worker_done = kh_wait_pid_bounded(worker->pid, KH_CLOSE_RACE_TIMEOUT_NS);
+        test_check(worker_done, "kh close-race send worker reaped");
+        if (worker_done)
+            test_check(ctx.rc == -EPIPE, "kh close-race send returns epipe");
+
+    send_out:
+        if (!worker_done && worker)
+            (void)kh_wait_pid_bounded(worker->pid, KH_CLOSE_RACE_TIMEOUT_NS);
+        if (rx_close_h >= 0)
+            (void)khandle_close(proc_current(), rx_close_h);
+        if (worker && ctx.h_send >= 0)
+            (void)khandle_close(worker, ctx.h_send);
+        if (rx_obj)
+            kobj_put(rx_obj);
+        if (tx_obj)
+            kobj_put(tx_obj);
+    }
+}
+
+static void test_kairos_channelfd_fd_only_longrun(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int32_t h0 = -1;
+    int32_t h1 = -1;
+    int32_t fd0 = -1;
+    int32_t fd1 = -1;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "kh fd-only user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    int32_t *u_h0 = (int32_t *)user_map_ptr(&um, 0x000);
+    int32_t *u_h1 = (int32_t *)user_map_ptr(&um, 0x008);
+    int32_t *u_fd = (int32_t *)user_map_ptr(&um, 0x010);
+    uint8_t *u_tx = (uint8_t *)user_map_ptr(&um, 0x100);
+    uint8_t *u_rx = (uint8_t *)user_map_ptr(&um, 0x180);
+    test_check(u_h0 && u_h1 && u_fd && u_tx && u_rx, "kh fd-only user_ptr");
+    if (!u_h0 || !u_h1 || !u_fd || !u_tx || !u_rx)
+        goto out;
+
+    int64_t ret64 =
+        sys_kairos_channel_create((uint64_t)u_h0, (uint64_t)u_h1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd-only create pair");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&h0, u_h0, sizeof(h0));
+    test_check(rc == 0, "kh fd-only read h0");
+    rc = copy_from_user(&h1, u_h1, sizeof(h1));
+    test_check(rc == 0, "kh fd-only read h1");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)h0, (uint64_t)u_fd, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd-only fd_from_handle h0");
+    if (ret64 < 0)
+        goto out;
+    rc = copy_from_user(&fd0, u_fd, sizeof(fd0));
+    test_check(rc == 0, "kh fd-only read fd0");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)h1, (uint64_t)u_fd, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd-only fd_from_handle h1");
+    if (ret64 < 0)
+        goto out;
+    rc = copy_from_user(&fd1, u_fd, sizeof(fd1));
+    test_check(rc == 0, "kh fd-only read fd1");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_handle_close((uint64_t)h0, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd-only close h0");
+    if (ret64 == 0)
+        h0 = -1;
+    ret64 = sys_kairos_handle_close((uint64_t)h1, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh fd-only close h1");
+    if (ret64 == 0)
+        h1 = -1;
+
+    for (uint32_t i = 0; i < KH_FD_ONLY_ROUNDS; i++) {
+        uint8_t tx[2] = {
+            (uint8_t)('A' + (i % 26U)),
+            (uint8_t)('0' + (i % 10U)),
+        };
+        uint8_t got[2] = {0};
+        int32_t write_fd = (i & 1U) ? fd1 : fd0;
+        int32_t read_fd = (i & 1U) ? fd0 : fd1;
+
+        rc = copy_to_user(u_tx, tx, sizeof(tx));
+        test_check(rc == 0, "kh fd-only copy tx");
+        if (rc < 0)
+            break;
+
+        ret64 = sys_write((uint64_t)write_fd, (uint64_t)u_tx, sizeof(tx), 0, 0, 0);
+        test_check(ret64 == (int64_t)sizeof(tx), "kh fd-only write");
+        if (ret64 != (int64_t)sizeof(tx))
+            break;
+
+        ret64 = sys_read((uint64_t)read_fd, (uint64_t)u_rx, sizeof(got), 0, 0, 0);
+        test_check(ret64 == (int64_t)sizeof(got), "kh fd-only read");
+        if (ret64 != (int64_t)sizeof(got))
+            break;
+
+        rc = copy_from_user(got, u_rx, sizeof(got));
+        test_check(rc == 0, "kh fd-only read payload");
+        if (rc < 0)
+            break;
+        test_check(memcmp(got, tx, sizeof(tx)) == 0, "kh fd-only payload");
+        if (memcmp(got, tx, sizeof(tx)) != 0)
+            break;
+    }
+
+out:
+    if (fd1 >= 0)
+        (void)sys_close((uint64_t)fd1, 0, 0, 0, 0, 0);
+    if (fd0 >= 0)
+        (void)sys_close((uint64_t)fd0, 0, 0, 0, 0, 0);
+    if (h1 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h1, 0, 0, 0, 0, 0);
+    if (h0 >= 0)
+        (void)sys_kairos_handle_close((uint64_t)h0, 0, 0, 0, 0, 0);
+    if (mapped)
+        user_map_end(&um);
+}
+
+static void test_kairos_channelfd_epoll_et_stress(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    int32_t tx_h = -1;
+    int32_t rx_h = -1;
+    int32_t rx_fd = -1;
+    int32_t epfd = -1;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "kh epoll-et user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    int32_t *u_h0 = (int32_t *)user_map_ptr(&um, 0x000);
+    int32_t *u_h1 = (int32_t *)user_map_ptr(&um, 0x008);
+    int32_t *u_fd = (int32_t *)user_map_ptr(&um, 0x010);
+    struct kairos_channel_msg_user *u_send_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x040);
+    uint8_t *u_tx = (uint8_t *)user_map_ptr(&um, 0x100);
+    uint8_t *u_rx = (uint8_t *)user_map_ptr(&um, 0x120);
+    struct epoll_event *u_add = (struct epoll_event *)user_map_ptr(&um, 0x180);
+    struct epoll_event *u_out = (struct epoll_event *)user_map_ptr(&um, 0x1C0);
+    test_check(u_h0 && u_h1 && u_fd && u_send_msg && u_tx && u_rx && u_add &&
+                   u_out,
+               "kh epoll-et user_ptr");
+    if (!u_h0 || !u_h1 || !u_fd || !u_send_msg || !u_tx || !u_rx || !u_add ||
+        !u_out)
+        goto out;
+
+    int64_t ret64 =
+        sys_kairos_channel_create((uint64_t)u_h0, (uint64_t)u_h1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh epoll-et create pair");
+    if (ret64 < 0)
+        goto out;
+
+    rc = copy_from_user(&tx_h, u_h0, sizeof(tx_h));
+    test_check(rc == 0, "kh epoll-et read tx handle");
+    rc = copy_from_user(&rx_h, u_h1, sizeof(rx_h));
+    test_check(rc == 0, "kh epoll-et read rx handle");
+    if (rc < 0)
+        goto out;
+
+    ret64 =
+        sys_kairos_fd_from_handle((uint64_t)rx_h, (uint64_t)u_fd, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh epoll-et fd_from_handle rx");
+    if (ret64 < 0)
+        goto out;
+    rc = copy_from_user(&rx_fd, u_fd, sizeof(rx_fd));
+    test_check(rc == 0, "kh epoll-et read rx fd");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_kairos_handle_close((uint64_t)rx_h, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh epoll-et close rx handle");
+    if (ret64 == 0)
+        rx_h = -1;
+
+    ret64 = sys_epoll_create1(0, 0, 0, 0, 0, 0);
+    test_check(ret64 >= 0, "kh epoll-et create epoll");
+    if (ret64 < 0)
+        goto out;
+    epfd = (int32_t)ret64;
+
+    struct epoll_event add = {
+        .events = EPOLLIN | EPOLLET,
+        .data = 0xC10EED6EULL,
+    };
+    rc = copy_to_user(u_add, &add, sizeof(add));
+    test_check(rc == 0, "kh epoll-et copy add");
+    if (rc < 0)
+        goto out;
+
+    ret64 = sys_epoll_ctl((uint64_t)epfd, EPOLL_CTL_ADD, (uint64_t)rx_fd,
+                          (uint64_t)u_add, 0, 0);
+    test_check(ret64 == 0, "kh epoll-et ctl add");
+    if (ret64 < 0)
+        goto out;
+
+    struct kairos_channel_msg_user send_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_tx,
+        .handles = 0,
+        .num_bytes = 1,
+        .num_handles = 0,
+    };
+    rc = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(rc == 0, "kh epoll-et copy send msg");
+    if (rc < 0)
+        goto out;
+
+    for (uint32_t i = 0; i < KH_EPOLL_ET_ROUNDS; i++) {
+        uint8_t tx = (uint8_t)('a' + (i % 26U));
+        uint8_t got = 0;
+
+        rc = copy_to_user(u_tx, &tx, sizeof(tx));
+        test_check(rc == 0, "kh epoll-et copy tx");
+        if (rc < 0)
+            break;
+
+        ret64 = sys_kairos_channel_send((uint64_t)tx_h, (uint64_t)u_send_msg, 0, 0,
+                                        0, 0);
+        test_check(ret64 == 0, "kh epoll-et send");
+        if (ret64 < 0)
+            break;
+
+        ret64 = sys_epoll_wait((uint64_t)epfd, (uint64_t)u_out, 4, 50, 0, 0);
+        test_check(ret64 > 0, "kh epoll-et wait ready");
+        if (ret64 <= 0)
+            break;
+
+        struct epoll_event out = {0};
+        rc = copy_from_user(&out, u_out, sizeof(out));
+        test_check(rc == 0, "kh epoll-et read ready event");
+        if (rc < 0)
+            break;
+        test_check((out.events & EPOLLIN) != 0, "kh epoll-et ready in");
+        test_check(out.data == add.data, "kh epoll-et ready data");
+
+        ret64 = sys_read((uint64_t)rx_fd, (uint64_t)u_rx, sizeof(got), 0, 0, 0);
+        test_check(ret64 == (int64_t)sizeof(got), "kh epoll-et read");
+        if (ret64 != (int64_t)sizeof(got))
+            break;
+
+        rc = copy_from_user(&got, u_rx, sizeof(got));
+        test_check(rc == 0, "kh epoll-et read payload");
+        if (rc < 0)
+            break;
+        test_check(got == tx, "kh epoll-et payload");
+        if (got != tx)
+            break;
+
+        ret64 = sys_epoll_wait((uint64_t)epfd, (uint64_t)u_out, 4, 0, 0, 0);
+        test_check(ret64 == 0, "kh epoll-et edge no repeat");
+        if (ret64 != 0)
+            break;
+    }
+
+out:
+    if (epfd >= 0)
+        (void)sys_close((uint64_t)epfd, 0, 0, 0, 0, 0);
+    if (rx_fd >= 0)
+        (void)sys_close((uint64_t)rx_fd, 0, 0, 0, 0, 0);
+    if (rx_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)rx_h, 0, 0, 0, 0, 0);
+    if (tx_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)tx_h, 0, 0, 0, 0, 0);
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_kairos_file_handle_bridge(void) {
     struct user_map_ctx um = {0};
     bool mapped = false;
@@ -3986,6 +4436,309 @@ out:
         kobj_put(ch0);
 }
 
+static void test_sys_kchannel_send_transfer_rollback_kmalloc_fault(void) {
+#if CONFIG_KERNEL_FAULT_INJECT
+    struct process *self = proc_current();
+    test_check(self != NULL, "kh send-fault self");
+    if (!self)
+        return;
+
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+    struct kobj *send_obj = NULL;
+    struct kobj *recv_obj = NULL;
+    struct kobj *transfer_obj = NULL;
+    struct kobj *transfer_peer = NULL;
+    struct kobj *probe_obj = NULL;
+    int32_t send_h = -1;
+    int32_t transfer_h = -1;
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "kh send-fault user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    struct kairos_channel_msg_user *u_send_msg =
+        (struct kairos_channel_msg_user *)user_map_ptr(&um, 0x040);
+    uint8_t *u_send_bytes = (uint8_t *)user_map_ptr(&um, 0x200);
+    int32_t *u_send_handles = (int32_t *)user_map_ptr(&um, 0x380);
+    test_check(u_send_msg && u_send_bytes && u_send_handles,
+               "kh send-fault user_ptr");
+    if (!u_send_msg || !u_send_bytes || !u_send_handles)
+        goto out;
+
+    rc = kchannel_create_pair(&send_obj, &recv_obj);
+    test_check(rc == 0, "kh send-fault create send pair");
+    if (rc < 0)
+        goto out;
+
+    rc = kchannel_create_pair(&transfer_obj, &transfer_peer);
+    test_check(rc == 0, "kh send-fault create transfer pair");
+    if (rc < 0)
+        goto out;
+
+    send_h = khandle_alloc(self, send_obj, KRIGHT_CHANNEL_DEFAULT);
+    test_check(send_h >= 0, "kh send-fault alloc send");
+    if (send_h < 0)
+        goto out;
+
+    transfer_h = khandle_alloc(self, transfer_obj, KRIGHT_CHANNEL_DEFAULT);
+    test_check(transfer_h >= 0, "kh send-fault alloc transfer");
+    if (transfer_h < 0)
+        goto out;
+
+    uint8_t payload[KCHANNEL_INLINE_MSG_BYTES + 1];
+    for (size_t i = 0; i < sizeof(payload); i++)
+        payload[i] = (uint8_t)(i ^ 0x5A);
+
+    struct kairos_channel_msg_user send_msg = {
+        .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+        .handles = (uint64_t)(uintptr_t)u_send_handles,
+        .num_bytes = (uint32_t)sizeof(payload),
+        .num_handles = 1,
+    };
+    rc = copy_to_user(u_send_bytes, payload, sizeof(payload));
+    test_check(rc == 0, "kh send-fault copy payload");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_send_handles, &transfer_h, sizeof(transfer_h));
+    test_check(rc == 0, "kh send-fault copy handle");
+    if (rc < 0)
+        goto out;
+    rc = copy_to_user(u_send_msg, &send_msg, sizeof(send_msg));
+    test_check(rc == 0, "kh send-fault copy msg");
+    if (rc < 0)
+        goto out;
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_KMALLOC, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_KMALLOC, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_KMALLOC, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    int64_t ret64 =
+        sys_kairos_channel_send((uint64_t)send_h, (uint64_t)u_send_msg, 0, 0, 0, 0);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+
+    test_check(ret64 == -ENOMEM, "kh send-fault send returns enomem");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_KMALLOC) == 1,
+               "kh send-fault kmalloc failure observed");
+
+    rc = khandle_get(self, transfer_h, KRIGHT_TRANSFER, &probe_obj, NULL);
+    test_check(rc == 0 && probe_obj == transfer_obj,
+               "kh send-fault transfer handle preserved");
+    if (rc == 0 && probe_obj) {
+        kobj_put(probe_obj);
+        probe_obj = NULL;
+    }
+
+    uint8_t out[KCHANNEL_INLINE_MSG_BYTES + 1] = {0};
+    size_t got_bytes = 0;
+    size_t got_handles = 0;
+    bool truncated = false;
+    rc = kchannel_recv(recv_obj, out, sizeof(out), &got_bytes, NULL, 0,
+                       &got_handles, &truncated, KCHANNEL_OPT_NONBLOCK);
+    test_check(rc == -EAGAIN, "kh send-fault no message queued");
+
+out:
+    fault_inject_enable(false);
+    fault_inject_reset();
+    if (transfer_h >= 0)
+        (void)khandle_close(self, transfer_h);
+    if (send_h >= 0)
+        (void)khandle_close(self, send_h);
+    if (probe_obj)
+        kobj_put(probe_obj);
+    if (transfer_peer)
+        kobj_put(transfer_peer);
+    if (transfer_obj)
+        kobj_put(transfer_obj);
+    if (recv_obj)
+        kobj_put(recv_obj);
+    if (send_obj)
+        kobj_put(send_obj);
+    if (mapped)
+        user_map_end(&um);
+#endif
+}
+
+static void test_khandle_reserved_transfer_timeout_sweep(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "khandle_timeout self");
+    if (!self)
+        return;
+
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    struct kobj *moved_obj = NULL;
+    uint32_t moved_rights = 0;
+    uint64_t moved_cap_id = KHANDLE_INVALID_CAP_ID;
+    uint64_t token = KHANDLE_INVALID_CAP_ID;
+    uint32_t slot_generation = 0;
+    int32_t h = -1;
+    bool reclaimed = false;
+    bool held_ref = false;
+    int rc = 0;
+
+    khandle_test_set_reserved_transfer_timeout_ns(120ULL * 1000ULL * 1000ULL);
+
+    rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0 && ch0 && ch1, "khandle_timeout create pair");
+    if (rc < 0 || !ch0 || !ch1)
+        goto out;
+
+    h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+    test_check(h >= 0, "khandle_timeout alloc source");
+    if (h < 0)
+        goto out;
+
+    rc = khandle_reserve_transfer(self, h, &moved_obj, &moved_rights,
+                                  &moved_cap_id, &token, &slot_generation);
+    test_check(rc == 0 && moved_obj != NULL &&
+                   token != KHANDLE_INVALID_CAP_ID,
+               "khandle_timeout reserve");
+    if (rc < 0 || !moved_obj)
+        goto out;
+
+    kobj_get(moved_obj);
+    held_ref = true;
+
+    uint64_t deadline_ns = time_now_ns() + (4ULL * TEST_NS_PER_SEC);
+    while (time_now_ns() < deadline_ns) {
+        int32_t probe = khandle_alloc(self, ch1, KRIGHT_CHANNEL_DEFAULT);
+        if (probe >= 0) {
+            if (probe == h) {
+                reclaimed = true;
+                (void)khandle_close(self, probe);
+                break;
+            }
+            (void)khandle_close(self, probe);
+        }
+        proc_yield();
+    }
+    test_check(reclaimed, "khandle_timeout reclaimed slot");
+
+out:
+    if (!reclaimed && h >= 0 && token != KHANDLE_INVALID_CAP_ID)
+        (void)khandle_abort_reserved_transfer(self, h, token, slot_generation);
+    if (h >= 0)
+        (void)khandle_close(self, h);
+    if (held_ref && moved_obj)
+        kobj_put(moved_obj);
+    if (ch1)
+        kobj_put(ch1);
+    if (ch0)
+        kobj_put(ch0);
+    khandle_test_reset_reserved_transfer_timeout_ns();
+}
+
+static void test_khandle_transfer_reserve_transaction(void) {
+    struct process *self = proc_current();
+    struct kobj *ch0 = NULL;
+    struct kobj *ch1 = NULL;
+    struct kobj *moved_obj = NULL;
+    struct kobj *tmp = NULL;
+    uint32_t moved_rights = 0;
+    uint64_t moved_cap_id = KHANDLE_INVALID_CAP_ID;
+    uint64_t token = KHANDLE_INVALID_CAP_ID;
+    uint32_t slot_generation = 0;
+    uint32_t probe_generation = 0;
+    bool reserved = false;
+    int32_t h = -1;
+    int rc = 0;
+
+    rc = kchannel_create_pair(&ch0, &ch1);
+    test_check(rc == 0 && ch0 && ch1, "khandle_txn create pair");
+    if (rc < 0 || !ch0 || !ch1)
+        goto out;
+
+    h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+    test_check(h >= 0, "khandle_txn alloc source");
+    if (h < 0)
+        goto out;
+
+    rc = khandle_reserve_transfer(self, h, &moved_obj, &moved_rights,
+                                  &moved_cap_id, &token, &slot_generation);
+    test_check(rc == 0 && moved_obj != NULL &&
+                   token != KHANDLE_INVALID_CAP_ID,
+               "khandle_txn reserve");
+    if (rc < 0 || !moved_obj)
+        goto out;
+    reserved = true;
+
+    tmp = NULL;
+    rc = khandle_get(self, h, KRIGHT_READ, &tmp, NULL);
+    test_check(rc == -EBADF, "khandle_txn reserved handle hidden");
+    if (rc == 0 && tmp)
+        kobj_put(tmp);
+
+    rc = khandle_reserve_transfer(self, h, &tmp, NULL, NULL, NULL,
+                                  &probe_generation);
+    test_check(rc == -EBUSY, "khandle_txn double reserve busy");
+    if (rc == 0 && tmp)
+        kobj_put(tmp);
+
+    rc = khandle_abort_reserved_transfer(self, h, token + 1, slot_generation);
+    test_check(rc == -EAGAIN, "khandle_txn wrong token reject");
+
+    uint32_t wrong_generation = slot_generation + 1;
+    if (wrong_generation == 0 || wrong_generation == slot_generation)
+        wrong_generation = slot_generation + 2;
+    if (wrong_generation == 0 || wrong_generation == slot_generation)
+        wrong_generation = 1;
+    rc = khandle_abort_reserved_transfer(self, h, token, wrong_generation);
+    test_check(rc == -EAGAIN, "khandle_txn wrong generation reject");
+
+    rc = khandle_abort_reserved_transfer(self, h, token, slot_generation);
+    test_check(rc == 0, "khandle_txn abort restore");
+    if (rc == 0)
+        reserved = false;
+
+    rc = khandle_get(self, h, KRIGHT_READ, &tmp, NULL);
+    test_check(rc == 0 && tmp != NULL, "khandle_txn restored visible");
+    if (rc == 0 && tmp)
+        kobj_put(tmp);
+
+    moved_obj = NULL;
+    moved_rights = 0;
+    moved_cap_id = KHANDLE_INVALID_CAP_ID;
+    token = KHANDLE_INVALID_CAP_ID;
+    slot_generation = 0;
+    rc = khandle_reserve_transfer(self, h, &moved_obj, &moved_rights,
+                                  &moved_cap_id, &token, &slot_generation);
+    test_check(rc == 0 && moved_obj != NULL, "khandle_txn reserve for commit");
+    if (rc < 0 || !moved_obj)
+        goto out;
+    reserved = true;
+
+    rc = khandle_commit_reserved_transfer(self, h, token, slot_generation);
+    test_check(rc == 0, "khandle_txn commit");
+    if (rc == 0)
+        reserved = false;
+    rc = khandle_get(self, h, KRIGHT_READ, &tmp, NULL);
+    test_check(rc == -EBADF, "khandle_txn committed removed");
+    if (rc == 0 && tmp)
+        kobj_put(tmp);
+
+    khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+    moved_obj = NULL;
+    moved_cap_id = KHANDLE_INVALID_CAP_ID;
+    h = -1;
+
+out:
+    if (reserved && h >= 0 && token != KHANDLE_INVALID_CAP_ID)
+        (void)khandle_abort_reserved_transfer(self, h, token, slot_generation);
+    if (moved_obj && !reserved)
+        khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+    if (h >= 0)
+        (void)khandle_close(self, h);
+    if (ch1)
+        kobj_put(ch1);
+    if (ch0)
+        kobj_put(ch0);
+}
+
 static void run_syscall_trap_tests_full(void) {
     test_syscall_table_slot_coverage();
     test_syscall_invalid_num_legacy();
@@ -4011,24 +4764,36 @@ static void run_syscall_trap_tests_full(void) {
     test_get_current_trapframe_process_fallback();
     test_kairos_cap_rights_fd_syscalls();
     test_kairos_channel_port_syscalls();
+    test_kairos_channel_close_last_handle_races();
     test_kairos_channel_port_stress_mpmc();
+    test_kairos_channelfd_fd_only_longrun();
+    test_kairos_channelfd_epoll_et_stress();
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
     test_kchannel_inline_queue_zero_heap();
     test_sys_kchannel_inline_queue_zero_heap();
+    test_sys_kchannel_send_transfer_rollback_kmalloc_fault();
+    test_khandle_reserved_transfer_timeout_sweep();
     test_kcap_duplicate_close_stress();
+    test_khandle_transfer_reserve_transaction();
     test_syscall_user_e2e();
 }
 
 static void run_syscall_trap_tests_ipc_cap_only(void) {
     test_kairos_cap_rights_fd_syscalls();
     test_kairos_channel_port_syscalls();
+    test_kairos_channel_close_last_handle_races();
     test_kairos_channel_port_stress_mpmc();
+    test_kairos_channelfd_fd_only_longrun();
+    test_kairos_channelfd_epoll_et_stress();
     test_kairos_file_handle_bridge();
     test_kobj_ops_refcount_history();
     test_kchannel_inline_queue_zero_heap();
     test_sys_kchannel_inline_queue_zero_heap();
+    test_sys_kchannel_send_transfer_rollback_kmalloc_fault();
+    test_khandle_reserved_transfer_timeout_sweep();
     test_kcap_duplicate_close_stress();
+    test_khandle_transfer_reserve_transaction();
 }
 
 int run_syscall_trap_tests(void) {

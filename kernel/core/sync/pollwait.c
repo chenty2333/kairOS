@@ -45,6 +45,10 @@ static const char *const poll_wait_stat_names[POLL_WAIT_STAT_COUNT] = {
     [POLL_WAIT_STAT_FUTEX_WAITV_INTERRUPTS] = "futex_waitv_interrupts",
     [POLL_WAIT_STAT_FUTEX_WAKE_CALLS] = "futex_wake_calls",
     [POLL_WAIT_STAT_FUTEX_WAKE_WOKEN] = "futex_wake_woken",
+    [POLL_WAIT_STAT_WAITSRC_SEQ_SKIP_PRE_SLEEP] = "waitsrc_seq_skip_pre_sleep",
+    [POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_CHANGED] = "waitsrc_seq_wake_changed",
+    [POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_UNCHANGED] =
+        "waitsrc_seq_wake_unchanged",
 };
 
 void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta) {
@@ -183,6 +187,7 @@ void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn) {
         return;
     wait_queue_init(&src->wq);
     src->vn = vn;
+    atomic_init(&src->seq, 0);
 }
 
 void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn) {
@@ -193,7 +198,10 @@ void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn) 
 
 int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
                            void *channel, struct mutex *mtx) {
-    return poll_wait_source_block_ex(src, deadline, channel, mtx, true);
+    if (!src)
+        return -EINVAL;
+    return poll_wait_source_block_seq_ex(src, deadline, channel, mtx, true,
+                                         poll_wait_source_seq_snapshot(src));
 }
 
 int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
@@ -201,19 +209,59 @@ int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
                               bool interruptible) {
     if (!src)
         return -EINVAL;
-    return poll_block_current_ex(&src->wq, deadline, channel ? channel : src,
-                                 mtx, interruptible);
+    return poll_wait_source_block_seq_ex(src, deadline, channel, mtx,
+                                         interruptible,
+                                         poll_wait_source_seq_snapshot(src));
+}
+
+uint32_t poll_wait_source_seq_snapshot(const struct poll_wait_source *src) {
+    if (!src)
+        return 0;
+    return atomic_read(&src->seq);
+}
+
+int poll_wait_source_block_seq(struct poll_wait_source *src, uint64_t deadline,
+                               void *channel, struct mutex *mtx,
+                               uint32_t observed_seq) {
+    return poll_wait_source_block_seq_ex(src, deadline, channel, mtx, true,
+                                         observed_seq);
+}
+
+int poll_wait_source_block_seq_ex(struct poll_wait_source *src,
+                                  uint64_t deadline, void *channel,
+                                  struct mutex *mtx, bool interruptible,
+                                  uint32_t observed_seq) {
+    if (!src)
+        return -EINVAL;
+
+    if (poll_wait_source_seq_snapshot(src) != observed_seq) {
+        poll_wait_stat_inc(POLL_WAIT_STAT_WAITSRC_SEQ_SKIP_PRE_SLEEP);
+        return 0;
+    }
+
+    int rc = poll_block_current_ex(&src->wq, deadline, channel ? channel : src,
+                                   mtx, interruptible);
+    if (rc < 0)
+        return rc;
+
+    if (poll_wait_source_seq_snapshot(src) != observed_seq)
+        poll_wait_stat_inc(POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_CHANGED);
+    else
+        poll_wait_stat_inc(POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_UNCHANGED);
+    return 0;
 }
 
 void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events) {
     if (!src)
         return;
+    atomic_inc_return(&src->seq);
     poll_ready_wake_one(&src->wq, src->vn, events);
 }
 
 void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events) {
     if (!src)
         return;
+    atomic_inc_return(&src->seq);
     poll_ready_wake_all(&src->wq, src->vn, events);
 }
 
@@ -301,7 +349,9 @@ void poll_wait_wake(struct poll_wait_head *head, uint32_t events) {
     list_for_each_entry(watch, &head->watches, node) {
         if (!watch->active || watch->notifying)
             continue;
-        if (events && !(watch->events & events))
+        uint32_t watch_events =
+            __atomic_load_n(&watch->events, __ATOMIC_ACQUIRE);
+        if (events && !(watch_events & events))
             continue;
         if (watch->prepare)
             watch->prepare(watch);

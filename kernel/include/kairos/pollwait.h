@@ -5,6 +5,7 @@
 #ifndef _KAIROS_POLLWAIT_H
 #define _KAIROS_POLLWAIT_H
 
+#include <kairos/atomic.h>
 #include <kairos/list.h>
 #include <kairos/spinlock.h>
 #include <kairos/types.h>
@@ -22,6 +23,7 @@ struct poll_wait_head {
 struct poll_wait_source {
     struct wait_queue wq;
     struct vnode *vn;
+    atomic_t seq;
 };
 
 struct poll_waiter {
@@ -80,6 +82,9 @@ enum poll_wait_stat {
     POLL_WAIT_STAT_FUTEX_WAITV_INTERRUPTS,
     POLL_WAIT_STAT_FUTEX_WAKE_CALLS,
     POLL_WAIT_STAT_FUTEX_WAKE_WOKEN,
+    POLL_WAIT_STAT_WAITSRC_SEQ_SKIP_PRE_SLEEP,
+    POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_CHANGED,
+    POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_UNCHANGED,
     POLL_WAIT_STAT_COUNT,
 };
 
@@ -107,11 +112,19 @@ void poll_ready_wake_all(struct wait_queue *wq, struct vnode *vn,
                          uint32_t events);
 void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn);
 void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn);
+uint32_t poll_wait_source_seq_snapshot(const struct poll_wait_source *src);
 int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
                            void *channel, struct mutex *mtx);
 int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
                               void *channel, struct mutex *mtx,
                               bool interruptible);
+int poll_wait_source_block_seq(struct poll_wait_source *src, uint64_t deadline,
+                               void *channel, struct mutex *mtx,
+                               uint32_t observed_seq);
+int poll_wait_source_block_seq_ex(struct poll_wait_source *src,
+                                  uint64_t deadline, void *channel,
+                                  struct mutex *mtx, bool interruptible,
+                                  uint32_t observed_seq);
 void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events);
 void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events);
 

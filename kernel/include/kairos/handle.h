@@ -140,7 +140,10 @@ struct khandle_entry {
     uint32_t rights;
     uint64_t cap_id;
     uint32_t flags;
+    uint32_t slot_generation;
     uint64_t transfer_token;
+    uint64_t cap_revoke_epoch;
+    uint64_t reserved_deadline_ns;
 };
 
 struct handletable {
@@ -149,6 +152,7 @@ struct handletable {
     atomic_t refcount;
     atomic_t seq;
     uint64_t cache_epoch;
+    uint64_t reserved_sweep_after_ns;
 };
 
 struct kairos_channel_msg_user {
@@ -169,6 +173,7 @@ struct khandle_transfer {
     uint32_t rights;
     uint64_t cap_id;
     uint64_t transfer_token;
+    uint32_t slot_generation;
 };
 
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops);
@@ -232,17 +237,19 @@ int khandle_take_for_access_with_cap(struct process *p, int32_t handle,
                                      uint64_t *out_cap_id);
 int khandle_reserve_transfer(struct process *p, int32_t handle,
                              struct kobj **out_obj, uint32_t *out_rights,
-                             uint64_t *out_cap_id, uint64_t *out_token);
+                             uint64_t *out_cap_id, uint64_t *out_token,
+                             uint32_t *out_slot_generation);
 int khandle_commit_reserved_transfer(struct process *p, int32_t handle,
-                                     uint64_t token);
+                                     uint64_t token,
+                                     uint32_t slot_generation);
 int khandle_abort_reserved_transfer(struct process *p, int32_t handle,
-                                    uint64_t token);
+                                    uint64_t token,
+                                    uint32_t slot_generation);
 int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
                     uint32_t rights);
 int khandle_restore_cap(struct process *p, int32_t handle, struct kobj *obj,
                         uint32_t rights, uint64_t cap_id);
 int khandle_close(struct process *p, int32_t handle);
-int khandle_close_with_flags(struct process *p, int32_t handle, uint32_t flags);
 int khandle_close_with_flags(struct process *p, int32_t handle, uint32_t flags);
 int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
                       int32_t *out_new_handle);
@@ -257,7 +264,22 @@ int khandle_install_transferred_cap(struct process *p, struct kobj *obj,
 int khandle_install_transferred(struct process *p, struct kobj *obj,
                                 uint32_t rights, int32_t *out_handle);
 
+#if CONFIG_KERNEL_TESTS
+void khandle_test_set_reserved_transfer_timeout_ns(uint64_t timeout_ns);
+void khandle_test_reset_reserved_transfer_timeout_ns(void);
+#endif
+
+enum kchannel_endpoint_ref_owner {
+    KCHANNEL_ENDPOINT_REF_OWNER_HANDLE = 1,
+    KCHANNEL_ENDPOINT_REF_OWNER_CHANNEL_FD = 2,
+    KCHANNEL_ENDPOINT_REF_OWNER_OTHER = 3,
+};
+
 int kchannel_create_pair(struct kobj **out0, struct kobj **out1);
+void kchannel_endpoint_ref_inc_owner(struct kobj *obj,
+                                     enum kchannel_endpoint_ref_owner owner);
+void kchannel_endpoint_ref_dec_owner(struct kobj *obj,
+                                     enum kchannel_endpoint_ref_owner owner);
 void kchannel_endpoint_ref_inc(struct kobj *obj);
 void kchannel_endpoint_ref_dec(struct kobj *obj);
 int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,

@@ -67,12 +67,14 @@ static int syshandle_abort_reserved(struct process *p, const int32_t *user_handl
         if (!transfers[i].obj)
             continue;
         int rc = khandle_abort_reserved_transfer(
-            p, user_handles[i], transfers[i].transfer_token);
+            p, user_handles[i], transfers[i].transfer_token,
+            transfers[i].slot_generation);
         if (rc < 0 && first_error == 0)
             first_error = rc;
         transfers[i].obj = NULL;
         transfers[i].cap_id = KHANDLE_INVALID_CAP_ID;
         transfers[i].transfer_token = KHANDLE_INVALID_CAP_ID;
+        transfers[i].slot_generation = 0;
     }
     return first_error;
 }
@@ -247,7 +249,8 @@ static int channelfd_close(struct vnode *vn) {
             (void)kobj_poll_detach_vnode(ctx->channel_obj, ctx->vnode);
         if (ctx->channel_obj) {
             if (ctx->endpoint_ref_held) {
-                kchannel_endpoint_ref_dec(ctx->channel_obj);
+                kchannel_endpoint_ref_dec_owner(
+                    ctx->channel_obj, KCHANNEL_ENDPOINT_REF_OWNER_CHANNEL_FD);
                 ctx->endpoint_ref_held = false;
             }
             kobj_put(ctx->channel_obj);
@@ -385,7 +388,8 @@ static int channelfd_create_file(struct kobj *obj, uint32_t rights,
     ctx->rights = rights;
     ctx->endpoint_ref_held = false;
     kobj_get(obj);
-    kchannel_endpoint_ref_inc(obj);
+    kchannel_endpoint_ref_inc_owner(obj,
+                                    KCHANNEL_ENDPOINT_REF_OWNER_CHANNEL_FD);
     ctx->endpoint_ref_held = true;
 
     vn->type = VNODE_FILE;
@@ -412,7 +416,8 @@ static int channelfd_create_file(struct kobj *obj, uint32_t rights,
     int rc = kobj_poll_attach_vnode(obj, vn);
     if (rc < 0) {
         if (ctx->endpoint_ref_held) {
-            kchannel_endpoint_ref_dec(obj);
+            kchannel_endpoint_ref_dec_owner(
+                obj, KCHANNEL_ENDPOINT_REF_OWNER_CHANNEL_FD);
             ctx->endpoint_ref_held = false;
         }
         kobj_put(obj);
@@ -756,29 +761,35 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
         rc = khandle_reserve_transfer(
             p, user_handles[taken], &transfers[taken].obj,
             &transfers[taken].rights, &transfers[taken].cap_id,
-            &transfers[taken].transfer_token);
+            &transfers[taken].transfer_token,
+            &transfers[taken].slot_generation);
         if (rc < 0)
             break;
     }
     if (rc < 0) {
-        (void)syshandle_abort_reserved(p, user_handles, transfers, taken);
+        int rollback_rc = syshandle_abort_reserved(p, user_handles, transfers, taken);
         kobj_put(channel_obj);
+        if (rollback_rc < 0)
+            return rollback_rc;
         return rc;
     }
 
     rc = kchannel_send(channel_obj, bytes, msg.num_bytes, transfers, msg.num_handles,
                        (uint32_t)options);
     if (rc < 0) {
-        (void)syshandle_abort_reserved(p, user_handles, transfers,
-                                       msg.num_handles);
+        int rollback_rc = syshandle_abort_reserved(
+            p, user_handles, transfers, msg.num_handles);
         kobj_put(channel_obj);
+        if (rollback_rc < 0)
+            return rollback_rc;
         return rc;
     }
 
     for (size_t i = 0; i < msg.num_handles; i++) {
         if (transfers[i].obj) {
             rc = khandle_commit_reserved_transfer(
-                p, user_handles[i], transfers[i].transfer_token);
+                p, user_handles[i], transfers[i].transfer_token,
+                transfers[i].slot_generation);
             if (rc < 0) {
                 kobj_put(channel_obj);
                 return rc;
@@ -787,6 +798,7 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
             transfers[i].obj = NULL;
             transfers[i].cap_id = KHANDLE_INVALID_CAP_ID;
             transfers[i].transfer_token = KHANDLE_INVALID_CAP_ID;
+            transfers[i].slot_generation = 0;
         }
     }
 

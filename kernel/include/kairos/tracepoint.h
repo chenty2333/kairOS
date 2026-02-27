@@ -26,6 +26,7 @@ enum tracepoint_event {
     TRACE_WAIT_EPOLL = 7,
     TRACE_WAIT_FD_EVENT = 8,
     TRACE_WAIT_FUTEX = 9,
+    TRACE_IPC_CHANNEL = 10,
 };
 
 struct tracepoint_entry {

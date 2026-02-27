@@ -36,6 +36,8 @@ static const char *tracepoint_event_name(uint16_t event) {
         return "wait_fd_event";
     case TRACE_WAIT_FUTEX:
         return "wait_futex";
+    case TRACE_IPC_CHANNEL:
+        return "ipc_channel";
     default:
         return "unknown";
     }
@@ -49,6 +51,10 @@ static bool tracepoint_wait_event_core(uint16_t event) {
     return event == TRACE_WAIT_BLOCK || event == TRACE_WAIT_WAKE ||
            event == TRACE_WAIT_EPOLL || event == TRACE_WAIT_FD_EVENT ||
            event == TRACE_WAIT_FUTEX;
+}
+
+static bool tracepoint_ipc_event(uint16_t event) {
+    return event == TRACE_IPC_CHANNEL;
 }
 
 static ssize_t tracepoint_wait_events_show_filtered(char *buf, size_t bufsz,
@@ -126,6 +132,12 @@ tracepoint_wait_core_events_show(void *priv __attribute__((unused)), char *buf,
                                                 tracepoint_wait_event_core);
 }
 
+static ssize_t tracepoint_ipc_events_show(void *priv __attribute__((unused)),
+                                          char *buf, size_t bufsz) {
+    return tracepoint_wait_events_show_filtered(buf, bufsz,
+                                                tracepoint_ipc_event);
+}
+
 static ssize_t tracepoint_wait_core_stats_show(void *priv __attribute__((unused)),
                                                char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
@@ -175,6 +187,13 @@ static const struct sysfs_attribute tracepoint_sysfs_attrs[] = {
         .name = "wait_core_events",
         .mode = 0444,
         .show = tracepoint_wait_core_events_show,
+        .store = NULL,
+        .priv = NULL,
+    },
+    {
+        .name = "ipc_events",
+        .mode = 0444,
+        .show = tracepoint_ipc_events_show,
         .store = NULL,
         .priv = NULL,
     },
