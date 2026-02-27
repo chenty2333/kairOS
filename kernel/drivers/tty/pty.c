@@ -47,6 +47,32 @@ static spinlock_t pty_lock = SPINLOCK_INIT;
 static const struct tty_ldisc_ops pty_master_ldisc_ops;
 extern struct tty_driver pty_master_driver;
 
+static void pty_slave_maybe_init_foreground(struct tty_struct *slave) {
+    if (!slave)
+        return;
+
+    struct process *p = proc_current();
+    if (!p)
+        return;
+
+    /*
+     * Match tty foreground semantics for a freshly opened slave:
+     * first session leader opening it becomes foreground pgrp unless
+     * userspace later overrides via TIOCSPGRP/TIOCSCTTY.
+     */
+    if (p->pid != p->sid)
+        return;
+
+    bool irq_state = arch_irq_save();
+    spin_lock(&slave->lock);
+    if (slave->session == 0)
+        slave->session = p->sid;
+    if (slave->session == p->sid && slave->fg_pgrp == 0)
+        slave->fg_pgrp = p->pgid;
+    spin_unlock(&slave->lock);
+    arch_irq_restore(irq_state);
+}
+
 static void pty_pair_get(struct pty_pair *pair) {
     if (pair)
         atomic_inc(&pair->refcount);
@@ -252,6 +278,9 @@ static int pty_wait_master_input_space(struct tty_struct *master) {
         spin_lock(&master->lock);
         bool has_space = ringbuf_avail(&master->input_rb) > 0;
         bool hungup = (master->flags & TTY_HUPPED) != 0;
+        bool arm_wait = !has_space && !hungup;
+        if (arm_wait)
+            wait_queue_add(&master->write_wait, proc_current());
         spin_unlock(&master->lock);
         arch_irq_restore(irq_state);
 
@@ -259,6 +288,8 @@ static int pty_wait_master_input_space(struct tty_struct *master) {
             return 1;
         if (hungup)
             return 0;
+        if (!arm_wait)
+            continue;
 
         int rc = proc_sleep_on(&master->write_wait, &master->write_wait, true);
         if (rc == -EINTR)
@@ -394,6 +425,20 @@ static ssize_t pty_master_ldisc_read(struct tty_struct *tty, uint8_t *buf,
             return 0; /* slave hung up → EOF */
         if (flags & O_NONBLOCK)
             return -EAGAIN;
+
+        bool irq_state_wait = arch_irq_save();
+        spin_lock(&tty->lock);
+        bool has_data = !ringbuf_empty(&tty->input_rb);
+        bool peer_hungup = tty->link && ((tty->link->flags & TTY_HUPPED) != 0);
+        bool arm_wait = !has_data && !peer_hungup;
+        if (arm_wait)
+            wait_queue_add(&tty->read_wait, proc_current());
+        spin_unlock(&tty->lock);
+        arch_irq_restore(irq_state_wait);
+        if (has_data)
+            continue;
+        if (peer_hungup)
+            return 0;
 
         int rc = proc_sleep_on(&tty->read_wait, &tty->read_wait, true);
         if (rc == -EINTR)
@@ -625,6 +670,7 @@ static int pts_open(struct file *file) {
 
     if (!slave->vnode)
         slave->vnode = file->vnode;
+    pty_slave_maybe_init_foreground(slave);
 
     ctx->pair = pair; /* slot_get ref becomes file ref */
     ctx->endpoint = PTY_ENDPOINT_SLAVE;
