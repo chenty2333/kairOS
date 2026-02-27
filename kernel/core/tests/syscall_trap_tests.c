@@ -61,6 +61,13 @@ struct futex_waker_ctx {
     int wake_ret;
 };
 
+struct futex_delay_waker_ctx {
+    vaddr_t uaddr;
+    uint64_t delay_ns;
+    volatile int started;
+    int wake_ret;
+};
+
 #define KH_STRESS_PRODUCERS 4U
 #define KH_STRESS_CONSUMERS 3U
 #define KH_STRESS_MSGS_PER_PRODUCER 48U
@@ -206,6 +213,27 @@ static int futex_waitv_waker_worker(void *arg) {
         }
         proc_yield();
     }
+    proc_exit(0);
+}
+
+static int futex_delay_waker_worker(void *arg) {
+    struct futex_delay_waker_ctx *ctx = (struct futex_delay_waker_ctx *)arg;
+    if (!ctx)
+        proc_exit(0);
+
+    ctx->started = 1;
+    ctx->wake_ret = 0;
+    uint64_t delay_ticks = arch_timer_ns_to_ticks(ctx->delay_ns);
+    if (!delay_ticks)
+        delay_ticks = 1;
+    uint64_t deadline = arch_timer_get_ticks() + delay_ticks;
+    while (arch_timer_get_ticks() < deadline)
+        proc_yield();
+
+    int64_t ret =
+        sys_futex((uint64_t)ctx->uaddr, FUTEX_WAKE, 1, 0, 0, 0);
+    if (ret > 0)
+        ctx->wake_ret = (int)ret;
     proc_exit(0);
 }
 
@@ -1912,6 +1940,69 @@ out:
         user_map_end(&um);
 }
 
+static void test_futex_wait_huge_relative_timeout_regression(void) {
+    struct user_map_ctx um = {0};
+    bool mapped = false;
+
+    int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
+    test_check(rc == 0, "futex_wait_huge user_map");
+    if (rc < 0)
+        return;
+    mapped = true;
+
+    uint32_t *u_word = (uint32_t *)user_map_ptr(&um, 0);
+    struct timespec *u_timeout = (struct timespec *)user_map_ptr(&um, 64);
+    test_check(u_word != NULL, "futex_wait_huge u_word");
+    test_check(u_timeout != NULL, "futex_wait_huge u_timeout");
+    if (!u_word || !u_timeout)
+        goto out;
+
+    uint32_t word = 0;
+    rc = copy_to_user(u_word, &word, sizeof(word));
+    test_check(rc == 0, "futex_wait_huge init_word");
+    if (rc < 0)
+        goto out;
+
+    struct timespec huge_rel = {
+        .tv_sec = 18446744074LL,
+        .tv_nsec = 0,
+    };
+    rc = copy_to_user(u_timeout, &huge_rel, sizeof(huge_rel));
+    test_check(rc == 0, "futex_wait_huge copy_timeout");
+    if (rc < 0)
+        goto out;
+
+    struct futex_delay_waker_ctx wctx = {
+        .uaddr = (vaddr_t)u_word,
+        .delay_ns = TEST_NS_PER_SEC,
+        .started = 0,
+        .wake_ret = 0,
+    };
+    struct process *waker =
+        kthread_create_joinable(futex_delay_waker_worker, &wctx, "fwhuge");
+    test_check(waker != NULL, "futex_wait_huge create_waker");
+    if (!waker)
+        goto out;
+    pid_t wpid = waker->pid;
+    sched_enqueue(waker);
+    for (int i = 0; i < 2000 && !wctx.started; i++)
+        proc_yield();
+    test_check(wctx.started != 0, "futex_wait_huge waker_started");
+
+    int64_t ret64 = sys_futex((uint64_t)(uintptr_t)u_word, FUTEX_WAIT, 0,
+                              (uint64_t)(uintptr_t)u_timeout, 0, 0);
+    test_check(ret64 == 0, "futex_wait_huge wait_woken");
+
+    int status = 0;
+    pid_t wp = proc_wait(wpid, &status, 0);
+    test_check(wp == wpid, "futex_wait_huge waker_reaped");
+    test_check(wctx.wake_ret > 0, "futex_wait_huge wake_positive");
+
+out:
+    if (mapped)
+        user_map_end(&um);
+}
+
 static void test_trap_dispatch_guard_clauses(void) {
     struct trap_frame tf;
     memset(&tf, 0, sizeof(tf));
@@ -2206,6 +2297,9 @@ static void test_kairos_channel_port_syscalls(void) {
     int32_t recv_h = -1;
     int32_t dup_h = -1;
     int32_t drop_h = -1;
+    int32_t fd_keep_tx_h = -1;
+    int32_t fd_keep_rx_h = -1;
+    int32_t fd_keep_fd = -1;
 
     int ret = user_map_begin(&um, CONFIG_PAGE_SIZE);
     test_check(ret == 0, "kh user map");
@@ -3069,7 +3163,99 @@ static void test_kairos_channel_port_syscalls(void) {
         }
     }
 
+    ret64 = sys_kairos_channel_create((uint64_t)u_h0, (uint64_t)u_h1, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channelfd keepalive create pair");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&fd_keep_tx_h, u_h0, sizeof(fd_keep_tx_h));
+    test_check(ret == 0, "kh channelfd keepalive read tx handle");
+    ret = copy_from_user(&fd_keep_rx_h, u_h1, sizeof(fd_keep_rx_h));
+    test_check(ret == 0, "kh channelfd keepalive read rx handle");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_fd_from_handle((uint64_t)fd_keep_rx_h, (uint64_t)u_hout, 0, 0,
+                                      0, 0);
+    test_check(ret64 == 0, "kh channelfd keepalive fd_from_handle");
+    if (ret64 < 0)
+        goto out;
+    ret = copy_from_user(&fd_keep_fd, u_hout, sizeof(fd_keep_fd));
+    test_check(ret == 0, "kh channelfd keepalive read fd");
+    if (ret < 0)
+        goto out;
+
+    ret64 = sys_kairos_handle_close((uint64_t)fd_keep_rx_h, 0, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channelfd keepalive close rx handle");
+    if (ret64 == 0)
+        fd_keep_rx_h = -1;
+
+    struct kairos_channel_msg_user keep_send = {
+        .bytes = (uint64_t)(uintptr_t)u_send_bytes,
+        .handles = 0,
+        .num_bytes = 2,
+        .num_handles = 0,
+    };
+    ret = copy_to_user(u_send_bytes, "KA", 2);
+    test_check(ret == 0, "kh channelfd keepalive copy send bytes");
+    ret = copy_to_user(u_send_msg, &keep_send, sizeof(keep_send));
+    test_check(ret == 0, "kh channelfd keepalive copy send msg");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_kairos_channel_send((uint64_t)fd_keep_tx_h, (uint64_t)u_send_msg, 0, 0,
+                                    0, 0);
+    test_check(ret64 == 0, "kh channelfd keepalive send after handle close");
+
+    ret64 = sys_read((uint64_t)fd_keep_fd, (uint64_t)u_recv_bytes, 2, 0, 0, 0);
+    test_check(ret64 == 2, "kh channelfd keepalive fd read after handle close");
+    if (ret64 == 2) {
+        char got[2] = {0};
+        ret = copy_from_user(got, u_recv_bytes, sizeof(got));
+        test_check(ret == 0, "kh channelfd keepalive read fd payload");
+        if (ret == 0)
+            test_check(memcmp(got, "KA", 2) == 0, "kh channelfd keepalive payload");
+    }
+
+    ret = copy_to_user(u_send_bytes, "KB", 2);
+    test_check(ret == 0, "kh channelfd keepalive copy write bytes");
+    if (ret < 0)
+        goto out;
+    ret64 = sys_write((uint64_t)fd_keep_fd, (uint64_t)u_send_bytes, 2, 0, 0, 0);
+    test_check(ret64 == 2, "kh channelfd keepalive fd write after handle close");
+
+    struct kairos_channel_msg_user keep_recv = {
+        .bytes = (uint64_t)(uintptr_t)u_recv_bytes,
+        .handles = 0,
+        .num_bytes = 4,
+        .num_handles = 0,
+    };
+    ret = copy_to_user(u_recv_msg, &keep_recv, sizeof(keep_recv));
+    test_check(ret == 0, "kh channelfd keepalive copy recv msg");
+    if (ret < 0)
+        goto out;
+    ret64 =
+        sys_kairos_channel_recv((uint64_t)fd_keep_tx_h, (uint64_t)u_recv_msg, 0, 0, 0, 0);
+    test_check(ret64 == 0, "kh channelfd keepalive recv fd-written payload");
+    if (ret64 == 0) {
+        struct kairos_channel_msg_user got = {0};
+        char got_bytes[2] = {0};
+        ret = copy_from_user(&got, u_recv_msg, sizeof(got));
+        test_check(ret == 0, "kh channelfd keepalive read recv meta");
+        ret = copy_from_user(got_bytes, u_recv_bytes, sizeof(got_bytes));
+        test_check(ret == 0, "kh channelfd keepalive read recv payload");
+        if (ret == 0) {
+            test_check(got.num_bytes == 2, "kh channelfd keepalive recv num_bytes");
+            test_check(memcmp(got_bytes, "KB", 2) == 0,
+                       "kh channelfd keepalive recv payload");
+        }
+    }
+
 out:
+    if (fd_keep_fd >= 0)
+        (void)sys_close((uint64_t)fd_keep_fd, 0, 0, 0, 0, 0);
+    if (fd_keep_rx_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)fd_keep_rx_h, 0, 0, 0, 0, 0);
+    if (fd_keep_tx_h >= 0)
+        (void)sys_kairos_handle_close((uint64_t)fd_keep_tx_h, 0, 0, 0, 0, 0);
     if (ch_from_fd_h >= 0)
         (void)sys_kairos_handle_close((uint64_t)ch_from_fd_h, 0, 0, 0, 0, 0);
     if (port_manage_from_fd_h >= 0)
@@ -3423,6 +3609,7 @@ static void test_kobj_ops_refcount_history(void) {
     bool src_handle_live = false;
     struct kobj *moved_obj = NULL;
     uint32_t moved_rights = 0;
+    uint64_t moved_cap_id = KHANDLE_INVALID_CAP_ID;
     int32_t moved_handle = -1;
 
     int rc = kchannel_create_pair(&tx_obj, &rx_obj);
@@ -3496,24 +3683,28 @@ static void test_kobj_ops_refcount_history(void) {
         src_handle_live = (src_handle >= 0);
         test_check(src_handle >= 0, "kobj_xferhist alloc source handle");
         if (src_handle >= 0) {
-            rc = khandle_take_for_access(p, src_handle, KOBJ_ACCESS_TRANSFER,
-                                         &moved_obj, &moved_rights);
+            rc = khandle_take_for_access_with_cap(
+                p, src_handle, KOBJ_ACCESS_TRANSFER, &moved_obj, &moved_rights,
+                &moved_cap_id);
             test_check(rc == 0 && moved_obj != NULL,
                        "kobj_xferhist take transfer");
             if (rc == 0 && moved_obj) {
                 src_handle_live = false;
-                rc = khandle_install_transferred(p, moved_obj, moved_rights,
-                                                 &moved_handle);
+                rc = khandle_install_transferred_cap(
+                    p, moved_obj, moved_rights, moved_cap_id, &moved_handle);
                 test_check(rc == 0 && moved_handle >= 0,
                            "kobj_xferhist install transfer");
                 if (rc == 0 && moved_handle >= 0) {
-                    khandle_transfer_drop_with_rights(moved_obj, moved_rights);
+                    khandle_transfer_drop_cap(moved_obj, moved_rights,
+                                              moved_cap_id);
                     moved_obj = NULL;
+                    moved_cap_id = KHANDLE_INVALID_CAP_ID;
                 } else {
-                    if (khandle_restore(p, src_handle, moved_obj, moved_rights) ==
-                        0)
+                    if (khandle_restore_cap(p, src_handle, moved_obj,
+                                            moved_rights, moved_cap_id) == 0)
                         src_handle_live = true;
                     moved_obj = NULL;
+                    moved_cap_id = KHANDLE_INVALID_CAP_ID;
                 }
             }
         }
@@ -3540,7 +3731,7 @@ out:
     if (moved_handle >= 0)
         (void)khandle_close(proc_current(), moved_handle);
     if (moved_obj)
-        khandle_transfer_drop_with_rights(moved_obj, moved_rights);
+        khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
     if (port_obj)
         kobj_put(port_obj);
     if (rx_obj)
@@ -3813,6 +4004,7 @@ static void run_syscall_trap_tests_full(void) {
     test_mount_propagation_recursive_semantics();
     test_acct_syscall_semantics();
     test_futex_waitv_syscalls_regression();
+    test_futex_wait_huge_relative_timeout_regression();
     test_trap_dispatch_guard_clauses();
     test_trap_dispatch_sets_and_restores_tf();
     test_trap_dispatch_restores_preexisting_tf();

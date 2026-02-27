@@ -27,6 +27,7 @@ struct channelfd_ctx {
     struct kobj *channel_obj;
     struct vnode *vnode;
     uint32_t rights;
+    bool endpoint_ref_held;
 };
 
 static inline int32_t syshandle_abi_i32(uint64_t raw) {
@@ -55,23 +56,25 @@ static uint32_t portfd_krights_from_fd(uint32_t fd_rights) {
     return rights;
 }
 
-static void syshandle_restore_taken(struct process *p, const int32_t *user_handles,
+static int syshandle_abort_reserved(struct process *p, const int32_t *user_handles,
                                     struct khandle_transfer *transfers,
                                     size_t count) {
     if (!p || !user_handles || !transfers)
-        return;
+        return -EINVAL;
 
+    int first_error = 0;
     for (size_t i = 0; i < count; i++) {
         if (!transfers[i].obj)
             continue;
-        int rc = khandle_restore_cap(p, user_handles[i], transfers[i].obj,
-                                     transfers[i].rights, transfers[i].cap_id);
-        if (rc < 0)
-            khandle_transfer_drop_cap(transfers[i].obj, transfers[i].rights,
-                                      transfers[i].cap_id);
+        int rc = khandle_abort_reserved_transfer(
+            p, user_handles[i], transfers[i].transfer_token);
+        if (rc < 0 && first_error == 0)
+            first_error = rc;
         transfers[i].obj = NULL;
         transfers[i].cap_id = KHANDLE_INVALID_CAP_ID;
+        transfers[i].transfer_token = KHANDLE_INVALID_CAP_ID;
     }
+    return first_error;
 }
 
 static void syshandle_close_installed(struct process *p, const int32_t *handles,
@@ -242,8 +245,13 @@ static int channelfd_close(struct vnode *vn) {
     if (ctx && ctx->magic == CHANFD_MAGIC) {
         if (ctx->channel_obj && ctx->vnode)
             (void)kobj_poll_detach_vnode(ctx->channel_obj, ctx->vnode);
-        if (ctx->channel_obj)
+        if (ctx->channel_obj) {
+            if (ctx->endpoint_ref_held) {
+                kchannel_endpoint_ref_dec(ctx->channel_obj);
+                ctx->endpoint_ref_held = false;
+            }
             kobj_put(ctx->channel_obj);
+        }
         ctx->magic = 0;
         kfree(ctx);
     }
@@ -375,7 +383,10 @@ static int channelfd_create_file(struct kobj *obj, uint32_t rights,
     ctx->channel_obj = obj;
     ctx->vnode = vn;
     ctx->rights = rights;
+    ctx->endpoint_ref_held = false;
     kobj_get(obj);
+    kchannel_endpoint_ref_inc(obj);
+    ctx->endpoint_ref_held = true;
 
     vn->type = VNODE_FILE;
     vn->mode = S_IFREG | 0;
@@ -400,6 +411,10 @@ static int channelfd_create_file(struct kobj *obj, uint32_t rights,
 
     int rc = kobj_poll_attach_vnode(obj, vn);
     if (rc < 0) {
+        if (ctx->endpoint_ref_held) {
+            kchannel_endpoint_ref_dec(obj);
+            ctx->endpoint_ref_held = false;
+        }
         kobj_put(obj);
         vfs_file_free(file);
         kfree(vn);
@@ -422,15 +437,8 @@ int64_t sys_kairos_handle_close(uint64_t handle, uint64_t a1, uint64_t a2,
     if (!p)
         return -EINVAL;
     uint32_t flags = (uint32_t)a1;
-    if (flags & ~KHANDLE_CLOSE_F_REVOKE_DESCENDANTS)
-        return -EINVAL;
     int32_t h = syshandle_abi_i32(handle);
-    if (flags & KHANDLE_CLOSE_F_REVOKE_DESCENDANTS) {
-        int rc = khandle_revoke_descendants(p, h);
-        if (rc < 0)
-            return rc;
-    }
-    return (int64_t)khandle_close(p, h);
+    return (int64_t)khandle_close_with_flags(p, h, flags);
 }
 
 int64_t sys_kairos_handle_duplicate(uint64_t handle, uint64_t rights_mask,
@@ -745,15 +753,15 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
 
     size_t taken = 0;
     for (; taken < msg.num_handles; taken++) {
-        rc = khandle_take_for_access_with_cap(
-            p, user_handles[taken], KOBJ_ACCESS_TRANSFER,
-            &transfers[taken].obj, &transfers[taken].rights,
-            &transfers[taken].cap_id);
+        rc = khandle_reserve_transfer(
+            p, user_handles[taken], &transfers[taken].obj,
+            &transfers[taken].rights, &transfers[taken].cap_id,
+            &transfers[taken].transfer_token);
         if (rc < 0)
             break;
     }
     if (rc < 0) {
-        syshandle_restore_taken(p, user_handles, transfers, taken);
+        (void)syshandle_abort_reserved(p, user_handles, transfers, taken);
         kobj_put(channel_obj);
         return rc;
     }
@@ -761,15 +769,24 @@ int64_t sys_kairos_channel_send(uint64_t handle, uint64_t msg_ptr,
     rc = kchannel_send(channel_obj, bytes, msg.num_bytes, transfers, msg.num_handles,
                        (uint32_t)options);
     if (rc < 0) {
-        syshandle_restore_taken(p, user_handles, transfers, msg.num_handles);
+        (void)syshandle_abort_reserved(p, user_handles, transfers,
+                                       msg.num_handles);
         kobj_put(channel_obj);
         return rc;
     }
 
     for (size_t i = 0; i < msg.num_handles; i++) {
         if (transfers[i].obj) {
+            rc = khandle_commit_reserved_transfer(
+                p, user_handles[i], transfers[i].transfer_token);
+            if (rc < 0) {
+                kobj_put(channel_obj);
+                return rc;
+            }
             kobj_put(transfers[i].obj);
             transfers[i].obj = NULL;
+            transfers[i].cap_id = KHANDLE_INVALID_CAP_ID;
+            transfers[i].transfer_token = KHANDLE_INVALID_CAP_ID;
         }
     }
 

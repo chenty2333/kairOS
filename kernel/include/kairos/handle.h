@@ -139,6 +139,8 @@ struct khandle_entry {
     struct kobj *obj;
     uint32_t rights;
     uint64_t cap_id;
+    uint32_t flags;
+    uint64_t transfer_token;
 };
 
 struct handletable {
@@ -166,9 +168,11 @@ struct khandle_transfer {
     struct kobj *obj;
     uint32_t rights;
     uint64_t cap_id;
+    uint64_t transfer_token;
 };
 
 void kobj_init(struct kobj *obj, uint32_t type, const struct kobj_ops *ops);
+void kobj_track_register(struct kobj *obj);
 void kobj_get(struct kobj *obj);
 void kobj_put(struct kobj *obj);
 uint32_t kobj_id(const struct kobj *obj);
@@ -204,6 +208,7 @@ int kobj_transfer_history_page_by_id(
 struct handletable *handletable_alloc(void);
 struct handletable *handletable_copy(struct handletable *src);
 void handletable_get(struct handletable *ht);
+bool handletable_tryget(struct handletable *ht);
 void handletable_put(struct handletable *ht);
 
 int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights);
@@ -225,11 +230,20 @@ int khandle_take_for_access_with_cap(struct process *p, int32_t handle,
                                      struct kobj **out_obj,
                                      uint32_t *out_rights,
                                      uint64_t *out_cap_id);
+int khandle_reserve_transfer(struct process *p, int32_t handle,
+                             struct kobj **out_obj, uint32_t *out_rights,
+                             uint64_t *out_cap_id, uint64_t *out_token);
+int khandle_commit_reserved_transfer(struct process *p, int32_t handle,
+                                     uint64_t token);
+int khandle_abort_reserved_transfer(struct process *p, int32_t handle,
+                                    uint64_t token);
 int khandle_restore(struct process *p, int32_t handle, struct kobj *obj,
                     uint32_t rights);
 int khandle_restore_cap(struct process *p, int32_t handle, struct kobj *obj,
                         uint32_t rights, uint64_t cap_id);
 int khandle_close(struct process *p, int32_t handle);
+int khandle_close_with_flags(struct process *p, int32_t handle, uint32_t flags);
+int khandle_close_with_flags(struct process *p, int32_t handle, uint32_t flags);
 int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
                       int32_t *out_new_handle);
 int khandle_revoke_descendants(struct process *p, int32_t handle);
@@ -244,6 +258,8 @@ int khandle_install_transferred(struct process *p, struct kobj *obj,
                                 uint32_t rights, int32_t *out_handle);
 
 int kchannel_create_pair(struct kobj **out0, struct kobj **out1);
+void kchannel_endpoint_ref_inc(struct kobj *obj);
+void kchannel_endpoint_ref_dec(struct kobj *obj);
 int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
                   const struct khandle_transfer *handles, size_t num_handles,
                   uint32_t options);
