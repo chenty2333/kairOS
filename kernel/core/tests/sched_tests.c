@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#include <kairos/completion.h>
 #include <kairos/printk.h>
 #include <kairos/poll.h>
 #include <kairos/process.h>
@@ -414,6 +415,7 @@ static void test_sched_sleep_wakeup_stress(void) {
 
 struct poll_wait_head_fastpath_ctx {
     struct poll_wait_head head;
+    struct completion armed_done;
     volatile int armed;
     volatile int done;
     int wake_rc;
@@ -433,8 +435,9 @@ static int poll_wait_head_fastpath_sleeper(void *arg) {
     waiter.entry.proc = curr;
     poll_wait_add(&ctx->head, &waiter);
     __atomic_store_n(&ctx->armed, 1, __ATOMIC_RELEASE);
+    complete_one(&ctx->armed_done);
 
-    uint64_t deadline = arch_timer_ticks() + CONFIG_HZ;
+    uint64_t deadline = arch_timer_get_ticks() + CONFIG_HZ;
     if (deadline == 0)
         deadline = 1;
     ctx->wake_rc = poll_block_current(deadline, curr);
@@ -450,6 +453,7 @@ static void test_poll_wait_head_single_waiter_fastpath(void) {
     struct poll_wait_head_fastpath_ctx ctx;
     memset(&ctx, 0, sizeof(ctx));
     poll_wait_head_init(&ctx.head);
+    completion_init(&ctx.armed_done);
     ctx.wake_rc = -ETIMEDOUT;
 
     poll_wait_stats_reset();
@@ -467,15 +471,10 @@ static void test_poll_wait_head_single_waiter_fastpath(void) {
     pid_t tid = thr->pid;
     sched_enqueue(thr);
 
-    uint64_t start = arch_timer_ticks();
-    while (__atomic_load_n(&ctx.armed, __ATOMIC_ACQUIRE) == 0) {
-        if ((arch_timer_ticks() - start) > CONFIG_HZ)
-            break;
-        proc_yield();
-    }
+    int arm_rc = wait_for_completion_timeout(&ctx.armed_done, 5 * CONFIG_HZ);
 
     bool armed = __atomic_load_n(&ctx.armed, __ATOMIC_ACQUIRE) != 0;
-    if (!armed)
+    if (arm_rc == -ETIMEDOUT || !armed)
         test_fail("sched_stress: poll_wait_head_single_waiter_fastpath FAIL: not armed\n");
     if (armed)
         poll_wait_wake(&ctx.head, POLLIN);
