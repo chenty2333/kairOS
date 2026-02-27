@@ -6,6 +6,7 @@
 #define _KAIROS_HANDLE_H
 
 #include <kairos/atomic.h>
+#include <kairos/list.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>
 
@@ -88,6 +89,14 @@ enum kobj_transfer_event {
     KOBJ_TRANSFER_DROP = 6,
 };
 
+enum kobj_lifecycle_state {
+    KOBJ_LIFECYCLE_INIT = 1,
+    KOBJ_LIFECYCLE_LIVE = 2,
+    KOBJ_LIFECYCLE_DETACHED = 3,
+    KOBJ_LIFECYCLE_DYING = 4,
+    KOBJ_LIFECYCLE_FREED = 5,
+};
+
 struct kobj_refcount_history_entry {
     uint64_t ticks;
     uint32_t seq;
@@ -125,6 +134,7 @@ struct kobj {
     atomic_t refcount;
     atomic_t refcount_hist_head;
     atomic_t transfer_hist_head;
+    atomic_t lifecycle;
     uint32_t id;
     uint32_t type;
     const struct kobj_ops *ops;
@@ -153,6 +163,8 @@ struct handletable {
     atomic_t seq;
     uint64_t cache_epoch;
     uint64_t reserved_sweep_after_ns;
+    struct list_head retire_node;
+    uint64_t retire_after_ns;
 };
 
 struct kairos_channel_msg_user {
@@ -182,6 +194,7 @@ void kobj_get(struct kobj *obj);
 void kobj_put(struct kobj *obj);
 uint32_t kobj_id(const struct kobj *obj);
 const char *kobj_type_name(uint32_t type);
+const char *kobj_lifecycle_state_name(enum kobj_lifecycle_state state);
 int kobj_read(struct kobj *obj, void *buf, size_t len, size_t *out_len,
               uint32_t options);
 int kobj_write(struct kobj *obj, const void *buf, size_t len, size_t *out_len,
@@ -280,8 +293,12 @@ void kchannel_endpoint_ref_inc_owner(struct kobj *obj,
                                      enum kchannel_endpoint_ref_owner owner);
 void kchannel_endpoint_ref_dec_owner(struct kobj *obj,
                                      enum kchannel_endpoint_ref_owner owner);
+/* Compatibility layer: new call sites should use *_owner API explicitly. */
 void kchannel_endpoint_ref_inc(struct kobj *obj);
 void kchannel_endpoint_ref_dec(struct kobj *obj);
+void kchannel_endpoint_ref_audit_obj(struct kobj *obj, const char *site,
+                                     int32_t pid);
+void kchannel_endpoint_ref_audit_registry(const char *site, int32_t pid);
 int kchannel_send(struct kobj *obj, const void *bytes, size_t num_bytes,
                   const struct khandle_transfer *handles, size_t num_handles,
                   uint32_t options);
