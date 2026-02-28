@@ -32,28 +32,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps "${ARCH}"
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
+      - name: Prepare CI environment
+        uses: ./.github/actions/prepare-kairos-ci
         with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi "${ARCH}"
+          arch: ${{ env.ARCH }}
 
       - name: Run nightly full matrix gates
         run: |

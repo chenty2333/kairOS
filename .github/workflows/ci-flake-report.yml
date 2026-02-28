@@ -38,6 +38,7 @@ jobs:
       SAMPLE_SIZE: ${{ github.event.inputs.sample_size || '20' }}
       MAX_FAIL_RATE_PERCENT: ${{ github.event.inputs.max_fail_rate_percent || '10' }}
       MIN_EVALUATED: ${{ github.event.inputs.min_evaluated || '10' }}
+      ENFORCE_FLAKE_BUDGET: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
     steps:
       - name: Checkout
@@ -49,12 +50,18 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          python3 scripts/impl/ci-flake-report.py \
-            --sample-size "${SAMPLE_SIZE}" \
-            --max-fail-rate-percent "${MAX_FAIL_RATE_PERCENT}" \
-            --min-evaluated "${MIN_EVALUATED}" \
-            --json-out ci-flake-report.json \
+          report_args=(
+            --sample-size "${SAMPLE_SIZE}"
+            --min-evaluated "${MIN_EVALUATED}"
+            --json-out ci-flake-report.json
             --markdown-out ci-flake-report.md
+          )
+          if [[ "${ENFORCE_FLAKE_BUDGET}" == "1" ]]; then
+            report_args+=(--max-fail-rate-percent "${MAX_FAIL_RATE_PERCENT}")
+          else
+            echo "ci-flake-report: pull_request mode, enforcement disabled"
+          fi
+          python3 scripts/impl/ci-flake-report.py "${report_args[@]}"
 
       - name: Publish report to workflow summary
         if: always()

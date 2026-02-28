@@ -1,0 +1,36 @@
+name: Prepare Kairos CI Environment
+description: Restore dependency cache and bootstrap host deps/UEFI for one arch.
+
+inputs:
+  arch:
+    description: Target architecture (riscv64|x86_64|aarch64)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Restore third-party source cache
+      uses: actions/cache@v4
+      with:
+        path: third_party
+        key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
+        restore-keys: |
+          third-party-${{ runner.os }}-
+
+    - name: Install host dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        scripts/impl/ci-bootstrap.sh install-host-deps "${{ inputs.arch }}"
+
+    - name: Fetch required third-party sources
+      shell: bash
+      run: |
+        set -euo pipefail
+        scripts/impl/ci-bootstrap.sh fetch-required-third-party
+
+    - name: Locate UEFI firmware
+      shell: bash
+      run: |
+        set -euo pipefail
+        scripts/impl/ci-bootstrap.sh locate-uefi "${{ inputs.arch }}"

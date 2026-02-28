@@ -26,28 +26,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps riscv64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
+      - name: Prepare CI environment
+        uses: ./.github/actions/prepare-kairos-ci
         with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate riscv64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi riscv64
+          arch: riscv64
 
       - name: Run focused subsystem gates (auto-selected)
         run: |
@@ -105,28 +87,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps riscv64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
+      - name: Prepare CI environment
+        uses: ./.github/actions/prepare-kairos-ci
         with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate riscv64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi riscv64
+          arch: riscv64
 
       - name: Capture riscv64 QEMU/UEFI diagnostics
         run: |
@@ -332,28 +296,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps x86_64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
+      - name: Prepare CI environment
+        uses: ./.github/actions/prepare-kairos-ci
         with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate x86_64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi x86_64
+          arch: x86_64
 
       - name: Run x86_64 syscall/trap gate
         run: |
@@ -487,28 +433,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps x86_64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
+      - name: Prepare CI environment
+        uses: ./.github/actions/prepare-kairos-ci
         with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate x86_64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi x86_64
+          arch: x86_64
 
       - name: Run x86_64 irq soak gate
         run: |
@@ -567,28 +495,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh install-host-deps aarch64
-
-      - name: Restore third-party source cache
-        uses: actions/cache@v4
+      - name: Prepare CI environment
+        uses: ./.github/actions/prepare-kairos-ci
         with:
-          path: third_party
-          key: third-party-${{ runner.os }}-${{ hashFiles('scripts/impl/fetch-deps.sh') }}
-          restore-keys: |
-            third-party-${{ runner.os }}-
-
-      - name: Fetch required third-party sources
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh fetch-required-third-party
-
-      - name: Locate aarch64 UEFI firmware
-        run: |
-          set -euo pipefail
-          scripts/impl/ci-bootstrap.sh locate-uefi aarch64
+          arch: aarch64
 
       - name: Run aarch64 syscall/trap gate
         run: |
