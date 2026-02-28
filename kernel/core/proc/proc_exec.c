@@ -187,6 +187,13 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
     bool has_interp = false;
     const char *fail_stage = "init";
 
+    struct process *curr = proc_current();
+    struct trap_frame *exec_tf = curr ? (struct trap_frame *)curr->active_tf : NULL;
+    if (!curr) {
+        ret = -EINVAL;
+        goto out;
+    }
+
     if (argv) {
         fail_stage = "copy_argv";
         kargv = kmalloc((EXEC_ARG_MAX + 1) * sizeof(char *));
@@ -360,7 +367,6 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
         goto out;
     }
 
-    struct process *curr = proc_current();
     old_mm = curr->mm;
     curr->mm = new_mm;
     arch_mmu_switch(new_mm->pgdir);
@@ -371,7 +377,7 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
     const char *name = strrchr(path, '/');
     strncpy(curr->name, name ? name + 1 : path, sizeof(curr->name) - 1);
 
-    struct trap_frame *tf = get_current_trapframe();
+    struct trap_frame *tf = exec_tf ? exec_tf : get_current_trapframe();
     if (tf) {
         tf->sepc = entry;
         tf->tf_sp = sp;
