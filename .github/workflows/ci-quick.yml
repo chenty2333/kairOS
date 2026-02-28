@@ -128,6 +128,37 @@ jobs:
           set -euo pipefail
           scripts/impl/ci-bootstrap.sh locate-uefi riscv64
 
+      - name: Capture riscv64 QEMU/UEFI diagnostics
+        run: |
+          set -euo pipefail
+          out_dir="ci-diagnostics/riscv64"
+          mkdir -p "${out_dir}"
+          {
+            echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "runner_os=${RUNNER_OS:-unknown}"
+            echo "runner_arch=${RUNNER_ARCH:-unknown}"
+            echo "uefi_code_src=${UEFI_CODE_SRC:-unset}"
+            echo "uefi_vars_src=${UEFI_VARS_SRC:-unset}"
+          } > "${out_dir}/env.txt"
+          qemu-system-riscv64 --version > "${out_dir}/qemu-version.txt"
+          dpkg-query -W -f='${Package} ${Version}\n' \
+            qemu-system-misc qemu-efi-riscv64 edk2-ovmf ovmf \
+            > "${out_dir}/dpkg-qemu-edk2.txt" || true
+          if [[ -n "${UEFI_CODE_SRC:-}" && -f "${UEFI_CODE_SRC}" ]]; then
+            sha256sum "${UEFI_CODE_SRC}" > "${out_dir}/uefi-code.sha256"
+            ls -l "${UEFI_CODE_SRC}" > "${out_dir}/uefi-code.ls.txt"
+          fi
+          if [[ -n "${UEFI_VARS_SRC:-}" && -f "${UEFI_VARS_SRC}" ]]; then
+            sha256sum "${UEFI_VARS_SRC}" > "${out_dir}/uefi-vars.sha256"
+            ls -l "${UEFI_VARS_SRC}" > "${out_dir}/uefi-vars.ls.txt"
+          fi
+          timeout 8s qemu-system-riscv64 \
+            -machine virt,dumpdtb="${out_dir}/qemu-virt-ci.dtb" \
+            -display none -serial none -nodefaults >/dev/null 2>&1 || true
+          if [[ -f "${out_dir}/qemu-virt-ci.dtb" ]]; then
+            sha256sum "${out_dir}/qemu-virt-ci.dtb" > "${out_dir}/qemu-virt-ci.dtb.sha256"
+          fi
+
       - name: Run riscv64 syscall/trap gate
         run: |
           set -euo pipefail
@@ -249,6 +280,24 @@ jobs:
             abi-snapshot-riscv64.json
             abi-snapshot-riscv64.md
             abi-compare-riscv64.md
+
+      - name: Upload riscv64 boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-riscv64-bootdiag-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ci-diagnostics/riscv64/env.txt
+            ci-diagnostics/riscv64/qemu-version.txt
+            ci-diagnostics/riscv64/dpkg-qemu-edk2.txt
+            ci-diagnostics/riscv64/uefi-code.sha256
+            ci-diagnostics/riscv64/uefi-vars.sha256
+            ci-diagnostics/riscv64/uefi-code.ls.txt
+            ci-diagnostics/riscv64/uefi-vars.ls.txt
+            ci-diagnostics/riscv64/qemu-virt-ci.dtb
+            ci-diagnostics/riscv64/qemu-virt-ci.dtb.sha256
 
   x86_64-gates:
     runs-on: ubuntu-24.04
