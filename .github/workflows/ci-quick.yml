@@ -159,6 +159,26 @@ jobs:
             sha256sum "${out_dir}/qemu-virt-ci.dtb" > "${out_dir}/qemu-virt-ci.dtb.sha256"
           fi
 
+      - name: Build riscv64 minimal repro image bundle
+        run: |
+          set -euo pipefail
+          out_dir="ci-diagnostics/riscv64/repro"
+          mkdir -p "${out_dir}"
+          make --no-print-directory ARCH=riscv64 UEFI_BOOT_MODE=img QEMU_UEFI_BOOT_MODE=img uefi
+          cp build/riscv64/boot.img "${out_dir}/boot.img"
+          cp build/riscv64/kairos.elf "${out_dir}/kairos.elf"
+          cp limine.cfg "${out_dir}/limine.cfg"
+          {
+            echo "ARCH=riscv64"
+            echo "UEFI_BOOT_MODE=img"
+            echo "QEMU_UEFI_BOOT_MODE=img"
+          } > "${out_dir}/build-env.txt"
+          sha256sum \
+            "${out_dir}/boot.img" \
+            "${out_dir}/kairos.elf" \
+            "${out_dir}/limine.cfg" \
+            > "${out_dir}/SHA256SUMS"
+
       - name: Run riscv64 syscall/trap gate
         run: |
           set -euo pipefail
@@ -298,6 +318,11 @@ jobs:
             ci-diagnostics/riscv64/uefi-vars.ls.txt
             ci-diagnostics/riscv64/qemu-virt-ci.dtb
             ci-diagnostics/riscv64/qemu-virt-ci.dtb.sha256
+            ci-diagnostics/riscv64/repro/boot.img
+            ci-diagnostics/riscv64/repro/kairos.elf
+            ci-diagnostics/riscv64/repro/limine.cfg
+            ci-diagnostics/riscv64/repro/build-env.txt
+            ci-diagnostics/riscv64/repro/SHA256SUMS
 
   x86_64-gates:
     runs-on: ubuntu-24.04
