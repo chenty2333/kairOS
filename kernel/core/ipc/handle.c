@@ -3230,6 +3230,7 @@ struct khandle_lookup_cache_cpu {
 #define KHANDLE_RESERVED_TRANSFER_TIMEOUT_NS_MIN     (10ULL * 1000ULL * 1000ULL)
 #define KHANDLE_RESERVED_TRANSFER_SWEEP_INTERVAL_MIN_NS (50ULL * 1000ULL * 1000ULL)
 #define KHANDLE_RESERVED_TRANSFER_SWEEP_INTERVAL_MAX_NS (1000ULL * 1000ULL * 1000ULL)
+#define KHANDLE_TABLE_LOCK_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 #define KHANDLE_DEFERRED_FREE_DELAY_NS (100ULL * 1000ULL * 1000ULL)
 
 static LIST_HEAD(kcap_nodes);
@@ -3417,6 +3418,23 @@ static uint64_t khandle_u64_add_sat(uint64_t lhs, uint64_t rhs) {
     return out;
 }
 
+static int khandle_table_lock_bounded(struct handletable *ht,
+                                      uint64_t timeout_ns) {
+    if (!ht)
+        return -EINVAL;
+    uint64_t deadline_ns = khandle_u64_add_sat(time_now_ns(), timeout_ns);
+    while (1) {
+        if (mutex_trylock(&ht->lock))
+            return 0;
+        if (time_now_ns() >= deadline_ns)
+            return -ETIMEDOUT;
+        if (proc_current())
+            proc_yield();
+        else
+            arch_cpu_relax();
+    }
+}
+
 static uint64_t khandle_deferred_retire_after_ns(void) {
     return khandle_u64_add_sat(time_now_ns(), KHANDLE_DEFERRED_FREE_DELAY_NS);
 }
@@ -3555,7 +3573,11 @@ static void khandle_reserved_transfer_sweep(struct handletable *ht, bool force) 
     uint64_t timeout_ns = khandle_reserved_timeout_ns();
     uint64_t sweep_interval_ns = khandle_reserved_sweep_interval_ns(timeout_ns);
 
-    mutex_lock(&ht->lock);
+    if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
+        pr_warn("ipc: reserved sweep lock timeout ht=%p force=%u\n", (void *)ht,
+                force ? 1U : 0U);
+        return;
+    }
     if (!force && ht->reserved_sweep_after_ns != 0 &&
         now_ns < ht->reserved_sweep_after_ns) {
         mutex_unlock(&ht->lock);
@@ -3574,7 +3596,11 @@ static void khandle_reserved_transfer_sweep(struct handletable *ht, bool force) 
         mutex_unlock(&ht->lock);
         khandle_transfer_drop_cap(obj, rights, cap_id);
         now_ns = time_now_ns();
-        mutex_lock(&ht->lock);
+        if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
+            pr_warn("ipc: reserved sweep relock timeout ht=%p force=%u\n",
+                    (void *)ht, force ? 1U : 0U);
+            return;
+        }
         if (force)
             continue;
         ht->reserved_sweep_after_ns =
@@ -4347,12 +4373,17 @@ static int khandle_install_locked(struct handletable *ht, int32_t handle,
 
 int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights) {
     struct handletable *ht = proc_handletable(p);
+    struct process *curr = proc_current();
     if (!ht || !obj || rights == 0)
         return -EINVAL;
 
     khandle_reserved_transfer_sweep(ht, false);
 
-    mutex_lock(&ht->lock);
+    if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
+        pr_warn("khandle_alloc: lock timeout pid=%d ht=%p\n",
+                curr ? curr->pid : -1, (void *)ht);
+        return -ETIMEDOUT;
+    }
     for (int h = 0; h < CONFIG_MAX_HANDLES_PER_PROC; h++) {
         if (ht->entries[h].obj)
             continue;
