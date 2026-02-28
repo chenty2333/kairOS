@@ -695,6 +695,7 @@ static int drm_lite_ioctl(struct file *file, uint64_t cmd, uint64_t arg) {
         bkobj->damage_pending = false;
         INIT_LIST_HEAD(&bkobj->poll_vnodes);
         kobj_init(&bkobj->obj, KOBJ_TYPE_BUFFER, &drm_buffer_kobj_ops);
+        kobj_track_register(&bkobj->obj);
 
         mutex_unlock(&ldev->lock);
 

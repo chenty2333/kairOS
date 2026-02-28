@@ -323,11 +323,8 @@ static int64_t sleep_until_deadline(uint64_t deadline, uint64_t rem_ptr,
         return -EINVAL;
 
     while (arch_timer_get_ticks() < deadline) {
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        poll_sleep_arm(&sleep, curr, deadline);
-        int sleep_rc = proc_sleep_on(NULL, &sleep, true);
-        poll_sleep_cancel(&sleep);
+        int sleep_rc =
+            proc_sleep_on_mutex_timeout(NULL, NULL, NULL, true, deadline);
         if (sleep_rc == -EINTR) {
             if (report_remaining && rem_ptr) {
                 uint64_t now = arch_timer_get_ticks();
@@ -342,6 +339,8 @@ static int64_t sleep_until_deadline(uint64_t deadline, uint64_t rem_ptr,
             }
             return -EINTR;
         }
+        if (sleep_rc < 0 && sleep_rc != -ETIMEDOUT)
+            return sleep_rc;
     }
     return 0;
 }

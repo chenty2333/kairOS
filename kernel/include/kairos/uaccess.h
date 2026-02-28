@@ -23,7 +23,7 @@ static inline int uaccess_prefault(const void *addr, size_t n, bool write) {
     uint32_t flags = write ? PTE_WRITE : 0;
 
     for (uintptr_t va = start; va <= end; va += CONFIG_PAGE_SIZE) {
-        int ret = mm_handle_fault(p->mm, (vaddr_t)va, flags);
+        int ret = mm_handle_fault_nolog(p->mm, (vaddr_t)va, flags);
         if (ret < 0)
             return -EFAULT;
     }

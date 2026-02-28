@@ -35,20 +35,19 @@ struct arch_context *arch_context_alloc(void) {
     if (!ctx)
         return NULL;
 
-    /* Allocate 8KB kernel stack (order 1 = 2 pages) */
-    struct page *pg = alloc_pages(1);
+    struct page *pg = alloc_pages(CONFIG_KERNEL_STACK_ORDER);
     if (!pg) {
         kfree(ctx);
         return NULL;
     }
 
     void *stack_addr = phys_to_virt(page_to_phys(pg));
-    memset(stack_addr, 0, 2 * CONFIG_PAGE_SIZE);
+    memset(stack_addr, 0, CONFIG_KERNEL_STACK_SIZE);
 
     memset(ctx, 0, sizeof(*ctx));
     
     ctx->kernel_stack =
-        (uint64_t)stack_addr + (2 * CONFIG_PAGE_SIZE) - 8;
+        (uint64_t)stack_addr + CONFIG_KERNEL_STACK_SIZE - 8;
     ctx->sp = ctx->kernel_stack;
 
     return ctx;
@@ -66,10 +65,10 @@ void arch_context_free(struct arch_context *ctx) {
     if (ctx->kernel_stack) {
         /* Adjust back to real page start */
         void *stack_bottom =
-            (void *)(ctx->kernel_stack + 8 - (2 * CONFIG_PAGE_SIZE));
+            (void *)(ctx->kernel_stack + 8 - CONFIG_KERNEL_STACK_SIZE);
         struct page *pg = phys_to_page(virt_to_phys(stack_bottom));
         if (pg)
-            free_pages(pg, 1);
+            free_pages(pg, CONFIG_KERNEL_STACK_ORDER);
     }
     kfree(ctx);
 }

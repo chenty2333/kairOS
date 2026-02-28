@@ -42,7 +42,53 @@ stage_base() {
   mkdir -p "$ROOTFS_DIR"/{bin,sbin,etc,home,root,dev}
 
   echo "Hello from Kairos filesystem!" >"$ROOTFS_DIR/test.txt"
-  echo "This is another test file" >"$ROOTFS_DIR/test2.txt"
+  {
+    echo "Kairos pager stress sample (300 lines, Shakespeare excerpts)."
+    echo
+    for i in $(seq 1 300); do
+      case $((i % 10)) in
+        0) echo "Line $i: To be, or not to be: that is the question." ;;
+        1) echo "Line $i: Whether tis nobler in the mind to suffer." ;;
+        2) echo "Line $i: The slings and arrows of outrageous fortune." ;;
+        3) echo "Line $i: Or to take arms against a sea of troubles." ;;
+        4) echo "Line $i: And by opposing end them." ;;
+        5) echo "Line $i: The quality of mercy is not strained." ;;
+        6) echo "Line $i: It droppeth as the gentle rain from heaven." ;;
+        7) echo "Line $i: All the worlds a stage, and all the men and women merely players." ;;
+        8) echo "Line $i: Some are born great, some achieve greatness." ;;
+        9) echo "Line $i: The lady doth protest too much, methinks." ;;
+      esac
+    done
+  } >"$ROOTFS_DIR/test2.txt"
+  cat >"$ROOTFS_DIR/hello.c" <<'EOF'
+#include <stdio.h>
+
+int main(void) {
+    puts("hello world");
+    return 0;
+}
+EOF
+  cat >"$ROOTFS_DIR/primes.c" <<'EOF'
+#include <stdio.h>
+
+static int is_prime(int n) {
+    if (n < 2)
+        return 0;
+    for (int d = 2; d * d <= n; d++) {
+        if (n % d == 0)
+            return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    for (int n = 1; n <= 200; n++) {
+        if (is_prime(n))
+            printf("%d\n", n);
+    }
+    return 0;
+}
+EOF
   echo "root:x:0:0:root:/root:/bin/sh" >"$ROOTFS_DIR/etc/passwd"
   echo "127.0.0.1 localhost" >"$ROOTFS_DIR/etc/hosts"
   cat >"$ROOTFS_DIR/etc/profile" <<'EOF'

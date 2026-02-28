@@ -88,6 +88,7 @@ noreturn void proc_exit(int status) {
         sighand_put(p->sighand);
         p->sighand = NULL;
     }
+    kchannel_endpoint_ref_audit_registry("proc_exit", p->pid);
 
     /* Remove from thread group if a non-leader thread */
     if (is_thread) {

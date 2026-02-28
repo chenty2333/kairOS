@@ -226,6 +226,15 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             break;
         }
 
+        case 'o': {
+            unsigned long long val;
+            if (length >= 2) val = va_arg(ap, unsigned long long);
+            else if (length == 1) val = va_arg(ap, unsigned long);
+            else val = va_arg(ap, unsigned int);
+            format_number(&state, val, 8, width, precision, flags);
+            break;
+        }
+
         case 'x':
         case 'X': {
             unsigned long long val;

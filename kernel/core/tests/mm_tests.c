@@ -4,6 +4,7 @@
 
 #include <kairos/arch.h>
 #include <kairos/atomic.h>
+#include <kairos/hashtable.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
@@ -16,6 +17,8 @@
 #define MM_TEST_BASE3 0x22000000UL
 #define MM_TEST_BASE4 0x23000000UL
 #define MM_TEST_PROBE_MAX 1024
+#define MM_KHASH_TEST_BITS 4U
+#define MM_KHASH_TEST_NODES 19U
 
 static int tests_failed;
 static paddr_t reserve_probe_pages[MM_TEST_PROBE_MAX];
@@ -35,6 +38,99 @@ static int dummy_vnode_close(struct vnode *vn) {
 static struct file_ops dummy_vnode_ops = {
     .close = dummy_vnode_close,
 };
+
+struct mm_khash_node {
+    uint64_t key;
+    uint32_t value;
+    struct list_head link;
+};
+
+static struct mm_khash_node *mm_khash_find(struct list_head *table,
+                                           size_t bucket_count,
+                                           uint64_t key) {
+    if (!table || !khash_bucket_count_valid(bucket_count))
+        return NULL;
+
+    struct list_head *head = &table[khash_index_u64(key, bucket_count)];
+    struct mm_khash_node *pos = NULL;
+    list_for_each_entry(pos, head, link) {
+        if (pos->key == key)
+            return pos;
+    }
+    return NULL;
+}
+
+static void test_khash_intrusive_basic(void) {
+    KHASH_DECLARE(table, MM_KHASH_TEST_BITS);
+    struct mm_khash_node nodes[MM_KHASH_TEST_NODES];
+    struct khash_stats stats = {0};
+
+    KHASH_INIT(table);
+    KHASH_STATS(table, &stats);
+    test_check(stats.bucket_count == ARRAY_SIZE(table), "khash init buckets");
+    test_check(stats.entries == 0, "khash init entries");
+    test_check(stats.used_buckets == 0, "khash init used_buckets");
+    test_check(stats.max_bucket_depth == 0, "khash init max_depth");
+
+    for (uint32_t i = 0; i < MM_KHASH_TEST_NODES; i++) {
+        nodes[i].key = 0x1000ULL + (uint64_t)i * 17ULL;
+        nodes[i].value = i;
+        INIT_LIST_HEAD(&nodes[i].link);
+        khash_add(table, &nodes[i].link, nodes[i].key);
+    }
+
+    for (uint32_t i = 0; i < MM_KHASH_TEST_NODES; i++) {
+        struct mm_khash_node *n =
+            mm_khash_find(table, ARRAY_SIZE(table), nodes[i].key);
+        test_check(n == &nodes[i], "khash find inserted node");
+    }
+    test_check(mm_khash_find(table, ARRAY_SIZE(table), 0xdeadbeefULL) == NULL,
+               "khash miss");
+
+    KHASH_STATS(table, &stats);
+    test_check(stats.entries == MM_KHASH_TEST_NODES, "khash stats entries");
+    test_check(stats.used_buckets > 0, "khash stats used_buckets nonzero");
+    test_check(stats.used_buckets <= stats.bucket_count,
+               "khash stats used_buckets bound");
+    test_check(stats.max_bucket_depth >= 1, "khash stats max_depth nonzero");
+    test_check(khash_collision_entries(&stats) >= 3,
+               "khash stats collision expected");
+    test_check(khash_load_factor_per_mille(&stats) >= 1000U,
+               "khash stats load_per_mille");
+    test_check(khash_avg_chain_per_mille(&stats) >= 1000U,
+               "khash stats avg_chain_per_mille");
+
+    size_t expected_left = 0;
+    for (uint32_t i = 0; i < MM_KHASH_TEST_NODES; i++) {
+        if ((i & 1U) == 0) {
+            expected_left++;
+            continue;
+        }
+        khash_del(&nodes[i].link);
+    }
+
+    for (uint32_t i = 0; i < MM_KHASH_TEST_NODES; i++) {
+        struct mm_khash_node *n =
+            mm_khash_find(table, ARRAY_SIZE(table), nodes[i].key);
+        if ((i & 1U) == 0)
+            test_check(n == &nodes[i], "khash find survivor");
+        else
+            test_check(n == NULL, "khash deleted node gone");
+    }
+
+    KHASH_STATS(table, &stats);
+    test_check(stats.entries == expected_left, "khash stats entries after del");
+
+    for (uint32_t i = 0; i < MM_KHASH_TEST_NODES; i++) {
+        if ((i & 1U) == 0)
+            khash_del(&nodes[i].link);
+    }
+
+    KHASH_STATS(table, &stats);
+    test_check(stats.entries == 0, "khash stats entries empty");
+    test_check(stats.used_buckets == 0, "khash stats used_buckets empty");
+    test_check(stats.max_bucket_depth == 0, "khash stats max_depth empty");
+}
 
 static void test_mmu_pte_roundtrip(void) {
     struct mm_struct *mm = mm_create();
@@ -306,6 +402,7 @@ int run_mm_tests(void) {
     test_mremap_move_integrity();
     test_pmm_reserve_range_nonallocatable();
     test_kmalloc_aligned_basic();
+    test_khash_intrusive_basic();
 
     if (tests_failed == 0)
         pr_info("mm tests: all passed\n");

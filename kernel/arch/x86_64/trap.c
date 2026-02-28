@@ -112,7 +112,7 @@ static bool x86_tf_on_current_kstack(const struct process *p,
     if (!p || !tf || !p->kstack_top)
         return false;
     uint64_t top = p->kstack_top;
-    uint64_t bottom = top + sizeof(uint64_t) - (2ULL * CONFIG_PAGE_SIZE);
+    uint64_t bottom = top + sizeof(uint64_t) - CONFIG_KERNEL_STACK_SIZE;
     uint64_t start = (uint64_t)tf;
     uint64_t end = start + sizeof(*tf) - 1;
     if (end < start)
@@ -243,7 +243,7 @@ static void handle_exception(struct trap_frame *tf) {
         if (cur && cur->kstack_top) {
             uint64_t kstack_top = cur->kstack_top;
             uint64_t kstack_bottom =
-                kstack_top + sizeof(uint64_t) - (2ULL * CONFIG_PAGE_SIZE);
+                kstack_top + sizeof(uint64_t) - CONFIG_KERNEL_STACK_SIZE;
             bool rsp_in_kstack =
                 (tf->rsp >= kstack_bottom) && (tf->rsp <= kstack_top);
             bool tf_in_kstack = x86_tf_on_current_kstack(cur, tf);
@@ -260,7 +260,7 @@ static void handle_exception(struct trap_frame *tf) {
         if (cur && cur->kstack_top) {
             uint64_t kstack_top = cur->kstack_top;
             uint64_t kstack_bottom =
-                kstack_top + sizeof(uint64_t) - (2ULL * CONFIG_PAGE_SIZE);
+                kstack_top + sizeof(uint64_t) - CONFIG_KERNEL_STACK_SIZE;
             bool rsp_in_kstack =
                 (tf->rsp >= kstack_bottom) && (tf->rsp <= kstack_top);
             pr_err("x86_64 #PF proc pid=%d kstack=%p..%p rsp_in_kstack=%d\n",
@@ -275,36 +275,43 @@ static void handle_exception(struct trap_frame *tf) {
 }
 
 static void handle_syscall(struct trap_frame *tf) {
+    struct process *cur = proc_current();
+    bool linux_abi = !cur || cur->syscall_abi == SYSCALL_ABI_LINUX;
     uint64_t nr = tf->rax;
-    if (nr == X86_NR_ARCH_PRCTL) {
-        tf->rax = x86_sys_arch_prctl(tf->rdi, tf->rsi);
-        return;
+
+    if (linux_abi) {
+        if (nr == X86_NR_ARCH_PRCTL) {
+            tf->rax = x86_sys_arch_prctl(tf->rdi, tf->rsi);
+            return;
+        }
+        if (nr == X86_NR_FORK) {
+            tf->rax = syscall_dispatch(LINUX_NR_clone, (uint64_t)SIGCHLD, 0, 0, 0, 0,
+                                       0);
+            return;
+        }
+        if (nr == X86_NR_VFORK) {
+            tf->rax = syscall_dispatch(LINUX_NR_clone,
+                                       (uint64_t)(CLONE_VFORK | CLONE_VM | SIGCHLD), 0,
+                                       0, 0, 0, 0);
+            return;
+        }
+        if (nr == X86_NR_MKDIR) {
+            tf->rax = syscall_dispatch(LINUX_NR_mkdirat,
+                                       (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                       tf->rsi, 0, 0, 0);
+            return;
+        }
+        if (nr == X86_NR_RMDIR) {
+            tf->rax = syscall_dispatch(LINUX_NR_unlinkat,
+                                       (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                       AT_REMOVEDIR, 0, 0, 0);
+            return;
+        }
+        nr = x86_syscall_remap(nr);
     }
-    if (nr == X86_NR_FORK) {
-        tf->rax = syscall_dispatch(LINUX_NR_clone, (uint64_t)SIGCHLD, 0, 0, 0, 0,
-                                   0);
-        return;
-    }
-    if (nr == X86_NR_VFORK) {
-        tf->rax = syscall_dispatch(LINUX_NR_clone,
-                                   (uint64_t)(CLONE_VFORK | CLONE_VM | SIGCHLD), 0,
-                                   0, 0, 0, 0);
-        return;
-    }
-    if (nr == X86_NR_MKDIR) {
-        tf->rax = syscall_dispatch(LINUX_NR_mkdirat,
-                                   (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
-                                   tf->rsi, 0, 0, 0);
-        return;
-    }
-    if (nr == X86_NR_RMDIR) {
-        tf->rax = syscall_dispatch(LINUX_NR_unlinkat,
-                                   (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
-                                   AT_REMOVEDIR, 0, 0, 0);
-        return;
-    }
-    tf->rax = syscall_dispatch(x86_syscall_remap(nr), tf->rdi, tf->rsi,
-                               tf->rdx, tf->r10, tf->r8, tf->r9);
+
+    tf->rax = syscall_dispatch(nr, tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8,
+                               tf->r9);
 }
 
 static void handle_irq(struct trap_frame *tf, const struct trap_core_event *ev) {

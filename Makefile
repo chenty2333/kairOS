@@ -20,7 +20,7 @@ ARCH ?= riscv64
 EMBEDDED_INIT ?= 0
 EXTRA_CFLAGS ?=
 VIRTIO_PCI_TEST_CFLAGS ?=
-KERNEL_TESTS ?= 1
+KERNEL_TESTS ?= 0
 
 # Auto-detect parallelism: use all available cores
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
@@ -343,7 +343,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-abi-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-concurrent-smoke test-concurrent-vfs-ipc test-focused test-focused-auto gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-abi-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-soak-ipc-cap-deep test-concurrent-smoke test-concurrent-vfs-ipc test-focused test-focused-auto gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -606,7 +606,7 @@ VALID_QEMU_UEFI_BOOT_MODES := dir img
 
 ifeq ($(strip $(UEFI_BOOT_MODE)),)
 ifeq ($(strip $(QEMU_UEFI_BOOT_MODE)),)
-UEFI_BOOT_MODE := dir
+UEFI_BOOT_MODE := img
 else
 UEFI_BOOT_MODE := $(QEMU_UEFI_BOOT_MODE)
 endif
@@ -618,7 +618,7 @@ endif
 
 ifeq ($(strip $(QEMU_UEFI_BOOT_MODE)),)
 ifeq ($(UEFI_BOOT_MODE),both)
-QEMU_UEFI_BOOT_MODE := dir
+QEMU_UEFI_BOOT_MODE := img
 else
 QEMU_UEFI_BOOT_MODE := $(UEFI_BOOT_MODE)
 endif
@@ -853,6 +853,8 @@ IRQ_SOAK_TEST_TIMEOUT ?= 420
 IRQ_SOAK_TEST_EXTRA_CFLAGS ?=
 SOAK_PR_TIMEOUT ?= 1800
 SOAK_PR_EXTRA_CFLAGS ?= -DCONFIG_KERNEL_FAULT_INJECT=1 -DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=900 -DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=3
+SOAK_IPC_CAP_DEEP_TIMEOUT ?= 5400
+SOAK_IPC_CAP_DEEP_EXTRA_CFLAGS ?= -DCONFIG_KERNEL_FAULT_INJECT=1 -DCONFIG_KERNEL_SOAK_PR_DURATION_SEC=1800 -DCONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE=3 -DCONFIG_KERNEL_SOAK_PR_SUITE_MASK=0x200 -DCONFIG_KERNEL_SOAK_PR_SCHED_EVERY=1 -DCONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC=600 -DCONFIG_KERNEL_SOAK_PR_IPC_CAP_DEEP_ROUNDS=3 -DCONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_THREADS=4 -DCONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_YIELD_MAX=16
 TEST_RUNS_ROOT ?= build/runs
 RUNS_KEEP ?= 20
 GC_RUNS_AUTO ?= 1
@@ -924,10 +926,10 @@ test: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 				$(MAKE) --no-print-directory gc-runs RUNS_KEEP="$(RUNS_KEEP)" TEST_RUNS_ROOT="$(TEST_RUNS_ROOT)"; \
 			fi; \
 			$(MAKE) --no-print-directory ARCH="$(ARCH)" BUILD_ROOT="$(TEST_BUILD_ROOT)" \
-				TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" \
+				KERNEL_TESTS=1 TEST_ISOLATED=0 RUN_ID="$(RUN_ID)" TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS)" \
 				TEST_TIMEOUT="$(TEST_TIMEOUT)" $(TEST_LOG_FWD) TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" test; \
 		else \
-			RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
+			KERNEL_TESTS=1 RUN_ID="$(RUN_ID)" TEST_LOCK_WAIT="$(TEST_LOCK_WAIT)" UEFI_BOOT_MODE="$(UEFI_BOOT_MODE)" QEMU_UEFI_BOOT_MODE="$(QEMU_UEFI_BOOT_MODE)" \
 				$(KAIROS_CMD) run test --extra-cflags "$(TEST_EXTRA_CFLAGS)" --timeout "$(TEST_TIMEOUT)" --log "$(TEST_LOG)"; \
 		fi
 
@@ -1288,6 +1290,10 @@ test-soak-pr:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" RUN_ID="$(RUN_ID)" TEST_TIMEOUT="$(SOAK_PR_TIMEOUT)" TEST_LOG="$(SOAK_PR_LOG)" \
 		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x800 $(SOAK_PR_EXTRA_CFLAGS)" test
 
+test-soak-ipc-cap-deep:
+	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" RUN_ID="$(RUN_ID)" TEST_TIMEOUT="$(SOAK_IPC_CAP_DEEP_TIMEOUT)" TEST_LOG="$(SOAK_PR_LOG)" \
+		TEST_EXTRA_CFLAGS="$(TEST_EXTRA_CFLAGS) -DCONFIG_KERNEL_TEST_MASK=0x800 $(SOAK_IPC_CAP_DEEP_EXTRA_CFLAGS)" test
+
 gc-runs:
 	$(Q)mkdir -p "$(TEST_RUNS_ROOT)"
 	$(Q)keep="$(RUNS_KEEP)"; \
@@ -1541,6 +1547,7 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  test-devmodel - Alias of test-device-virtio"
 	@echo "  test-tty - Run tty stack module only (tty_core/n_tty/pty)"
 	@echo "  test-soak-pr - Run PR soak + low-rate fault injection module only"
+	@echo "  test-soak-ipc-cap-deep - Run deep ipc-cap soak profile (multi-core + random jitter)"
 	@echo "  print-config - Show effective build/run/test configuration"
 	@echo "  gc-runs  - Keep only latest N isolated runs (RUNS_KEEP, default 20)"
 	@echo "  lock-status - List lock files and metadata (pid/state)"
@@ -1581,9 +1588,13 @@ ifneq ($(HELP_ADVANCED),0)
 	@echo "  TEST_LOCK_WAIT - Seconds to wait for test qemu lock before lock_busy (default: 0)"
 	@echo "  TOOLCHAIN_LOCK_WAIT - Seconds to wait for global toolchain lock (default: 900)"
 	@echo "  SOAK_PR_LOG - test-soak-pr log path (isolated default: <TEST_BUILD_ROOT>/<arch>/test.log)"
+	@echo "  SOAK_IPC_CAP_DEEP_TIMEOUT - Timeout seconds for test-soak-ipc-cap-deep (default: 5400)"
+	@echo "  SOAK_IPC_CAP_DEEP_EXTRA_CFLAGS - Extra CFLAGS appended by test-soak-ipc-cap-deep"
 	@echo "  IRQ_SOAK_TEST_TIMEOUT - Timeout seconds for test-irq-soak (default: 420)"
 	@echo "  IRQ_SOAK_TEST_EXTRA_CFLAGS - Extra CFLAGS appended by test-irq-soak"
 	@echo "  QEMU_FILTER_UEFI_NOISE - Filter known non-fatal UEFI noise on run (aarch64 default: 1)"
+	@echo "  UEFI_BOOT_MODE - Boot media artifact mode (dir, img, both; default: img)"
+	@echo "  QEMU_UEFI_BOOT_MODE - Runtime boot media mode (dir, img; default follows UEFI_BOOT_MODE, both defaults to img)"
 	@echo "  QEMU_IOMMU - IOMMU device mode for QEMU (auto, off, virtio)"
 	@echo "  VIRTIO_IOMMU_HEALTH_REQUIRED - Fail driver test when virtio-iommu backend is unavailable (default: auto by QEMU_IOMMU_EFFECTIVE)"
 	@echo "  HELP_ADVANCED - Show advanced help sections (set 1)"

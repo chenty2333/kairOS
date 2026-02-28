@@ -349,7 +349,9 @@ static ssize_t eventfd_fread(struct file *file, void *buf, size_t len) {
             return -EAGAIN;
         fd_event_note_block(POLL_WAIT_STAT_FDEVENT_EVENTFD_R_BLOCKS,
                             FD_EVENT_WAIT_EVENTFD_READ, ctx);
-        int rc = poll_wait_source_block(&ctx->rd_src, 0, ctx, &file->lock);
+        int rc = poll_wait_source_block_seq(
+            &ctx->rd_src, 0, ctx, &file->lock,
+            poll_wait_source_seq_snapshot(&ctx->rd_src));
         if (rc < 0)
             return rc;
     }
@@ -396,7 +398,9 @@ static ssize_t eventfd_fwrite(struct file *file, const void *buf, size_t len) {
             return -EAGAIN;
         fd_event_note_block(POLL_WAIT_STAT_FDEVENT_EVENTFD_W_BLOCKS,
                             FD_EVENT_WAIT_EVENTFD_WRITE, ctx);
-        int rc = poll_wait_source_block(&ctx->wr_src, 0, ctx, &file->lock);
+        int rc = poll_wait_source_block_seq(
+            &ctx->wr_src, 0, ctx, &file->lock,
+            poll_wait_source_seq_snapshot(&ctx->wr_src));
         if (rc < 0)
             return rc;
     }
@@ -576,7 +580,9 @@ static ssize_t signalfd_fread(struct file *file, void *buf, size_t len) {
             return -EAGAIN;
         fd_event_note_block(POLL_WAIT_STAT_FDEVENT_SIGNALFD_R_BLOCKS,
                             FD_EVENT_WAIT_SIGNALFD_READ, ctx);
-        int rc = poll_wait_source_block(&ctx->rd_src, 0, p, &file->lock);
+        int rc = poll_wait_source_block_seq(
+            &ctx->rd_src, 0, p, &file->lock,
+            poll_wait_source_seq_snapshot(&ctx->rd_src));
         if (rc < 0)
             return rc;
     }
@@ -897,7 +903,9 @@ static ssize_t inotify_fread(struct file *file, void *buf, size_t len) {
 
         fd_event_note_block(POLL_WAIT_STAT_FDEVENT_INOTIFY_R_BLOCKS,
                             FD_EVENT_WAIT_INOTIFY_READ, ctx);
-        int rc = poll_wait_source_block(&ctx->rd_src, 0, ctx, &file->lock);
+        int rc = poll_wait_source_block_seq(
+            &ctx->rd_src, 0, ctx, &file->lock,
+            poll_wait_source_seq_snapshot(&ctx->rd_src));
         if (rc < 0)
             return rc;
     }
@@ -1165,7 +1173,9 @@ static ssize_t timerfd_fread(struct file *file, void *buf, size_t len) {
             return -EAGAIN;
         fd_event_note_block(POLL_WAIT_STAT_FDEVENT_TIMERFD_R_BLOCKS,
                             FD_EVENT_WAIT_TIMERFD_READ, ctx);
-        int rc = poll_wait_source_block(&ctx->rd_src, 0, ctx, &file->lock);
+        int rc = poll_wait_source_block_seq(
+            &ctx->rd_src, 0, ctx, &file->lock,
+            poll_wait_source_seq_snapshot(&ctx->rd_src));
         if (rc < 0)
             return rc;
     }

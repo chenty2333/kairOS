@@ -6,6 +6,7 @@
 #include <kairos/config.h>
 #include <kairos/dentry.h>
 #include <kairos/handle.h>
+#include <kairos/hashtable.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
@@ -22,16 +23,10 @@ spinlock_t proc_table_lock = SPINLOCK_INIT;
 pid_t next_pid = 1;
 struct process *reaper_proc = NULL;
 #define PROC_PID_HASH_BITS 8U
-#define PROC_PID_HASH_SIZE (1U << PROC_PID_HASH_BITS)
-static struct list_head proc_pid_hash[PROC_PID_HASH_SIZE];
-
-static size_t proc_pid_hash_bucket(pid_t pid) {
-    return (size_t)(((uint32_t)pid) & (PROC_PID_HASH_SIZE - 1U));
-}
+KHASH_DECLARE(proc_pid_hash, PROC_PID_HASH_BITS);
 
 static void proc_pid_hash_init(void) {
-    for (size_t i = 0; i < PROC_PID_HASH_SIZE; i++)
-        INIT_LIST_HEAD(&proc_pid_hash[i]);
+    KHASH_INIT(proc_pid_hash);
 }
 
 static void proc_pid_hash_insert_locked(struct process *p) {
@@ -39,23 +34,20 @@ static void proc_pid_hash_insert_locked(struct process *p) {
         return;
     if (!list_empty(&p->pid_hash_node))
         return;
-    size_t idx = proc_pid_hash_bucket(p->pid);
-    list_add_tail(&p->pid_hash_node, &proc_pid_hash[idx]);
+    khash_add(proc_pid_hash, &p->pid_hash_node, (uint32_t)p->pid);
 }
 
 static void proc_pid_hash_remove_locked(struct process *p) {
     if (!p || list_empty(&p->pid_hash_node))
         return;
-    list_del(&p->pid_hash_node);
-    INIT_LIST_HEAD(&p->pid_hash_node);
+    khash_del(&p->pid_hash_node);
 }
 
 struct process *proc_find_locked(pid_t pid) {
     if (pid <= 0)
         return NULL;
-    size_t idx = proc_pid_hash_bucket(pid);
     struct process *p = NULL;
-    list_for_each_entry(p, &proc_pid_hash[idx], pid_hash_node) {
+    khash_for_each_possible_u32(proc_pid_hash, p, pid_hash_node, pid) {
         if (p->pid == pid && p->state != PROC_UNUSED &&
             p->state != PROC_EMBRYO) {
             return p;
@@ -170,6 +162,7 @@ struct process *proc_alloc(void) {
     sched_entity_init(&p->se);
     p->exit_code = p->sig_pending = p->sig_blocked = 0;
     p->wait_channel = NULL;
+    p->wake_pending = false;
     p->sleep_deadline = 0;
     p->fdtable = fdtable_alloc();
     if (!p->fdtable) {
@@ -325,11 +318,13 @@ void proc_free(struct process *p) {
     proc_free_internal(p);
 }
 
-#if defined(ARCH_riscv64) || defined(ARCH_aarch64)
+#if defined(ARCH_riscv64) || defined(ARCH_aarch64) || defined(ARCH_x86_64)
 static inline uint64_t proc_read_sp(void) {
     uint64_t sp;
 #if defined(ARCH_riscv64)
     __asm__ __volatile__("mv %0, sp" : "=r"(sp));
+#elif defined(ARCH_x86_64)
+    __asm__ __volatile__("mov %%rsp, %0" : "=r"(sp));
 #else
     __asm__ __volatile__("mov %0, sp" : "=r"(sp));
 #endif
@@ -339,7 +334,7 @@ static inline uint64_t proc_read_sp(void) {
 static bool proc_stack_contains_sp(const struct process *p, uint64_t sp) {
     if (!p || !p->kstack_top)
         return false;
-    uint64_t bottom = p->kstack_top + 8 - (2ULL * CONFIG_PAGE_SIZE);
+    uint64_t bottom = p->kstack_top + 8 - CONFIG_KERNEL_STACK_SIZE;
     return sp >= bottom && sp <= p->kstack_top;
 }
 
@@ -353,13 +348,19 @@ static struct process *proc_current_from_sp(uint64_t sp) {
     }
     return NULL;
 }
+
+static bool proc_ptr_in_table(const struct process *p) {
+    if (!p)
+        return false;
+    return p >= &proc_table[0] && p < &proc_table[CONFIG_MAX_PROCESSES];
+}
 #endif
 
 struct process *proc_current(void) {
     struct process *curr = arch_get_percpu()->curr_proc;
-#if defined(ARCH_riscv64) || defined(ARCH_aarch64)
+#if defined(ARCH_riscv64) || defined(ARCH_aarch64) || defined(ARCH_x86_64)
     uint64_t sp = proc_read_sp();
-    if (proc_stack_contains_sp(curr, sp))
+    if (proc_ptr_in_table(curr) && proc_stack_contains_sp(curr, sp))
         return curr;
     struct process *fallback = proc_current_from_sp(sp);
     if (fallback) {
@@ -368,8 +369,9 @@ struct process *proc_current(void) {
             int n = __atomic_fetch_add(&corrected_warn_count, 1,
                                        __ATOMIC_RELAXED);
             if (n < 8) {
+                int curr_pid = proc_ptr_in_table(curr) ? curr->pid : -1;
                 pr_warn("proc_current: corrected stale curr_proc cpu=%d curr=%d fallback=%d sp=%p\n",
-                        arch_cpu_id(), curr->pid, fallback->pid, (void *)sp);
+                        arch_cpu_id(), curr_pid, fallback->pid, (void *)sp);
             }
         }
         return fallback;
@@ -496,17 +498,49 @@ void proc_unlock(struct process *p) {
     arch_irq_restore(flags);
 }
 
+static inline void proc_wait_entry_prepare(struct process *p,
+                                           struct wait_queue *wq) {
+    if (!p || !p->wait_entry.active)
+        return;
+    if (wq && p->wait_entry.wq == wq)
+        return;
+    wait_queue_remove_entry(&p->wait_entry);
+}
+
+static inline void proc_wait_entry_abort_interrupt(struct process *p,
+                                                   struct wait_queue *wq) {
+    if (!p || !p->wait_entry.active)
+        return;
+    if (!wq || p->wait_entry.wq == wq)
+        wait_queue_remove_entry(&p->wait_entry);
+}
+
 int proc_sleep_on(struct wait_queue *wq, void *channel, bool interruptible) {
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (interruptible && proc_has_unblocked_signal(p))
+    proc_wait_entry_prepare(p, wq);
+    if (interruptible && proc_has_unblocked_signal(p)) {
+        proc_wait_entry_abort_interrupt(p, wq);
         return -EINTR;
+    }
 
     if (wq)
         wait_queue_add(wq, p);
 
     proc_lock(p);
+    if (p->wake_pending) {
+        p->wake_pending = false;
+        if (wq && p->wait_entry.active)
+            wait_queue_remove_entry(&p->wait_entry);
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        proc_unlock(p);
+        if (interruptible && proc_has_unblocked_signal(p))
+            return -EINTR;
+        return 0;
+    }
     /*
      * A wakeup can happen after wait_queue_add() but before we mark the task
      * sleeping. In that case wait_queue_wakeup() already removed wait_entry.
@@ -547,13 +581,28 @@ int proc_sleep_on_mutex(struct wait_queue *wq, void *channel,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (interruptible && proc_has_unblocked_signal(p))
+    proc_wait_entry_prepare(p, wq);
+    if (interruptible && proc_has_unblocked_signal(p)) {
+        proc_wait_entry_abort_interrupt(p, wq);
         return -EINTR;
+    }
 
     if (wq)
         wait_queue_add(wq, p);
 
     proc_lock(p);
+    if (p->wake_pending) {
+        p->wake_pending = false;
+        if (wq && p->wait_entry.active)
+            wait_queue_remove_entry(&p->wait_entry);
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        proc_unlock(p);
+        if (interruptible && proc_has_unblocked_signal(p))
+            return -EINTR;
+        return 0;
+    }
     /*
      * Handle early wakeup racing between wait_queue_add() and sleep state set.
      */
@@ -600,13 +649,28 @@ int proc_sleep_on_mutex_timeout(struct wait_queue *wq, void *channel,
     struct process *p = proc_current();
     if (!p)
         return -EINVAL;
-    if (interruptible && proc_has_unblocked_signal(p))
+    proc_wait_entry_prepare(p, wq);
+    if (interruptible && proc_has_unblocked_signal(p)) {
+        proc_wait_entry_abort_interrupt(p, wq);
         return -EINTR;
+    }
 
     if (wq)
         wait_queue_add(wq, p);
 
     proc_lock(p);
+    if (p->wake_pending) {
+        p->wake_pending = false;
+        if (wq && p->wait_entry.active)
+            wait_queue_remove_entry(&p->wait_entry);
+        p->wait_channel = NULL;
+        p->sleep_deadline = 0;
+        p->state = PROC_RUNNING;
+        proc_unlock(p);
+        if (interruptible && proc_has_unblocked_signal(p))
+            return -EINTR;
+        return 0;
+    }
     /*
      * Handle early wakeup racing between wait_queue_add() and sleep state set.
      */

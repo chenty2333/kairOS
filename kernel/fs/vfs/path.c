@@ -49,6 +49,8 @@ int vfs_build_relpath(struct dentry *root, struct dentry *target,
 int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
     if (!d || !out || len == 0)
         return -EINVAL;
+    if (!vfs_mount_is_live(d->mnt))
+        return -ENOENT;
     if (!d->mnt || !d->mnt->root_dentry)
         return -EINVAL;
 

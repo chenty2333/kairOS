@@ -245,6 +245,10 @@ static int channelfd_close(struct vnode *vn) {
 
     struct channelfd_ctx *ctx = (struct channelfd_ctx *)vn->fs_data;
     if (ctx && ctx->magic == CHANFD_MAGIC) {
+        int32_t pid = -1;
+        struct process *curr = proc_current();
+        if (curr)
+            pid = curr->pid;
         if (ctx->channel_obj && ctx->vnode)
             (void)kobj_poll_detach_vnode(ctx->channel_obj, ctx->vnode);
         if (ctx->channel_obj) {
@@ -253,6 +257,8 @@ static int channelfd_close(struct vnode *vn) {
                     ctx->channel_obj, KCHANNEL_ENDPOINT_REF_OWNER_CHANNEL_FD);
                 ctx->endpoint_ref_held = false;
             }
+            kchannel_endpoint_ref_audit_obj(ctx->channel_obj, "channelfd_close",
+                                            pid);
             kobj_put(ctx->channel_obj);
         }
         ctx->magic = 0;

@@ -96,7 +96,6 @@ def select_targets(files: list[str], all_if_empty: bool) -> tuple[list[str], dic
         for rule in RULES:
             if any(pat.search(path) for pat in rule.patterns):
                 matched_by_target[rule.target].append(path)
-                break
     selected = [target for target, paths in matched_by_target.items() if paths]
     if not selected and all_if_empty:
         selected = [rule.target for rule in RULES]

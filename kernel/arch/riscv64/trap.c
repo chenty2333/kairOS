@@ -271,7 +271,7 @@ void arch_backtrace(void) {
     struct process *p = proc_current();
     uint64_t stack_top = p ? (p->kstack_top + 8) : 0;
     uint64_t stack_bottom =
-        stack_top ? (stack_top - (2ULL * CONFIG_PAGE_SIZE)) : 0;
+        stack_top ? (stack_top - CONFIG_KERNEL_STACK_SIZE) : 0;
 
     uint64_t fp;
     __asm__ __volatile__("mv %0, s0" : "=r"(fp));

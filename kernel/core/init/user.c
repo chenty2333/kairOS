@@ -8,6 +8,7 @@
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
+#include <kairos/vfs.h>
 
 int run_driver_tests(void);
 int run_mm_tests(void);
@@ -39,6 +40,31 @@ enum kernel_test_module_bits {
 
 static int kernel_test_module_enabled(unsigned int bit) {
     return (CONFIG_KERNEL_TEST_MASK & bit) != 0;
+}
+
+static void kernel_test_log_ipc_hash_stats(void) {
+    struct file *f = NULL;
+    char buf[1024];
+
+    int rc = vfs_open("/sys/ipc/hash_stats", O_RDONLY, 0, &f);
+    if (rc < 0 || !f) {
+        pr_warn("kernel tests: /sys/ipc/hash_stats open failed (ret=%d)\n", rc);
+        return;
+    }
+
+    ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
+    vfs_close(f);
+    if (n < 0) {
+        pr_warn("kernel tests: /sys/ipc/hash_stats read failed (ret=%zd)\n", n);
+        return;
+    }
+    buf[n] = '\0';
+
+    pr_info("kernel tests: /sys/ipc/hash_stats begin\n");
+    pr_info("%s", buf);
+    if (n == 0 || buf[n - 1] != '\n')
+        pr_info("\n");
+    pr_info("kernel tests: /sys/ipc/hash_stats end\n");
 }
 
 static void kernel_test_drain_children(void) {
@@ -175,6 +201,7 @@ static int kernel_test_main(void *arg __attribute__((unused))) {
 
     arch_irq_enable();
     kernel_test_drain_children();
+    kernel_test_log_ipc_hash_stats();
 
     if (total_failed == 0)
         pr_info("TEST_SUMMARY: failed=0\n");

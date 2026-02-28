@@ -12,6 +12,7 @@
 #include <kairos/string.h>
 #include <kairos/syscall.h>
 #include <kairos/vfs.h>
+#include <kairos/wait.h>
 
 #if CONFIG_KERNEL_TESTS
 
@@ -593,6 +594,33 @@ static void test_n_tty_blocking_read_paths(void) {
     close_file_if_open(&master);
 }
 
+static void test_proc_sleep_interrupt_cleanup(void) {
+    struct process *p = proc_current();
+    test_check(p != NULL, "proc_sleep interrupt current proc");
+    if (!p)
+        return;
+
+    struct wait_queue wq;
+    wait_queue_init(&wq);
+
+    uint64_t sig_mask = (1ULL << (SIGUSR1 - 1));
+    uint64_t saved_pending = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
+    uint64_t saved_blocked = __atomic_load_n(&p->sig_blocked, __ATOMIC_ACQUIRE);
+
+    __atomic_store_n(&p->sig_blocked, saved_blocked & ~sig_mask, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->sig_pending, saved_pending | sig_mask, __ATOMIC_RELEASE);
+
+    wait_queue_add(&wq, p);
+    int rc = proc_sleep_on(&wq, &wq, true);
+    test_check(rc == -EINTR, "proc_sleep interrupt returns eintr");
+    test_check(!p->wait_entry.active, "proc_sleep interrupt clears wait entry");
+
+    if (p->wait_entry.active)
+        wait_queue_remove_entry(&p->wait_entry);
+    __atomic_store_n(&p->sig_pending, saved_pending, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->sig_blocked, saved_blocked, __ATOMIC_RELEASE);
+}
+
 static void test_ctty_dev_tty_lifecycle(void) {
     struct file *master = NULL;
     struct file *slave = NULL;
@@ -690,6 +718,7 @@ int run_tty_tests(void) {
     test_n_tty_canonical_echo();
     test_n_tty_isig_behavior();
     test_n_tty_blocking_read_paths();
+    test_proc_sleep_interrupt_cleanup();
     test_ctty_dev_tty_lifecycle();
     test_pty_reopen_stability();
 

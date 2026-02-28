@@ -3998,23 +3998,29 @@ static void test_procfs_pid_handle_transfers_readonly(void) {
     struct file *f = NULL;
     char buf[2048] = {0};
 
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=create_pair\n");
     int rc = kchannel_create_pair(&ch0, &ch1);
     test_check(rc == 0, "procfs xfer create channel pair");
     if (rc < 0)
         goto out;
 
     uint32_t obj_id = kobj_id(ch0);
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=alloc_handle\n");
     h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=alloc_handle_done h=%d\n",
+            h);
     test_check(h >= 0, "procfs xfer alloc handle");
     if (h < 0)
         goto out;
     handle_live = true;
 
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=take\n");
     rc = khandle_take(self, h, KRIGHT_TRANSFER, &taken_obj, &taken_rights);
     test_check(rc == 0 && taken_obj != NULL, "procfs xfer take");
     if (rc < 0 || !taken_obj)
         goto out;
 
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=restore\n");
     rc = khandle_restore(self, h, taken_obj, taken_rights);
     test_check(rc == 0, "procfs xfer restore");
     if (rc == 0)
@@ -4022,9 +4028,11 @@ static void test_procfs_pid_handle_transfers_readonly(void) {
     else
         goto out;
 
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=open1\n");
     rc = vfs_open("/proc/self/handle_transfers", O_RDONLY, 0, &f);
     test_check(rc == 0, "procfs xfer open");
     if (rc == 0) {
+        pr_info("vfs_ipc_tests: procfs_xfer_readonly step=read1\n");
         ssize_t n = vfs_read(f, buf, sizeof(buf) - 1);
         test_check(n > 0, "procfs xfer read");
         if (n > 0) {
@@ -4043,11 +4051,14 @@ static void test_procfs_pid_handle_transfers_readonly(void) {
                        "procfs xfer includes event");
         }
     }
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=close1\n");
     close_file_if_open(&f);
 
+    pr_info("vfs_ipc_tests: procfs_xfer_readonly step=open2\n");
     rc = vfs_open("/proc/self/handle_transfers", O_RDONLY, 0, &f);
     test_check(rc == 0, "procfs xfer reopen");
     if (rc == 0) {
+        pr_info("vfs_ipc_tests: procfs_xfer_readonly step=write2\n");
         ssize_t wr = vfs_write(f, "x", 1);
         test_check(write_readonly_rejected(wr), "procfs xfer readonly");
     }
@@ -6020,7 +6031,6 @@ int run_vfs_ipc_tests(void) {
     test_signalfd_syscall_functional();
     test_signalfd_syscall_rebind();
     test_procfs_pid_control_write_semantics();
-    test_signal_stop_cont_kill_timing();
     test_pidfd_syscall_semantics();
     test_pidfd_syscall_functional();
     test_waitid_pidfd_functional();
@@ -6030,12 +6040,30 @@ int run_vfs_ipc_tests(void) {
     test_inotify_mask_update_functional();
     test_sysfs_ipc_visibility();
     test_sysfs_ipc_port_drop_stats();
+    pr_info("vfs_ipc_tests: stage=procfs_pid_handle_transfers_readonly enter\n");
     test_procfs_pid_handle_transfers_readonly();
+    pr_info("vfs_ipc_tests: stage=procfs_pid_handle_transfers_readonly done\n");
+    pr_info("vfs_ipc_tests: stage=procfs_pid_handle_transfers_large enter\n");
     test_procfs_pid_handle_transfers_large_not_truncated();
+    pr_info("vfs_ipc_tests: stage=procfs_pid_handle_transfers_large done\n");
+    pr_info("vfs_ipc_tests: stage=procfs_pid_handle_transfers_v2_cursor enter\n");
     test_procfs_pid_handle_transfers_v2_cursor();
+    pr_info("vfs_ipc_tests: stage=procfs_pid_handle_transfers_v2_cursor done\n");
+    pr_info("vfs_ipc_tests: stage=procfs_ipc_object_transfers_v2_cursor enter\n");
     test_procfs_ipc_object_transfers_v2_cursor();
+    pr_info("vfs_ipc_tests: stage=procfs_ipc_object_transfers_v2_cursor done\n");
+    pr_info("vfs_ipc_tests: stage=procfs_transfers_v2_open_binds_private_data enter\n");
     test_procfs_transfers_v2_open_binds_private_data();
+    pr_info("vfs_ipc_tests: stage=procfs_transfers_v2_open_binds_private_data done\n");
+    pr_info("vfs_ipc_tests: stage=procfs_transfers_v2_token_flood enter\n");
     test_procfs_transfers_v2_token_flood();
+    pr_info("vfs_ipc_tests: stage=procfs_transfers_v2_token_flood done\n");
+    /*
+     * Keep this kill/stop timing probe at tail. It exercises aggressive signal
+     * paths and may leave transient scheduler/signal side effects that should
+     * not contaminate later VFS/IPC assertions.
+     */
+    test_signal_stop_cont_kill_timing();
 
     if (tests_failed == 0)
         pr_info("vfs/ipc tests: all passed\n");

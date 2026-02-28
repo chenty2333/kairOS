@@ -19,7 +19,7 @@ BOOT_FS="$BUILD_DIR/bootfs"
 LIMINE_DIR="$ROOT_DIR/third_party/limine"
 INITRAMFS="$BUILD_DIR/initramfs.cpio"
 LIMINE_CFG="$ROOT_DIR/limine.cfg"
-UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-dir}" # dir|img|both
+UEFI_BOOT_MODE="${UEFI_BOOT_MODE:-img}" # dir|img|both
 QEMU_UEFI_BOOT_MODE="${QEMU_UEFI_BOOT_MODE:-}" # optional dir|img
 QEMU_MEM="${QEMU_MEM:-384M}"
 

@@ -201,6 +201,16 @@ static ssize_t evdev_fread(struct file *file, void *buf, size_t len) {
             if (nonblock)
                 return -EAGAIN;
 
+            bool irq_state = arch_irq_save();
+            spin_lock(&client->lock);
+            bool need_wait = evdev_client_available(client) == 0;
+            if (need_wait)
+                wait_queue_add(&client->wait, proc_current());
+            spin_unlock(&client->lock);
+            arch_irq_restore(irq_state);
+            if (!need_wait)
+                continue;
+
             int ret = proc_sleep_on(&client->wait, &client->wait, true);
             if (ret < 0)
                 return ret;

@@ -135,6 +135,7 @@ struct vm_area *mm_find_vma(struct mm_struct *mm, vaddr_t addr);
 void mm_unmap_range(paddr_t pgdir, vaddr_t start, vaddr_t end);
 void mm_unmap_range_noflush(paddr_t pgdir, vaddr_t start, vaddr_t end);
 int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags);
+int mm_handle_fault_nolog(struct mm_struct *mm, vaddr_t addr, uint32_t flags);
 int mm_add_vma(struct mm_struct *mm, vaddr_t start, vaddr_t end,
                uint32_t flags, struct vnode *vn, off_t offset);
 int mm_add_vma_file(struct mm_struct *mm, vaddr_t start, vaddr_t end,

@@ -4,6 +4,7 @@
 
 #include <kairos/list.h>
 #include <kairos/handle_bridge.h>
+#include <kairos/hashtable.h>
 #include <kairos/pidfd.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
@@ -32,9 +33,7 @@ struct pidfd_ctx {
 
 static LIST_HEAD(pidfd_instances);
 #define PIDFD_PID_HASH_BITS 8U
-#define PIDFD_PID_HASH_SIZE (1U << PIDFD_PID_HASH_BITS)
-static struct list_head pidfd_pid_hash[PIDFD_PID_HASH_SIZE];
-static bool pidfd_pid_hash_ready;
+KHASH_DECLARE(pidfd_pid_hash, PIDFD_PID_HASH_BITS);
 static spinlock_t pidfd_instances_lock = SPINLOCK_INIT;
 static spinlock_t pidfd_init_lock = SPINLOCK_INIT;
 static bool pidfd_ready;
@@ -55,30 +54,20 @@ static inline int syspidfd_abi_int32(uint64_t v) {
     return (int32_t)(uint32_t)v;
 }
 
-static size_t pidfd_pid_hash_bucket(pid_t pid) {
-    return (size_t)(((uint32_t)pid) & (PIDFD_PID_HASH_SIZE - 1U));
-}
-
 static void pidfd_pid_hash_init(void) {
-    if (pidfd_pid_hash_ready)
-        return;
-    for (size_t i = 0; i < PIDFD_PID_HASH_SIZE; i++)
-        INIT_LIST_HEAD(&pidfd_pid_hash[i]);
-    pidfd_pid_hash_ready = true;
+    KHASH_INIT(pidfd_pid_hash);
 }
 
 static void pidfd_pid_hash_insert_locked(struct pidfd_ctx *ctx) {
-    if (!ctx || !pidfd_pid_hash_ready)
+    if (!ctx)
         return;
-    size_t idx = pidfd_pid_hash_bucket(ctx->pid);
-    list_add_tail(&ctx->pid_hash_node, &pidfd_pid_hash[idx]);
+    khash_add(pidfd_pid_hash, &ctx->pid_hash_node, (uint32_t)ctx->pid);
 }
 
 static void pidfd_pid_hash_remove_locked(struct pidfd_ctx *ctx) {
     if (!ctx || list_empty(&ctx->pid_hash_node))
         return;
-    list_del(&ctx->pid_hash_node);
-    INIT_LIST_HEAD(&ctx->pid_hash_node);
+    khash_del(&ctx->pid_hash_node);
 }
 
 static void pidfd_on_process_exit(struct process *p) {
@@ -88,8 +77,7 @@ static void pidfd_on_process_exit(struct process *p) {
     bool irq;
     spin_lock_irqsave(&pidfd_instances_lock, &irq);
     struct pidfd_ctx *ctx;
-    size_t idx = pidfd_pid_hash_bucket(p->pid);
-    list_for_each_entry(ctx, &pidfd_pid_hash[idx], pid_hash_node) {
+    khash_for_each_possible_u32(pidfd_pid_hash, ctx, pid_hash_node, p->pid) {
         if (ctx->pid != p->pid || ctx->start_time != p->start_time)
             continue;
 

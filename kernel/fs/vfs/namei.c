@@ -197,7 +197,7 @@ static int namei_walk_locked(const struct path *base, const char *path,
                 dentry_put(cur);
                 return -ENOMEM;
             }
-            d->mnt = mnt;
+            dentry_set_mnt(d, mnt);
             if (!mnt->ops || !mnt->ops->lookup) {
                 dentry_put(cur);
                 dentry_put(d);
@@ -223,15 +223,25 @@ static int namei_walk_locked(const struct path *base, const char *path,
             dentry_add(d, vn);
             vnode_put(vn);
         } else if (d->flags & DENTRY_NEGATIVE) {
-            if (last && (flags & NAMEI_CREATE)) {
+            struct vnode *vn = NULL;
+            if (mnt->ops && mnt->ops->lookup)
+                vn = mnt->ops->lookup(cur->vnode, comp);
+            if (vn) {
+                rwlock_write_lock(&vn->lock);
+                vnode_set_parent(vn, cur->vnode, comp);
+                rwlock_write_unlock(&vn->lock);
+                dentry_add(d, vn);
+                vnode_put(vn);
+            } else if (last && (flags & NAMEI_CREATE)) {
                 dentry_put(cur);
                 out->dentry = d;
                 out->mnt = mnt;
                 return 0;
+            } else {
+                dentry_put(cur);
+                dentry_put(d);
+                return -ENOENT;
             }
-            dentry_put(cur);
-            dentry_put(d);
-            return -ENOENT;
         } else if ((flags & NAMEI_EXCL) && last) {
             dentry_put(cur);
             dentry_put(d);

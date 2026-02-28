@@ -260,6 +260,7 @@ struct mount *vfs_root_mount(void);
 struct dentry *vfs_root_dentry(void);
 void vfs_mount_hold(struct mount *mnt);
 void vfs_mount_put(struct mount *mnt);
+bool vfs_mount_is_live(const struct mount *mnt);
 void vfs_mount_global_lock(void);
 void vfs_mount_global_unlock(void);
 struct mount_ns *vfs_mount_ns_get(void);

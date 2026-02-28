@@ -671,11 +671,14 @@ int64_t sys_rt_sigtimedwait(uint64_t mask_ptr, uint64_t info_ptr,
         if (has_timeout && arch_timer_get_ticks() >= deadline)
             return -EAGAIN;
 
-        struct poll_sleep sleep = {0};
-        INIT_LIST_HEAD(&sleep.node);
-        poll_sleep_arm(&sleep, p, has_timeout ? deadline : 0);
-        proc_sleep_on(NULL, NULL, true);
-        poll_sleep_cancel(&sleep);
+        int sleep_rc = has_timeout
+                           ? proc_sleep_on_mutex_timeout(NULL, NULL, NULL, true,
+                                                         deadline)
+                           : proc_sleep_on(NULL, NULL, true);
+        if (sleep_rc == -EINTR)
+            return -EINTR;
+        if (sleep_rc < 0 && sleep_rc != -ETIMEDOUT)
+            return sleep_rc;
         if (has_timeout && arch_timer_get_ticks() >= deadline)
             return -EAGAIN;
     }

@@ -7,6 +7,7 @@
  */
 
 #include <kairos/atomic.h>
+#include <kairos/hashtable.h>
 #include <kairos/handle.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
@@ -151,8 +152,7 @@ static void unix_bind_table_init(void) {
         return;
     }
     mutex_init(&unix_bind_table.lock, "unix_bind");
-    for (size_t i = 0; i < UNIX_BIND_TABLE_SIZE; i++)
-        INIT_LIST_HEAD(&unix_bind_table.buckets[i]);
+    khash_init(unix_bind_table.buckets, UNIX_BIND_TABLE_SIZE);
     unix_bind_table.entries = 0;
     unix_bind_table.init = true;
 }
@@ -165,15 +165,15 @@ static uint32_t unix_bind_hash_path(const char *path) {
         h ^= (uint32_t)(*p);
         h *= 16777619u;
     }
-    return h & (UNIX_BIND_TABLE_SIZE - 1U);
+    return h;
 }
 
 static struct unix_sock *unix_find_bound_locked(const char *path) {
     if (!path || !path[0])
         return NULL;
-    uint32_t idx = unix_bind_hash_path(path);
+    uint32_t key = unix_bind_hash_path(path);
     struct unix_bind_entry *ent;
-    list_for_each_entry(ent, &unix_bind_table.buckets[idx], node) {
+    khash_for_each_possible_u32(unix_bind_table.buckets, ent, node, key) {
         if (ent->us && strcmp(ent->us->path, path) == 0)
             return ent->us;
     }
@@ -196,8 +196,7 @@ static int unix_add_bound(struct unix_sock *us) {
     if (!ent)
         return -ENOMEM;
     ent->us = us;
-    uint32_t idx = unix_bind_hash_path(us->path);
-    list_add_tail(&ent->node, &unix_bind_table.buckets[idx]);
+    khash_add(unix_bind_table.buckets, &ent->node, unix_bind_hash_path(us->path));
     unix_bind_table.entries++;
     unix_sock_get(us);
     return 0;
@@ -207,12 +206,13 @@ static void unix_remove_bound(struct unix_sock *us) {
     if (!us)
         return;
 
-    uint32_t idx = unix_bind_hash_path(us->path);
+    uint32_t key = unix_bind_hash_path(us->path);
     struct unix_bind_entry *ent = NULL;
     struct unix_bind_entry *tmp = NULL;
-    list_for_each_entry_safe(ent, tmp, &unix_bind_table.buckets[idx], node) {
+    list_for_each_entry_safe(ent, tmp, KHASH_HEAD_U32(unix_bind_table.buckets, key),
+                             node) {
         if (ent->us == us) {
-            list_del(&ent->node);
+            khash_del(&ent->node);
             if (unix_bind_table.entries > 0)
                 unix_bind_table.entries--;
             unix_sock_put(us);
@@ -225,7 +225,7 @@ static void unix_remove_bound(struct unix_sock *us) {
         list_for_each_entry_safe(ent, tmp, &unix_bind_table.buckets[i], node) {
             if (ent->us != us)
                 continue;
-            list_del(&ent->node);
+            khash_del(&ent->node);
             if (unix_bind_table.entries > 0)
                 unix_bind_table.entries--;
             unix_sock_put(us);
@@ -313,8 +313,9 @@ static ssize_t unix_buf_read(struct unix_buf *b, struct mutex *lock,
                 mutex_unlock(lock);
                 return total ? (ssize_t)total : -EAGAIN;
             }
-            int rc =
-                poll_wait_source_block(&b->rd_src, 0, &b->rd_src, lock);
+            int rc = poll_wait_source_block_seq(
+                &b->rd_src, 0, &b->rd_src, lock,
+                poll_wait_source_seq_snapshot(&b->rd_src));
             if (rc == -EINTR) {
                 mutex_unlock(lock);
                 return total ? (ssize_t)total : -EINTR;
@@ -379,8 +380,9 @@ static ssize_t unix_buf_write_locked(struct unix_buf *b, struct mutex *lock,
             if (nonblock) {
                 return total ? (ssize_t)total : -EAGAIN;
             }
-            int rc =
-                poll_wait_source_block(&b->wr_src, 0, &b->wr_src, lock);
+            int rc = poll_wait_source_block_seq(
+                &b->wr_src, 0, &b->wr_src, lock,
+                poll_wait_source_seq_snapshot(&b->wr_src));
             if (rc == -EINTR) {
                 return total ? (ssize_t)total : -EINTR;
             }
@@ -639,8 +641,9 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
             return -EALREADY;
         }
         while (!us->peer && us->connect_err == 0 && !us->closing) {
-            int rc = poll_wait_source_block(&us->buf.rd_src, 0, &us->buf.rd_src,
-                                            &us->lock);
+            int rc = poll_wait_source_block_seq(
+                &us->buf.rd_src, 0, &us->buf.rd_src, &us->lock,
+                poll_wait_source_seq_snapshot(&us->buf.rd_src));
             if (rc == -EINTR) {
                 mutex_unlock(&us->lock);
                 return -EINTR;
@@ -727,8 +730,9 @@ static int unix_stream_connect(struct socket *sock, const struct sockaddr *addr,
             ret = us->connect_err;
             break;
         }
-        int rc =
-            poll_wait_source_block(&us->buf.rd_src, 0, &us->buf.rd_src, &us->lock);
+        int rc = poll_wait_source_block_seq(
+            &us->buf.rd_src, 0, &us->buf.rd_src, &us->lock,
+            poll_wait_source_seq_snapshot(&us->buf.rd_src));
         if (rc == -EINTR) {
             mutex_unlock(&us->lock);
             unix_sock_put(listener);
@@ -760,8 +764,9 @@ static int unix_stream_accept(struct socket *sock, struct socket **newsock,
                 mutex_unlock(&us->lock);
                 return -EAGAIN;
             }
-            int rc = poll_wait_source_block(&us->accept_src, 0, &us->accept_src,
-                                            &us->lock);
+            int rc = poll_wait_source_block_seq(
+                &us->accept_src, 0, &us->accept_src, &us->lock,
+                poll_wait_source_seq_snapshot(&us->accept_src));
             if (rc == -EINTR) {
                 mutex_unlock(&us->lock);
                 return -EINTR;
@@ -1129,8 +1134,9 @@ static ssize_t unix_dgram_recvmsg(struct socket *sock, void *buf,
             mutex_unlock(&us->lock);
             return -EAGAIN;
         }
-        int rc =
-            poll_wait_source_block(&us->dgram_src, 0, &us->dgram_src, &us->lock);
+        int rc = poll_wait_source_block_seq(
+            &us->dgram_src, 0, &us->dgram_src, &us->lock,
+            poll_wait_source_seq_snapshot(&us->dgram_src));
         if (rc == -EINTR) {
             mutex_unlock(&us->lock);
             return -EINTR;

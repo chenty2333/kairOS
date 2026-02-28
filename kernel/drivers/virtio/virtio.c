@@ -17,18 +17,32 @@ static int virtio_bus_match(struct device *dev, struct driver *drv) {
  * Wrapper to translate generic device probe to virtio-specific probe 
  */
 static int virtio_drv_probe(struct device *dev) {
+    if (!dev || !dev->driver)
+        return -EINVAL;
     struct virtio_device *vdev = (struct virtio_device *)dev;
     struct virtio_driver *vdrv = container_of(dev->driver, struct virtio_driver, drv);
-    
-    return vdrv->probe(vdev);
+
+    int ret = vdrv->probe(vdev);
+    if (ret == 0)
+        vdev->bound_driver = vdrv;
+    else
+        vdev->bound_driver = NULL;
+    return ret;
 }
 
 static void virtio_drv_remove(struct device *dev) {
+    if (!dev)
+        return;
     struct virtio_device *vdev = (struct virtio_device *)dev;
-    struct virtio_driver *vdrv = container_of(dev->driver, struct virtio_driver, drv);
+    struct virtio_driver *vdrv = vdev->bound_driver;
+    if (!vdrv && dev->driver)
+        vdrv = container_of(dev->driver, struct virtio_driver, drv);
+    if (!vdrv)
+        return;
 
     if (vdrv->remove)
         vdrv->remove(vdev);
+    vdev->bound_driver = NULL;
 }
 
 struct bus_type virtio_bus_type = {
@@ -45,6 +59,7 @@ int virtio_register_driver(struct virtio_driver *vdrv) {
 
 int virtio_device_register(struct virtio_device *vdev) {
     vdev->dev.bus = &virtio_bus_type;
+    vdev->bound_driver = NULL;
     INIT_LIST_HEAD(&vdev->vqs);
     return device_register(&vdev->dev);
 }

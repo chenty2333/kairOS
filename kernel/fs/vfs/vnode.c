@@ -58,6 +58,7 @@ void vnode_kobj_init(struct vnode *vn) {
                 uint32_t refs = atomic_read(&vn->refcount);
                 for (uint32_t i = 1; i < refs; i++)
                     kobj_get(vn->kobj);
+                kobj_track_register(vn->kobj);
                 atomic_set(&vn->kobj_state, VNODE_KOBJ_STATE_READY);
                 return;
             }

@@ -18,11 +18,13 @@
 int run_driver_tests(void);
 int run_mm_tests(void);
 int run_syscall_trap_tests(void);
+int run_syscall_trap_tests_ipc_cap(void);
 int run_vfs_ipc_tests(void);
 int run_socket_tests(void);
 int run_device_virtio_tests(void);
 int run_tty_tests(void);
 extern int run_sched_stress_tests(void);
+static int run_syscall_trap_tests_ipc_cap_deep_soak(void);
 
 struct soak_suite_entry {
     const char *name;
@@ -38,11 +40,26 @@ static const struct soak_suite_entry soak_suites[] = {
     {"socket", run_socket_tests, 1U << 4},
     {"device_virtio", run_device_virtio_tests, 1U << 5},
     {"tty", run_tty_tests, 1U << 6},
+    {"syscall_trap_ipc_cap", run_syscall_trap_tests_ipc_cap, 1U << 8},
+    {"syscall_trap_ipc_cap_deep", run_syscall_trap_tests_ipc_cap_deep_soak,
+     1U << 9},
     {"sched", run_sched_stress_tests, 1U << 7},
 };
 
 static int tests_failed;
 static uint64_t soak_prng_state = 0x6a09e667f3bcc909ULL;
+#define SOAK_IPC_CAP_NOISE_MAX 16U
+
+struct ipc_cap_noise_ctx {
+    volatile int stop;
+    uint32_t yield_span;
+};
+
+struct ipc_cap_noise_state {
+    struct process *workers[SOAK_IPC_CAP_NOISE_MAX];
+    struct ipc_cap_noise_ctx ctx[SOAK_IPC_CAP_NOISE_MAX];
+    size_t count;
+};
 
 static uint32_t soak_rand32(void) {
     uint64_t x = soak_prng_state;
@@ -181,6 +198,131 @@ static int soak_fault_probe_uaccess(uint32_t iter) {
         }
     }
     fault_inject_scope_exit();
+    return 0;
+}
+
+static bool soak_wait_pid_bounded(pid_t pid, uint64_t timeout_ns) {
+    int status = 0;
+    uint64_t timeout_ticks = arch_timer_ns_to_ticks(timeout_ns);
+    if (timeout_ticks == 0)
+        timeout_ticks = 1;
+    uint64_t start = arch_timer_ticks();
+
+    while ((arch_timer_ticks() - start) < timeout_ticks) {
+        pid_t got = proc_wait(pid, &status, WNOHANG);
+        if (got == pid)
+            return true;
+        if (got < 0)
+            return false;
+        proc_yield();
+    }
+    return proc_wait(pid, &status, WNOHANG) == pid;
+}
+
+static int ipc_cap_noise_worker(void *arg) {
+    struct ipc_cap_noise_ctx *ctx = (struct ipc_cap_noise_ctx *)arg;
+    if (!ctx)
+        proc_exit(1);
+
+    uint32_t span = ctx->yield_span ? ctx->yield_span : 1U;
+    while (__atomic_load_n(&ctx->stop, __ATOMIC_ACQUIRE) == 0) {
+        for (uint32_t i = 0; i < span; i++)
+            proc_yield();
+    }
+    proc_exit(0);
+}
+
+static int ipc_cap_noise_start(struct ipc_cap_noise_state *state, size_t count,
+                               uint32_t yield_max) {
+    if (!state)
+        return -EINVAL;
+    if (count > SOAK_IPC_CAP_NOISE_MAX)
+        count = SOAK_IPC_CAP_NOISE_MAX;
+    if (yield_max == 0)
+        yield_max = 1;
+
+    for (size_t i = 0; i < count; i++) {
+        state->ctx[i].stop = 0;
+        state->ctx[i].yield_span = 1U + (soak_rand32() % yield_max);
+        state->workers[i] =
+            kthread_create_joinable(ipc_cap_noise_worker, &state->ctx[i], "soaknj");
+        if (!state->workers[i])
+            return -ENOMEM;
+        sched_enqueue(state->workers[i]);
+        state->count++;
+    }
+    return 0;
+}
+
+static int ipc_cap_noise_stop(struct ipc_cap_noise_state *state) {
+    if (!state)
+        return -EINVAL;
+
+    uint64_t timeout_ns =
+        (uint64_t)CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_STOP_TIMEOUT_SEC *
+        1000000000ULL;
+    if (timeout_ns == 0)
+        timeout_ns = 1000000000ULL;
+
+    int failures = 0;
+    for (size_t i = 0; i < state->count; i++)
+        __atomic_store_n(&state->ctx[i].stop, 1, __ATOMIC_RELEASE);
+
+    for (size_t i = 0; i < state->count; i++) {
+        if (!state->workers[i])
+            continue;
+        pid_t pid = state->workers[i]->pid;
+        if (!soak_wait_pid_bounded(pid, timeout_ns)) {
+            failures++;
+            signal_send(pid, SIGKILL);
+            (void)proc_wait(pid, NULL, 0);
+        }
+    }
+    state->count = 0;
+    return failures == 0 ? 0 : -ETIMEDOUT;
+}
+
+static int run_syscall_trap_tests_ipc_cap_deep_soak(void) {
+    uint32_t rounds = CONFIG_KERNEL_SOAK_PR_IPC_CAP_DEEP_ROUNDS;
+    uint32_t noise_max = CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_THREADS;
+    uint32_t noise_yield_max = CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_YIELD_MAX;
+    if (rounds == 0)
+        rounds = 1;
+    if (noise_max > SOAK_IPC_CAP_NOISE_MAX)
+        noise_max = SOAK_IPC_CAP_NOISE_MAX;
+
+    pr_info("soak_pr: ipc_cap_deep rounds=%u noise_max=%u yield_max=%u\n", rounds,
+            noise_max, noise_yield_max);
+
+    for (uint32_t round = 0; round < rounds; round++) {
+        struct ipc_cap_noise_state noise = {0};
+        size_t noise_count = 0;
+        if (noise_max != 0)
+            noise_count = 1U + (soak_rand32() % noise_max);
+
+        int rc = ipc_cap_noise_start(&noise, noise_count, noise_yield_max);
+        if (rc < 0) {
+            (void)ipc_cap_noise_stop(&noise);
+            pr_err("soak_pr: ipc_cap_deep round=%u noise_start failed (%d)\n",
+                   round, rc);
+            return 1;
+        }
+
+        uint32_t jitter = 1U + (soak_rand32() & 0x7U);
+        for (uint32_t i = 0; i < jitter; i++)
+            proc_yield();
+
+        rc = run_syscall_trap_tests_ipc_cap();
+        int stop_rc = ipc_cap_noise_stop(&noise);
+        if (stop_rc < 0) {
+            pr_err("soak_pr: ipc_cap_deep round=%u noise_stop timeout\n", round);
+            return 1;
+        }
+        if (rc > 0)
+            return rc;
+        pr_info("soak_pr: ipc_cap_deep round=%u/%u done\n", round + 1, rounds);
+    }
+
     return 0;
 }
 

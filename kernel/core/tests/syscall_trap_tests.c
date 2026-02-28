@@ -10,6 +10,7 @@
 #include <kairos/ioctl.h>
 #include <kairos/mm.h>
 #include <kairos/poll.h>
+#include <kairos/pollwait.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -81,6 +82,12 @@ struct futex_delay_waker_ctx {
 #define KH_CLOSE_RACE_TIMEOUT_NS (5ULL * TEST_NS_PER_SEC)
 #define KH_FD_ONLY_ROUNDS 96U
 #define KH_EPOLL_ET_ROUNDS 96U
+#define KH_CACHE_EXIT_WORKERS 6U
+#define KH_CACHE_EXIT_ROUNDS 24U
+#define KH_CACHE_HOT_GET_ROUNDS 256U
+#define KH_CACHE_EXIT_TIMEOUT_NS (8ULL * TEST_NS_PER_SEC)
+#define KH_CAP_MATRIX_ROUNDS 48U
+#define KH_CAP_MATRIX_TIMEOUT_NS (6ULL * TEST_NS_PER_SEC)
 
 struct kh_stress_msg {
     uint32_t producer_id;
@@ -139,6 +146,50 @@ struct kh_close_send_ctx {
     int32_t h_send;
     volatile int started;
     int rc;
+};
+
+struct kh_cache_exit_worker_ctx {
+    int32_t h_probe;
+    uint32_t rounds;
+    volatile int started;
+    volatile int done;
+    int rc;
+};
+
+enum kh_cap_matrix_action {
+    KH_CAP_MATRIX_ACTION_RESTORE = 1,
+    KH_CAP_MATRIX_ACTION_INSTALL = 2,
+};
+
+enum kh_cap_reserve_action {
+    KH_CAP_RESERVE_ACTION_ONLY = 1,
+    KH_CAP_RESERVE_ACTION_COMMIT = 2,
+    KH_CAP_RESERVE_ACTION_ABORT = 3,
+};
+
+struct kh_cap_matrix_worker_ctx {
+    struct process *target;
+    int32_t source_handle;
+    volatile int started;
+    volatile int proceed;
+    uint32_t action;
+    int rc_take;
+    int rc_action;
+};
+
+struct kh_cap_reserve_worker_ctx {
+    struct process *target;
+    int32_t source_handle;
+    bool reserve_before_barrier;
+    uint32_t action;
+    volatile int started;
+    volatile int proceed;
+    int rc_reserve;
+    int rc_commit;
+    int rc_abort;
+    int rc_install;
+    uint64_t token;
+    uint32_t slot_generation;
 };
 
 static int user_map_begin(struct user_map_ctx *ctx, size_t len) {
@@ -219,11 +270,13 @@ static int futex_waitv_waker_worker(void *arg) {
 
     ctx->started = 1;
     ctx->wake_ret = 0;
-    uint64_t wake_deadline = arch_timer_get_ticks() +
-                             arch_timer_ns_to_ticks(2ULL * TEST_NS_PER_SEC);
-    if (wake_deadline == 0)
-        wake_deadline = 1;
-    while (arch_timer_get_ticks() < wake_deadline) {
+    uint64_t now_ns = time_now_ns();
+    uint64_t wake_deadline = now_ns;
+    if (UINT64_MAX - now_ns < 2ULL * TEST_NS_PER_SEC)
+        wake_deadline = UINT64_MAX;
+    else
+        wake_deadline = now_ns + 2ULL * TEST_NS_PER_SEC;
+    while (time_now_ns() < wake_deadline) {
         int nr = ctx->wake_nr > 0 ? ctx->wake_nr : 1;
         int64_t ret =
             sys_futex((uint64_t)ctx->uaddr, FUTEX_WAKE, (uint64_t)nr, 0, 0, 0);
@@ -243,11 +296,13 @@ static int futex_delay_waker_worker(void *arg) {
 
     ctx->started = 1;
     ctx->wake_ret = 0;
-    uint64_t delay_ticks = arch_timer_ns_to_ticks(ctx->delay_ns);
-    if (!delay_ticks)
-        delay_ticks = 1;
-    uint64_t deadline = arch_timer_get_ticks() + delay_ticks;
-    while (arch_timer_get_ticks() < deadline)
+    uint64_t now_ns = time_now_ns();
+    uint64_t deadline_ns = now_ns;
+    if (UINT64_MAX - now_ns < ctx->delay_ns)
+        deadline_ns = UINT64_MAX;
+    else
+        deadline_ns = now_ns + ctx->delay_ns;
+    while (time_now_ns() < deadline_ns)
         proc_yield();
 
     int64_t ret =
@@ -306,6 +361,19 @@ static bool kh_wait_flag_bounded(volatile int *flag, uint64_t timeout_ns) {
     return __atomic_load_n(flag, __ATOMIC_ACQUIRE) != 0;
 }
 
+static bool kh_wait_kobj_refcount_bounded(struct kobj *obj, uint32_t target,
+                                          uint64_t timeout_ns) {
+    if (!obj)
+        return false;
+    uint64_t deadline = time_now_ns() + timeout_ns;
+    while (time_now_ns() < deadline) {
+        if ((uint32_t)atomic_read(&obj->refcount) == target)
+            return true;
+        proc_yield();
+    }
+    return (uint32_t)atomic_read(&obj->refcount) == target;
+}
+
 static int kh_close_recv_worker(void *arg) {
     struct kh_close_recv_ctx *ctx = (struct kh_close_recv_ctx *)arg;
     struct process *p = proc_current();
@@ -338,6 +406,174 @@ static int kh_close_send_worker(void *arg) {
     uint8_t byte = 'S';
     ctx->rc = kchannel_send(send_obj, &byte, sizeof(byte), NULL, 0, 0);
     kobj_put(send_obj);
+    proc_exit(0);
+}
+
+static int kh_cache_exit_worker(void *arg) {
+    struct kh_cache_exit_worker_ctx *ctx = (struct kh_cache_exit_worker_ctx *)arg;
+    struct process *p = proc_current();
+    if (!ctx || !p)
+        proc_exit(1);
+
+    __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+    ctx->rc = 0;
+
+    for (uint32_t i = 0; i < ctx->rounds; i++) {
+        struct kobj *obj = NULL;
+        int rc = khandle_get_for_access(p, ctx->h_probe, KOBJ_ACCESS_READ, &obj, NULL);
+        if (rc < 0 || !obj) {
+            ctx->rc = (rc < 0) ? rc : -EIO;
+            break;
+        }
+        kobj_put(obj);
+        if ((i & 0x1fU) == 0)
+            proc_yield();
+    }
+
+    __atomic_store_n(&ctx->done, 1, __ATOMIC_RELEASE);
+    proc_exit(ctx->rc == 0 ? 0 : 1);
+}
+
+static bool kh_cap_matrix_bind_rejected(int rc) {
+    return rc == -EACCES || rc == -ENOENT;
+}
+
+static bool kh_cap_matrix_reserve_rejected(int rc) {
+    return rc == -EBADF || rc == -EACCES || rc == -ENOENT;
+}
+
+static int kh_cap_matrix_worker(void *arg) {
+    struct kh_cap_matrix_worker_ctx *ctx = (struct kh_cap_matrix_worker_ctx *)arg;
+    if (!ctx || !ctx->target)
+        proc_exit(1);
+
+    struct kobj *moved_obj = NULL;
+    uint32_t moved_rights = 0;
+    uint64_t moved_cap_id = KHANDLE_INVALID_CAP_ID;
+    ctx->rc_take = khandle_take_for_access_with_cap(
+        ctx->target, ctx->source_handle, KOBJ_ACCESS_TRANSFER, &moved_obj,
+        &moved_rights, &moved_cap_id);
+    __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+    if (ctx->rc_take < 0 || !moved_obj ||
+        moved_cap_id == KHANDLE_INVALID_CAP_ID) {
+        if (moved_obj)
+            khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+        proc_exit(1);
+    }
+
+    uint64_t deadline = time_now_ns() + KH_CAP_MATRIX_TIMEOUT_NS;
+    while (__atomic_load_n(&ctx->proceed, __ATOMIC_ACQUIRE) == 0 &&
+           time_now_ns() < deadline) {
+        proc_yield();
+    }
+
+    ctx->rc_action = -EINVAL;
+    if (ctx->action == KH_CAP_MATRIX_ACTION_RESTORE) {
+        ctx->rc_action = khandle_restore_cap(
+            ctx->target, ctx->source_handle, moved_obj, moved_rights,
+            moved_cap_id);
+        if (ctx->rc_action == 0) {
+            (void)khandle_close(ctx->target, ctx->source_handle);
+        } else {
+            khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+        }
+    } else if (ctx->action == KH_CAP_MATRIX_ACTION_INSTALL) {
+        int32_t installed = -1;
+        ctx->rc_action = khandle_install_transferred_cap(
+            ctx->target, moved_obj, moved_rights, moved_cap_id, &installed);
+        if (ctx->rc_action == 0) {
+            (void)khandle_close(ctx->target, installed);
+        } else {
+            khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+        }
+    } else {
+        khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+    }
+
+    proc_exit(0);
+}
+
+static int kh_cap_reserve_matrix_worker(void *arg) {
+    struct kh_cap_reserve_worker_ctx *ctx =
+        (struct kh_cap_reserve_worker_ctx *)arg;
+    if (!ctx || !ctx->target)
+        proc_exit(1);
+
+    struct kobj *moved_obj = NULL;
+    uint32_t moved_rights = 0;
+    uint64_t moved_cap_id = KHANDLE_INVALID_CAP_ID;
+    uint64_t token = KHANDLE_INVALID_CAP_ID;
+    uint32_t slot_generation = 0;
+    ctx->rc_reserve = -EINVAL;
+    ctx->rc_commit = -EINVAL;
+    ctx->rc_abort = -EINVAL;
+    ctx->rc_install = -EINVAL;
+    ctx->token = KHANDLE_INVALID_CAP_ID;
+    ctx->slot_generation = 0;
+
+    if (!ctx->reserve_before_barrier) {
+        __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+        uint64_t deadline = time_now_ns() + KH_CAP_MATRIX_TIMEOUT_NS;
+        while (__atomic_load_n(&ctx->proceed, __ATOMIC_ACQUIRE) == 0 &&
+               time_now_ns() < deadline) {
+            proc_yield();
+        }
+    }
+
+    ctx->rc_reserve = khandle_reserve_transfer(
+        ctx->target, ctx->source_handle, &moved_obj, &moved_rights, &moved_cap_id,
+        &token, &slot_generation);
+    if (ctx->rc_reserve < 0) {
+        if (ctx->reserve_before_barrier)
+            __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+        proc_exit(0);
+    }
+
+    ctx->token = token;
+    ctx->slot_generation = slot_generation;
+    if (ctx->reserve_before_barrier) {
+        __atomic_store_n(&ctx->started, 1, __ATOMIC_RELEASE);
+        uint64_t deadline = time_now_ns() + KH_CAP_MATRIX_TIMEOUT_NS;
+        while (__atomic_load_n(&ctx->proceed, __ATOMIC_ACQUIRE) == 0 &&
+               time_now_ns() < deadline) {
+            proc_yield();
+        }
+    }
+
+    if (ctx->action == KH_CAP_RESERVE_ACTION_ONLY) {
+        ctx->rc_abort = khandle_abort_reserved_transfer(
+            ctx->target, ctx->source_handle, token, slot_generation);
+        proc_exit(0);
+    }
+
+    if (ctx->action == KH_CAP_RESERVE_ACTION_ABORT) {
+        ctx->rc_abort = khandle_abort_reserved_transfer(
+            ctx->target, ctx->source_handle, token, slot_generation);
+        proc_exit(0);
+    }
+
+    if (ctx->action != KH_CAP_RESERVE_ACTION_COMMIT) {
+        ctx->rc_abort = khandle_abort_reserved_transfer(
+            ctx->target, ctx->source_handle, token, slot_generation);
+        proc_exit(0);
+    }
+
+    ctx->rc_commit = khandle_commit_reserved_transfer(
+        ctx->target, ctx->source_handle, token, slot_generation);
+    if (ctx->rc_commit < 0) {
+        ctx->rc_abort = khandle_abort_reserved_transfer(
+            ctx->target, ctx->source_handle, token, slot_generation);
+        proc_exit(0);
+    }
+
+    int32_t installed = -1;
+    ctx->rc_install = khandle_install_transferred_cap(
+        ctx->target, moved_obj, moved_rights, moved_cap_id, &installed);
+    if (ctx->rc_install == 0) {
+        (void)khandle_close(ctx->target, installed);
+    } else {
+        khandle_transfer_drop_cap(moved_obj, moved_rights, moved_cap_id);
+    }
     proc_exit(0);
 }
 
@@ -2008,9 +2244,11 @@ out:
 }
 
 static void test_futex_wait_huge_relative_timeout_regression(void) {
+    pr_info("syscall_trap_tests: futex_wait_huge step=enter\n");
     struct user_map_ctx um = {0};
     bool mapped = false;
 
+    pr_info("syscall_trap_tests: futex_wait_huge step=user_map_begin\n");
     int rc = user_map_begin(&um, CONFIG_PAGE_SIZE);
     test_check(rc == 0, "futex_wait_huge user_map");
     if (rc < 0)
@@ -2052,20 +2290,37 @@ static void test_futex_wait_huge_relative_timeout_regression(void) {
         goto out;
     pid_t wpid = waker->pid;
     sched_enqueue(waker);
+    pr_info("syscall_trap_tests: futex_wait_huge step=wait_waker_started\n");
     for (int i = 0; i < 2000 && !wctx.started; i++)
         proc_yield();
-    test_check(wctx.started != 0, "futex_wait_huge waker_started");
+    bool waker_started = (wctx.started != 0);
+    test_check(waker_started, "futex_wait_huge waker_started");
+    if (!waker_started) {
+        int status = 0;
+        bool reaped = kh_wait_pid_bounded(wpid, 2ULL * TEST_NS_PER_SEC);
+        test_check(reaped, "futex_wait_huge waker_reaped_when_not_started");
+        if (!reaped) {
+            (void)signal_send(wpid, SIGKILL);
+            (void)proc_wait(wpid, &status, 0);
+        }
+        goto out;
+    }
 
+    pr_info("syscall_trap_tests: futex_wait_huge step=futex_wait_call\n");
     int64_t ret64 = sys_futex((uint64_t)(uintptr_t)u_word, FUTEX_WAIT, 0,
                               (uint64_t)(uintptr_t)u_timeout, 0, 0);
+    pr_info("syscall_trap_tests: futex_wait_huge step=futex_wait_return ret=%lld\n",
+            (long long)ret64);
     test_check(ret64 == 0, "futex_wait_huge wait_woken");
 
+    pr_info("syscall_trap_tests: futex_wait_huge step=wait_waker_exit\n");
     int status = 0;
     pid_t wp = proc_wait(wpid, &status, 0);
     test_check(wp == wpid, "futex_wait_huge waker_reaped");
     test_check(wctx.wake_ret > 0, "futex_wait_huge wake_positive");
 
 out:
+    pr_info("syscall_trap_tests: futex_wait_huge step=out\n");
     if (mapped)
         user_map_end(&um);
 }
@@ -3503,6 +3758,82 @@ out:
     }
 }
 
+static void test_khandle_cache_release_under_fork_exit(void) {
+    struct kobj *probe_obj = NULL;
+    struct kobj *peer_obj = NULL;
+    int32_t root_h = -1;
+    int rc = kchannel_create_pair(&probe_obj, &peer_obj);
+    test_check(rc == 0 && probe_obj && peer_obj, "kh cache-exit create pair");
+    if (rc < 0 || !probe_obj || !peer_obj)
+        goto out;
+
+    root_h = khandle_alloc(proc_current(), probe_obj, KRIGHT_CHANNEL_DEFAULT);
+    test_check(root_h >= 0, "kh cache-exit alloc root handle");
+    if (root_h < 0)
+        goto out;
+
+    uint32_t baseline_refcount = (uint32_t)atomic_read(&probe_obj->refcount);
+    test_check(baseline_refcount > 0, "kh cache-exit baseline refcount");
+    if (baseline_refcount == 0)
+        goto out;
+
+    for (uint32_t round = 0; round < KH_CACHE_EXIT_ROUNDS; round++) {
+        struct process *workers[KH_CACHE_EXIT_WORKERS] = {0};
+        struct kh_cache_exit_worker_ctx ctx[KH_CACHE_EXIT_WORKERS];
+        memset(ctx, 0, sizeof(ctx));
+        uint32_t started = 0;
+
+        for (uint32_t i = 0; i < KH_CACHE_EXIT_WORKERS; i++) {
+            workers[i] = kthread_create_joinable(kh_cache_exit_worker, &ctx[i], "khcext");
+            test_check(workers[i] != NULL, "kh cache-exit worker create");
+            if (!workers[i])
+                break;
+
+            ctx[i].h_probe = khandle_alloc(workers[i], probe_obj, KRIGHT_CHANNEL_DEFAULT);
+            ctx[i].rounds = KH_CACHE_HOT_GET_ROUNDS;
+            test_check(ctx[i].h_probe >= 0, "kh cache-exit alloc probe handle");
+            if (ctx[i].h_probe < 0)
+                break;
+
+            sched_enqueue(workers[i]);
+            started++;
+        }
+
+        for (uint32_t i = 0; i < started; i++) {
+            bool armed =
+                kh_wait_flag_bounded(&ctx[i].started, KH_CACHE_EXIT_TIMEOUT_NS);
+            test_check(armed, "kh cache-exit worker armed");
+            bool done = kh_wait_pid_bounded(workers[i]->pid, KH_CACHE_EXIT_TIMEOUT_NS);
+            test_check(done, "kh cache-exit worker reaped");
+            if (done)
+                test_check(ctx[i].rc == 0, "kh cache-exit worker rc");
+            workers[i] = NULL;
+        }
+
+        for (uint32_t i = 0; i < KH_CACHE_EXIT_WORKERS; i++) {
+            if (workers[i]) {
+                (void)kh_wait_pid_bounded(workers[i]->pid, KH_CACHE_EXIT_TIMEOUT_NS);
+                if (ctx[i].h_probe >= 0)
+                    (void)khandle_close(workers[i], ctx[i].h_probe);
+            }
+        }
+
+        bool stable = kh_wait_kobj_refcount_bounded(
+            probe_obj, baseline_refcount, KH_CACHE_EXIT_TIMEOUT_NS);
+        test_check(stable, "kh cache-exit refcount baseline");
+        if (!stable)
+            break;
+    }
+
+out:
+    if (root_h >= 0)
+        (void)khandle_close(proc_current(), root_h);
+    if (peer_obj)
+        kobj_put(peer_obj);
+    if (probe_obj)
+        kobj_put(probe_obj);
+}
+
 static void test_kairos_channel_close_last_handle_races(void) {
     {
         struct kobj *tx_obj = NULL;
@@ -4391,6 +4722,461 @@ out:
 #endif
 }
 
+static void test_kcap_transfer_matrix_case(uint32_t action, bool close_root) {
+    struct process *self = proc_current();
+    const char *name_self = "kcap_matrix self";
+    const char *name_create = "kcap_matrix create pair";
+    const char *name_root = "kcap_matrix alloc root";
+    const char *name_child = "kcap_matrix duplicate child";
+    const char *name_worker = "kcap_matrix worker create";
+    const char *name_started = "kcap_matrix worker started";
+    const char *name_ctrl = "kcap_matrix revoke op";
+    const char *name_done = "kcap_matrix worker done";
+    const char *name_take = "kcap_matrix take transfer";
+    const char *name_blocked = "kcap_matrix bind blocked";
+
+    if (!close_root && action == KH_CAP_MATRIX_ACTION_RESTORE) {
+        name_create = "kcap_matrix revoke_restore create pair";
+        name_root = "kcap_matrix revoke_restore alloc root";
+        name_child = "kcap_matrix revoke_restore duplicate child";
+        name_worker = "kcap_matrix revoke_restore worker create";
+        name_started = "kcap_matrix revoke_restore worker started";
+        name_ctrl = "kcap_matrix revoke_restore revoke";
+        name_done = "kcap_matrix revoke_restore worker done";
+        name_take = "kcap_matrix revoke_restore take";
+        name_blocked = "kcap_matrix revoke_restore blocked";
+    } else if (!close_root && action == KH_CAP_MATRIX_ACTION_INSTALL) {
+        name_create = "kcap_matrix revoke_install create pair";
+        name_root = "kcap_matrix revoke_install alloc root";
+        name_child = "kcap_matrix revoke_install duplicate child";
+        name_worker = "kcap_matrix revoke_install worker create";
+        name_started = "kcap_matrix revoke_install worker started";
+        name_ctrl = "kcap_matrix revoke_install revoke";
+        name_done = "kcap_matrix revoke_install worker done";
+        name_take = "kcap_matrix revoke_install take";
+        name_blocked = "kcap_matrix revoke_install blocked";
+    } else if (close_root && action == KH_CAP_MATRIX_ACTION_INSTALL) {
+        name_create = "kcap_matrix close_install create pair";
+        name_root = "kcap_matrix close_install alloc root";
+        name_child = "kcap_matrix close_install duplicate child";
+        name_worker = "kcap_matrix close_install worker create";
+        name_started = "kcap_matrix close_install worker started";
+        name_ctrl = "kcap_matrix close_install close revoke";
+        name_done = "kcap_matrix close_install worker done";
+        name_take = "kcap_matrix close_install take";
+        name_blocked = "kcap_matrix close_install blocked";
+    }
+
+    test_check(self != NULL, name_self);
+    if (!self)
+        return;
+
+    for (uint32_t round = 0; round < KH_CAP_MATRIX_ROUNDS; round++) {
+        struct kobj *ch0 = NULL;
+        struct kobj *ch1 = NULL;
+        struct process *worker = NULL;
+        struct kh_cap_matrix_worker_ctx ctx = {0};
+        int32_t root_h = -1;
+        int32_t child_h = -1;
+
+        int rc = kchannel_create_pair(&ch0, &ch1);
+        test_check(rc == 0 && ch0 && ch1, name_create);
+        if (rc < 0 || !ch0 || !ch1)
+            goto round_out;
+
+        root_h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+        test_check(root_h >= 0, name_root);
+        if (root_h < 0)
+            goto round_out;
+
+        rc = khandle_duplicate(self, root_h, KRIGHT_CHANNEL_DEFAULT, &child_h);
+        test_check(rc == 0 && child_h >= 0, name_child);
+        if (rc < 0 || child_h < 0)
+            goto round_out;
+
+        ctx.target = self;
+        ctx.source_handle = child_h;
+        ctx.action = action;
+        worker = kthread_create_joinable(kh_cap_matrix_worker, &ctx, "khcpmx");
+        test_check(worker != NULL, name_worker);
+        if (!worker)
+            goto round_out;
+
+        sched_enqueue(worker);
+        bool started = kh_wait_flag_bounded(&ctx.started, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(started, name_started);
+        if (!started) {
+            __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+            goto round_out;
+        }
+
+        if ((round & 1U) == 0)
+            proc_yield();
+        if ((round & 3U) == 0)
+            proc_yield();
+
+        if (close_root) {
+            rc = khandle_close_with_flags(self, root_h,
+                                          KHANDLE_CLOSE_F_REVOKE_DESCENDANTS);
+            if (rc == 0)
+                root_h = -1;
+        } else {
+            rc = khandle_revoke_descendants(self, root_h);
+        }
+        test_check(rc == 0, name_ctrl);
+
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        bool done = kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(done, name_done);
+        if (done) {
+            worker = NULL;
+            test_check(ctx.rc_take == 0, name_take);
+            test_check(kh_cap_matrix_bind_rejected(ctx.rc_action), name_blocked);
+        }
+
+    round_out:
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        if (worker)
+            (void)kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        if (child_h >= 0)
+            (void)khandle_close(self, child_h);
+        if (root_h >= 0)
+            (void)khandle_close(self, root_h);
+        if (ch1)
+            kobj_put(ch1);
+        if (ch0)
+            kobj_put(ch0);
+    }
+}
+
+static void test_kcap_revoke_transfer_matrix_first_batch(void) {
+    test_kcap_transfer_matrix_case(KH_CAP_MATRIX_ACTION_RESTORE, false);
+    test_kcap_transfer_matrix_case(KH_CAP_MATRIX_ACTION_INSTALL, false);
+    test_kcap_transfer_matrix_case(KH_CAP_MATRIX_ACTION_INSTALL, true);
+}
+
+static void test_kcap_reserve_after_revoke_matrix_case(bool close_root) {
+    const char *name_create = close_root
+                                  ? "kcap_matrix close_reserve create pair"
+                                  : "kcap_matrix revoke_reserve create pair";
+    const char *name_root = close_root
+                                ? "kcap_matrix close_reserve alloc root"
+                                : "kcap_matrix revoke_reserve alloc root";
+    const char *name_child = close_root
+                                 ? "kcap_matrix close_reserve duplicate child"
+                                 : "kcap_matrix revoke_reserve duplicate child";
+    const char *name_worker = close_root
+                                  ? "kcap_matrix close_reserve worker create"
+                                  : "kcap_matrix revoke_reserve worker create";
+    const char *name_started = close_root
+                                   ? "kcap_matrix close_reserve worker started"
+                                   : "kcap_matrix revoke_reserve worker started";
+    const char *name_ctrl = close_root
+                                ? "kcap_matrix close_reserve close revoke"
+                                : "kcap_matrix revoke_reserve revoke";
+    const char *name_done = close_root
+                                ? "kcap_matrix close_reserve worker done"
+                                : "kcap_matrix revoke_reserve worker done";
+    const char *name_reject = close_root
+                                  ? "kcap_matrix close_reserve rejected"
+                                  : "kcap_matrix revoke_reserve rejected";
+
+    struct process *self = proc_current();
+    test_check(self != NULL, "kcap_matrix reserve self");
+    if (!self)
+        return;
+
+    for (uint32_t round = 0; round < KH_CAP_MATRIX_ROUNDS; round++) {
+        struct kobj *ch0 = NULL;
+        struct kobj *ch1 = NULL;
+        struct process *worker = NULL;
+        struct kh_cap_reserve_worker_ctx ctx = {
+            .target = self,
+            .reserve_before_barrier = false,
+            .action = KH_CAP_RESERVE_ACTION_ONLY,
+        };
+        int32_t root_h = -1;
+        int32_t child_h = -1;
+
+        int rc = kchannel_create_pair(&ch0, &ch1);
+        test_check(rc == 0 && ch0 && ch1, name_create);
+        if (rc < 0 || !ch0 || !ch1)
+            goto round_out;
+
+        root_h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+        test_check(root_h >= 0, name_root);
+        if (root_h < 0)
+            goto round_out;
+
+        rc = khandle_duplicate(self, root_h, KRIGHT_CHANNEL_DEFAULT, &child_h);
+        test_check(rc == 0 && child_h >= 0, name_child);
+        if (rc < 0 || child_h < 0)
+            goto round_out;
+
+        ctx.source_handle = child_h;
+        worker = kthread_create_joinable(kh_cap_reserve_matrix_worker, &ctx,
+                                         "khcprs");
+        test_check(worker != NULL, name_worker);
+        if (!worker)
+            goto round_out;
+
+        sched_enqueue(worker);
+        bool started = kh_wait_flag_bounded(&ctx.started, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(started, name_started);
+        if (!started) {
+            __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+            goto round_out;
+        }
+
+        if (close_root) {
+            rc = khandle_close_with_flags(self, root_h,
+                                          KHANDLE_CLOSE_F_REVOKE_DESCENDANTS);
+            if (rc == 0)
+                root_h = -1;
+        } else {
+            rc = khandle_revoke_descendants(self, root_h);
+        }
+        test_check(rc == 0, name_ctrl);
+
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        bool done = kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(done, name_done);
+        if (done) {
+            worker = NULL;
+            test_check(kh_cap_matrix_reserve_rejected(ctx.rc_reserve), name_reject);
+        }
+
+    round_out:
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        if (worker)
+            (void)kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        if (child_h >= 0)
+            (void)khandle_close(self, child_h);
+        if (root_h >= 0)
+            (void)khandle_close(self, root_h);
+        if (ch1)
+            kobj_put(ch1);
+        if (ch0)
+            kobj_put(ch0);
+    }
+}
+
+static void test_kcap_commit_after_revoke_matrix_case(bool close_root) {
+    const char *name_create = close_root
+                                  ? "kcap_matrix close_commit create pair"
+                                  : "kcap_matrix revoke_commit create pair";
+    const char *name_root = close_root
+                                ? "kcap_matrix close_commit alloc root"
+                                : "kcap_matrix revoke_commit alloc root";
+    const char *name_child = close_root
+                                 ? "kcap_matrix close_commit duplicate child"
+                                 : "kcap_matrix revoke_commit duplicate child";
+    const char *name_worker = close_root
+                                  ? "kcap_matrix close_commit worker create"
+                                  : "kcap_matrix revoke_commit worker create";
+    const char *name_started = close_root
+                                   ? "kcap_matrix close_commit worker started"
+                                   : "kcap_matrix revoke_commit worker started";
+    const char *name_ctrl = close_root
+                                ? "kcap_matrix close_commit close revoke"
+                                : "kcap_matrix revoke_commit revoke";
+    const char *name_done = close_root
+                                ? "kcap_matrix close_commit worker done"
+                                : "kcap_matrix revoke_commit worker done";
+    const char *name_reserve = close_root
+                                   ? "kcap_matrix close_commit reserve"
+                                   : "kcap_matrix revoke_commit reserve";
+    const char *name_commit = close_root
+                                  ? "kcap_matrix close_commit commit"
+                                  : "kcap_matrix revoke_commit commit";
+    const char *name_blocked = close_root
+                                   ? "kcap_matrix close_commit install blocked"
+                                   : "kcap_matrix revoke_commit install blocked";
+    const char *name_removed = close_root
+                                   ? "kcap_matrix close_commit source removed"
+                                   : "kcap_matrix revoke_commit source removed";
+
+    struct process *self = proc_current();
+    test_check(self != NULL, "kcap_matrix commit self");
+    if (!self)
+        return;
+
+    for (uint32_t round = 0; round < KH_CAP_MATRIX_ROUNDS; round++) {
+        struct kobj *ch0 = NULL;
+        struct kobj *ch1 = NULL;
+        struct process *worker = NULL;
+        struct kh_cap_reserve_worker_ctx ctx = {
+            .target = self,
+            .reserve_before_barrier = true,
+            .action = KH_CAP_RESERVE_ACTION_COMMIT,
+        };
+        int32_t root_h = -1;
+        int32_t child_h = -1;
+
+        int rc = kchannel_create_pair(&ch0, &ch1);
+        test_check(rc == 0 && ch0 && ch1, name_create);
+        if (rc < 0 || !ch0 || !ch1)
+            goto round_out;
+
+        root_h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+        test_check(root_h >= 0, name_root);
+        if (root_h < 0)
+            goto round_out;
+
+        rc = khandle_duplicate(self, root_h, KRIGHT_CHANNEL_DEFAULT, &child_h);
+        test_check(rc == 0 && child_h >= 0, name_child);
+        if (rc < 0 || child_h < 0)
+            goto round_out;
+
+        ctx.source_handle = child_h;
+        worker = kthread_create_joinable(kh_cap_reserve_matrix_worker, &ctx,
+                                         "khcpcm");
+        test_check(worker != NULL, name_worker);
+        if (!worker)
+            goto round_out;
+
+        sched_enqueue(worker);
+        bool started = kh_wait_flag_bounded(&ctx.started, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(started, name_started);
+        if (!started) {
+            __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+            goto round_out;
+        }
+        test_check(ctx.rc_reserve == 0, name_reserve);
+
+        if (close_root) {
+            rc = khandle_close_with_flags(self, root_h,
+                                          KHANDLE_CLOSE_F_REVOKE_DESCENDANTS);
+            if (rc == 0)
+                root_h = -1;
+        } else {
+            rc = khandle_revoke_descendants(self, root_h);
+        }
+        test_check(rc == 0, name_ctrl);
+
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        bool done = kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(done, name_done);
+        if (done) {
+            worker = NULL;
+            test_check(ctx.rc_commit == 0, name_commit);
+            test_check(kh_cap_matrix_bind_rejected(ctx.rc_install), name_blocked);
+
+            struct kobj *probe = NULL;
+            int grc = khandle_get(self, child_h, KRIGHT_READ, &probe, NULL);
+            test_check(grc == -EBADF, name_removed);
+            if (grc == 0 && probe)
+                kobj_put(probe);
+            child_h = -1;
+        }
+
+    round_out:
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        if (worker)
+            (void)kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        if (child_h >= 0)
+            (void)khandle_close(self, child_h);
+        if (root_h >= 0)
+            (void)khandle_close(self, root_h);
+        if (ch1)
+            kobj_put(ch1);
+        if (ch0)
+            kobj_put(ch0);
+    }
+}
+
+static void test_kcap_abort_after_revoke_matrix_case(void) {
+    struct process *self = proc_current();
+    test_check(self != NULL, "kcap_matrix revoke_abort self");
+    if (!self)
+        return;
+
+    for (uint32_t round = 0; round < KH_CAP_MATRIX_ROUNDS; round++) {
+        struct kobj *ch0 = NULL;
+        struct kobj *ch1 = NULL;
+        struct process *worker = NULL;
+        struct kh_cap_reserve_worker_ctx ctx = {
+            .target = self,
+            .reserve_before_barrier = true,
+            .action = KH_CAP_RESERVE_ACTION_ABORT,
+        };
+        int32_t root_h = -1;
+        int32_t child_h = -1;
+
+        int rc = kchannel_create_pair(&ch0, &ch1);
+        test_check(rc == 0 && ch0 && ch1, "kcap_matrix revoke_abort create pair");
+        if (rc < 0 || !ch0 || !ch1)
+            goto round_out;
+
+        root_h = khandle_alloc(self, ch0, KRIGHT_CHANNEL_DEFAULT);
+        test_check(root_h >= 0, "kcap_matrix revoke_abort alloc root");
+        if (root_h < 0)
+            goto round_out;
+
+        rc = khandle_duplicate(self, root_h, KRIGHT_CHANNEL_DEFAULT, &child_h);
+        test_check(rc == 0 && child_h >= 0,
+                   "kcap_matrix revoke_abort duplicate child");
+        if (rc < 0 || child_h < 0)
+            goto round_out;
+
+        ctx.source_handle = child_h;
+        worker = kthread_create_joinable(kh_cap_reserve_matrix_worker, &ctx,
+                                         "khcpab");
+        test_check(worker != NULL, "kcap_matrix revoke_abort worker create");
+        if (!worker)
+            goto round_out;
+
+        sched_enqueue(worker);
+        bool started = kh_wait_flag_bounded(&ctx.started, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(started, "kcap_matrix revoke_abort worker started");
+        if (!started) {
+            __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+            goto round_out;
+        }
+        test_check(ctx.rc_reserve == 0, "kcap_matrix revoke_abort reserve");
+
+        rc = khandle_revoke_descendants(self, root_h);
+        test_check(rc == 0, "kcap_matrix revoke_abort revoke");
+
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        bool done = kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        test_check(done, "kcap_matrix revoke_abort worker done");
+        if (done) {
+            worker = NULL;
+            test_check(kh_cap_matrix_bind_rejected(ctx.rc_abort),
+                       "kcap_matrix revoke_abort blocked");
+
+            struct kobj *probe = NULL;
+            int grc = khandle_get(self, child_h, KRIGHT_READ, &probe, NULL);
+            test_check(grc == -EBADF, "kcap_matrix revoke_abort source removed");
+            if (grc == 0 && probe)
+                kobj_put(probe);
+            child_h = -1;
+        }
+
+    round_out:
+        __atomic_store_n(&ctx.proceed, 1, __ATOMIC_RELEASE);
+        if (worker)
+            (void)kh_wait_pid_bounded(worker->pid, KH_CAP_MATRIX_TIMEOUT_NS);
+        if (child_h >= 0)
+            (void)khandle_close(self, child_h);
+        if (root_h >= 0)
+            (void)khandle_close(self, root_h);
+        if (ch1)
+            kobj_put(ch1);
+        if (ch0)
+            kobj_put(ch0);
+    }
+}
+
+static void test_kcap_revoke_transfer_matrix_second_batch(void) {
+    test_kcap_reserve_after_revoke_matrix_case(false);
+    test_kcap_commit_after_revoke_matrix_case(false);
+    test_kcap_reserve_after_revoke_matrix_case(true);
+    test_kcap_commit_after_revoke_matrix_case(true);
+    test_kcap_abort_after_revoke_matrix_case();
+}
+
 static void test_kcap_duplicate_close_stress(void) {
     struct process *self = proc_current();
     test_check(self != NULL, "kcap_stress self");
@@ -4560,6 +5346,154 @@ out:
         kobj_put(send_obj);
     if (mapped)
         user_map_end(&um);
+#endif
+}
+
+static void test_kchannel_fault_inject_coverage(void) {
+#if CONFIG_KERNEL_FAULT_INJECT
+    struct process *self = proc_current();
+    test_check(self != NULL, "kchannel fi self");
+    if (!self)
+        return;
+
+    struct kobj *tx_obj = NULL;
+    struct kobj *rx_obj = NULL;
+    struct kobj *close_obj = NULL;
+    struct kobj *close_peer = NULL;
+    int32_t close_h = -1;
+    int rc = kchannel_create_pair(&tx_obj, &rx_obj);
+    test_check(rc == 0, "kchannel fi create pair");
+    if (rc < 0)
+        return;
+
+    uint8_t payload[24] = "fi-ipc-coverage";
+    uint8_t out[sizeof(payload)] = {0};
+    size_t got_bytes = 0;
+    size_t got_handles = 0;
+    bool truncated = false;
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_IPC_CHANNEL_SEND, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_IPC_CHANNEL_SEND, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_IPC_CHANNEL_SEND, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    rc = kchannel_send(tx_obj, payload, sizeof(payload), NULL, 0, 0);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+    test_check(rc == -EINTR, "kchannel fi send fail");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_IPC_CHANNEL_SEND) == 1,
+               "kchannel fi send point hit");
+    rc = kchannel_recv(rx_obj, out, sizeof(out), &got_bytes, NULL, 0,
+                       &got_handles, &truncated, KCHANNEL_OPT_NONBLOCK);
+    test_check(rc == -EAGAIN, "kchannel fi send leaves queue empty");
+
+    rc = kchannel_send(tx_obj, payload, sizeof(payload), NULL, 0, 0);
+    test_check(rc == 0, "kchannel fi prepare recv");
+    if (rc == 0) {
+        fault_inject_reset();
+        fault_inject_set_rate_permille(FAULT_INJECT_POINT_IPC_CHANNEL_RECV, 1000);
+        fault_inject_set_warmup_hits(FAULT_INJECT_POINT_IPC_CHANNEL_RECV, 0);
+        fault_inject_set_fail_budget(FAULT_INJECT_POINT_IPC_CHANNEL_RECV, 1);
+        fault_inject_enable(true);
+        fault_inject_scope_enter();
+        rc = kchannel_recv(rx_obj, out, sizeof(out), &got_bytes, NULL, 0,
+                           &got_handles, &truncated, 0);
+        fault_inject_scope_exit();
+        fault_inject_enable(false);
+        test_check(rc == -EINTR, "kchannel fi recv fail");
+        test_check(fault_inject_failures(FAULT_INJECT_POINT_IPC_CHANNEL_RECV) == 1,
+                   "kchannel fi recv point hit");
+
+        rc = kchannel_recv(rx_obj, out, sizeof(out), &got_bytes, NULL, 0,
+                           &got_handles, &truncated, KCHANNEL_OPT_NONBLOCK);
+        test_check(rc == 0, "kchannel fi recv message preserved");
+        if (rc == 0) {
+            test_check(got_bytes == sizeof(payload), "kchannel fi recv bytes");
+            test_check(memcmp(out, payload, sizeof(payload)) == 0,
+                       "kchannel fi recv payload");
+        }
+    }
+
+    rc = kchannel_create_pair(&close_obj, &close_peer);
+    test_check(rc == 0, "kchannel fi create close pair");
+    if (rc == 0) {
+        close_h = khandle_alloc(self, close_obj, KRIGHT_CHANNEL_DEFAULT);
+        test_check(close_h >= 0, "kchannel fi alloc close handle");
+        if (close_h >= 0) {
+            fault_inject_reset();
+            fault_inject_set_rate_permille(FAULT_INJECT_POINT_IPC_CHANNEL_CLOSE,
+                                           1000);
+            fault_inject_set_warmup_hits(FAULT_INJECT_POINT_IPC_CHANNEL_CLOSE, 0);
+            fault_inject_set_fail_budget(FAULT_INJECT_POINT_IPC_CHANNEL_CLOSE, 1);
+            fault_inject_enable(true);
+            fault_inject_scope_enter();
+            rc = khandle_close(self, close_h);
+            fault_inject_scope_exit();
+            fault_inject_enable(false);
+            close_h = -1;
+            test_check(rc == 0, "kchannel fi close still succeeds");
+            test_check(
+                fault_inject_failures(FAULT_INJECT_POINT_IPC_CHANNEL_CLOSE) == 1,
+                "kchannel fi close point hit");
+        }
+    }
+
+    struct poll_wait_source src = {0};
+    poll_wait_source_init(&src, NULL);
+    enum poll_wait_wake_reason reason = POLL_WAIT_WAKE_UNKNOWN;
+    uint32_t seq = poll_wait_source_seq_snapshot(&src);
+
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_POLLWAIT_BLOCK, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_POLLWAIT_BLOCK, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_POLLWAIT_BLOCK, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    rc = poll_wait_source_block_seq_ex_reason(&src, 0, &src, NULL, true, seq,
+                                              &reason);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+    test_check(rc == -EINTR, "kchannel fi pollwait block fail");
+    test_check(reason == POLL_WAIT_WAKE_SIGNAL,
+               "kchannel fi pollwait block reason");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_POLLWAIT_BLOCK) == 1,
+               "kchannel fi pollwait block point hit");
+
+    uint32_t before_seq = poll_wait_source_seq_snapshot(&src);
+    fault_inject_reset();
+    fault_inject_set_rate_permille(FAULT_INJECT_POINT_POLLWAIT_WAKE, 1000);
+    fault_inject_set_warmup_hits(FAULT_INJECT_POINT_POLLWAIT_WAKE, 0);
+    fault_inject_set_fail_budget(FAULT_INJECT_POINT_POLLWAIT_WAKE, 1);
+    fault_inject_enable(true);
+    fault_inject_scope_enter();
+    poll_wait_source_wake_one_reason(&src, POLLIN, POLL_WAIT_WAKE_DATA);
+    fault_inject_scope_exit();
+    fault_inject_enable(false);
+    test_check(poll_wait_source_seq_snapshot(&src) == before_seq + 1,
+               "kchannel fi pollwait wake seq");
+    test_check(fault_inject_failures(FAULT_INJECT_POINT_POLLWAIT_WAKE) == 1,
+               "kchannel fi pollwait wake point hit");
+
+    reason = POLL_WAIT_WAKE_UNKNOWN;
+    rc = poll_wait_source_block_seq_ex_reason(&src, 0, &src, NULL, true, before_seq,
+                                              &reason);
+    test_check(rc == 0, "kchannel fi pollwait wake post-check");
+    test_check(reason == POLL_WAIT_WAKE_DATA,
+               "kchannel fi pollwait wake reason");
+
+    fault_inject_enable(false);
+    fault_inject_reset();
+    if (close_h >= 0)
+        (void)khandle_close(self, close_h);
+    if (close_peer)
+        kobj_put(close_peer);
+    if (close_obj)
+        kobj_put(close_obj);
+    if (rx_obj)
+        kobj_put(rx_obj);
+    if (tx_obj)
+        kobj_put(tx_obj);
 #endif
 }
 
@@ -4740,43 +5674,56 @@ out:
 }
 
 static void run_syscall_trap_tests_full(void) {
-    test_syscall_table_slot_coverage();
-    test_syscall_invalid_num_legacy();
-    test_syscall_unimplemented_slot_legacy();
-    test_syscall_identity_legacy();
-    test_syscall_error_paths_legacy();
-    test_uaccess_cross_page_regression();
-    test_uaccess_large_range_regression();
-    test_strncpy_from_user_len_regression();
-    test_strncpy_from_user_unmapped_tail_regression();
-    test_strncpy_from_user_nul_before_unmapped_tail_regression();
-    test_uaccess_arg_validation_regression();
-    test_sched_affinity_syscalls_regression();
-    test_sched_policy_syscalls_regression();
-    test_mount_umount_flag_semantics();
-    test_mount_propagation_recursive_semantics();
-    test_acct_syscall_semantics();
-    test_futex_waitv_syscalls_regression();
-    test_futex_wait_huge_relative_timeout_regression();
-    test_trap_dispatch_guard_clauses();
-    test_trap_dispatch_sets_and_restores_tf();
-    test_trap_dispatch_restores_preexisting_tf();
-    test_get_current_trapframe_process_fallback();
-    test_kairos_cap_rights_fd_syscalls();
-    test_kairos_channel_port_syscalls();
-    test_kairos_channel_close_last_handle_races();
-    test_kairos_channel_port_stress_mpmc();
-    test_kairos_channelfd_fd_only_longrun();
-    test_kairos_channelfd_epoll_et_stress();
-    test_kairos_file_handle_bridge();
-    test_kobj_ops_refcount_history();
-    test_kchannel_inline_queue_zero_heap();
-    test_sys_kchannel_inline_queue_zero_heap();
-    test_sys_kchannel_send_transfer_rollback_kmalloc_fault();
-    test_khandle_reserved_transfer_timeout_sweep();
-    test_kcap_duplicate_close_stress();
-    test_khandle_transfer_reserve_transaction();
-    test_syscall_user_e2e();
+#define RUN_TRAP_STEP(fn)                                                       \
+    do {                                                                        \
+        pr_info("syscall_trap_tests: step=%s enter\n", #fn);                   \
+        fn();                                                                   \
+        pr_info("syscall_trap_tests: step=%s done\n", #fn);                    \
+    } while (0)
+
+    RUN_TRAP_STEP(test_syscall_table_slot_coverage);
+    RUN_TRAP_STEP(test_syscall_invalid_num_legacy);
+    RUN_TRAP_STEP(test_syscall_unimplemented_slot_legacy);
+    RUN_TRAP_STEP(test_syscall_identity_legacy);
+    RUN_TRAP_STEP(test_syscall_error_paths_legacy);
+    RUN_TRAP_STEP(test_uaccess_cross_page_regression);
+    RUN_TRAP_STEP(test_uaccess_large_range_regression);
+    RUN_TRAP_STEP(test_strncpy_from_user_len_regression);
+    RUN_TRAP_STEP(test_strncpy_from_user_unmapped_tail_regression);
+    RUN_TRAP_STEP(test_strncpy_from_user_nul_before_unmapped_tail_regression);
+    RUN_TRAP_STEP(test_uaccess_arg_validation_regression);
+    RUN_TRAP_STEP(test_sched_affinity_syscalls_regression);
+    RUN_TRAP_STEP(test_sched_policy_syscalls_regression);
+    RUN_TRAP_STEP(test_mount_umount_flag_semantics);
+    RUN_TRAP_STEP(test_mount_propagation_recursive_semantics);
+    RUN_TRAP_STEP(test_acct_syscall_semantics);
+    RUN_TRAP_STEP(test_futex_waitv_syscalls_regression);
+    RUN_TRAP_STEP(test_futex_wait_huge_relative_timeout_regression);
+    RUN_TRAP_STEP(test_trap_dispatch_guard_clauses);
+    RUN_TRAP_STEP(test_trap_dispatch_sets_and_restores_tf);
+    RUN_TRAP_STEP(test_trap_dispatch_restores_preexisting_tf);
+    RUN_TRAP_STEP(test_get_current_trapframe_process_fallback);
+    RUN_TRAP_STEP(test_kairos_cap_rights_fd_syscalls);
+    RUN_TRAP_STEP(test_kairos_channel_port_syscalls);
+    RUN_TRAP_STEP(test_kairos_channel_close_last_handle_races);
+    RUN_TRAP_STEP(test_kairos_channel_port_stress_mpmc);
+    RUN_TRAP_STEP(test_khandle_cache_release_under_fork_exit);
+    RUN_TRAP_STEP(test_kairos_channelfd_fd_only_longrun);
+    RUN_TRAP_STEP(test_kairos_channelfd_epoll_et_stress);
+    RUN_TRAP_STEP(test_kairos_file_handle_bridge);
+    RUN_TRAP_STEP(test_kobj_ops_refcount_history);
+    RUN_TRAP_STEP(test_kchannel_inline_queue_zero_heap);
+    RUN_TRAP_STEP(test_sys_kchannel_inline_queue_zero_heap);
+    RUN_TRAP_STEP(test_sys_kchannel_send_transfer_rollback_kmalloc_fault);
+    RUN_TRAP_STEP(test_kchannel_fault_inject_coverage);
+    RUN_TRAP_STEP(test_khandle_reserved_transfer_timeout_sweep);
+    RUN_TRAP_STEP(test_kcap_duplicate_close_stress);
+    RUN_TRAP_STEP(test_kcap_revoke_transfer_matrix_first_batch);
+    RUN_TRAP_STEP(test_kcap_revoke_transfer_matrix_second_batch);
+    RUN_TRAP_STEP(test_khandle_transfer_reserve_transaction);
+    RUN_TRAP_STEP(test_syscall_user_e2e);
+
+#undef RUN_TRAP_STEP
 }
 
 static void run_syscall_trap_tests_ipc_cap_only(void) {
@@ -4784,6 +5731,7 @@ static void run_syscall_trap_tests_ipc_cap_only(void) {
     test_kairos_channel_port_syscalls();
     test_kairos_channel_close_last_handle_races();
     test_kairos_channel_port_stress_mpmc();
+    test_khandle_cache_release_under_fork_exit();
     test_kairos_channelfd_fd_only_longrun();
     test_kairos_channelfd_epoll_et_stress();
     test_kairos_file_handle_bridge();
@@ -4791,9 +5739,23 @@ static void run_syscall_trap_tests_ipc_cap_only(void) {
     test_kchannel_inline_queue_zero_heap();
     test_sys_kchannel_inline_queue_zero_heap();
     test_sys_kchannel_send_transfer_rollback_kmalloc_fault();
+    test_kchannel_fault_inject_coverage();
     test_khandle_reserved_transfer_timeout_sweep();
     test_kcap_duplicate_close_stress();
+    test_kcap_revoke_transfer_matrix_first_batch();
+    test_kcap_revoke_transfer_matrix_second_batch();
     test_khandle_transfer_reserve_transaction();
+}
+
+int run_syscall_trap_tests_ipc_cap(void) {
+    tests_failed = 0;
+    pr_info("Running syscall/trap tests (ipc/cap focused)...\n");
+    run_syscall_trap_tests_ipc_cap_only();
+    if (tests_failed == 0)
+        pr_info("syscall/trap ipc/cap tests: all passed\n");
+    else
+        pr_err("syscall/trap ipc/cap tests: %d failures\n", tests_failed);
+    return tests_failed;
 }
 
 int run_syscall_trap_tests(void) {
@@ -4818,5 +5780,6 @@ int run_syscall_trap_tests(void) {
 #else
 
 int run_syscall_trap_tests(void) { return 0; }
+int run_syscall_trap_tests_ipc_cap(void) { return 0; }
 
 #endif /* CONFIG_KERNEL_TESTS */

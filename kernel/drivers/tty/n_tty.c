@@ -240,6 +240,8 @@ static ssize_t n_tty_read(struct tty_struct *tty, uint8_t *buf, size_t count,
         irq_state = arch_irq_save();
         spin_lock(&tty->lock);
         bool has_data = !ringbuf_empty(&tty->input_rb) || tty->eof_pending;
+        if (!has_data)
+            wait_queue_add(&tty->read_wait, proc_current());
         spin_unlock(&tty->lock);
         arch_irq_restore(irq_state);
         if (has_data)

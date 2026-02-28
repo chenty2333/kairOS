@@ -166,10 +166,12 @@ void proc_wakeup_ex(struct process *p, bool direct_switch_hint) {
 
     proc_lock(p);
     if (p->state != PROC_SLEEPING) {
+        p->wake_pending = true;
         proc_unlock(p);
         return;
     }
 
+    p->wake_pending = false;
     if (p->wait_channel && p->wait_entry.active)
         wait_queue_remove_entry(&p->wait_entry);
     p->wait_channel = NULL;

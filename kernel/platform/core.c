@@ -349,6 +349,8 @@ static int irq_deferred_worker(void *arg __unused)
             if (has_ev)
                 ev = action->deferred_ev;
             action->deferred_has_ev = false;
+        } else {
+            wait_queue_add(&irq_deferred.wait, proc_current());
         }
         spin_unlock_irqrestore(&irq_deferred.lock, irq_state);
 

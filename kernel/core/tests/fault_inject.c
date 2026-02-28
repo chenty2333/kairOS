@@ -150,6 +150,16 @@ const char *fault_inject_point_name(enum fault_inject_point point) {
         return "copy_from_user";
     case FAULT_INJECT_POINT_COPY_TO_USER:
         return "copy_to_user";
+    case FAULT_INJECT_POINT_IPC_CHANNEL_SEND:
+        return "ipc_channel_send";
+    case FAULT_INJECT_POINT_IPC_CHANNEL_RECV:
+        return "ipc_channel_recv";
+    case FAULT_INJECT_POINT_IPC_CHANNEL_CLOSE:
+        return "ipc_channel_close";
+    case FAULT_INJECT_POINT_POLLWAIT_BLOCK:
+        return "pollwait_block";
+    case FAULT_INJECT_POINT_POLLWAIT_WAKE:
+        return "pollwait_wake";
     default:
         return "unknown";
     }

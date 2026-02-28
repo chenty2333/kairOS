@@ -76,6 +76,7 @@ static inline uint16_t virtqueue_used_idx(struct virtqueue *vq) {
 
 /* VirtIO Device Configuration Operations */
 struct virtio_device;
+struct virtio_driver;
 struct virtio_config_ops {
     uint8_t (*get_status)(struct virtio_device *vdev);
     void (*set_status)(struct virtio_device *vdev, uint8_t status);
@@ -91,6 +92,7 @@ struct virtio_device {
     struct device dev;          /* Base device */
     uint32_t id;                /* VirtIO device ID (e.g., 2 for block) */
     struct virtio_config_ops *ops;
+    struct virtio_driver *bound_driver; /* Matched driver while device is bound */
     void (*handler)(struct virtio_device *vdev); /* Interrupt handler */
     void *priv;                 /* Transport private data */
     struct list_head vqs;       /* List of virtqueues */

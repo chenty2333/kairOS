@@ -270,6 +270,54 @@ static bool mount_has_child_locked(const struct mount *mnt,
     return false;
 }
 
+static void mount_prune_subtree_dentries(struct mount *root) {
+    if (!root)
+        return;
+
+    size_t count = 0;
+    spin_lock(&vfs_lock);
+    struct mount *mnt;
+    list_for_each_entry(mnt, &mount_list, list) {
+        if (mnt == root || mount_is_descendant_of(mnt, root))
+            count++;
+    }
+    spin_unlock(&vfs_lock);
+    if (count == 0)
+        return;
+
+    struct mount **targets = kmalloc(count * sizeof(*targets));
+    if (!targets) {
+        dentry_prune_mount(root);
+        return;
+    }
+
+    size_t filled = 0;
+    spin_lock(&vfs_lock);
+    list_for_each_entry(mnt, &mount_list, list) {
+        if (mnt != root && !mount_is_descendant_of(mnt, root))
+            continue;
+        if (filled < count)
+            targets[filled++] = mnt;
+    }
+    spin_unlock(&vfs_lock);
+
+    for (size_t i = 0; i < filled; i++)
+        dentry_prune_mount(targets[i]);
+    kfree(targets);
+}
+
+static uint32_t mount_baseline_refs(const struct mount *mnt) {
+    if (!mnt)
+        return 0;
+
+    uint32_t refs = 1;
+    if (mnt->root_dentry)
+        refs++;
+    if (mnt == init_mnt_ns.root)
+        refs++;
+    return refs;
+}
+
 static bool mount_can_reap_detached_locked(struct mount *mnt) {
     if (!mnt || !(mnt->mflags & MOUNT_F_DETACHED))
         return false;
@@ -280,7 +328,7 @@ static bool mount_can_reap_detached_locked(struct mount *mnt) {
     if (mount_has_child_locked(mnt, false))
         return false;
     uint32_t refs = atomic_read(&mnt->refcount);
-    return refs <= 1;
+    return refs <= mount_baseline_refs(mnt);
 }
 
 static void mount_finalize_free(struct mount *mnt) {
@@ -294,6 +342,7 @@ static void mount_finalize_free(struct mount *mnt) {
     }
     if (mnt->root_dentry) {
         dentry_drop(mnt->root_dentry);
+        dentry_put(mnt->root_dentry);
         mnt->root_dentry = NULL;
     }
     if (mnt->mountpoint_dentry) {
@@ -388,6 +437,23 @@ struct dentry *vfs_root_dentry(void) {
     if (!mnt)
         return NULL;
     return mnt->root_dentry;
+}
+
+bool vfs_mount_is_live(const struct mount *mnt) {
+    if (!mnt)
+        return false;
+
+    bool live = false;
+    spin_lock(&vfs_lock);
+    struct mount *iter;
+    list_for_each_entry(iter, &mount_list, list) {
+        if (iter == mnt) {
+            live = true;
+            break;
+        }
+    }
+    spin_unlock(&vfs_lock);
+    return live;
 }
 
 void vfs_mount_hold(struct mount *mnt) {
@@ -591,7 +657,7 @@ int vfs_mount(const char *src, const char *tgt, const char *fstype,
             ret = -ENOMEM;
             goto err;
         }
-        rootd->mnt = mnt;
+        dentry_set_mnt(rootd, mnt);
         dentry_add(rootd, mnt->root);
         mnt->root_dentry = rootd;
     }
@@ -651,6 +717,7 @@ err:
     }
     if (mnt && mnt->root_dentry) {
         dentry_drop(mnt->root_dentry);
+        dentry_put(mnt->root_dentry);
         mnt->root_dentry = NULL;
     }
     if (mnt && mnt->root) {
@@ -707,6 +774,7 @@ static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
     }
     mnt->ops = src_mnt->ops;
     mnt->root = source->vnode;
+    atomic_init(&mnt->refcount, 1);
     vnode_get(source->vnode);
     struct dentry *rootd = dentry_alloc(NULL, "");
     if (!rootd) {
@@ -715,14 +783,13 @@ static int vfs_mount_bind_at(struct dentry *source, struct dentry *target,
         kfree(mnt);
         return -ENOMEM;
     }
-    rootd->mnt = mnt;
+    dentry_set_mnt(rootd, mnt);
     dentry_add(rootd, source->vnode);
     mnt->root_dentry = rootd;
     mnt->dev = src_mnt->dev;
     mnt->fs_data = src_mnt->fs_data;
     mnt->prop = MOUNT_PRIVATE;
     mnt->mflags = MOUNT_F_BIND;
-    atomic_init(&mnt->refcount, 1);
     mnt->parent = target->mnt;
     mnt->mountpoint_dentry = target;
     dentry_get(target);
@@ -912,6 +979,9 @@ int vfs_umount2(const char *tgt, uint32_t flags) {
             vfs_mount_global_unlock();
             return -EBUSY;
         }
+        spin_unlock(&vfs_lock);
+        mount_prune_subtree_dentries(mnt);
+        spin_lock(&vfs_lock);
         mount_mark_detached_subtree_locked(mnt);
         mount_reap_detached_locked();
         spin_unlock(&vfs_lock);
@@ -924,10 +994,11 @@ int vfs_umount2(const char *tgt, uint32_t flags) {
         vfs_mount_global_unlock();
         return -EBUSY;
     }
+    spin_unlock(&vfs_lock);
+    dentry_prune_mount(mnt);
+    spin_lock(&vfs_lock);
     uint32_t mount_refs = atomic_read(&mnt->refcount);
-    uint32_t baseline_refs = 1;
-    if (mnt == init_mnt_ns.root)
-        baseline_refs++;
+    uint32_t baseline_refs = mount_baseline_refs(mnt);
     if (mount_refs > baseline_refs) {
         spin_unlock(&vfs_lock);
         vfs_mount_global_unlock();

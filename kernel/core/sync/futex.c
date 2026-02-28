@@ -62,17 +62,39 @@ static int futex_read_u32(vaddr_t uaddr, uint32_t *out) {
     return 0;
 }
 
-static uint64_t timespec_to_ticks(const struct timespec *ts) {
+static int timespec_to_ticks(const struct timespec *ts, uint64_t *ticks_out) {
+    if (!ticks_out)
+        return -EINVAL;
+    *ticks_out = 0;
     if (!ts)
         return 0;
     if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= (int64_t)NS_PER_SEC)
-        return UINT64_MAX;
+        return -EINVAL;
 
     uint64_t sec = (uint64_t)ts->tv_sec;
     uint64_t nsec = (uint64_t)ts->tv_nsec;
-    uint64_t ns = sec * NS_PER_SEC + nsec;
-    uint64_t ticks = (ns * CONFIG_HZ + NS_PER_SEC - 1) / NS_PER_SEC;
-    return ticks ? ticks : 1;
+    uint64_t ns = 0;
+    if (sec > UINT64_MAX / NS_PER_SEC) {
+        ns = UINT64_MAX;
+    } else {
+        ns = sec * NS_PER_SEC;
+        if (UINT64_MAX - ns < nsec)
+            ns = UINT64_MAX;
+        else
+            ns += nsec;
+    }
+
+    uint64_t ticks = 0;
+    if (ns == UINT64_MAX ||
+        ns > (UINT64_MAX - (NS_PER_SEC - 1)) / CONFIG_HZ) {
+        ticks = UINT64_MAX;
+    } else {
+        ticks = (ns * CONFIG_HZ + NS_PER_SEC - 1) / NS_PER_SEC;
+        if (!ticks)
+            ticks = 1;
+    }
+    *ticks_out = ticks;
+    return 0;
 }
 
 static int futex_abs_timeout_deadline(const struct timespec *ts, int clockid,
@@ -163,8 +185,9 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
     if (cur != val)
         return -EAGAIN;
 
-    uint64_t delta = timespec_to_ticks(timeout);
-    if (delta == UINT64_MAX)
+    uint64_t delta = 0;
+    rc = timespec_to_ticks(timeout, &delta);
+    if (rc < 0)
         return -EINVAL;
 
     struct poll_wait_source wait_src;
@@ -181,8 +204,13 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
     waiter.woken = false;
 
     uint64_t deadline = 0;
-    if (delta)
-        deadline = arch_timer_get_ticks() + delta;
+    if (delta) {
+        uint64_t now = arch_timer_get_ticks();
+        if (UINT64_MAX - now < delta)
+            deadline = UINT64_MAX;
+        else
+            deadline = now + delta;
+    }
 
     while (1) {
         mutex_lock(&waiter.bucket->lock);
@@ -201,8 +229,9 @@ int futex_wait(uint64_t uaddr_u64, uint32_t val, const struct timespec *timeout)
         poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_BLOCKS);
         tracepoint_emit(TRACE_WAIT_FUTEX, FUTEX_TRACE_WAIT, (uint64_t)uaddr,
                         deadline);
-        int sleep_rc = poll_wait_source_block(&wait_src, deadline, (void *)uaddr,
-                                              &waiter.bucket->lock);
+        int sleep_rc = poll_wait_source_block_seq(
+            &wait_src, deadline, (void *)uaddr, &waiter.bucket->lock,
+            poll_wait_source_seq_snapshot(&wait_src));
 
         if (waiter.woken) {
             poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAIT_WAKES);
@@ -402,8 +431,9 @@ int futex_waitv(const struct futex_waitv *waiters, uint32_t nr_waiters,
         poll_wait_stat_inc(POLL_WAIT_STAT_FUTEX_WAITV_BLOCKS);
         tracepoint_emit(TRACE_WAIT_FUTEX, FUTEX_TRACE_WAITV,
                         (uint64_t)nr_waiters, deadline);
-        int sleep_rc =
-            poll_wait_source_block(&wait_src, deadline, kwaiters, &wait_lock);
+        int sleep_rc = poll_wait_source_block_seq(
+            &wait_src, deadline, kwaiters, &wait_lock,
+            poll_wait_source_seq_snapshot(&wait_src));
 
         idx = __atomic_load_n(&wake_index, __ATOMIC_ACQUIRE);
         if (idx >= 0) {

@@ -47,15 +47,17 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout) {
     while (sem->count == 0) {
         int rc;
         if (deadline) {
-            rc = poll_wait_source_block_ex(&sem->wait_src, deadline,
-                                           &sem->wait_src, &sem->lock, false);
+            rc = poll_wait_source_block_seq_ex(
+                &sem->wait_src, deadline, &sem->wait_src, &sem->lock, false,
+                poll_wait_source_seq_snapshot(&sem->wait_src));
             if (rc == -ETIMEDOUT) {
                 mutex_unlock(&sem->lock);
                 return SYS_ARCH_TIMEOUT;
             }
         } else {
-            rc = poll_wait_source_block_ex(&sem->wait_src, 0, &sem->wait_src,
-                                           &sem->lock, false);
+            rc = poll_wait_source_block_seq_ex(
+                &sem->wait_src, 0, &sem->wait_src, &sem->lock, false,
+                poll_wait_source_seq_snapshot(&sem->wait_src));
         }
         (void)rc;
     }
@@ -121,8 +123,9 @@ void sys_mbox_free(sys_mbox_t *mbox) {
 void sys_mbox_post(sys_mbox_t *mbox, void *msg) {
     mutex_lock(&mbox->lock);
     while (mbox->count >= SYS_MBOX_SIZE) {
-        poll_wait_source_block_ex(&mbox->not_full, 0, &mbox->not_full,
-                                  &mbox->lock, false);
+        poll_wait_source_block_seq_ex(
+            &mbox->not_full, 0, &mbox->not_full, &mbox->lock, false,
+            poll_wait_source_seq_snapshot(&mbox->not_full));
     }
     mbox->msgs[mbox->head] = msg;
     mbox->head = (mbox->head + 1) % SYS_MBOX_SIZE;
@@ -160,17 +163,17 @@ u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout) {
     while (mbox->count == 0) {
         int rc;
         if (deadline) {
-            rc = poll_wait_source_block_ex(&mbox->not_empty, deadline,
-                                           &mbox->not_empty, &mbox->lock,
-                                           false);
+            rc = poll_wait_source_block_seq_ex(
+                &mbox->not_empty, deadline, &mbox->not_empty, &mbox->lock,
+                false, poll_wait_source_seq_snapshot(&mbox->not_empty));
             if (rc == -ETIMEDOUT) {
                 mutex_unlock(&mbox->lock);
                 return SYS_ARCH_TIMEOUT;
             }
         } else {
-            rc = poll_wait_source_block_ex(&mbox->not_empty, 0,
-                                           &mbox->not_empty, &mbox->lock,
-                                           false);
+            rc = poll_wait_source_block_seq_ex(
+                &mbox->not_empty, 0, &mbox->not_empty, &mbox->lock, false,
+                poll_wait_source_seq_snapshot(&mbox->not_empty));
         }
         (void)rc;
     }

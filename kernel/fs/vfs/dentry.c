@@ -4,6 +4,7 @@
 
 #include <kairos/dentry.h>
 #include <kairos/arch.h>
+#include <kairos/hashtable.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
@@ -17,7 +18,7 @@
 #define DENTRY_KOBJ_STATE_FAILED  3U
 
 static struct kmem_cache *dentry_cache;
-static struct list_head dentry_hash[DCACHE_HASH_SIZE];
+KHASH_DECLARE(dentry_hash, DCACHE_HASH_BITS);
 static struct list_head dentry_lru;
 static struct mutex dcache_lock;
 static size_t dcache_count;
@@ -25,6 +26,9 @@ static size_t dcache_count;
 static void dcache_evict(void);
 static void dentry_kobj_init(struct dentry *d);
 static inline bool dentry_kobj_is_ready(struct dentry *d);
+static void dentry_attach_child(struct dentry *parent, struct dentry *child);
+static void dentry_detach_child(struct dentry *parent, struct dentry *child);
+static void dentry_hash_reinsert_preserve_ref(struct dentry *d);
 
 struct dentry_kobj_bridge {
     struct kobj obj;
@@ -52,14 +56,13 @@ static uint32_t dcache_hash_key(struct dentry *parent, const char *name,
     while (name && *name) {
         h = (h * 33u) ^ (uint8_t)(*name++);
     }
-    return h & (DCACHE_HASH_SIZE - 1u);
+    return h;
 }
 
 void dentry_init(void) {
     if (!dentry_cache)
         dentry_cache = kmem_cache_create("dentry", sizeof(struct dentry), NULL);
-    for (size_t i = 0; i < DCACHE_HASH_SIZE; i++)
-        INIT_LIST_HEAD(&dentry_hash[i]);
+    KHASH_INIT(dentry_hash);
     INIT_LIST_HEAD(&dentry_lru);
     dcache_count = 0;
     mutex_init(&dcache_lock, "dcache");
@@ -76,12 +79,50 @@ static void dentry_init_struct(struct dentry *d) {
     INIT_LIST_HEAD(&d->lru);
     d->hashed = false;
     mutex_init(&d->lock, "dentry");
-    dentry_kobj_init(d);
 }
 
 static inline bool dentry_kobj_is_ready(struct dentry *d) {
     return d && atomic_read(&d->kobj_state) == DENTRY_KOBJ_STATE_READY &&
            d->kobj != NULL;
+}
+
+static inline void dentry_ref_get_noinit(struct dentry *d) {
+    if (!d)
+        return;
+    atomic_inc(&d->refcount);
+    if (dentry_kobj_is_ready(d))
+        kobj_get(d->kobj);
+}
+
+static void dentry_attach_child(struct dentry *parent, struct dentry *child) {
+    if (!parent || !child)
+        return;
+    mutex_lock(&parent->lock);
+    list_add_tail(&child->child, &parent->children);
+    mutex_unlock(&parent->lock);
+}
+
+static void dentry_detach_child(struct dentry *parent, struct dentry *child) {
+    if (!parent || !child)
+        return;
+    mutex_lock(&parent->lock);
+    list_del(&child->child);
+    mutex_unlock(&parent->lock);
+}
+
+static void dentry_hash_reinsert_preserve_ref(struct dentry *d) {
+    if (!d || d->hashed)
+        return;
+    uint32_t key = dcache_hash_key(d->parent, d->name, d->mnt);
+    mutex_lock(&dcache_lock);
+    if (!d->hashed) {
+        list_add(&d->hash, KHASH_HEAD_U32(dentry_hash, key));
+        list_add(&d->lru, &dentry_lru);
+        d->hashed = true;
+        dcache_count++;
+    }
+    mutex_unlock(&dcache_lock);
+    dcache_evict();
 }
 
 static void dentry_kobj_init(struct dentry *d) {
@@ -106,6 +147,7 @@ static void dentry_kobj_init(struct dentry *d) {
                 uint32_t refs = atomic_read(&d->refcount);
                 for (uint32_t i = 1; i < refs; i++)
                     kobj_get(d->kobj);
+                kobj_track_register(d->kobj);
                 atomic_set(&d->kobj_state, DENTRY_KOBJ_STATE_READY);
                 return;
             }
@@ -145,12 +187,27 @@ struct dentry *dentry_alloc(struct dentry *parent, const char *name) {
     if (parent) {
         d->parent = parent;
         dentry_get(parent);
+        dentry_attach_child(parent, d);
     }
     if (name && name[0]) {
         strncpy(d->name, name, sizeof(d->name) - 1);
         d->name[sizeof(d->name) - 1] = '\0';
     }
     return d;
+}
+
+void dentry_set_mnt(struct dentry *d, struct mount *mnt) {
+    if (!d || d->mnt == mnt)
+        return;
+
+    if (mnt)
+        vfs_mount_hold(mnt);
+
+    struct mount *old = d->mnt;
+    d->mnt = mnt;
+
+    if (old)
+        vfs_mount_put(old);
 }
 
 void dentry_get(struct dentry *d) {
@@ -179,7 +236,9 @@ static void dentry_unhash(struct dentry *d) {
 
 void dentry_put(struct dentry *d) {
     while (d) {
-        dentry_kobj_init(d);
+        uint32_t state = atomic_read(&d->kobj_state);
+        if (state != DENTRY_KOBJ_STATE_UNINIT)
+            dentry_kobj_init(d);
         uint32_t old = atomic_read(&d->refcount);
         if (old == 0)
             panic("dentry_put: refcount underflow on dentry '%s'", d->name);
@@ -190,9 +249,11 @@ void dentry_put(struct dentry *d) {
             break;
         struct dentry *parent = d->parent;
         struct vnode *vn = d->vnode;
+        dentry_detach_child(parent, d);
         d->parent = NULL;
         d->vnode = NULL;
         dentry_unhash(d);
+        dentry_set_mnt(d, NULL);
         if (vn)
             vnode_put(vn);
         kmem_cache_free(dentry_cache, d);
@@ -204,10 +265,10 @@ struct dentry *dentry_lookup(struct dentry *parent, const char *name,
                              struct mount *mnt) {
     if (!name)
         return NULL;
-    uint32_t idx = dcache_hash_key(parent, name, mnt);
+    uint32_t key = dcache_hash_key(parent, name, mnt);
     mutex_lock(&dcache_lock);
     struct dentry *d;
-    list_for_each_entry(d, &dentry_hash[idx], hash) {
+    khash_for_each_possible_u32(dentry_hash, d, hash, key) {
         if (d->parent == parent && d->mnt == mnt &&
             strcmp(d->name, name) == 0) {
             if ((d->flags & DENTRY_NEGATIVE) && d->neg_expire) {
@@ -239,13 +300,13 @@ struct dentry *dentry_lookup(struct dentry *parent, const char *name,
 static void dentry_hash_insert(struct dentry *d) {
     if (!d || d->hashed)
         return;
-    uint32_t idx = dcache_hash_key(d->parent, d->name, d->mnt);
+    uint32_t key = dcache_hash_key(d->parent, d->name, d->mnt);
     mutex_lock(&dcache_lock);
     if (!d->hashed) {
-        list_add(&d->hash, &dentry_hash[idx]);
+        list_add(&d->hash, KHASH_HEAD_U32(dentry_hash, key));
         list_add(&d->lru, &dentry_lru);
         d->hashed = true;
-        dentry_get(d);
+        dentry_ref_get_noinit(d);
         dcache_count++;
     }
     mutex_unlock(&dcache_lock);
@@ -275,7 +336,9 @@ static void dcache_evict(void) {
             list_add(&d->lru, &dentry_lru);
             continue;
         }
-        dentry_kobj_init(d);
+        uint32_t state = atomic_read(&d->kobj_state);
+        if (state != DENTRY_KOBJ_STATE_UNINIT)
+            dentry_kobj_init(d);
         /* Atomically transition refcount 1→0 to close the TOCTOU window.
          * If another thread grabbed a reference after we released d->lock,
          * the cmpxchg fails and we simply skip this dentry. */
@@ -304,8 +367,10 @@ static void dcache_evict(void) {
         list_del(&d->lru);
         struct dentry *parent = d->parent;
         struct vnode *vn = d->vnode;
+        dentry_detach_child(parent, d);
         d->parent = NULL;
         d->vnode = NULL;
+        dentry_set_mnt(d, NULL);
         if (vn)
             vnode_put(vn);
         if (parent)
@@ -355,18 +420,53 @@ void dentry_drop(struct dentry *d) {
     }
 }
 
+void dentry_prune_mount(struct mount *mnt) {
+    if (!mnt)
+        return;
+
+    struct list_head victims;
+    INIT_LIST_HEAD(&victims);
+
+    mutex_lock(&dcache_lock);
+    for (size_t i = 0; i < DCACHE_HASH_SIZE; i++) {
+        struct dentry *d, *tmp;
+        list_for_each_entry_safe(d, tmp, &dentry_hash[i], hash) {
+            if (d->mnt != mnt || !d->hashed)
+                continue;
+            if (d == mnt->root_dentry)
+                continue;
+            list_del(&d->hash);
+            list_del(&d->lru);
+            d->hashed = false;
+            if (dcache_count > 0)
+                dcache_count--;
+            list_add_tail(&d->lru, &victims);
+        }
+    }
+    mutex_unlock(&dcache_lock);
+
+    struct dentry *d, *tmp;
+    list_for_each_entry_safe(d, tmp, &victims, lru) {
+        list_del(&d->lru);
+        dentry_put(d);
+    }
+}
+
 void dentry_move(struct dentry *d, struct dentry *new_parent,
                  const char *new_name) {
     if (!d || !new_parent || !new_name || !new_name[0])
         return;
+    bool was_hashed = d->hashed;
     dentry_unhash(d);
     mutex_lock(&d->lock);
     if (d->parent) {
+        dentry_detach_child(d->parent, d);
         dentry_put(d->parent);
         d->parent = NULL;
     }
     d->parent = new_parent;
     dentry_get(new_parent);
+    dentry_attach_child(new_parent, d);
     strncpy(d->name, new_name, sizeof(d->name) - 1);
     d->name[sizeof(d->name) - 1] = '\0';
     mutex_unlock(&d->lock);
@@ -375,5 +475,8 @@ void dentry_move(struct dentry *d, struct dentry *new_parent,
         vnode_set_parent(d->vnode, new_parent->vnode, new_name);
         rwlock_write_unlock(&d->vnode->lock);
     }
-    dentry_hash_insert(d);
+    if (was_hashed)
+        dentry_hash_reinsert_preserve_ref(d);
+    else
+        dentry_hash_insert(d);
 }

@@ -5,11 +5,26 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define SHELL_RESTART_DELAY_MIN 1U
 #define SHELL_RESTART_DELAY_MAX 16U
+
+static void setup_controlling_tty(int fd) {
+    if (fd < 0)
+        return;
+
+    (void)setsid();
+    (void)ioctl(fd, TIOCSCTTY, 0);
+
+    pid_t pgrp = getpgrp();
+    if (pgrp <= 0)
+        pgrp = getpid();
+    if (pgrp > 0)
+        (void)ioctl(fd, TIOCSPGRP, &pgrp);
+}
 
 static void setup_stdio(void) {
     int fd = open("/dev/console", O_RDWR);
@@ -22,6 +37,7 @@ static void setup_stdio(void) {
     dup2(fd, 0);
     dup2(fd, 1);
     dup2(fd, 2);
+    setup_controlling_tty(fd);
     if (fd > 2) {
         close(fd);
     }
@@ -107,6 +123,9 @@ int main(int argc, char **argv) {
         }
 
         if (pid == 0) {
+            pid_t shell_pgrp = getpid();
+            (void)setpgid(0, shell_pgrp);
+            (void)ioctl(0, TIOCSPGRP, &shell_pgrp);
             exec_shell();
             const char msg[] = "init: exec /bin/sh failed\n";
             write(2, msg, sizeof(msg) - 1);

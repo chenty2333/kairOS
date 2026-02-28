@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -37,6 +38,13 @@ static void setup_stdio(void) {
     dup2(fd, 0);
     dup2(fd, 1);
     dup2(fd, 2);
+    (void)setsid();
+    (void)ioctl(fd, TIOCSCTTY, 0);
+    pid_t pgrp = getpgrp();
+    if (pgrp <= 0)
+        pgrp = getpid();
+    if (pgrp > 0)
+        (void)ioctl(fd, TIOCSPGRP, &pgrp);
     if (fd > 2)
         close(fd);
 }

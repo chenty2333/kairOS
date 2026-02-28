@@ -5,6 +5,7 @@
 #include <kairos/device.h>
 #include <kairos/io.h>
 #include <kairos/mm.h>
+#include <kairos/platform.h>
 #include <kairos/printk.h>
 #include <kairos/string.h>
 #include <kairos/virtio.h>
@@ -509,15 +510,15 @@ static void mmio_ok_remove(struct virtio_device *vdev) {
 }
 
 static void test_virtio_mmio_probe_remove_cleanup(void) {
-    uint8_t *mmio = kzalloc(0x200);
+    paddr_t mmio_pa = pmm_alloc_page();
+    uint8_t *mmio = mmio_pa ? (uint8_t *)phys_to_virt(mmio_pa) : NULL;
     test_check(mmio != NULL, "virtio_mmio_ok alloc regs");
     if (!mmio)
         return;
+    memset(mmio, 0, CONFIG_PAGE_SIZE);
 
     mmio_write32(mmio, VIRTIO_MMIO_MAGIC_VALUE, 0x74726976);
     mmio_write32(mmio, VIRTIO_MMIO_DEVICE_ID, KT_VIRTIO_DEV_ID_OK);
-
-    paddr_t mmio_pa = virt_to_phys(mmio);
     struct resource res[2] = {
         {
             .start = mmio_pa,
@@ -534,6 +535,7 @@ static void test_virtio_mmio_probe_remove_cleanup(void) {
     struct device pdev;
     memset(&pdev, 0, sizeof(pdev));
     strncpy(pdev.name, "ktest-mmio-ok", sizeof(pdev.name) - 1);
+    pdev.bus = &platform_bus_type;
     pdev.resources = res;
     pdev.num_resources = 2;
 
@@ -550,7 +552,7 @@ static void test_virtio_mmio_probe_remove_cleanup(void) {
     int ret = virtio_register_driver(&drv);
     test_check(ret == 0, "virtio_mmio_ok register virtio driver");
     if (ret < 0) {
-        kfree(mmio);
+        pmm_free_page(mmio_pa);
         return;
     }
 
@@ -582,7 +584,7 @@ static void test_virtio_mmio_probe_remove_cleanup(void) {
         virtio_mmio_driver.remove(&pdev);
 
     driver_unregister(&drv.drv);
-    kfree(mmio);
+    pmm_free_page(mmio_pa);
 }
 
 static void test_virtio_mmio_probe_failfast(void) {
@@ -591,12 +593,13 @@ static void test_virtio_mmio_probe_failfast(void) {
     int ret = virtio_mmio_driver.probe(&dev_no_res);
     test_check(ret == -ENODEV, "virtio_mmio no_resources enodev");
 
-    uint8_t *mmio = kzalloc(0x200);
+    paddr_t mmio_pa = pmm_alloc_page();
+    uint8_t *mmio = mmio_pa ? (uint8_t *)phys_to_virt(mmio_pa) : NULL;
     test_check(mmio != NULL, "virtio_mmio alloc regs");
     if (!mmio)
         return;
+    memset(mmio, 0, CONFIG_PAGE_SIZE);
 
-    paddr_t mmio_pa = virt_to_phys(mmio);
     struct resource res[2] = {
         {
             .start = mmio_pa,
@@ -628,7 +631,7 @@ static void test_virtio_mmio_probe_failfast(void) {
     ret = virtio_mmio_driver.probe(&dev_reserved);
     test_check(ret == -ENODEV, "virtio_mmio reserved_id enodev");
 
-    kfree(mmio);
+    pmm_free_page(mmio_pa);
 }
 
 int run_device_virtio_tests(void) {

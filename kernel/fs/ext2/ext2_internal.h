@@ -6,6 +6,7 @@
 #define _KAIROS_EXT2_INTERNAL_H
 
 #include <kairos/buf.h>
+#include <kairos/hashtable.h>
 #include <kairos/list.h>
 #include <kairos/sync.h>
 #include <kairos/types.h>

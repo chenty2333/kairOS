@@ -163,10 +163,8 @@ static int ext2_vnode_close(struct vnode *vn) {
             list_del(&id->cache_node);
             INIT_LIST_HEAD(&id->cache_node);
         }
-        if (!list_empty(&id->hash_node)) {
-            list_del(&id->hash_node);
-            INIT_LIST_HEAD(&id->hash_node);
-        }
+        if (!list_empty(&id->hash_node))
+            khash_del(&id->hash_node);
         mutex_unlock(&mnt->icache_lock);
     }
     if (id)

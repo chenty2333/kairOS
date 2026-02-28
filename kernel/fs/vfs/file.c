@@ -226,6 +226,8 @@ void file_put(struct file *file) {
 ssize_t vfs_read(struct file *file, void *buf, size_t len) {
     if (!file || !file->vnode || !file->vnode->ops)
         return -EINVAL;
+    if ((file->flags & O_ACCMODE) == O_WRONLY)
+        return -EBADF;
     if (file->vnode->type == VNODE_DIR)
         return -EISDIR;
     if (file->vnode->type == VNODE_PIPE) {
@@ -254,6 +256,8 @@ ssize_t vfs_read(struct file *file, void *buf, size_t len) {
 ssize_t vfs_write(struct file *file, const void *buf, size_t len) {
     if (!file || !file->vnode || !file->vnode->ops)
         return -EINVAL;
+    if ((file->flags & O_ACCMODE) == O_RDONLY)
+        return -EBADF;
     if (file->vnode->type == VNODE_DIR)
         return -EISDIR;
     if (file->vnode->type == VNODE_PIPE) {

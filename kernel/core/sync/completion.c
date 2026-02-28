@@ -17,7 +17,8 @@ void completion_init(struct completion *c) {
 void wait_for_completion(struct completion *c) {
     SLEEP_LOCK_DEBUG_CHECK();
 
-    if (!proc_current()) {
+    struct process *curr = proc_current();
+    if (!curr) {
         spin_lock(&c->lock);
         while (!c->done) {
             spin_unlock(&c->lock);
@@ -32,6 +33,7 @@ void wait_for_completion(struct completion *c) {
 
     spin_lock(&c->lock);
     while (!c->done) {
+        wait_queue_add(&c->wq, curr);
         spin_unlock(&c->lock);
         proc_sleep_on(&c->wq, c, false);
         spin_lock(&c->lock);
@@ -44,7 +46,8 @@ void wait_for_completion(struct completion *c) {
 int wait_for_completion_interruptible(struct completion *c) {
     SLEEP_LOCK_DEBUG_CHECK();
 
-    if (!proc_current()) {
+    struct process *curr = proc_current();
+    if (!curr) {
         spin_lock(&c->lock);
         while (!c->done) {
             spin_unlock(&c->lock);
@@ -59,6 +62,7 @@ int wait_for_completion_interruptible(struct completion *c) {
 
     spin_lock(&c->lock);
     while (!c->done) {
+        wait_queue_add(&c->wq, curr);
         spin_unlock(&c->lock);
         int rc = proc_sleep_on(&c->wq, c, true);
         if (rc < 0)
@@ -74,7 +78,8 @@ int wait_for_completion_interruptible(struct completion *c) {
 int wait_for_completion_timeout(struct completion *c, uint64_t ticks) {
     SLEEP_LOCK_DEBUG_CHECK();
 
-    if (!proc_current()) {
+    struct process *curr = proc_current();
+    if (!curr) {
         uint64_t deadline = arch_timer_get_ticks() + ticks;
         spin_lock(&c->lock);
         while (!c->done) {
@@ -93,6 +98,7 @@ int wait_for_completion_timeout(struct completion *c, uint64_t ticks) {
     uint64_t deadline = arch_timer_get_ticks() + ticks;
     spin_lock(&c->lock);
     while (!c->done) {
+        wait_queue_add(&c->wq, curr);
         spin_unlock(&c->lock);
         int rc = proc_sleep_on_mutex_timeout(&c->wq, c, NULL, false, deadline);
         if (rc == -ETIMEDOUT)

@@ -1,0 +1,62 @@
+diff --git a/miscutils/less.c b/miscutils/less.c
+index 2204b1c..62eefbf 100644
+--- a/miscutils/less.c
++++ b/miscutils/less.c
+@@ -278,6 +278,7 @@ struct globals {
+ #define kbd_input           (G.kbd_input         )
+ #define INIT_G() do { \
+ 	SET_PTR_TO_GLOBALS(xzalloc(sizeof(G))); \
++	kbd_fd = -1; \
+ 	less_gets_pos = -1; \
+ 	empty_line_marker = "~"; \
+ 	current_file = 1; \
+@@ -297,6 +298,8 @@ struct globals {
+ /* Reset terminal input to normal */
+ static void set_tty_cooked(void)
+ {
++	if (!ptr_to_globals || kbd_fd < 0)
++		return;
+ 	fflush_all();
+ 	tcsetattr(kbd_fd, TCSANOW, &term_orig);
+ }
+@@ -327,6 +330,8 @@ static void print_statusline(const char *str)
+ /* Exit the program gracefully */
+ static void restore_tty(void)
+ {
++	if (!ptr_to_globals || kbd_fd < 0)
++		return;
+ 	set_tty_cooked();
+ 	if (!(G.kbd_fd_orig_flags & O_NONBLOCK))
+ 		ndelay_off(kbd_fd);
+@@ -1104,7 +1109,6 @@ static int64_t getch_nowait(void)
+ 	pfd[1].fd = kbd_fd;
+ 	pfd[1].events = POLLIN;
+  again:
+-	tcsetattr(kbd_fd, TCSANOW, &term_less);
+ 	/* NB: select/poll returns whenever read will not block. Therefore:
+ 	 * if eof is reached, select/poll will return immediately
+ 	 * because read will immediately return 0 bytes.
+@@ -1148,10 +1152,9 @@ static int64_t getch_nowait(void)
+ 			buffer_fill_and_print();
+ 			goto again;
+ 		}
+-		/* EOF/error (ssh session got killed etc) */
+-		less_exit();
+-	}
+-	set_tty_cooked();
++			/* EOF/error (ssh session got killed etc) */
++			less_exit();
++		}
+ 	return key64;
+ }
+ 
+@@ -1896,6 +1899,9 @@ int less_main(int argc, char **argv)
+ 	kbd_fd = tty_fd; /* save in a global */
+ 
+ 	get_termios_and_make_raw(tty_fd, &term_less, &term_orig, TERMIOS_RAW_CRNL_INPUT);
++	/* Keep signal chars active in pager mode (Ctrl-C/Ctrl-\). */
++	term_less.c_lflag |= ISIG;
++	tcsetattr(kbd_fd, TCSANOW, &term_less);
+ 
+ 	IF_FEATURE_LESS_ASK_TERMINAL(G.winsize_err =) get_terminal_width_height(tty_fd, &width, &max_displayed_line);
+ 	/* 20: two tabstops + 4 */

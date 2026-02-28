@@ -4,6 +4,7 @@
 
 #include <kairos/blkdev.h>
 #include <kairos/buf.h>
+#include <kairos/hashtable.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
 #include <kairos/spinlock.h>
@@ -11,16 +12,22 @@
 #include <kairos/sync.h>
 
 #define NBUF 128
-#define HASH_SIZE 32
+#define BIO_HASH_BITS 5U
 #define BIO_MAX_BLOCK_BYTES CONFIG_PAGE_SIZE
-#define BUF_HASH(dev, b, sz)                                                   \
-    (((uintptr_t)(dev) ^ (uintptr_t)(b) ^ (uintptr_t)(sz)) % HASH_SIZE)
 
 static struct buf bufs[NBUF];
-static struct list_head hashtable[HASH_SIZE];
+KHASH_DECLARE(bio_hash_table, BIO_HASH_BITS);
 static struct list_head lru_list;
 static struct list_head dirty_list;
 static spinlock_t bcache_lock = SPINLOCK_INIT;
+
+static inline uint64_t bio_hash_key(struct blkdev *dev, uint64_t blockno,
+                                    uint32_t block_bytes) {
+    uint64_t key = blockno;
+    key ^= ((uint64_t)(uintptr_t)dev) >> 4;
+    key ^= ((uint64_t)block_bytes << 32) ^ (uint64_t)block_bytes;
+    return key;
+}
 
 static inline int bio_validate_block_bytes(uint32_t block_bytes)
 {
@@ -65,8 +72,7 @@ static int bflush_locked(struct buf *b)
 void binit(void) {
     INIT_LIST_HEAD(&lru_list);
     INIT_LIST_HEAD(&dirty_list);
-    for (int i = 0; i < HASH_SIZE; i++)
-        INIT_LIST_HEAD(&hashtable[i]);
+    KHASH_INIT(bio_hash_table);
 
     for (int i = 0; i < NBUF; i++) {
         struct buf *b = &bufs[i];
@@ -91,13 +97,13 @@ static struct buf *bget(struct blkdev *dev, uint64_t blockno,
                         uint32_t block_bytes) {
     struct buf *b;
     struct buf *dirty_victim = NULL;
-    uint32_t h = BUF_HASH(dev, blockno, block_bytes);
+    uint64_t key = bio_hash_key(dev, blockno, block_bytes);
 
 retry:
     spin_lock(&bcache_lock);
 
     /* 1. Check if in hash table */
-    list_for_each_entry(b, &hashtable[h], hash) {
+    khash_for_each_possible(bio_hash_table, b, hash, key) {
         if (b->dev == dev && b->blockno == blockno &&
             b->block_bytes == block_bytes) {
             b->refcount++;
@@ -111,13 +117,13 @@ retry:
     list_for_each_entry_reverse(b, &lru_list, lru) {
         if (b->refcount == 0 && !(b->flags & B_DIRTY)) {
             if (b->dev)
-                list_del(&b->hash); /* Remove from old hash */
+                khash_del(&b->hash); /* Remove from old hash */
             b->dev = dev;
             b->blockno = blockno;
             b->block_bytes = block_bytes;
             b->flags = 0;
             b->refcount = 1;
-            list_add(&b->hash, &hashtable[h]);
+            khash_add(bio_hash_table, &b->hash, key);
             spin_unlock(&bcache_lock);
             mutex_lock(&b->lock);
             return b;

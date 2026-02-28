@@ -13,6 +13,8 @@
 struct device;
 struct driver;
 struct sysfs_node;
+struct sysfs_attribute;
+struct device_sysfs_controls;
 struct dma_ops;
 struct iommu_domain;
 
@@ -47,6 +49,7 @@ struct device {
     bool iommu_domain_owned;      /* Destroy domain on device detach */
     void *driver_data;          /* Driver private data */
     struct sysfs_node *sysfs_node; /* sysfs directory for this device */
+    struct device_sysfs_controls *sysfs_controls; /* core sysfs control files */
     struct list_head list;      /* Global device list node */
     struct list_head bus_list;  /* Bus-specific device list node */
 };
@@ -70,9 +73,19 @@ void bus_unregister(struct bus_type *bus);
 int device_register(struct device *dev);
 void device_unregister(struct device *dev);
 int device_for_each(int (*fn)(struct device *dev, void *arg), void *arg);
+int device_bind(struct device *dev);
+int device_unbind(struct device *dev);
+int device_rescan(struct device *dev);
 
 int driver_register(struct driver *drv);
 void driver_unregister(struct driver *drv);
+int device_sysfs_create_file(struct device *dev,
+                             const struct sysfs_attribute *attr,
+                             struct sysfs_node **out_node);
+int device_sysfs_create_files(struct device *dev,
+                              const struct sysfs_attribute *attrs,
+                              size_t count);
+void device_sysfs_remove_file(struct sysfs_node *node);
 
 struct resource {
     uint64_t start;

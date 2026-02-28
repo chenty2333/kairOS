@@ -65,6 +65,19 @@ static inline uint32_t epoll_item_watch_events(const struct epoll_item *item) {
     return events;
 }
 
+static uint32_t epoll_item_watch_events_snapshot(struct epoll_instance *ep,
+                                                 struct epoll_item *item) {
+    if (!ep || !item)
+        return 0;
+
+    uint32_t watch_events = 0;
+    mutex_lock(&ep->lock);
+    if (!ep->closing && !item->deleted && item->ep == ep)
+        watch_events = epoll_item_watch_events(item);
+    mutex_unlock(&ep->lock);
+    return watch_events;
+}
+
 static struct epoll_instance *epoll_from_fd(int epfd, struct file **filep) {
     struct file *file = NULL;
     if (handle_bridge_pin_fd(proc_current(), epfd, 0, &file, NULL) < 0)
@@ -115,7 +128,7 @@ static void epoll_item_prepare(struct poll_watch *watch) {
 }
 
 static void epoll_mark_ready(struct epoll_item *item, uint32_t revents) {
-    struct epoll_instance *ep = item->ep;
+    struct epoll_instance *ep = __atomic_load_n(&item->ep, __ATOMIC_ACQUIRE);
     if (!ep)
         return;
 
@@ -123,8 +136,10 @@ static void epoll_mark_ready(struct epoll_item *item, uint32_t revents) {
     if (!revents)
         return;
 
+    bool wake_waiters = false;
     mutex_lock(&ep->lock);
     if (!ep->closing && !item->deleted) {
+        wake_waiters = true;
         item->revents = revents;
         if (!item->ready && !item->dispatching) {
             item->ready = true;
@@ -133,16 +148,26 @@ static void epoll_mark_ready(struct epoll_item *item, uint32_t revents) {
     }
     mutex_unlock(&ep->lock);
 
-    poll_wait_wake(&ep->waiters, revents);
+    if (wake_waiters)
+        poll_wait_wake(&ep->waiters, revents);
 }
 
 static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
     struct epoll_item *item = (struct epoll_item *)watch->data;
-    if (!item || item->deleted) {
+    if (!item)
+        return;
+    struct epoll_instance *ep = __atomic_load_n(&item->ep, __ATOMIC_ACQUIRE);
+    if (!ep) {
         epoll_item_put(item);
         return;
     }
-    uint32_t watch_events = epoll_item_watch_events(item);
+
+    uint32_t watch_events = epoll_item_watch_events_snapshot(ep, item);
+    if (!watch_events) {
+        epoll_item_put(item);
+        return;
+    }
+
     uint32_t mask = events ? (events & watch_events) : watch_events;
     if (!mask) {
         epoll_item_put(item);
@@ -152,6 +177,24 @@ static void epoll_item_notify(struct poll_watch *watch, uint32_t events) {
     if (revents)
         epoll_mark_ready(item, revents);
     epoll_item_put(item);
+}
+
+static void epoll_item_wait_notify_done(struct epoll_item *item) {
+    while (1) {
+        struct poll_wait_head *head =
+            __atomic_load_n(&item->watch.head, __ATOMIC_ACQUIRE);
+        if (!head)
+            return;
+
+        bool flags;
+        bool notifying = false;
+        spin_lock_irqsave(&head->wq.lock, &flags);
+        notifying = item->watch.notifying;
+        spin_unlock_irqrestore(&head->wq.lock, flags);
+        if (!notifying)
+            return;
+        proc_yield();
+    }
 }
 
 static void epoll_item_detach(struct epoll_item *item) {
@@ -164,9 +207,19 @@ static void epoll_item_detach(struct epoll_item *item) {
         proc_yield();
     }
     vfs_poll_unwatch(&item->watch);
+    epoll_item_wait_notify_done(item);
     while (epoll_item_refs(item) > 1) {
-        int rc = poll_wait_source_block_ex(&item->detach_src, 0, item, NULL,
-                                           false);
+        struct process *curr = proc_current();
+        if (!curr) {
+            proc_yield();
+            continue;
+        }
+        wait_queue_add(&item->detach_src.wq, curr);
+        if (epoll_item_refs(item) <= 1) {
+            wait_queue_remove(&item->detach_src.wq, curr);
+            break;
+        }
+        int rc = proc_sleep_on(&item->detach_src.wq, item, false);
         if (rc < 0)
             break;
     }
@@ -196,7 +249,7 @@ static int epoll_close(struct vnode *vn) {
         list_for_each_entry_safe(item, tmp, &local, list) {
             list_del(&item->list);
             item->deleted = true;
-            item->ep = NULL;
+            __atomic_store_n(&item->ep, NULL, __ATOMIC_RELEASE);
             epoll_item_detach(item);
             epoll_item_put(item);
         }
@@ -437,10 +490,10 @@ static int epoll_collect_ready(struct epoll_instance *ep,
     list_for_each_entry_safe(item, tmp, &local_ready, ready_node) {
         list_del(&item->ready_node);
         uint32_t revents = 0;
-        uint32_t watch_events = epoll_item_watch_events(item);
-        if (!item->deleted && item->ep && watch_events)
-            revents =
-                (uint32_t)vfs_poll(item->file, watch_events) & EPOLL_EVENT_MASK;
+        uint32_t watch_events = epoll_item_watch_events_snapshot(ep, item);
+        if (watch_events)
+            revents = (uint32_t)vfs_poll(item->file, watch_events) &
+                      EPOLL_EVENT_MASK;
 
         bool delivered = false;
         if (revents && out < (int)maxevents) {
@@ -521,16 +574,14 @@ static void epoll_rescan(struct epoll_instance *ep) {
 
         for (size_t i = 0; i < idx; i++) {
             item = items[i];
-            if (!item->deleted && item->ep) {
-                uint32_t watch_events = epoll_item_watch_events(item);
-                uint32_t revents = 0;
-                if (watch_events) {
-                    revents = (uint32_t)vfs_poll(item->file, watch_events) &
-                              EPOLL_EVENT_MASK;
-                }
-                if (revents)
-                    epoll_mark_ready(item, revents);
+            uint32_t watch_events = epoll_item_watch_events_snapshot(ep, item);
+            uint32_t revents = 0;
+            if (watch_events) {
+                revents =
+                    (uint32_t)vfs_poll(item->file, watch_events) & EPOLL_EVENT_MASK;
             }
+            if (revents)
+                epoll_mark_ready(item, revents);
             epoll_item_put(item);
         }
 

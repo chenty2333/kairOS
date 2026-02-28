@@ -73,8 +73,7 @@ int ext2_mount(struct mount *mnt) {
     mutex_init(&e->lock, "ext2_mount");
     mutex_init(&e->icache_lock, "ext2_icache");
     INIT_LIST_HEAD(&e->inode_cache);
-    for (size_t i = 0; i < EXT2_ICACHE_HASH_SIZE; i++)
-        INIT_LIST_HEAD(&e->inode_cache_hash[i]);
+    khash_init(e->inode_cache_hash, EXT2_ICACHE_HASH_SIZE);
     e->s_last_alloc_group_blk = 0;
     e->s_last_alloc_group_ino = 0;
 

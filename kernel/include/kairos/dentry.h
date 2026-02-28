@@ -50,11 +50,13 @@ void dentry_init(void);
 struct dentry *dentry_alloc(struct dentry *parent, const char *name);
 void dentry_get(struct dentry *d);
 void dentry_put(struct dentry *d);
+void dentry_set_mnt(struct dentry *d, struct mount *mnt);
 struct dentry *dentry_lookup(struct dentry *parent, const char *name,
                              struct mount *mnt);
 void dentry_add(struct dentry *d, struct vnode *vn);
 void dentry_add_negative(struct dentry *d);
 void dentry_drop(struct dentry *d);
+void dentry_prune_mount(struct mount *mnt);
 void dentry_move(struct dentry *d, struct dentry *new_parent,
                  const char *new_name);
 struct kobj *dentry_kobj(struct dentry *d);

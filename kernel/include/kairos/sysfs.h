@@ -2,7 +2,7 @@
  * kernel/include/kairos/sysfs.h - Kernel attribute tree filesystem
  *
  * Provides /sys with a tree of directories and attribute files
- * managed entirely by kernel APIs. Userspace sees a read-only VFS.
+ * managed entirely by kernel APIs.
  */
 
 #ifndef _KAIROS_SYSFS_H
@@ -19,6 +19,7 @@ struct sysfs_attribute {
     ssize_t (*show)(void *priv, char *buf, size_t bufsz);
     ssize_t (*store)(void *priv, const char *buf, size_t len);
     void *priv;
+    void (*release_priv)(void *priv);
 };
 
 /* Directory management */
@@ -44,6 +45,8 @@ struct sysfs_node *sysfs_root(void);
 struct sysfs_node *sysfs_bus_dir(void);
 struct sysfs_node *sysfs_class_dir(void);
 struct sysfs_node *sysfs_devices_dir(void);
+struct sysfs_node *sysfs_kernel_dir(void);
+struct sysfs_node *sysfs_find_child(struct sysfs_node *parent, const char *name);
 
 void sysfs_init(void);
 

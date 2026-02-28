@@ -5,6 +5,10 @@
 #include <kairos/pollwait.h>
 #include <kairos/arch.h>
 #include <kairos/config.h>
+#if CONFIG_KERNEL_FAULT_INJECT
+#include <kairos/fault_inject.h>
+#endif
+#include <kairos/poll.h>
 #include <kairos/process.h>
 #include <kairos/tracepoint.h>
 #include <kairos/vfs.h>
@@ -49,6 +53,12 @@ static const char *const poll_wait_stat_names[POLL_WAIT_STAT_COUNT] = {
     [POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_CHANGED] = "waitsrc_seq_wake_changed",
     [POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_UNCHANGED] =
         "waitsrc_seq_wake_unchanged",
+    [POLL_WAIT_STAT_WAITSRC_REASON_UNKNOWN] = "waitsrc_reason_unknown",
+    [POLL_WAIT_STAT_WAITSRC_REASON_DATA] = "waitsrc_reason_data",
+    [POLL_WAIT_STAT_WAITSRC_REASON_HUP] = "waitsrc_reason_hup",
+    [POLL_WAIT_STAT_WAITSRC_REASON_CLOSE] = "waitsrc_reason_close",
+    [POLL_WAIT_STAT_WAITSRC_REASON_SIGNAL] = "waitsrc_reason_signal",
+    [POLL_WAIT_STAT_WAITSRC_REASON_TIMEOUT] = "waitsrc_reason_timeout",
 };
 
 void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta) {
@@ -68,6 +78,54 @@ const char *poll_wait_stat_name(enum poll_wait_stat stat) {
         return "unknown";
     const char *name = poll_wait_stat_names[stat];
     return name ? name : "unknown";
+}
+
+const char *poll_wait_wake_reason_name(enum poll_wait_wake_reason reason) {
+    switch (reason) {
+    case POLL_WAIT_WAKE_DATA:
+        return "data";
+    case POLL_WAIT_WAKE_HUP:
+        return "hup";
+    case POLL_WAIT_WAKE_CLOSE:
+        return "close";
+    case POLL_WAIT_WAKE_SIGNAL:
+        return "signal";
+    case POLL_WAIT_WAKE_TIMEOUT:
+        return "timeout";
+    default:
+        return "unknown";
+    }
+}
+
+static enum poll_wait_wake_reason
+poll_wait_reason_from_events(uint32_t events) {
+    if (events & POLLHUP)
+        return POLL_WAIT_WAKE_HUP;
+    if (events & (POLLIN | POLLOUT | POLLERR | POLLPRI))
+        return POLL_WAIT_WAKE_DATA;
+    return POLL_WAIT_WAKE_UNKNOWN;
+}
+
+static enum poll_wait_stat
+poll_wait_reason_to_stat(enum poll_wait_wake_reason reason) {
+    switch (reason) {
+    case POLL_WAIT_WAKE_DATA:
+        return POLL_WAIT_STAT_WAITSRC_REASON_DATA;
+    case POLL_WAIT_WAKE_HUP:
+        return POLL_WAIT_STAT_WAITSRC_REASON_HUP;
+    case POLL_WAIT_WAKE_CLOSE:
+        return POLL_WAIT_STAT_WAITSRC_REASON_CLOSE;
+    case POLL_WAIT_WAKE_SIGNAL:
+        return POLL_WAIT_STAT_WAITSRC_REASON_SIGNAL;
+    case POLL_WAIT_WAKE_TIMEOUT:
+        return POLL_WAIT_STAT_WAITSRC_REASON_TIMEOUT;
+    default:
+        return POLL_WAIT_STAT_WAITSRC_REASON_UNKNOWN;
+    }
+}
+
+static void poll_wait_reason_note(enum poll_wait_wake_reason reason) {
+    poll_wait_stat_inc(poll_wait_reason_to_stat(reason));
 }
 
 void poll_wait_stats_snapshot(uint64_t out[POLL_WAIT_STAT_COUNT]) {
@@ -123,27 +181,15 @@ int poll_block_current_ex(struct wait_queue *wq, uint64_t deadline,
     tracepoint_emit(TRACE_WAIT_BLOCK, deadline ? 1U : 0U, deadline,
                     (uint64_t)(uintptr_t)channel);
 
-    bool use_poll_sleep = (deadline != 0) && (wq == NULL) && (mtx == NULL);
-    struct poll_sleep sleep = {0};
-    if (use_poll_sleep) {
-        INIT_LIST_HEAD(&sleep.node);
-        poll_sleep_arm(&sleep, curr, deadline);
-    }
-
     int rc = 0;
     if (deadline) {
-        if (use_poll_sleep)
-            rc = proc_sleep_on(NULL, channel, interruptible);
-        else
-            rc = proc_sleep_on_mutex_timeout(wq, channel, mtx, interruptible, deadline);
+        rc = proc_sleep_on_mutex_timeout(wq, channel, mtx, interruptible,
+                                         deadline);
     } else if (mtx) {
         rc = proc_sleep_on_mutex(wq, channel, mtx, interruptible);
     } else {
         rc = proc_sleep_on(wq, channel, interruptible);
     }
-
-    if (use_poll_sleep)
-        poll_sleep_cancel(&sleep);
 
     if (rc < 0)
         return rc;
@@ -188,6 +234,8 @@ void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn) {
     wait_queue_init(&src->wq);
     src->vn = vn;
     atomic_init(&src->seq, 0);
+    atomic_init(&src->last_wake_reason, POLL_WAIT_WAKE_UNKNOWN);
+    atomic_init(&src->last_wake_events, 0);
 }
 
 void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn) {
@@ -200,8 +248,10 @@ int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
                            void *channel, struct mutex *mtx) {
     if (!src)
         return -EINVAL;
-    return poll_wait_source_block_seq_ex(src, deadline, channel, mtx, true,
-                                         poll_wait_source_seq_snapshot(src));
+    /* Compatibility wrapper: prefer poll_wait_source_block_seq*. */
+    return poll_wait_source_block_seq_ex_reason(
+        src, deadline, channel, mtx, true, poll_wait_source_seq_snapshot(src),
+        NULL);
 }
 
 int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
@@ -209,9 +259,10 @@ int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
                               bool interruptible) {
     if (!src)
         return -EINVAL;
-    return poll_wait_source_block_seq_ex(src, deadline, channel, mtx,
-                                         interruptible,
-                                         poll_wait_source_seq_snapshot(src));
+    /* Compatibility wrapper: prefer poll_wait_source_block_seq*. */
+    return poll_wait_source_block_seq_ex_reason(
+        src, deadline, channel, mtx, interruptible,
+        poll_wait_source_seq_snapshot(src), NULL);
 }
 
 uint32_t poll_wait_source_seq_snapshot(const struct poll_wait_source *src) {
@@ -223,44 +274,110 @@ uint32_t poll_wait_source_seq_snapshot(const struct poll_wait_source *src) {
 int poll_wait_source_block_seq(struct poll_wait_source *src, uint64_t deadline,
                                void *channel, struct mutex *mtx,
                                uint32_t observed_seq) {
-    return poll_wait_source_block_seq_ex(src, deadline, channel, mtx, true,
-                                         observed_seq);
+    return poll_wait_source_block_seq_ex_reason(src, deadline, channel, mtx,
+                                                true, observed_seq, NULL);
 }
 
 int poll_wait_source_block_seq_ex(struct poll_wait_source *src,
                                   uint64_t deadline, void *channel,
                                   struct mutex *mtx, bool interruptible,
                                   uint32_t observed_seq) {
+    return poll_wait_source_block_seq_ex_reason(src, deadline, channel, mtx,
+                                                interruptible, observed_seq,
+                                                NULL);
+}
+
+int poll_wait_source_block_seq_ex_reason(struct poll_wait_source *src,
+                                         uint64_t deadline, void *channel,
+                                         struct mutex *mtx,
+                                         bool interruptible,
+                                         uint32_t observed_seq,
+                                         enum poll_wait_wake_reason *out_reason) {
     if (!src)
         return -EINVAL;
+    if (out_reason)
+        *out_reason = POLL_WAIT_WAKE_UNKNOWN;
+#if CONFIG_KERNEL_FAULT_INJECT
+    if (fault_inject_should_fail(FAULT_INJECT_POINT_POLLWAIT_BLOCK)) {
+        poll_wait_reason_note(POLL_WAIT_WAKE_SIGNAL);
+        if (out_reason)
+            *out_reason = POLL_WAIT_WAKE_SIGNAL;
+        return -EINTR;
+    }
+#endif
 
     if (poll_wait_source_seq_snapshot(src) != observed_seq) {
+        enum poll_wait_wake_reason reason = (enum poll_wait_wake_reason)atomic_read(
+            &src->last_wake_reason);
+        poll_wait_reason_note(reason);
+        if (out_reason)
+            *out_reason = reason;
         poll_wait_stat_inc(POLL_WAIT_STAT_WAITSRC_SEQ_SKIP_PRE_SLEEP);
         return 0;
     }
 
     int rc = poll_block_current_ex(&src->wq, deadline, channel ? channel : src,
                                    mtx, interruptible);
-    if (rc < 0)
+    if (rc < 0) {
+        if (rc == -EINTR) {
+            poll_wait_reason_note(POLL_WAIT_WAKE_SIGNAL);
+            if (out_reason)
+                *out_reason = POLL_WAIT_WAKE_SIGNAL;
+        } else if (rc == -ETIMEDOUT) {
+            poll_wait_reason_note(POLL_WAIT_WAKE_TIMEOUT);
+            if (out_reason)
+                *out_reason = POLL_WAIT_WAKE_TIMEOUT;
+        }
         return rc;
+    }
 
     if (poll_wait_source_seq_snapshot(src) != observed_seq)
         poll_wait_stat_inc(POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_CHANGED);
     else
         poll_wait_stat_inc(POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_UNCHANGED);
+
+    enum poll_wait_wake_reason reason =
+        (enum poll_wait_wake_reason)atomic_read(&src->last_wake_reason);
+    poll_wait_reason_note(reason);
+    if (out_reason)
+        *out_reason = reason;
     return 0;
 }
 
 void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events) {
+    poll_wait_source_wake_one_reason(src, events,
+                                     poll_wait_reason_from_events(events));
+}
+
+void poll_wait_source_wake_one_reason(struct poll_wait_source *src,
+                                      uint32_t events,
+                                      enum poll_wait_wake_reason reason) {
     if (!src)
         return;
+    atomic_set(&src->last_wake_reason, (uint32_t)reason);
+    atomic_set(&src->last_wake_events, events);
     atomic_inc_return(&src->seq);
+#if CONFIG_KERNEL_FAULT_INJECT
+    if (fault_inject_should_fail(FAULT_INJECT_POINT_POLLWAIT_WAKE)) {
+        poll_ready_wake_all(&src->wq, src->vn, events);
+        return;
+    }
+#endif
     poll_ready_wake_one(&src->wq, src->vn, events);
 }
 
 void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events) {
+    poll_wait_source_wake_all_reason(src, events,
+                                     poll_wait_reason_from_events(events));
+}
+
+void poll_wait_source_wake_all_reason(struct poll_wait_source *src,
+                                      uint32_t events,
+                                      enum poll_wait_wake_reason reason) {
     if (!src)
         return;
+    atomic_set(&src->last_wake_reason, (uint32_t)reason);
+    atomic_set(&src->last_wake_events, events);
     atomic_inc_return(&src->seq);
     poll_ready_wake_all(&src->wq, src->vn, events);
 }

@@ -24,6 +24,8 @@ struct poll_wait_source {
     struct wait_queue wq;
     struct vnode *vn;
     atomic_t seq;
+    atomic_t last_wake_reason;
+    atomic_t last_wake_events;
 };
 
 struct poll_waiter {
@@ -85,7 +87,22 @@ enum poll_wait_stat {
     POLL_WAIT_STAT_WAITSRC_SEQ_SKIP_PRE_SLEEP,
     POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_CHANGED,
     POLL_WAIT_STAT_WAITSRC_SEQ_WAKE_UNCHANGED,
+    POLL_WAIT_STAT_WAITSRC_REASON_UNKNOWN,
+    POLL_WAIT_STAT_WAITSRC_REASON_DATA,
+    POLL_WAIT_STAT_WAITSRC_REASON_HUP,
+    POLL_WAIT_STAT_WAITSRC_REASON_CLOSE,
+    POLL_WAIT_STAT_WAITSRC_REASON_SIGNAL,
+    POLL_WAIT_STAT_WAITSRC_REASON_TIMEOUT,
     POLL_WAIT_STAT_COUNT,
+};
+
+enum poll_wait_wake_reason {
+    POLL_WAIT_WAKE_UNKNOWN = 0,
+    POLL_WAIT_WAKE_DATA = 1,
+    POLL_WAIT_WAKE_HUP = 2,
+    POLL_WAIT_WAKE_CLOSE = 3,
+    POLL_WAIT_WAKE_SIGNAL = 4,
+    POLL_WAIT_WAKE_TIMEOUT = 5,
 };
 
 void poll_wait_stat_add(enum poll_wait_stat stat, uint64_t delta);
@@ -94,6 +111,7 @@ static inline void poll_wait_stat_inc(enum poll_wait_stat stat) {
 }
 uint64_t poll_wait_stat_read(enum poll_wait_stat stat);
 const char *poll_wait_stat_name(enum poll_wait_stat stat);
+const char *poll_wait_wake_reason_name(enum poll_wait_wake_reason reason);
 void poll_wait_stats_snapshot(uint64_t out[POLL_WAIT_STAT_COUNT]);
 void poll_wait_stats_reset(void);
 
@@ -113,6 +131,7 @@ void poll_ready_wake_all(struct wait_queue *wq, struct vnode *vn,
 void poll_wait_source_init(struct poll_wait_source *src, struct vnode *vn);
 void poll_wait_source_set_vnode(struct poll_wait_source *src, struct vnode *vn);
 uint32_t poll_wait_source_seq_snapshot(const struct poll_wait_source *src);
+/* Compatibility layer: new call sites should use poll_wait_source_block_seq*. */
 int poll_wait_source_block(struct poll_wait_source *src, uint64_t deadline,
                            void *channel, struct mutex *mtx);
 int poll_wait_source_block_ex(struct poll_wait_source *src, uint64_t deadline,
@@ -125,8 +144,20 @@ int poll_wait_source_block_seq_ex(struct poll_wait_source *src,
                                   uint64_t deadline, void *channel,
                                   struct mutex *mtx, bool interruptible,
                                   uint32_t observed_seq);
+int poll_wait_source_block_seq_ex_reason(struct poll_wait_source *src,
+                                         uint64_t deadline, void *channel,
+                                         struct mutex *mtx,
+                                         bool interruptible,
+                                         uint32_t observed_seq,
+                                         enum poll_wait_wake_reason *out_reason);
 void poll_wait_source_wake_one(struct poll_wait_source *src, uint32_t events);
 void poll_wait_source_wake_all(struct poll_wait_source *src, uint32_t events);
+void poll_wait_source_wake_one_reason(struct poll_wait_source *src,
+                                      uint32_t events,
+                                      enum poll_wait_wake_reason reason);
+void poll_wait_source_wake_all_reason(struct poll_wait_source *src,
+                                      uint32_t events,
+                                      enum poll_wait_wake_reason reason);
 
 void poll_wait_head_init(struct poll_wait_head *head);
 void poll_wait_add(struct poll_wait_head *head, struct poll_waiter *waiter);

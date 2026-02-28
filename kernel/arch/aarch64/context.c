@@ -6,6 +6,7 @@
 #include <kairos/arch.h>
 #include <kairos/config.h>
 #include <kairos/mm.h>
+#include <kairos/process.h>
 #include <kairos/string.h>
 #include <kairos/types.h>
 
@@ -38,16 +39,16 @@ struct arch_context *arch_context_alloc(void) {
     struct arch_context *ctx = kmalloc(sizeof(*ctx));
     if (!ctx)
         return NULL;
-    struct page *pg = alloc_pages(1);
+    struct page *pg = alloc_pages(CONFIG_KERNEL_STACK_ORDER);
     if (!pg) {
         kfree(ctx);
         return NULL;
     }
     void *stack_addr = phys_to_virt(page_to_phys(pg));
-    memset(stack_addr, 0, 2 * CONFIG_PAGE_SIZE);
+    memset(stack_addr, 0, CONFIG_KERNEL_STACK_SIZE);
 
     memset(ctx, 0, sizeof(*ctx));
-    ctx->kernel_stack = (uint64_t)stack_addr + (2 * CONFIG_PAGE_SIZE) - 8;
+    ctx->kernel_stack = (uint64_t)stack_addr + CONFIG_KERNEL_STACK_SIZE - 8;
     ctx->sp = ctx->kernel_stack;
     return ctx;
 }
@@ -57,10 +58,10 @@ void arch_context_free(struct arch_context *ctx) {
         return;
     if (ctx->kernel_stack) {
         void *stack_bottom =
-            (void *)(ctx->kernel_stack + 8 - (2 * CONFIG_PAGE_SIZE));
+            (void *)(ctx->kernel_stack + 8 - CONFIG_KERNEL_STACK_SIZE);
         struct page *pg = phys_to_page(virt_to_phys(stack_bottom));
         if (pg)
-            free_pages(pg, 1);
+            free_pages(pg, CONFIG_KERNEL_STACK_ORDER);
     }
     kfree(ctx);
 }
@@ -99,7 +100,7 @@ void arch_context_clone(struct arch_context *dst, struct arch_context *src) {
 
     uint64_t dst_top = dst->kernel_stack;
     uint64_t src_top = src->kernel_stack;
-    uint64_t stack_bytes = 2ULL * CONFIG_PAGE_SIZE;
+    uint64_t stack_bytes = CONFIG_KERNEL_STACK_SIZE;
 
     *dst = *src;
     dst->kernel_stack = dst_top;
@@ -143,10 +144,21 @@ void arch_set_tls(struct arch_context *ctx, uint64_t tls) {
     if (!ctx)
         return;
     ctx->tpidr_el0 = tls;
+    struct process *cur = proc_current();
+    if (cur && cur->context == ctx)
+        __asm__ __volatile__("msr tpidr_el0, %0" :: "r"(tls));
 }
 
 uint64_t arch_get_tls(const struct arch_context *ctx) {
-    return ctx ? ctx->tpidr_el0 : 0;
+    if (!ctx)
+        return 0;
+    struct process *cur = proc_current();
+    if (cur && cur->context == ctx) {
+        uint64_t tls = 0;
+        __asm__ __volatile__("mrs %0, tpidr_el0" : "=r"(tls));
+        return tls;
+    }
+    return ctx->tpidr_el0;
 }
 
 void arch_context_set_user_sp(struct arch_context *ctx, vaddr_t sp) {

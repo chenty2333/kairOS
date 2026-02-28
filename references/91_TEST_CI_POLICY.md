@@ -17,7 +17,7 @@
 - `make test-sched` — scheduler module only (includes `poll_wait_head` single-waiter fastpath regression)
 - `make test-crash` — crash module only
 - `make test-syscall-trap` / `make test-syscall` — syscall/trap module only
-- `make test-ipc-cap` — focused syscall-trap IPC/Capability subset (`cap_rights_fd`, `channel_port`, `channel_port_stress_mpmc`, `file_handle_bridge`, `kobj_refcount_history`, `channel_inline_queue_zero_heap`) with `QEMU_IOMMU=off` to avoid unrelated backend noise
+- `make test-ipc-cap` — focused syscall-trap IPC/Capability subset (`cap_rights_fd`, `channel_port`, `channel_port_stress_mpmc`, `file_handle_bridge`, `kobj_refcount_history`, `channel_inline_queue_zero_heap`, `send_transfer_rollback_kmalloc_fault`, `reserved_transfer_timeout_sweep`, `kcap_revoke_transfer_matrix_first_batch`, `kcap_revoke_transfer_matrix_second_batch`, `transfer_reserve_transaction`) with `QEMU_IOMMU=off` to avoid unrelated backend noise
 - `make test-ipc-cap-matrix` — run `test-ipc-cap` across `aarch64`, `x86_64`, `riscv64`
 - `make test-boot-smoke` — cross-arch boot-chain smoke (`KERNEL_TESTS=0`) with shell markers (`SMP`, `/init`, BusyBox) and forbidden fault/kill/fork-fail markers
 - `make test-x86-boot-smp` — x86_64 boot-chain smoke on `QEMU_SMP=1` and `QEMU_SMP=4` with `KERNEL_TESTS=0`; requires shell boot markers (`SMP`, `/init`, BusyBox) and rejects fault/kill/fork-fail markers
@@ -26,6 +26,7 @@
 - `make test-device-virtio` / `make test-devmodel` — device model + virtio probe-path module coverage. On `aarch64`, this target runs a 4-case IRQ-route matrix with explicit log assertions (`MSI-X(2)`, `MSI-X(1)`, `MSI-attempt fallback`, `INTx`) via `VIRTIO_IRQ_MODE:<mode>:<vectors>` + `VIRTIO_IRQ_MSI_STATE:<state>` markers and validates MSI-X affinity programming via `VIRTIO_IRQ_AFFINITY:ok:<vec>:<mask>`. On `riscv64`, it runs an 8-case AIA on/off matrix (`MSI-X(2)`, `MSI-X(1)`, `MSI-attempt`, `INTx`) using unstructured marker assertions over `run-direct`; when `RISCV_IRQ_BACKEND:imsic` is present, MSI-X route/affinity markers are required; when `RISCV_IRQ_BACKEND:none` is present, INTx + fallback markers are required.
 - `make test-tty` — tty stack module only (pty open/read/write/ioctl, n_tty canonical/echo/isig semantics, blocking read wakeup and EINTR paths, controlling-tty `/dev/tty` attach/detach lifecycle, pty pair EOF + reopen stability)
 - `make test-soak-pr` — PR-level soak module only (default 15 min, low-rate fault injection, deterministic round-based suite scheduling, summary-based pass/fail)
+- `make test-soak-ipc-cap-deep` — deep IPC/CAP soak profile (default 30 min) with dedicated deep suite mask, random scheduler jitter and multi-thread noise workers
 - `test-soak-pr` log path is controlled by `SOAK_PR_LOG` (default isolated mode: `<TEST_BUILD_ROOT>/<arch>/test.log`; non-isolated mode: `build/<arch>/soak-pr.log`)
 - `make test-soak` — long SMP stress test (timeout 600s, CONFIG_PMM_PCP_MODE=2, log: build/<arch>/soak.log)
 - `make test-debug` — tests with CONFIG_DEBUG=1
@@ -51,6 +52,9 @@
 - `test-ipc-cap` is enabled by compile-time selector `CONFIG_SYSCALL_TRAP_IPC_CAP_ONLY=1` on top of `CONFIG_KERNEL_TEST_MASK=0x40`; default `test-syscall-trap` behavior is unchanged when the selector is not set
 - Example (only syscall/trap): `make ARCH=riscv64 test TEST_EXTRA_CFLAGS='-DCONFIG_KERNEL_TESTS=1 -DCONFIG_KERNEL_TEST_MASK=0x40'`
 - `test-soak-pr` tunables (via `SOAK_PR_EXTRA_CFLAGS`): `CONFIG_KERNEL_FAULT_INJECT`, `CONFIG_KERNEL_SOAK_PR_DURATION_SEC`, `CONFIG_KERNEL_SOAK_PR_FAULT_PERMILLE`, `CONFIG_KERNEL_SOAK_PR_SUITE_MASK`, `CONFIG_KERNEL_SOAK_PR_MAX_ITERS`, `CONFIG_KERNEL_SOAK_PR_SCHED_EVERY`, `CONFIG_KERNEL_SOAK_PR_FAULT_EVERY`, `CONFIG_KERNEL_SOAK_PR_MIN_RUNS_PER_SUITE`, `CONFIG_KERNEL_SOAK_PR_SUITE_TIMEOUT_SEC`
+- `test-soak-pr` optional suite bit adds IPC/CAP focused longrun set: `CONFIG_KERNEL_SOAK_PR_SUITE_MASK` includes `0x100` (`syscall_trap_ipc_cap`, covering close-vs-blocking races, fd-only keepalive longrun, channelfd `epoll(EPOLLET)` stress and IPC fault-inject coverage); default suite mask remains unchanged unless explicitly overridden
+- `test-soak-pr` optional deep suite bit `0x200` (`syscall_trap_ipc_cap_deep`) runs repeated IPC/CAP rounds with randomized `proc_yield()` jitter and concurrent noise workers; knobs: `CONFIG_KERNEL_SOAK_PR_IPC_CAP_DEEP_ROUNDS`, `CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_THREADS`, `CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_YIELD_MAX`, `CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_STOP_TIMEOUT_SEC`
+- `test-soak-ipc-cap-deep` defaults: `CONFIG_KERNEL_SOAK_PR_SUITE_MASK=0x200`, `CONFIG_KERNEL_SOAK_PR_SCHED_EVERY=1`, `CONFIG_KERNEL_SOAK_PR_IPC_CAP_DEEP_ROUNDS=3`, `CONFIG_KERNEL_SOAK_PR_IPC_CAP_NOISE_THREADS=4`
 - Fault injection probe points in PR soak: `kmalloc`, `copy_from_user`, `copy_to_user`; each probe logs hit/failure counters.
 
 ## Session Artifacts
@@ -93,6 +97,7 @@ Run retention:
 - `scripts/run-qemu-test.sh` writes `manifest.json` at start and `result.json` at end.
 - Structured mode is default for kernel test/smoke paths (`TEST_REQUIRE_STRUCTURED=auto`, resolved to `1` when `TEST_REQUIRE_MARKERS=1`).
 - Structured verdict requires both `TEST_RESULT_JSON` and `TEST_SUMMARY` and checks `failed` consistency.
+- Kernel test runs also emit a post-suite `/sys/ipc/hash_stats` snapshot bracketed by `kernel tests: /sys/ipc/hash_stats begin|end`, so load-factor/collision trends can be compared across suites without interactive shell access.
 - When structured result is complete and passed, `qemu_rc=0/124/2` are accepted (`2` covers firmware-reset style exits seen on some runs).
 - If structured output is missing/invalid/inconsistent, verdict is non-pass (`infra_fail`).
 - In structured mode, pre-QEMU/structured integrity checks run before optional required-marker assertions; this keeps build failures classified as `build_fail_*` instead of `required_markers_missing`.

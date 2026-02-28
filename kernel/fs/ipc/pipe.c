@@ -57,9 +57,11 @@ static ssize_t pipe_read_internal(struct pipe *p, void *buf, size_t len, bool no
                 mutex_unlock(&p->lock);
                 return read ? (ssize_t)read : -EAGAIN;
             }
-            int rc =
-                poll_wait_source_block(&p->rd_src, 0, &p->rd_src, &p->lock);
+            int rc = poll_wait_source_block_seq(
+                &p->rd_src, 0, &p->rd_src, &p->lock,
+                poll_wait_source_seq_snapshot(&p->rd_src));
             if (rc == -EINTR) {
+                mutex_unlock(&p->lock);
                 return read ? (ssize_t)read : -EINTR;
             }
         }
@@ -119,8 +121,9 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
                     mutex_unlock(&p->lock);
                     return written ? (ssize_t)written : -EAGAIN;
                 }
-                int rc =
-                    poll_wait_source_block(&p->wr_src, 0, &p->wr_src, &p->lock);
+                int rc = poll_wait_source_block_seq(
+                    &p->wr_src, 0, &p->wr_src, &p->lock,
+                    poll_wait_source_seq_snapshot(&p->wr_src));
                 if (rc == -EINTR) {
                     mutex_unlock(&p->lock);
                     return written ? (ssize_t)written : -EINTR;
@@ -132,8 +135,9 @@ static ssize_t pipe_write_internal(struct pipe *p, const void *buf, size_t len, 
                 mutex_unlock(&p->lock);
                 return written ? (ssize_t)written : -EAGAIN;
             }
-            int rc =
-                poll_wait_source_block(&p->wr_src, 0, &p->wr_src, &p->lock);
+            int rc = poll_wait_source_block_seq(
+                &p->wr_src, 0, &p->wr_src, &p->lock,
+                poll_wait_source_seq_snapshot(&p->wr_src));
             if (rc == -EINTR) {
                 mutex_unlock(&p->lock);
                 return written ? (ssize_t)written : -EINTR;

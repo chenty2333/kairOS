@@ -7,10 +7,6 @@
 
 #include "ext2_internal.h"
 
-static uint32_t ext2_icache_hash_index(ino_t ino) {
-    return ((uint32_t)ino) & (EXT2_ICACHE_HASH_SIZE - 1U);
-}
-
 int ext2_read_inode(struct ext2_mount *mnt, ino_t ino,
                     struct ext2_inode *inode) {
     if (ino == 0 || ino > mnt->sb->s_inodes_count)
@@ -57,9 +53,9 @@ struct vnode *ext2_cache_get(struct ext2_mount *mnt, ino_t ino) {
     if (!mnt)
         return NULL;
     mutex_lock(&mnt->icache_lock);
-    uint32_t idx = ext2_icache_hash_index(ino);
+    uint32_t key = (uint32_t)ino;
     struct ext2_inode_data *id;
-    list_for_each_entry(id, &mnt->inode_cache_hash[idx], hash_node) {
+    khash_for_each_possible_u32(mnt->inode_cache_hash, id, hash_node, key) {
         if (id->magic != EXT2_INODE_DATA_MAGIC)
             continue;
         if (id->ino == ino && id->vn) {
@@ -76,9 +72,8 @@ void ext2_cache_add(struct ext2_inode_data *id) {
     if (!id || !id->mnt)
         return;
     mutex_lock(&id->mnt->icache_lock);
-    uint32_t idx = ext2_icache_hash_index(id->ino);
     list_add(&id->cache_node, &id->mnt->inode_cache);
-    list_add(&id->hash_node, &id->mnt->inode_cache_hash[idx]);
+    khash_add(id->mnt->inode_cache_hash, &id->hash_node, (uint32_t)id->ino);
     mutex_unlock(&id->mnt->icache_lock);
 }
 

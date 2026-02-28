@@ -7,6 +7,7 @@
 
 #include <kairos/blkdev.h>
 #include <kairos/printk.h>
+#include <kairos/hashtable.h>
 #include <kairos/mm.h>
 #include <kairos/spinlock.h>
 #include <kairos/list.h>
@@ -19,8 +20,7 @@
 static LIST_HEAD(blkdev_list);
 static spinlock_t blkdev_lock = SPINLOCK_INIT;
 #define BLKDEV_NAME_HASH_BITS 7U
-#define BLKDEV_NAME_HASH_SIZE (1U << BLKDEV_NAME_HASH_BITS)
-static struct list_head blkdev_name_hash[BLKDEV_NAME_HASH_SIZE];
+KHASH_DECLARE(blkdev_name_hash, BLKDEV_NAME_HASH_BITS);
 static bool blkdev_name_hash_ready;
 
 #define MBR_SIGNATURE_OFFSET 510U
@@ -101,23 +101,22 @@ static uint32_t blkdev_name_hash_key(const char *name) {
         h ^= (uint32_t)(*p);
         h *= 16777619u;
     }
-    return h & (BLKDEV_NAME_HASH_SIZE - 1U);
+    return h;
 }
 
 static void blkdev_name_hash_init_locked(void) {
     if (blkdev_name_hash_ready)
         return;
-    for (size_t i = 0; i < BLKDEV_NAME_HASH_SIZE; i++)
-        INIT_LIST_HEAD(&blkdev_name_hash[i]);
+    KHASH_INIT(blkdev_name_hash);
     blkdev_name_hash_ready = true;
 }
 
 static struct blkdev *blkdev_find_by_name_locked(const char *name) {
     if (!name || !name[0] || !blkdev_name_hash_ready)
         return NULL;
-    uint32_t idx = blkdev_name_hash_key(name);
+    uint32_t key = blkdev_name_hash_key(name);
     struct blkdev *dev = NULL;
-    list_for_each_entry(dev, &blkdev_name_hash[idx], hash) {
+    khash_for_each_possible_u32(blkdev_name_hash, dev, hash, key) {
         if (strcmp(dev->name, name) == 0)
             return dev;
     }
@@ -127,15 +126,13 @@ static struct blkdev *blkdev_find_by_name_locked(const char *name) {
 static void blkdev_name_hash_insert_locked(struct blkdev *dev) {
     if (!dev || !dev->name[0] || !blkdev_name_hash_ready)
         return;
-    uint32_t idx = blkdev_name_hash_key(dev->name);
-    list_add_tail(&dev->hash, &blkdev_name_hash[idx]);
+    khash_add(blkdev_name_hash, &dev->hash, blkdev_name_hash_key(dev->name));
 }
 
 static void blkdev_name_hash_remove_locked(struct blkdev *dev) {
     if (!dev || list_empty(&dev->hash))
         return;
-    list_del(&dev->hash);
-    INIT_LIST_HEAD(&dev->hash);
+    khash_del(&dev->hash);
 }
 
 static int make_partition_name(const struct blkdev *parent, uint32_t part_index,

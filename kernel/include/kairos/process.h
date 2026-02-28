@@ -142,6 +142,7 @@ struct process {
     uint64_t sig_pending, sig_blocked;
     struct sighand_struct *sighand;
     void *wait_channel;
+    bool wake_pending;
     uint64_t sleep_deadline;  /* 0 = no timeout; >0 = tick deadline */
     struct wait_queue exit_wait;
     struct completion vfork_completion;

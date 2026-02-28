@@ -188,7 +188,8 @@ static struct vm_area *mm_stack_grow_target_locked(struct mm_struct *mm,
     return NULL;
 }
 
-int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
+static int mm_handle_fault_impl(struct mm_struct *mm, vaddr_t addr,
+                                uint32_t flags, bool log_fault) {
     if (!mm)
         return -EINVAL;
 
@@ -205,8 +206,10 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
                                              NULL, 0);
             if (grow_ret < 0) {
                 mutex_unlock(&mm->lock);
-                mm_fault_log_ctx("stack grow failed", addr, flags, 0,
-                                 (long)grow_ret, true);
+                if (log_fault) {
+                    mm_fault_log_ctx("stack grow failed", addr, flags, 0,
+                                     (long)grow_ret, true);
+                }
                 return grow_ret;
             }
             vma = mm_find_vma(mm, addr);
@@ -215,17 +218,22 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
 
     if (!vma) {
         mutex_unlock(&mm->lock);
-        mm_fault_log_ctx("no vma", addr, flags, 0, 0, false);
+        if (log_fault)
+            mm_fault_log_ctx("no vma", addr, flags, 0, 0, false);
         return -EFAULT;
     }
     if ((flags & PTE_WRITE) && !(vma->flags & VM_WRITE)) {
         mutex_unlock(&mm->lock);
-        mm_fault_log_ctx("write denied", addr, flags, vma->flags, 0, false);
+        if (log_fault)
+            mm_fault_log_ctx("write denied", addr, flags, vma->flags, 0,
+                             false);
         return -EFAULT;
     }
     if ((flags & PTE_EXEC) && !(vma->flags & VM_EXEC)) {
         mutex_unlock(&mm->lock);
-        mm_fault_log_ctx("exec denied", addr, flags, vma->flags, 0, false);
+        if (log_fault)
+            mm_fault_log_ctx("exec denied", addr, flags, vma->flags, 0,
+                             false);
         return -EFAULT;
     }
 
@@ -235,8 +243,10 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
             paddr_t old_pa = ALIGN_DOWN(arch_mmu_translate(mm->pgdir, va), CONFIG_PAGE_SIZE);
             if (!old_pa) {
                 mutex_unlock(&mm->lock);
-                mm_fault_log_ctx("cow translate failed", addr, flags, 0, 0,
-                                 false);
+                if (log_fault) {
+                    mm_fault_log_ctx("cow translate failed", addr, flags, 0, 0,
+                                     false);
+                }
                 return -EFAULT;
             }
 
@@ -253,8 +263,10 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
             paddr_t new_pa = pmm_alloc_page();
             if (!new_pa) {
                 mutex_unlock(&mm->lock);
-                mm_fault_log_ctx("cow alloc page failed", addr, flags, 0, 0,
-                                 false);
+                if (log_fault) {
+                    mm_fault_log_ctx("cow alloc page failed", addr, flags, 0,
+                                     0, false);
+                }
                 return -ENOMEM;
             }
             memcpy(phys_to_virt(new_pa), phys_to_virt(old_pa), CONFIG_PAGE_SIZE);
@@ -275,7 +287,8 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
     paddr_t pa = pmm_alloc_page();
     if (!pa) {
         mutex_unlock(&mm->lock);
-        mm_fault_log_ctx("alloc page failed", addr, flags, 0, 0, false);
+        if (log_fault)
+            mm_fault_log_ctx("alloc page failed", addr, flags, 0, 0, false);
         return -ENOMEM;
     }
     void *kva = phys_to_virt(pa);
@@ -301,15 +314,19 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
             if (rd < 0) {
                 pmm_free_page(pa);
                 mutex_unlock(&mm->lock);
-                mm_fault_log_ctx("vnode read failed", addr, flags, 0,
-                                 (long)rd, true);
+                if (log_fault) {
+                    mm_fault_log_ctx("vnode read failed", addr, flags, 0,
+                                     (long)rd, true);
+                }
                 return (int)rd;
             }
             if ((size_t)rd != to_read) {
                 pmm_free_page(pa);
                 mutex_unlock(&mm->lock);
-                mm_fault_log_ctx("vnode short read", addr, flags, 0,
-                                 (long)rd, true);
+                if (log_fault) {
+                    mm_fault_log_ctx("vnode short read", addr, flags, 0,
+                                     (long)rd, true);
+                }
                 return -EIO;
             }
         }
@@ -319,10 +336,19 @@ int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
     int ret = arch_mmu_map(mm->pgdir, va, pa, f);
     if (ret < 0) {
         pmm_free_page(pa);
-        mm_fault_log_ctx("map failed", addr, flags, 0, (long)ret, true);
+        if (log_fault)
+            mm_fault_log_ctx("map failed", addr, flags, 0, (long)ret, true);
     }
     mutex_unlock(&mm->lock);
     return ret;
+}
+
+int mm_handle_fault(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
+    return mm_handle_fault_impl(mm, addr, flags, true);
+}
+
+int mm_handle_fault_nolog(struct mm_struct *mm, vaddr_t addr, uint32_t flags) {
+    return mm_handle_fault_impl(mm, addr, flags, false);
 }
 
 vaddr_t mm_brk(struct mm_struct *mm, vaddr_t newbrk) {

@@ -4,6 +4,7 @@
 
 #include <kairos/device.h>
 #include <kairos/dma.h>
+#include <kairos/hashtable.h>
 #include <kairos/iommu.h>
 #include <kairos/mm.h>
 #include <kairos/printk.h>
@@ -73,23 +74,17 @@ static void iommu_direct_unmap_rollback(const struct dma_ops *direct,
     direct->unmap_single(dev, phys_dma, size, direction);
 }
 
-static size_t iommu_mapping_hash_bucket(dma_addr_t dma_addr) {
-    return (size_t)(((uint64_t)dma_addr) & (IOMMU_MAPPING_HASH_SIZE - 1U));
-}
-
 static void iommu_mapping_hash_insert_locked(struct iommu_domain *domain,
                                              struct iommu_mapping *mapping) {
     if (!domain || !mapping)
         return;
-    size_t idx = iommu_mapping_hash_bucket(mapping->dma_addr);
-    list_add_tail(&mapping->hash_node, &domain->mapping_hash[idx]);
+    khash_add(domain->mapping_hash, &mapping->hash_node, mapping->dma_addr);
 }
 
 static void iommu_mapping_hash_remove_locked(struct iommu_mapping *mapping) {
     if (!mapping || list_empty(&mapping->hash_node))
         return;
-    list_del(&mapping->hash_node);
-    INIT_LIST_HEAD(&mapping->hash_node);
+    khash_del(&mapping->hash_node);
 }
 
 static struct iommu_mapping *
@@ -97,9 +92,8 @@ iommu_mapping_find_locked(struct iommu_domain *domain, struct device *dev,
                           dma_addr_t dma_addr) {
     if (!domain || !dev || dma_addr == 0)
         return NULL;
-    size_t idx = iommu_mapping_hash_bucket(dma_addr);
     struct iommu_mapping *iter = NULL;
-    list_for_each_entry(iter, &domain->mapping_hash[idx], hash_node) {
+    khash_for_each_possible(domain->mapping_hash, iter, hash_node, dma_addr) {
         if (iter->dev == dev && iter->dma_addr == dma_addr)
             return iter;
     }
@@ -362,8 +356,7 @@ struct iommu_domain *iommu_domain_create(enum iommu_domain_type type,
     domain->fault_policy = IOMMU_FAULT_POLICY_REPORT;
     spin_init(&domain->lock);
     INIT_LIST_HEAD(&domain->mappings);
-    for (size_t i = 0; i < IOMMU_MAPPING_HASH_SIZE; i++)
-        INIT_LIST_HEAD(&domain->mapping_hash[i]);
+    KHASH_INIT(domain->mapping_hash);
     return domain;
 }
 
@@ -384,8 +377,7 @@ struct iommu_domain *iommu_get_passthrough_domain(void) {
         iommu_passthrough_domain.fault_policy = IOMMU_FAULT_POLICY_REPORT;
         spin_init(&iommu_passthrough_domain.lock);
         INIT_LIST_HEAD(&iommu_passthrough_domain.mappings);
-        for (size_t i = 0; i < IOMMU_MAPPING_HASH_SIZE; i++)
-            INIT_LIST_HEAD(&iommu_passthrough_domain.mapping_hash[i]);
+        KHASH_INIT(iommu_passthrough_domain.mapping_hash);
         __atomic_store_n(&iommu_passthrough_domain_init_done, true,
                          __ATOMIC_RELEASE);
     }

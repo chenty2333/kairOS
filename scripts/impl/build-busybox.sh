@@ -21,6 +21,7 @@ BUSYBOX_SRC="${BUSYBOX_SRC:-$ROOT_DIR/third_party/busybox}"
 BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build}"
 OUT_DIR="${OUT_DIR:-$BUILD_ROOT/${ARCH}/busybox}"
 DEFCONFIG="${DEFCONFIG:-$ROOT_DIR/tools/busybox/kairos_defconfig}"
+PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/tools/patches-bbox}"
 SYSROOT="${SYSROOT:-$BUILD_ROOT/${ARCH}/sysroot}"
 JOBS="${JOBS:-$(nproc)}"
 USE_GCC="${USE_GCC:-0}"
@@ -39,6 +40,7 @@ BUSYBOX_SRC="$(realpath -m "$BUSYBOX_SRC")"
 OUT_DIR="$(realpath -m "$OUT_DIR")"
 SYSROOT="$(realpath -m "$SYSROOT")"
 DEFCONFIG="$(realpath -m "$DEFCONFIG")"
+PATCH_DIR="$(realpath -m "$PATCH_DIR")"
 
 if [[ ! -d "$BUSYBOX_SRC" ]]; then
   echo "BusyBox source not found: $BUSYBOX_SRC (run scripts/kairos.sh deps fetch busybox)" >&2
@@ -87,6 +89,23 @@ if [[ "${MAKEFLAGS:-}" != *"--jobserver-auth="* ]] &&
 fi
 
 make -C "$BUSYBOX_SRC" mrproper >"$_out" 2>&1
+
+if [[ -d "$PATCH_DIR" ]]; then
+  shopt -s nullglob
+  for patch_file in "$PATCH_DIR"/*.patch; do
+    if patch -d "$BUSYBOX_SRC" -p1 -N --dry-run -s <"$patch_file" >/dev/null 2>&1; then
+      patch -d "$BUSYBOX_SRC" -p1 -N -s <"$patch_file" >/dev/null
+      [[ "$QUIET" != "1" ]] && echo "Applied BusyBox patch: $(basename "$patch_file")"
+      continue
+    fi
+    if patch -d "$BUSYBOX_SRC" -p1 -R --dry-run -s <"$patch_file" >/dev/null 2>&1; then
+      continue
+    fi
+    echo "Failed to apply BusyBox patch: $patch_file" >&2
+    exit 1
+  done
+  shopt -u nullglob
+fi
 
 for shipped in zconf.tab.c_shipped lex.zconf.c_shipped zconf.hash.c_shipped; do
   src="${BUSYBOX_SRC}/scripts/kconfig/${shipped}"
