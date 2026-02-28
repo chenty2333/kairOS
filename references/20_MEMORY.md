@@ -83,5 +83,5 @@ COW (Copy-on-Write):
 
 Related references:
 - references/00_REPO_MAP.md
-- references/10_BOOT_FIRMWARE_TRAP_SYSCALL_TIME.md
-- references/30_PROCESS_SCHED_SYNC_IPC.md
+- references/10_BOOT_FIRMWARE.md
+- references/30_PROCESS.md

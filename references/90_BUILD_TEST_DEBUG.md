@@ -3,7 +3,7 @@
 ## Scope
 
 - This document covers build/run/debug workflows.
-- Detailed testing, CI gates, lock/session behavior, and verdict policy are moved to `references/91_TEST_CI_POLICY.md`.
+- Detailed testing, CI gates, lock/session behavior, and verdict policy are split into `references/92_TESTING_COMMANDS.md`, `references/93_TEST_SESSION_LOCKING.md`, and `references/94_TEST_VERDICT_POLICY.md`.
 
 ## Build System
 
@@ -102,5 +102,7 @@ QEMU configuration:
 
 Related references:
 - references/00_REPO_MAP.md
-- references/10_BOOT_FIRMWARE_TRAP_SYSCALL_TIME.md
-- references/91_TEST_CI_POLICY.md
+- references/10_BOOT_FIRMWARE.md
+- references/92_TESTING_COMMANDS.md
+- references/93_TEST_SESSION_LOCKING.md
+- references/94_TEST_VERDICT_POLICY.md

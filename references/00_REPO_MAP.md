@@ -39,10 +39,27 @@
 - Networking: syscall → net/socket.c protocol family dispatch → af_unix or af_inet(lwIP)
 
 Related references:
-- references/10_BOOT_FIRMWARE_TRAP_SYSCALL_TIME.md
+- references/10_BOOT_FIRMWARE.md
+- references/11_TRAP_INTERRUPT.md
+- references/12_SYSCALL.md
+- references/13_TIME.md
 - references/20_MEMORY.md
-- references/30_PROCESS_SCHED_SYNC_IPC.md
-- references/40_VFS_BLOCK_FS.md
+- references/30_PROCESS.md
+- references/33_IPC.md
+- references/33_IPC__A_SURFACE_AND_FD_RIGHTS.md
+- references/33_IPC__B_CHANNEL_PORT.md
+- references/33_IPC__C_TRANSFER_OBSERVABILITY.md
+- references/41_VFS_CORE_PATH_MOUNT_IO.md
+- references/42_POLL_EPOLL.md
+- references/42_POLL_EPOLL__A_WAIT_CORE_FD_EVENTS.md
+- references/42_POLL_EPOLL__B_SOCKET_MESSAGE_ABI.md
+- references/42_POLL_EPOLL__C_SELECT_PATH_ABI.md
+- references/43_BLOCK_FS_IMPLEMENTATIONS.md
 - references/50_DRIVERS_BUS_DISCOVERY.md
 - references/90_BUILD_TEST_DEBUG.md
-- references/91_TEST_CI_POLICY.md
+- references/92_TESTING_COMMANDS.md
+- references/92_TESTING_COMMANDS__A_TARGETS_AND_PROFILES.md
+- references/92_TESTING_COMMANDS__B_CI_WORKFLOWS_AND_DEPS.md
+- references/92_TESTING_COMMANDS__C_MASKS_AND_TUNABLES.md
+- references/93_TEST_SESSION_LOCKING.md
+- references/94_TEST_VERDICT_POLICY.md

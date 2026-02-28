@@ -172,6 +172,6 @@ lwIP integration:
 
 Related references:
 - references/00_REPO_MAP.md
-- references/10_BOOT_FIRMWARE_TRAP_SYSCALL_TIME.md
-- references/40_VFS_BLOCK_FS.md
+- references/10_BOOT_FIRMWARE.md
+- references/41_VFS_CORE_PATH_MOUNT_IO.md
 - references/51_DRM_LITE_DISPLAY.md
