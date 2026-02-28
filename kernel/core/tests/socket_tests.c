@@ -3762,6 +3762,156 @@ struct inet_attempt_ctx {
     bool ok;
 };
 
+struct inet_send_worker_ctx {
+    struct socket *sock;
+    const uint8_t *buf;
+    size_t len;
+    volatile int started;
+    ssize_t ret;
+};
+
+static int inet_send_worker(void *arg) {
+    struct inet_send_worker_ctx *ctx = (struct inet_send_worker_ctx *)arg;
+    if (!ctx || !ctx->sock)
+        proc_exit(0);
+    ctx->started = 1;
+    ctx->ret =
+        ctx->sock->ops->sendto(ctx->sock, ctx->buf, ctx->len, 0, NULL, 0);
+    proc_exit(0);
+}
+
+static bool run_inet_tcp_send_backpressure_attempt(uint32_t loopback_ip,
+                                                   uint16_t server_port,
+                                                   uint16_t client_port) {
+    struct socket *listener = NULL;
+    struct socket *client = NULL;
+    struct socket *server = NULL;
+    struct sockaddr_in listener_addr;
+    struct sockaddr_in client_addr;
+    uint8_t *send_buf = NULL;
+    bool ok = false;
+    bool sender_reaped = false;
+    bool sender_spawned = false;
+    pid_t sender_pid = -1;
+    int ret;
+
+    ret = sock_create(AF_INET, SOCK_STREAM, 0, &listener);
+    if (ret < 0 || !listener)
+        goto out;
+    ret = sock_create(AF_INET, SOCK_STREAM, 0, &client);
+    if (ret < 0 || !client)
+        goto out;
+
+    make_inet_addr(&listener_addr, loopback_ip, server_port);
+    make_inet_addr(&client_addr, loopback_ip, client_port);
+
+    ret = listener->ops->bind(listener, (const struct sockaddr *)&listener_addr,
+                              sizeof(listener_addr));
+    if (ret < 0)
+        goto out;
+    ret = listener->ops->listen(listener, 8);
+    if (ret < 0)
+        goto out;
+    ret = client->ops->bind(client, (const struct sockaddr *)&client_addr,
+                            sizeof(client_addr));
+    if (ret < 0)
+        goto out;
+
+    ret = client->ops->connect(client, (const struct sockaddr *)&listener_addr,
+                               sizeof(listener_addr), MSG_DONTWAIT);
+    if (ret != 0 && ret != -EINPROGRESS)
+        goto out;
+    if (ret == -EINPROGRESS) {
+        int so_error = -1;
+        if (!wait_inet_connect_so_error(client, &so_error, 4000) ||
+            so_error != 0)
+            goto out;
+    }
+
+    ret = listener->ops->accept(listener, &server, 0);
+    if (ret < 0 || !server)
+        goto out;
+
+    size_t send_len = 256U * 1024U;
+    send_buf = kmalloc(send_len);
+    if (!send_buf)
+        goto out;
+    for (size_t i = 0; i < send_len; i++)
+        send_buf[i] = (uint8_t)(i & 0xFFU);
+
+    struct inet_send_worker_ctx sctx = {
+        .sock = client,
+        .buf = send_buf,
+        .len = send_len,
+        .started = 0,
+        .ret = -1,
+    };
+    struct process *sender =
+        kthread_create_joinable(inet_send_worker, &sctx, "intsnd");
+    if (!sender)
+        goto out;
+    sender_pid = sender->pid;
+    sender_spawned = true;
+    sched_enqueue(sender);
+    for (int i = 0; i < 2000 && !sctx.started; i++)
+        proc_yield();
+    if (!sctx.started)
+        goto out_kill_sender;
+
+    uint8_t recv_buf[4096];
+    size_t recv_total = 0;
+    int status = 0;
+    /*
+     * Backpressure behavior can be scheduler-sensitive under stress.
+     * Drive progress by alternating nonblocking drain + sender reap checks.
+     */
+    for (int spins = 0; spins < 120000; spins++) {
+        if (!sender_reaped) {
+            pid_t wp = proc_wait(sender_pid, &status, WNOHANG);
+            if (wp == sender_pid)
+                sender_reaped = true;
+            else if (wp < 0)
+                break;
+        }
+
+        if (recv_total < send_len) {
+            ssize_t rd = server->ops->recvfrom(server, recv_buf, sizeof(recv_buf),
+                                               MSG_DONTWAIT, NULL, NULL);
+            if (rd > 0) {
+                recv_total += (size_t)rd;
+                if (sender_reaped && recv_total >= send_len)
+                    break;
+                continue;
+            }
+            if (rd != -EAGAIN)
+                break;
+            (void)wait_socket_event(server, POLLIN, POLLIN, 64);
+        }
+
+        if (sender_reaped && recv_total >= send_len)
+            break;
+        proc_yield();
+    }
+
+    if (!sender_reaped)
+        goto out_kill_sender;
+
+    ok = (sctx.ret == (ssize_t)send_len && recv_total == send_len);
+    goto out;
+
+out_kill_sender:
+    if (sender_spawned && !sender_reaped && sender_pid >= 0) {
+        (void)signal_send(sender_pid, SIGKILL);
+        (void)proc_wait(sender_pid, NULL, 0);
+    }
+out:
+    kfree(send_buf);
+    close_socket_if_open(&server);
+    close_socket_if_open(&client);
+    close_socket_if_open(&listener);
+    return ok;
+}
+
 static int inet_udp_attempt_worker(void *arg) {
     struct inet_attempt_ctx *ctx = (struct inet_attempt_ctx *)arg;
     ctx->ok = run_inet_udp_attempt_inner(ctx->loopback_ip, ctx->server_port,
@@ -3781,6 +3931,14 @@ static int inet_tcp_backlog_attempt_worker(void *arg) {
     ctx->ok = run_inet_tcp_backlog_attempt(ctx->loopback_ip, ctx->server_port,
                                            ctx->client_port,
                                            ctx->client2_port);
+    proc_exit(0);
+}
+
+static int inet_tcp_send_backpressure_attempt_worker(void *arg) {
+    struct inet_attempt_ctx *ctx = (struct inet_attempt_ctx *)arg;
+    ctx->ok = run_inet_tcp_send_backpressure_attempt(ctx->loopback_ip,
+                                                     ctx->server_port,
+                                                     ctx->client_port);
     proc_exit(0);
 }
 
@@ -3900,6 +4058,25 @@ static void test_inet_tcp_primary(void) {
             }
         }
         test_check(backlog_ok, "inet_tcp backlog limit");
+
+        bool backpressure_ok = false;
+        for (size_t i = 0; i < sizeof(loopback_ips) / sizeof(loopback_ips[0]);
+             i++) {
+            struct inet_attempt_ctx ctx = {
+                .loopback_ip = loopback_ips[i],
+                .server_port = (uint16_t)(49000 + i),
+                .client_port = (uint16_t)(50000 + i),
+                .client2_port = 0,
+                .ok = false,
+            };
+            if (run_inet_attempt_with_timeout(
+                    inet_tcp_send_backpressure_attempt_worker, &ctx, "intcps",
+                    12000)) {
+                backpressure_ok = true;
+                break;
+            }
+        }
+        test_check(backpressure_ok, "inet_tcp send backpressure wake");
     } else {
         test_skip("inet_tcp (loopback tcp unavailable)");
     }

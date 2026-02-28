@@ -149,8 +149,9 @@ static int inet_recv_buf_init(struct inet_sock *is) {
     return 0;
 }
 
-static void inet_recv_buf_push(struct inet_sock *is, const void *data,
-                                size_t len) {
+static size_t inet_recv_buf_push(struct inet_sock *is, const void *data,
+                                 size_t len) {
+    size_t pushed = 0;
     while (len > 0 && is->recv_count < INET_RECV_BUF_SIZE) {
         size_t space = INET_RECV_BUF_SIZE - is->recv_head;
         size_t can = len;
@@ -163,9 +164,11 @@ static void inet_recv_buf_push(struct inet_sock *is, const void *data,
         memcpy(is->recv_buf + is->recv_head, data, can);
         is->recv_head = (is->recv_head + can) % INET_RECV_BUF_SIZE;
         is->recv_count += can;
+        pushed += can;
         data = (const uint8_t *)data + can;
         len -= can;
     }
+    return pushed;
 }
 
 static size_t inet_recv_buf_pop(struct inet_sock *is, void *buf, size_t len) {
@@ -206,10 +209,8 @@ static err_t inet_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
     }
 
     /* Copy pbuf data into receive buffer */
-    for (struct pbuf *q = p; q != NULL; q = q->next) {
-        inet_recv_buf_push(is, q->payload, q->len);
-    }
-    tcp_recved(pcb, p->tot_len);
+    for (struct pbuf *q = p; q != NULL; q = q->next)
+        (void)inet_recv_buf_push(is, q->payload, q->len);
     mutex_unlock(&is->lock);
     pbuf_free(p);
 
@@ -222,7 +223,9 @@ static err_t inet_tcp_sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len) {
     struct inet_sock *is = arg;
     (void)pcb; (void)len;
 
+    mutex_lock(&is->lock);
     is->send_ready = true;
+    mutex_unlock(&is->lock);
     poll_wait_source_wake_all(&is->send_src, 0);
     poll_wait_wake(&is->sock->pollers, POLLOUT);
     return ERR_OK;
@@ -451,8 +454,9 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
             return -EALREADY;
         }
         while (!is->connect_done) {
-            int rc = poll_wait_source_block(&is->connect_src, 0, &is->connect_src,
-                                            &is->lock);
+            int rc = poll_wait_source_block_seq(
+                &is->connect_src, 0, &is->connect_src, &is->lock,
+                poll_wait_source_seq_snapshot(&is->connect_src));
             if (rc == -EINTR) {
                 mutex_unlock(&is->lock);
                 return -EINTR;
@@ -507,8 +511,9 @@ static int inet_tcp_connect(struct socket *sock, const struct sockaddr *addr,
     /* Wait for connection completion */
     mutex_lock(&is->lock);
     while (!is->connect_done) {
-        int rc = poll_wait_source_block(&is->connect_src, 0, &is->connect_src,
-                                        &is->lock);
+        int rc = poll_wait_source_block_seq(
+            &is->connect_src, 0, &is->connect_src, &is->lock,
+            poll_wait_source_seq_snapshot(&is->connect_src));
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -541,8 +546,9 @@ static int inet_tcp_accept(struct socket *sock, struct socket **newsock,
             mutex_unlock(&is->lock);
             return -EAGAIN;
         }
-        int rc =
-            poll_wait_source_block(&is->accept_src, 0, &is->accept_src, &is->lock);
+        int rc = poll_wait_source_block_seq(
+            &is->accept_src, 0, &is->accept_src, &is->lock,
+            poll_wait_source_seq_snapshot(&is->accept_src));
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -637,17 +643,19 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
             inet_lwip_unlock();
             if (nonblock)
                 return total ? (ssize_t)total : -EAGAIN;
-            /* Wait for send space */
-            is->send_ready = false;
+            /* Backpressure: wait until sent-callback signals progress. */
             mutex_lock(&is->lock);
             while (!is->send_ready && !is->peer_closed) {
-                int rc = poll_wait_source_block(&is->send_src, 0, &is->send_src,
-                                                &is->lock);
+                int rc = poll_wait_source_block_seq(
+                    &is->send_src, 0, &is->send_src, &is->lock,
+                    poll_wait_source_seq_snapshot(&is->send_src));
                 if (rc == -EINTR) {
                     mutex_unlock(&is->lock);
                     return total ? (ssize_t)total : -EINTR;
                 }
             }
+            if (!is->peer_closed)
+                is->send_ready = false;
             mutex_unlock(&is->lock);
             if (is->peer_closed) {
                 return total ? (ssize_t)total : -EPIPE;
@@ -666,9 +674,32 @@ static ssize_t inet_tcp_sendto(struct socket *sock, const void *buf,
         err = tcp_write(pcb, (const uint8_t *)buf + total,
                                (u16_t)chunk, TCP_WRITE_FLAG_COPY);
         if (err == ERR_OK) {
-            err = tcp_output(pcb);
+            err_t out_err = tcp_output(pcb);
+            if (out_err != ERR_OK && out_err != ERR_MEM)
+                err = out_err;
         }
         inet_lwip_unlock();
+        if (err == ERR_MEM) {
+            if (nonblock)
+                return total ? (ssize_t)total : -EAGAIN;
+            mutex_lock(&is->lock);
+            while (!is->send_ready && !is->peer_closed) {
+                int rc = poll_wait_source_block_seq(
+                    &is->send_src, 0, &is->send_src, &is->lock,
+                    poll_wait_source_seq_snapshot(&is->send_src));
+                if (rc == -EINTR) {
+                    mutex_unlock(&is->lock);
+                    return total ? (ssize_t)total : -EINTR;
+                }
+            }
+            if (!is->peer_closed)
+                is->send_ready = false;
+            mutex_unlock(&is->lock);
+            if (is->peer_closed) {
+                return total ? (ssize_t)total : -EPIPE;
+            }
+            continue;
+        }
         if (err != ERR_OK) {
             return total ? (ssize_t)total : -EIO;
         }
@@ -701,8 +732,9 @@ static ssize_t inet_tcp_recvfrom(struct socket *sock, void *buf, size_t len,
             mutex_unlock(&is->lock);
             return -EAGAIN;
         }
-        int rc =
-            poll_wait_source_block(&is->recv_src, 0, &is->recv_src, &is->lock);
+        int rc = poll_wait_source_block_seq(
+            &is->recv_src, 0, &is->recv_src, &is->lock,
+            poll_wait_source_seq_snapshot(&is->recv_src));
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
@@ -711,6 +743,17 @@ static ssize_t inet_tcp_recvfrom(struct socket *sock, void *buf, size_t len,
 
     size_t n = inet_recv_buf_pop(is, buf, len);
     mutex_unlock(&is->lock);
+    if (n > 0) {
+        size_t left = n;
+        while (left > 0) {
+            u16_t ack = left > 0xFFFFU ? 0xFFFFU : (u16_t)left;
+            inet_lwip_lock();
+            if (is->pcb.tcp)
+                tcp_recved(is->pcb.tcp, ack);
+            inet_lwip_unlock();
+            left -= ack;
+        }
+    }
     return (ssize_t)n;
 }
 
@@ -897,8 +940,9 @@ static ssize_t inet_udp_recvfrom(struct socket *sock, void *buf, size_t len,
             mutex_unlock(&is->lock);
             return -EAGAIN;
         }
-        int rc =
-            poll_wait_source_block(&is->recv_src, 0, &is->recv_src, &is->lock);
+        int rc = poll_wait_source_block_seq(
+            &is->recv_src, 0, &is->recv_src, &is->lock,
+            poll_wait_source_seq_snapshot(&is->recv_src));
         if (rc == -EINTR) {
             mutex_unlock(&is->lock);
             return -EINTR;
