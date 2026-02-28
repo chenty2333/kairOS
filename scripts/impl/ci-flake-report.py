@@ -84,6 +84,12 @@ WORKFLOW_GATES = {
             job="aarch64-smoke",
             step="Run aarch64 smp4 vfs/ipc gate",
         ),
+        GateSpec(gate="x86_64-irq-soak", job="x86_64-irq-soak"),
+        GateSpec(
+            gate="x86_64-irq-soak-step",
+            job="x86_64-irq-soak",
+            step="Run x86_64 irq soak gate",
+        ),
     ],
     "soak-long.yml": [
         GateSpec(gate="riscv64-soak-pr", job="riscv64-soak-pr"),
@@ -113,14 +119,6 @@ WORKFLOW_GATES = {
             gate="aarch64-soak-pr-step",
             job="aarch64-soak-pr",
             step="Run aarch64 soak-pr profile",
-        ),
-    ],
-    "ci-irq-soak.yml": [
-        GateSpec(gate="x86_64-irq-soak", job="x86_64-irq-soak"),
-        GateSpec(
-            gate="x86_64-irq-soak-step",
-            job="x86_64-irq-soak",
-            step="Run x86_64 irq soak gate",
         ),
     ],
 }
