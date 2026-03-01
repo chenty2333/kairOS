@@ -156,6 +156,12 @@ struct khandle_entry {
     uint64_t reserved_deadline_ns;
 };
 
+struct khandle_deferred_drop {
+    struct kobj *obj;
+    uint32_t rights;
+    uint64_t cap_id;
+};
+
 struct handletable {
     struct khandle_entry entries[CONFIG_MAX_HANDLES_PER_PROC];
     struct mutex lock;
@@ -163,6 +169,11 @@ struct handletable {
     atomic_t seq;
     uint64_t cache_epoch;
     uint64_t reserved_sweep_after_ns;
+    struct khandle_deferred_drop
+        reserved_drop_q[CONFIG_MAX_HANDLES_PER_PROC];
+    uint32_t reserved_drop_head;
+    uint32_t reserved_drop_tail;
+    uint32_t reserved_drop_count;
     struct list_head retire_node;
     uint64_t retire_after_ns;
 };

@@ -14,6 +14,7 @@
 #include <kairos/mm.h>
 #include <kairos/poll.h>
 #include <kairos/pollwait.h>
+#include <kairos/preempt.h>
 #include <kairos/printk.h>
 #include <kairos/process.h>
 #include <kairos/sched.h>
@@ -141,6 +142,12 @@ struct ipc_sysfs_object_state {
     uint32_t transfers_page_size;
 };
 
+struct ipc_registry_obj_owner_pin {
+    struct kobj *obj;
+    struct vnode *vnode;
+    struct dentry *dentry;
+};
+
 static LIST_HEAD(ipc_registry_all);
 static LIST_HEAD(ipc_channel_registry);
 static LIST_HEAD(ipc_port_registry);
@@ -149,7 +156,7 @@ static LIST_HEAD(ipc_vnode_registry);
 static LIST_HEAD(ipc_dentry_registry);
 static LIST_HEAD(ipc_buffer_registry);
 static LIST_HEAD(ipc_sysfs_project_queue);
-#define IPC_REGISTRY_ID_HASH_BITS 8U
+#define IPC_REGISTRY_ID_HASH_BITS 10U
 KHASH_DECLARE(ipc_registry_id_hash, IPC_REGISTRY_ID_HASH_BITS);
 static struct mutex ipc_registry_lock;
 static bool ipc_registry_lock_ready;
@@ -183,6 +190,7 @@ static uint64_t ipc_channel_ref_audit_mismatch_total;
 static uint64_t ipc_cap_revoke_marked_total;
 static uint64_t ipc_cap_bind_rejected_revoked_total;
 static uint64_t ipc_cap_commit_eagain_total;
+static uint64_t ipc_cap_commit_epoch_mismatch_total;
 static uint64_t ipc_cap_tryget_failed_total;
 static uint64_t ipc_lock_probe_registry_after_channel_total;
 static uint64_t ipc_lock_probe_registry_after_port_total;
@@ -864,7 +872,57 @@ static int ipc_parse_u32(const char *buf, size_t len, uint32_t *out) {
     return 0;
 }
 
-static struct kobj *ipc_registry_pin_obj_by_id(uint32_t obj_id) {
+static bool ipc_registry_pin_obj_owner_by_id(
+    uint32_t obj_id, struct ipc_registry_obj_owner_pin *pin) {
+    if (!pin)
+        return false;
+    memset(pin, 0, sizeof(*pin));
+    if (obj_id == 0)
+        return false;
+
+    ipc_registry_ensure_lock();
+    ipc_registry_lock_enter();
+    struct ipc_registry_entry *ent = ipc_registry_find_by_obj_id_locked(obj_id);
+    struct kobj *obj = NULL;
+    if (ent && ent->obj && ent->lifecycle == IPC_REG_ENTRY_LIVE) {
+        obj = ent->obj;
+        kobj_get(obj);
+    }
+    ipc_registry_lock_leave();
+    if (!obj)
+        return false;
+
+    pin->obj = obj;
+    switch (obj->type) {
+    case VFS_KOBJ_TYPE_VNODE: {
+        struct vnode *vn = vnode_from_kobj(obj);
+        if (vn) {
+            vnode_get(vn);
+            pin->vnode = vn;
+        }
+        break;
+    }
+    case VFS_KOBJ_TYPE_DENTRY: {
+        struct dentry *d = dentry_from_kobj(obj);
+        if (d) {
+            dentry_get(d);
+            pin->dentry = d;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return true;
+}
+
+/*
+ * Compatibility helper for legacy call sites that only need a pinned kobj.
+ * Keep this alongside owner-pin API so mixed integration states compile.
+ */
+static struct kobj *__attribute__((unused))
+ipc_registry_pin_obj_by_id(uint32_t obj_id) {
     if (obj_id == 0)
         return NULL;
     ipc_registry_ensure_lock();
@@ -877,6 +935,19 @@ static struct kobj *ipc_registry_pin_obj_by_id(uint32_t obj_id) {
     }
     ipc_registry_lock_leave();
     return obj;
+}
+
+static void ipc_registry_unpin_obj_owner(struct ipc_registry_obj_owner_pin *pin) {
+    if (!pin || !pin->obj)
+        return;
+    if (pin->dentry)
+        dentry_put(pin->dentry);
+    if (pin->vnode)
+        vnode_put(pin->vnode);
+    kobj_put(pin->obj);
+    pin->obj = NULL;
+    pin->vnode = NULL;
+    pin->dentry = NULL;
 }
 
 static struct ipc_sysfs_object_state *
@@ -996,6 +1067,12 @@ static int ipc_sysfs_append_object_row(struct kobj *obj, char *buf, size_t bufsz
                                      obj->id, kobj_type_name(obj->type),
                                      atomic_read(&obj->refcount), lifecycle,
                                      d->flags, path_out, mnt_present);
+                    } else if (obj->type == VFS_KOBJ_TYPE_VNODE ||
+                               obj->type == VFS_KOBJ_TYPE_DENTRY) {
+                        n = snprintf(buf + len, bufsz - len,
+                                     "%u %s %u %s owner=stale\n", obj->id,
+                                     kobj_type_name(obj->type),
+                                     atomic_read(&obj->refcount), lifecycle);
                     } else {
                         n = snprintf(buf + len, bufsz - len, "%u %s %u %s\n",
                                      obj->id, kobj_type_name(obj->type),
@@ -1167,9 +1244,10 @@ static ssize_t ipc_sysfs_show_object_summary(void *priv, char *buf, size_t bufsz
         return -EINVAL;
 
     struct ipc_sysfs_object_state *state = priv;
-    struct kobj *obj = ipc_registry_pin_obj_by_id(state->obj_id);
-    if (!obj)
+    struct ipc_registry_obj_owner_pin pin = {0};
+    if (!ipc_registry_pin_obj_owner_by_id(state->obj_id, &pin))
         return -ENODEV;
+    struct kobj *obj = pin.obj;
 
     ssize_t ret = -EINVAL;
     size_t len = 0;
@@ -1264,7 +1342,7 @@ static ssize_t ipc_sysfs_show_object_summary(void *priv, char *buf, size_t bufsz
         goto out_put;
     }
 
-    struct vnode *vn = vnode_from_kobj(obj);
+    struct vnode *vn = pin.vnode;
     if (vn) {
         unsigned int mnt_present = vn->mount ? 1U : 0U;
         const char *name = vn->name[0] ? vn->name : "-";
@@ -1284,7 +1362,7 @@ static ssize_t ipc_sysfs_show_object_summary(void *priv, char *buf, size_t bufsz
         goto out_put;
     }
 
-    struct dentry *d = dentry_from_kobj(obj);
+    struct dentry *d = pin.dentry;
     if (d) {
         struct mount *mnt = d->mnt;
         bool mnt_live = vfs_mount_is_live(mnt);
@@ -1304,11 +1382,21 @@ static ssize_t ipc_sysfs_show_object_summary(void *priv, char *buf, size_t bufsz
             goto out_put;
         }
         len += (size_t)n;
+    } else if (obj->type == VFS_KOBJ_TYPE_VNODE ||
+               obj->type == VFS_KOBJ_TYPE_DENTRY) {
+        n = snprintf(buf + len, bufsz - len, "owner=stale\n");
+        if (n < 0)
+            goto out_put;
+        if ((size_t)n >= bufsz - len) {
+            ret = (ssize_t)bufsz;
+            goto out_put;
+        }
+        len += (size_t)n;
     }
 
     ret = (ssize_t)len;
 out_put:
-    kobj_put(obj);
+    ipc_registry_unpin_obj_owner(&pin);
     return ret;
 }
 
@@ -1317,9 +1405,10 @@ static ssize_t ipc_sysfs_show_object_transfers(void *priv, char *buf, size_t buf
         return -EINVAL;
 
     struct ipc_sysfs_object_state *state = priv;
-    struct kobj *obj = ipc_registry_pin_obj_by_id(state->obj_id);
-    if (!obj)
+    struct ipc_registry_obj_owner_pin pin = {0};
+    if (!ipc_registry_pin_obj_owner_by_id(state->obj_id, &pin))
         return -ENODEV;
+    struct kobj *obj = pin.obj;
 
     ssize_t ret = -EINVAL;
     size_t len = 0;
@@ -1354,7 +1443,7 @@ static ssize_t ipc_sysfs_show_object_transfers(void *priv, char *buf, size_t buf
 
     ret = (ssize_t)len;
 out_put:
-    kobj_put(obj);
+    ipc_registry_unpin_obj_owner(&pin);
     return ret;
 }
 
@@ -1364,9 +1453,10 @@ static ssize_t ipc_sysfs_show_object_transfers_v2(void *priv, char *buf,
         return -EINVAL;
 
     struct ipc_sysfs_object_state *state = priv;
-    struct kobj *obj = ipc_registry_pin_obj_by_id(state->obj_id);
-    if (!obj)
+    struct ipc_registry_obj_owner_pin pin = {0};
+    if (!ipc_registry_pin_obj_owner_by_id(state->obj_id, &pin))
         return -ENODEV;
+    struct kobj *obj = pin.obj;
 
     ssize_t ret = -EINVAL;
     uint32_t cursor =
@@ -1447,7 +1537,7 @@ static ssize_t ipc_sysfs_show_object_transfers_v2(void *priv, char *buf,
 
     ret = (ssize_t)len;
 out_put:
-    kobj_put(obj);
+    ipc_registry_unpin_obj_owner(&pin);
     return ret;
 }
 
@@ -1656,6 +1746,8 @@ static ssize_t ipc_sysfs_show_stats(void *priv __attribute__((unused)), char *bu
         &ipc_cap_bind_rejected_revoked_total, __ATOMIC_RELAXED);
     uint64_t cap_commit_eagain = __atomic_load_n(
         &ipc_cap_commit_eagain_total, __ATOMIC_RELAXED);
+    uint64_t cap_commit_epoch_mismatch = __atomic_load_n(
+        &ipc_cap_commit_epoch_mismatch_total, __ATOMIC_RELAXED);
     uint64_t cap_tryget_failed = __atomic_load_n(
         &ipc_cap_tryget_failed_total, __ATOMIC_RELAXED);
     uint32_t reg_oom_warns = atomic_read(&ipc_registry_register_oom_warn_count);
@@ -1716,6 +1808,7 @@ static ssize_t ipc_sysfs_show_stats(void *priv __attribute__((unused)), char *bu
                      "cap_revoke_marked_total=%llu\n"
                      "cap_bind_rejected_revoked_total=%llu\n"
                      "cap_commit_eagain_total=%llu\n"
+                     "cap_commit_epoch_mismatch_total=%llu\n"
                      "cap_tryget_failed_total=%llu\n"
                      "channel_poll_hint_checks_total=%llu\n"
                      "channel_poll_hint_mismatch_in_total=%llu\n"
@@ -1758,6 +1851,7 @@ static ssize_t ipc_sysfs_show_stats(void *priv __attribute__((unused)), char *bu
                      (unsigned long long)cap_revoke_marked,
                      (unsigned long long)cap_bind_rejected_revoked,
                      (unsigned long long)cap_commit_eagain,
+                     (unsigned long long)cap_commit_epoch_mismatch,
                      (unsigned long long)cap_tryget_failed,
                      (unsigned long long)hint_checks,
                      (unsigned long long)hint_mismatch_in,
@@ -1901,16 +1995,20 @@ static ssize_t ipc_sysfs_show_vnodes(void *priv __attribute__((unused)), char *b
     list_for_each_entry(ent, &ipc_vnode_registry, type_node) {
         struct kobj *obj = ent->obj;
         struct vnode *vn = vnode_from_kobj(obj);
-        if (!obj || !vn)
+        if (!obj)
             continue;
-
-        unsigned int mnt_present = vn->mount ? 1U : 0U;
-        const char *name = vn->name[0] ? vn->name : "-";
-
-        n = snprintf(buf + len, bufsz - len, "%u %u %lu %s 0%o %llu %s %u\n",
-                     obj->id, atomic_read(&obj->refcount), (unsigned long)vn->ino,
-                     vnode_type_name(vn->type), (unsigned int)vn->mode,
-                     (unsigned long long)vn->size, name, mnt_present);
+        if (!vn) {
+            n = snprintf(buf + len, bufsz - len, "%u %u 0 - 0 0 - 0\n", obj->id,
+                         atomic_read(&obj->refcount));
+        } else {
+            unsigned int mnt_present = vn->mount ? 1U : 0U;
+            const char *name = vn->name[0] ? vn->name : "-";
+            n = snprintf(buf + len, bufsz - len, "%u %u %lu %s 0%o %llu %s %u\n",
+                         obj->id, atomic_read(&obj->refcount),
+                         (unsigned long)vn->ino, vnode_type_name(vn->type),
+                         (unsigned int)vn->mode, (unsigned long long)vn->size,
+                         name, mnt_present);
+        }
         if (n < 0 || (size_t)n >= bufsz - len) {
             len = bufsz;
             break;
@@ -1942,20 +2040,25 @@ static ssize_t ipc_sysfs_show_dentries(void *priv __attribute__((unused)),
     list_for_each_entry(ent, &ipc_dentry_registry, type_node) {
         struct kobj *obj = ent->obj;
         struct dentry *d = dentry_from_kobj(obj);
-        if (!obj || !d)
+        if (!obj)
             continue;
+        if (!d) {
+            n = snprintf(buf + len, bufsz - len, "%u %u 0x0 - 0\n", obj->id,
+                         atomic_read(&obj->refcount));
+        } else {
+            struct mount *mnt = d->mnt;
+            bool mnt_live = vfs_mount_is_live(mnt);
+            unsigned int mnt_present = mnt_live ? 1U : 0U;
+            char path[CONFIG_PATH_MAX];
+            const char *path_out = d->name[0] ? d->name : "/";
+            if (mnt_live && vfs_build_path_dentry(d, path, sizeof(path)) >= 0 &&
+                path[0])
+                path_out = path;
 
-        struct mount *mnt = d->mnt;
-        bool mnt_live = vfs_mount_is_live(mnt);
-        unsigned int mnt_present = mnt_live ? 1U : 0U;
-        char path[CONFIG_PATH_MAX];
-        const char *path_out = d->name[0] ? d->name : "/";
-        if (mnt_live && vfs_build_path_dentry(d, path, sizeof(path)) >= 0 &&
-            path[0])
-            path_out = path;
-
-        n = snprintf(buf + len, bufsz - len, "%u %u 0x%x %s %u\n", obj->id,
-                     atomic_read(&obj->refcount), d->flags, path_out, mnt_present);
+            n = snprintf(buf + len, bufsz - len, "%u %u 0x%x %s %u\n", obj->id,
+                         atomic_read(&obj->refcount), d->flags, path_out,
+                         mnt_present);
+        }
         if (n < 0 || (size_t)n >= bufsz - len) {
             len = bufsz;
             break;
@@ -2756,11 +2859,11 @@ void kchannel_endpoint_ref_audit_registry(const char *site, int32_t pid) {
             break;
         if (type != KOBJ_TYPE_CHANNEL)
             continue;
-        struct kobj *obj = ipc_registry_pin_obj_by_id(obj_id);
-        if (!obj)
+        struct ipc_registry_obj_owner_pin pin = {0};
+        if (!ipc_registry_pin_obj_owner_by_id(obj_id, &pin))
             continue;
-        kchannel_endpoint_ref_audit_obj(obj, site, pid);
-        kobj_put(obj);
+        kchannel_endpoint_ref_audit_obj(pin.obj, site, pid);
+        ipc_registry_unpin_obj_owner(&pin);
     }
 }
 
@@ -3230,7 +3333,11 @@ struct khandle_lookup_cache_cpu {
 #define KHANDLE_RESERVED_TRANSFER_TIMEOUT_NS_MIN     (10ULL * 1000ULL * 1000ULL)
 #define KHANDLE_RESERVED_TRANSFER_SWEEP_INTERVAL_MIN_NS (50ULL * 1000ULL * 1000ULL)
 #define KHANDLE_RESERVED_TRANSFER_SWEEP_INTERVAL_MAX_NS (1000ULL * 1000ULL * 1000ULL)
+#define KHANDLE_RESERVED_TRANSFER_SWEEP_BUDGET_OPPORTUNISTIC 8U
 #define KHANDLE_TABLE_LOCK_TIMEOUT_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
+#define KHANDLE_TABLE_LOCK_TIMEOUT_FAST_NS (5ULL * 1000ULL * 1000ULL)
+#define KHANDLE_RESERVED_TRANSFER_DEFERRED_DRAIN_BATCH 8U
+#define KHANDLE_RESERVED_TRANSFER_DEFERRED_DRAIN_SAFEPOINT_BUDGET 16U
 #define KHANDLE_DEFERRED_FREE_DELAY_NS (100ULL * 1000ULL * 1000ULL)
 
 static LIST_HEAD(kcap_nodes);
@@ -3418,21 +3525,65 @@ static uint64_t khandle_u64_add_sat(uint64_t lhs, uint64_t rhs) {
     return out;
 }
 
+static uint64_t khandle_ns_to_sched_ticks(uint64_t ns) {
+    const uint64_t ns_per_sec = 1000000000ULL;
+    if (ns == 0)
+        return 1;
+    if (ns > UINT64_MAX / CONFIG_HZ)
+        return UINT64_MAX;
+    uint64_t scaled = ns * CONFIG_HZ;
+    uint64_t rounded = khandle_u64_add_sat(scaled, ns_per_sec - 1ULL);
+    uint64_t ticks = rounded / ns_per_sec;
+    return ticks ? ticks : 1;
+}
+
 static int khandle_table_lock_bounded(struct handletable *ht,
                                       uint64_t timeout_ns) {
     if (!ht)
         return -EINVAL;
-    uint64_t deadline_ns = khandle_u64_add_sat(time_now_ns(), timeout_ns);
-    while (1) {
-        if (mutex_trylock(&ht->lock))
+    uint64_t timeout_ticks = khandle_ns_to_sched_ticks(timeout_ns);
+    int rc = -ETIMEDOUT;
+    bool can_sleep = proc_current() && arch_irq_enabled() && !in_atomic();
+
+    if (can_sleep) {
+        rc = mutex_lock_timeout(&ht->lock, timeout_ticks);
+        if (rc == 0)
             return 0;
-        if (time_now_ns() >= deadline_ns)
-            return -ETIMEDOUT;
-        if (proc_current())
-            proc_yield();
-        else
+    } else {
+        uint64_t deadline_ns = khandle_u64_add_sat(time_now_ns(), timeout_ns);
+        while (time_now_ns() < deadline_ns) {
+            if (mutex_trylock(&ht->lock))
+                return 0;
             arch_cpu_relax();
+        }
     }
+    struct process *curr = proc_current();
+    struct process *holder = ht->lock.holder;
+    pr_warn("ipc: handletable lock timeout ht=%p curr_pid=%d holder_pid=%d "
+            "irq=%u atomic=%u\n",
+            (void *)ht, curr ? curr->pid : -1, holder ? holder->pid : -1,
+            arch_irq_enabled() ? 1U : 0U, in_atomic() ? 1U : 0U);
+    return (rc < 0) ? rc : -ETIMEDOUT;
+}
+
+static bool khandle_table_lock_quiet(struct handletable *ht,
+                                     uint64_t timeout_ns) {
+    if (!ht)
+        return false;
+    uint64_t timeout_ticks = khandle_ns_to_sched_ticks(timeout_ns);
+    bool can_sleep = proc_current() && arch_irq_enabled() && !in_atomic();
+
+    if (can_sleep) {
+        return mutex_lock_timeout(&ht->lock, timeout_ticks) == 0;
+    }
+
+    uint64_t deadline_ns = khandle_u64_add_sat(time_now_ns(), timeout_ns);
+    while (time_now_ns() < deadline_ns) {
+        if (mutex_trylock(&ht->lock))
+            return true;
+        arch_cpu_relax();
+    }
+    return false;
 }
 
 static uint64_t khandle_deferred_retire_after_ns(void) {
@@ -3530,27 +3681,66 @@ static bool khandle_reserved_entry_expired(const struct khandle_entry *entry,
     return now_ns >= entry->reserved_deadline_ns;
 }
 
-static bool khandle_reserved_take_expired_locked(struct handletable *ht,
-                                                 uint64_t now_ns,
-                                                 struct kobj **out_obj,
-                                                 uint32_t *out_rights,
-                                                 uint64_t *out_cap_id) {
-    if (out_obj)
-        *out_obj = NULL;
-    if (out_rights)
-        *out_rights = 0;
-    if (out_cap_id)
-        *out_cap_id = KHANDLE_INVALID_CAP_ID;
-    if (!ht || !out_obj || !out_rights || !out_cap_id)
+static uint32_t khandle_reserved_deferred_next_idx(uint32_t idx) {
+    idx++;
+    if (idx >= CONFIG_MAX_HANDLES_PER_PROC)
+        idx = 0;
+    return idx;
+}
+
+static bool khandle_reserved_deferred_enqueue_locked(
+    struct handletable *ht, struct kobj *obj, uint32_t rights, uint64_t cap_id) {
+    if (!ht || !obj)
+        return false;
+    if (ht->reserved_drop_count >= CONFIG_MAX_HANDLES_PER_PROC)
         return false;
 
+    uint32_t tail = ht->reserved_drop_tail;
+    ht->reserved_drop_q[tail].obj = obj;
+    ht->reserved_drop_q[tail].rights = rights;
+    ht->reserved_drop_q[tail].cap_id = cap_id;
+    ht->reserved_drop_tail = khandle_reserved_deferred_next_idx(tail);
+    ht->reserved_drop_count++;
+    return true;
+}
+
+static bool khandle_reserved_deferred_dequeue_locked(
+    struct handletable *ht, struct khandle_deferred_drop *out) {
+    if (!ht || !out || ht->reserved_drop_count == 0)
+        return false;
+
+    uint32_t head = ht->reserved_drop_head;
+    *out = ht->reserved_drop_q[head];
+    ht->reserved_drop_q[head].obj = NULL;
+    ht->reserved_drop_q[head].rights = 0;
+    ht->reserved_drop_q[head].cap_id = KHANDLE_INVALID_CAP_ID;
+    ht->reserved_drop_head = khandle_reserved_deferred_next_idx(head);
+    ht->reserved_drop_count--;
+    return true;
+}
+
+static uint32_t khandle_reserved_detach_expired_locked(struct handletable *ht,
+                                                       uint64_t now_ns,
+                                                       uint32_t budget) {
+    if (!ht)
+        return 0;
+    if (budget == 0 || budget > CONFIG_MAX_HANDLES_PER_PROC)
+        budget = CONFIG_MAX_HANDLES_PER_PROC;
+
+    uint32_t detached = 0;
     for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
+        if (detached >= budget)
+            break;
+
         struct khandle_entry *entry = &ht->entries[i];
         if (!khandle_reserved_entry_expired(entry, now_ns))
             continue;
-        *out_obj = entry->obj;
-        *out_rights = entry->rights;
-        *out_cap_id = entry->cap_id;
+        if (!khandle_reserved_deferred_enqueue_locked(ht, entry->obj,
+                                                      entry->rights,
+                                                      entry->cap_id)) {
+            break;
+        }
+
         entry->obj = NULL;
         entry->rights = 0;
         entry->cap_id = KHANDLE_INVALID_CAP_ID;
@@ -3560,53 +3750,87 @@ static bool khandle_reserved_take_expired_locked(struct handletable *ht,
         entry->cap_revoke_epoch = 0;
         entry->reserved_deadline_ns = 0;
         atomic_inc(&ht->seq);
-        return true;
+        detached++;
     }
-    return false;
+    return detached;
 }
 
 static void khandle_reserved_transfer_sweep(struct handletable *ht, bool force) {
     if (!ht)
         return;
-
     uint64_t now_ns = time_now_ns();
     uint64_t timeout_ns = khandle_reserved_timeout_ns();
     uint64_t sweep_interval_ns = khandle_reserved_sweep_interval_ns(timeout_ns);
-
-    if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
-        pr_warn("ipc: reserved sweep lock timeout ht=%p force=%u\n", (void *)ht,
-                force ? 1U : 0U);
-        return;
+    if (force) {
+        if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
+            pr_warn("ipc: reserved sweep lock timeout ht=%p force=%u\n",
+                    (void *)ht, force ? 1U : 0U);
+            return;
+        }
+    } else {
+        if (!khandle_table_lock_quiet(ht, KHANDLE_TABLE_LOCK_TIMEOUT_FAST_NS))
+            return;
     }
+
     if (!force && ht->reserved_sweep_after_ns != 0 &&
         now_ns < ht->reserved_sweep_after_ns) {
         mutex_unlock(&ht->lock);
         return;
     }
     ht->reserved_sweep_after_ns = khandle_u64_add_sat(now_ns, sweep_interval_ns);
-
-    while (1) {
-        struct kobj *obj = NULL;
-        uint32_t rights = 0;
-        uint64_t cap_id = KHANDLE_INVALID_CAP_ID;
-        if (!khandle_reserved_take_expired_locked(ht, now_ns, &obj, &rights,
-                                                  &cap_id)) {
-            break;
-        }
-        mutex_unlock(&ht->lock);
-        khandle_transfer_drop_cap(obj, rights, cap_id);
-        now_ns = time_now_ns();
-        if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
-            pr_warn("ipc: reserved sweep relock timeout ht=%p force=%u\n",
-                    (void *)ht, force ? 1U : 0U);
-            return;
-        }
-        if (force)
-            continue;
-        ht->reserved_sweep_after_ns =
-            khandle_u64_add_sat(now_ns, sweep_interval_ns);
-    }
+    uint32_t budget = force ? CONFIG_MAX_HANDLES_PER_PROC
+                            : KHANDLE_RESERVED_TRANSFER_SWEEP_BUDGET_OPPORTUNISTIC;
+    (void)khandle_reserved_detach_expired_locked(ht, now_ns, budget);
     mutex_unlock(&ht->lock);
+}
+
+static uint32_t khandle_reserved_transfer_drain_deferred(struct handletable *ht,
+                                                         uint32_t budget,
+                                                         bool force) {
+    if (!ht || budget == 0)
+        return 0;
+
+    uint32_t drained = 0;
+    while (drained < budget) {
+        uint32_t batch_cap = KHANDLE_RESERVED_TRANSFER_DEFERRED_DRAIN_BATCH;
+        uint32_t remain = budget - drained;
+        if (remain < batch_cap)
+            batch_cap = remain;
+
+        bool locked = force ? (khandle_table_lock_bounded(
+                                   ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) == 0)
+                            : khandle_table_lock_quiet(
+                                  ht, KHANDLE_TABLE_LOCK_TIMEOUT_FAST_NS);
+        if (!locked)
+            break;
+
+        struct khandle_deferred_drop
+            dropped[KHANDLE_RESERVED_TRANSFER_DEFERRED_DRAIN_BATCH];
+        uint32_t popped = 0;
+        while (popped < batch_cap &&
+               khandle_reserved_deferred_dequeue_locked(ht, &dropped[popped])) {
+            popped++;
+        }
+        bool empty = (ht->reserved_drop_count == 0);
+        mutex_unlock(&ht->lock);
+
+        if (popped == 0)
+            break;
+
+        for (uint32_t i = 0; i < popped; i++) {
+            khandle_transfer_drop_cap(dropped[i].obj, dropped[i].rights,
+                                      dropped[i].cap_id);
+        }
+        drained += popped;
+        if (empty)
+            break;
+    }
+    return drained;
+}
+
+static void khandle_reserved_transfer_drain_safepoint(struct handletable *ht) {
+    (void)khandle_reserved_transfer_drain_deferred(
+        ht, KHANDLE_RESERVED_TRANSFER_DEFERRED_DRAIN_SAFEPOINT_BUDGET, false);
 }
 
 #if CONFIG_KERNEL_TESTS
@@ -3829,8 +4053,17 @@ static void kcap_drop_detached(uint64_t cap_id) {
     if (cap_id == KHANDLE_INVALID_CAP_ID)
         return;
 
+    const uint64_t spin_timeout_ns = 2ULL * 1000ULL * 1000ULL;
+    uint64_t deadline_ns = khandle_u64_add_sat(time_now_ns(), spin_timeout_ns);
     LIST_HEAD(free_nodes);
-    spin_lock(&kcap_lock);
+    while (!spin_trylock(&kcap_lock)) {
+        if (time_now_ns() >= deadline_ns) {
+            pr_warn("ipc: kcap_drop_detached lock timeout cap=%llu\n",
+                    (unsigned long long)cap_id);
+            return;
+        }
+        arch_cpu_relax();
+    }
     kcap_hash_ensure_locked();
     struct kcap_node *node = kcap_find_locked(cap_id);
     if (node && !kcap_node_is_attached_locked(node))
@@ -4274,10 +4507,13 @@ void handletable_put(struct handletable *ht) {
         audit_pid = curr->pid;
 
     khandle_reserved_transfer_sweep(ht, true);
+    (void)khandle_reserved_transfer_drain_deferred(ht, UINT32_MAX, true);
     khandle_cache_invalidate_ht(ht);
     for (int i = 0; i < CONFIG_MAX_HANDLES_PER_PROC; i++) {
         struct kobj *obj = ht->entries[i].obj;
+        uint32_t rights = ht->entries[i].rights;
         uint64_t cap_id = ht->entries[i].cap_id;
+        uint32_t flags = ht->entries[i].flags;
         if (!obj)
             continue;
         ht->entries[i].obj = NULL;
@@ -4288,6 +4524,10 @@ void handletable_put(struct handletable *ht) {
         ht->entries[i].transfer_token = KHANDLE_INVALID_CAP_ID;
         ht->entries[i].cap_revoke_epoch = 0;
         ht->entries[i].reserved_deadline_ns = 0;
+        if (flags & KHANDLE_ENTRY_F_RESERVED_TRANSFER) {
+            khandle_transfer_drop_cap(obj, rights, cap_id);
+            continue;
+        }
         kcap_detach_owner(cap_id, ht, i, false);
         kobj_handle_ref_dec(obj);
         kchannel_endpoint_ref_audit_obj(obj, "handletable_put", audit_pid);
@@ -4306,6 +4546,7 @@ static int khandle_close_in_table(struct handletable *ht, int32_t handle,
         return -EBADF;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     struct kobj *obj = NULL;
     uint64_t cap_id = KHANDLE_INVALID_CAP_ID;
@@ -4378,8 +4619,10 @@ int khandle_alloc(struct process *p, struct kobj *obj, uint32_t rights) {
         return -EINVAL;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
-    if (khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS) < 0) {
+    int lock_rc = khandle_table_lock_bounded(ht, KHANDLE_TABLE_LOCK_TIMEOUT_NS);
+    if (lock_rc < 0) {
         pr_warn("khandle_alloc: lock timeout pid=%d ht=%p\n",
                 curr ? curr->pid : -1, (void *)ht);
         return -ETIMEDOUT;
@@ -4543,6 +4786,7 @@ int khandle_reserve_transfer(struct process *p, int32_t handle,
         return -EBADF;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     uint64_t token = khandle_alloc_transfer_token();
     struct kobj *obj = NULL;
@@ -4640,11 +4884,8 @@ int khandle_commit_reserved_transfer(struct process *p, int32_t handle,
     entry->reserved_deadline_ns = 0;
     atomic_inc(&ht->seq);
     mutex_unlock(&ht->lock);
-    if (!epoch_match) {
-        pr_warn("ipc: reserved transfer commit epoch mismatch cap=%llu expect=%llu\n",
-                (unsigned long long)cap_id,
-                (unsigned long long)reserved_epoch);
-    }
+    if (!epoch_match)
+        ipc_stat_inc_u64(&ipc_cap_commit_epoch_mismatch_total);
     return 0;
 }
 
@@ -4719,6 +4960,7 @@ int khandle_restore_cap(struct process *p, int32_t handle, struct kobj *obj,
         return -EBADF;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     mutex_lock(&ht->lock);
     if (ht->entries[handle].obj) {
@@ -4851,6 +5093,7 @@ int khandle_close_with_flags(struct process *p, int32_t handle, uint32_t flags) 
         return -EBADF;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     if ((flags & KHANDLE_CLOSE_F_REVOKE_DESCENDANTS) == 0)
         return khandle_close_in_table(ht, handle, KHANDLE_INVALID_CAP_ID, false);
@@ -4869,6 +5112,7 @@ int khandle_duplicate(struct process *p, int32_t handle, uint32_t rights_mask,
         return -EBADF;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     mutex_lock(&ht->lock);
     struct kobj *obj = ht->entries[handle].obj;
@@ -4914,6 +5158,7 @@ int khandle_revoke_descendants(struct process *p, int32_t handle) {
         return -EBADF;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     return khandle_revoke_subtree_txn(ht, handle, false);
 }
@@ -4949,6 +5194,7 @@ int khandle_install_transferred_cap(struct process *p, struct kobj *obj,
         return -EINVAL;
 
     khandle_reserved_transfer_sweep(ht, false);
+    khandle_reserved_transfer_drain_safepoint(ht);
 
     mutex_lock(&ht->lock);
     for (int h = 0; h < CONFIG_MAX_HANDLES_PER_PROC; h++) {
@@ -5593,6 +5839,7 @@ int kchannel_poll_attach_vnode(struct kobj *channel_obj, struct vnode *vn) {
         }
     }
     list_add_tail(&watch->node, &ch->poll_vnodes);
+    vnode_get(vn);
     wake_events = kchannel_poll_revents_locked(ch, POLLIN | POLLOUT | POLLHUP);
     ipc_channel_unlock(ch);
 
@@ -5613,6 +5860,7 @@ int kchannel_poll_detach_vnode(struct kobj *channel_obj, struct vnode *vn) {
             continue;
         list_del(&iter->node);
         ipc_channel_unlock(ch);
+        vnode_put(iter->vn);
         kfree(iter);
         return 0;
     }
@@ -5754,6 +6002,7 @@ int kport_poll_attach_vnode(struct kobj *port_obj, struct vnode *vn) {
         }
     }
     list_add_tail(&watch->node, &port->poll_vnodes);
+    vnode_get(vn);
     ready = !list_empty(&port->queue);
     ipc_port_unlock(port);
 
@@ -5774,6 +6023,7 @@ int kport_poll_detach_vnode(struct kobj *port_obj, struct vnode *vn) {
             continue;
         list_del(&iter->node);
         ipc_port_unlock(port);
+        vnode_put(iter->vn);
         kfree(iter);
         return 0;
     }
@@ -6015,6 +6265,7 @@ static void kchannel_release_obj(struct kobj *obj) {
         struct kchannel_watch *watch =
             list_first_entry(&poll_reap, struct kchannel_watch, node);
         list_del(&watch->node);
+        vnode_put(watch->vn);
         kfree(watch);
     }
 
@@ -6084,6 +6335,7 @@ static void kport_release_obj(struct kobj *obj) {
         struct kport_watch *watch =
             list_first_entry(&poll_reap, struct kport_watch, node);
         list_del(&watch->node);
+        vnode_put(watch->vn);
         kfree(watch);
     }
 
