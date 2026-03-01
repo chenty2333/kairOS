@@ -439,6 +439,14 @@ struct dentry *vfs_root_dentry(void) {
     return mnt->root_dentry;
 }
 
+struct dentry *vfs_root_dentry_get(void) {
+    struct dentry *root = vfs_root_dentry();
+    if (!root)
+        return NULL;
+    dentry_get(root);
+    return root;
+}
+
 bool vfs_mount_is_live(const struct mount *mnt) {
     if (!mnt)
         return false;

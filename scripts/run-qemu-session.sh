@@ -58,13 +58,17 @@ prepare_interactive_tty() {
         return
     fi
 
-    SESSION_TTY_STATE="$(stty -g 2>/dev/null || true)"
+    # Avoid being stopped by TTIN/TTOU/TSTP when this session runs in a
+    # background process group under an interactive parent.
+    SESSION_TTY_STATE="$(
+        (trap '' TTIN TTOU TSTP; stty -g </dev/tty 2>/dev/null) || true
+    )"
     if [[ -z "${SESSION_TTY_STATE}" ]]; then
         return
     fi
 
     # Guest binary output can contain XON/XOFF bytes and accidentally pause host tty output.
-    stty -ixon -ixoff 2>/dev/null || true
+    (trap '' TTIN TTOU TSTP; stty -ixon -ixoff </dev/tty 2>/dev/null) || true
 }
 
 restore_interactive_tty() {
@@ -77,7 +81,7 @@ restore_interactive_tty() {
     if ! command -v stty >/dev/null 2>&1; then
         return
     fi
-    stty "${SESSION_TTY_STATE}" 2>/dev/null || true
+    (trap '' TTIN TTOU TSTP; stty "${SESSION_TTY_STATE}" </dev/tty 2>/dev/null) || true
 }
 
 validate_boot_drive_cmd() {

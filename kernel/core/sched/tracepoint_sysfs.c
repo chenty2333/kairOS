@@ -301,7 +301,8 @@ static ssize_t tracepoint_ipc_cap_events_show(void *priv __attribute__((unused))
     int n = snprintf(
         buf + off, bufsz - off,
         "# schema=trace_ipc_cap_v1\n"
-        "# ticks cpu seq pid event flags version op cap_id arg1\n");
+        "# ticks cpu seq pid event flags version op cap_id arg1\n"
+        "# op=commit_epoch_mismatch: arg1=(expected_low32<<32)|current_low32\n");
     if (n < 0)
         return -EINVAL;
     if ((size_t)n >= bufsz - off)
@@ -342,6 +343,9 @@ static ssize_t tracepoint_ipc_cap_events_show(void *priv __attribute__((unused))
                 break;
             case TRACE_IPC_CAP_OP_TRYGET_FAILED:
                 op_name = "tryget_failed";
+                break;
+            case TRACE_IPC_CAP_OP_COMMIT_EPOCH_MISMATCH:
+                op_name = "commit_epoch_mismatch";
                 break;
             default:
                 break;

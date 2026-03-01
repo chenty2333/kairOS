@@ -116,6 +116,7 @@ static void drm_buffer_kobj_release(struct kobj *obj)
     struct drm_buffer_watch *watch, *tmp;
     list_for_each_entry_safe(watch, tmp, &bkobj->poll_vnodes, node) {
         list_del(&watch->node);
+        vnode_put(watch->vn);
         kfree(watch);
     }
 
@@ -205,6 +206,7 @@ static int drm_buffer_kobj_poll_attach(struct kobj *obj, struct vnode *vn)
     }
 
     list_add_tail(&watch->node, &bkobj->poll_vnodes);
+    vnode_get(vn);
     bool should_wake = bkobj->damage_pending;
     mutex_unlock(&bkobj->damage_lock);
 
@@ -226,6 +228,7 @@ static int drm_buffer_kobj_poll_detach(struct kobj *obj, struct vnode *vn)
     list_for_each_entry_safe(watch, tmp, &bkobj->poll_vnodes, node) {
         if (watch->vn == vn) {
             list_del(&watch->node);
+            vnode_put(watch->vn);
             kfree(watch);
             break;
         }

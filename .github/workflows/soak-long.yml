@@ -63,6 +63,26 @@ on:
         description: "Directed aarch64 smp=2 test-driver TEST_TIMEOUT"
         required: false
         default: "300"
+      flake_sample_size:
+        description: "Latest completed runs per workflow to inspect for flake report"
+        required: false
+        default: "20"
+      flake_min_evaluated:
+        description: "Minimum evaluated samples before enforcing flake thresholds"
+        required: false
+        default: "10"
+      flake_max_fail_rate_percent:
+        description: "Legacy fallback threshold (optional)"
+        required: false
+        default: ""
+      flake_max_kernel_fail_rate_percent:
+        description: "Fail when kernel-fail rate exceeds this percentage"
+        required: false
+        default: "10"
+      flake_max_infra_fail_rate_percent:
+        description: "Fail when infra-fail rate exceeds this percentage"
+        required: false
+        default: "20"
 
 concurrency:
   group: soak-long-${{ github.ref }}
@@ -425,3 +445,43 @@ jobs:
             build/aarch64/soak-pr.log
             build/aarch64/test.log
             build/aarch64/run.log
+
+  flake-report:
+    if: ${{ always() }}
+    needs:
+      - riscv64-soak-pr
+      - x86_64-soak-pr
+      - aarch64-soak-pr
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate rolling flake report (inline with soak-long)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        uses: ./.github/actions/run-flake-report
+        with:
+          sample_size: ${{ github.event.inputs.flake_sample_size || '20' }}
+          min_evaluated: ${{ github.event.inputs.flake_min_evaluated || '10' }}
+          max_fail_rate_percent: ${{ github.event.inputs.flake_max_fail_rate_percent || '' }}
+          max_kernel_fail_rate_percent: ${{ github.event.inputs.flake_max_kernel_fail_rate_percent || '10' }}
+          max_infra_fail_rate_percent: ${{ github.event.inputs.flake_max_infra_fail_rate_percent || '20' }}
+          enforce: "true"
+
+      - name: Upload flake report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-flake-report-${{ github.run_id }}
+          retention-days: 21
+          if-no-files-found: error
+          path: |
+            ci-flake-report.json
+            ci-flake-report.md

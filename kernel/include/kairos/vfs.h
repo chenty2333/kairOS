@@ -258,6 +258,7 @@ void vfs_file_free(struct file *file);
 void vfs_dump_mounts(void);
 struct mount *vfs_root_mount(void);
 struct dentry *vfs_root_dentry(void);
+struct dentry *vfs_root_dentry_get(void);
 void vfs_mount_hold(struct mount *mnt);
 void vfs_mount_put(struct mount *mnt);
 bool vfs_mount_is_live(const struct mount *mnt);

@@ -1,0 +1,71 @@
+name: Run Rolling Flake Report
+description: Generate rolling flake report, publish summary, and optionally enforce thresholds.
+
+inputs:
+  sample_size:
+    description: Latest completed runs per workflow to inspect
+    required: false
+    default: "20"
+  min_evaluated:
+    description: Minimum evaluated samples before enforcement
+    required: false
+    default: "10"
+  max_fail_rate_percent:
+    description: Legacy fallback threshold (optional)
+    required: false
+    default: ""
+  max_kernel_fail_rate_percent:
+    description: Kernel fail-rate threshold
+    required: false
+    default: "10"
+  max_infra_fail_rate_percent:
+    description: Infra fail-rate threshold
+    required: false
+    default: "20"
+  enforce:
+    description: Enable enforcement (true/false)
+    required: false
+    default: "true"
+  json_out:
+    description: JSON output path
+    required: false
+    default: "ci-flake-report.json"
+  markdown_out:
+    description: Markdown output path
+    required: false
+    default: "ci-flake-report.md"
+
+runs:
+  using: composite
+  steps:
+    - name: Generate rolling gate failure-rate report
+      shell: bash
+      run: |
+        set -euo pipefail
+        report_args=(
+          --sample-size "${{ inputs.sample_size }}"
+          --min-evaluated "${{ inputs.min_evaluated }}"
+          --json-out "${{ inputs.json_out }}"
+          --markdown-out "${{ inputs.markdown_out }}"
+        )
+        if [[ "${{ inputs.enforce }}" == "true" ]]; then
+          report_args+=(
+            --max-kernel-fail-rate-percent "${{ inputs.max_kernel_fail_rate_percent }}"
+            --max-infra-fail-rate-percent "${{ inputs.max_infra_fail_rate_percent }}"
+          )
+          if [[ -n "${{ inputs.max_fail_rate_percent }}" ]]; then
+            report_args+=(--max-fail-rate-percent "${{ inputs.max_fail_rate_percent }}")
+          fi
+        else
+          echo "ci-flake-report: enforcement disabled"
+        fi
+        python3 scripts/impl/ci-flake-report.py "${report_args[@]}"
+
+    - name: Publish report to workflow summary
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ -f "${{ inputs.markdown_out }}" ]]; then
+          cat "${{ inputs.markdown_out }}" >> "${GITHUB_STEP_SUMMARY}"
+        fi

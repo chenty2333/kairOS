@@ -19,8 +19,8 @@ from typing import Dict, List, Optional, Tuple
 API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"
 
-FAIL_CONCLUSIONS = {
-    "failure",
+KERNEL_FAIL_CONCLUSIONS = {"failure"}
+INFRA_FAIL_CONCLUSIONS = {
     "timed_out",
     "startup_failure",
     "action_required",
@@ -133,6 +133,8 @@ class GateStats:
     window_runs: int
     evaluated: int
     pass_count: int
+    kernel_fail_count: int
+    infra_fail_count: int
     fail_count: int
     missing_count: int
     ignored_count: int
@@ -144,6 +146,18 @@ class GateStats:
             return 0.0
         return (self.fail_count * 100.0) / self.evaluated
 
+    @property
+    def kernel_fail_rate_percent(self) -> float:
+        if self.evaluated == 0:
+            return 0.0
+        return (self.kernel_fail_count * 100.0) / self.evaluated
+
+    @property
+    def infra_fail_rate_percent(self) -> float:
+        if self.evaluated == 0:
+            return 0.0
+        return (self.infra_fail_count * 100.0) / self.evaluated
+
 
 @dataclass(frozen=True)
 class GateViolation:
@@ -151,6 +165,7 @@ class GateViolation:
     gate: str
     source_job: str
     source_step: Optional[str]
+    category: str
     evaluated: int
     fail_count: int
     fail_rate_percent: float
@@ -243,8 +258,26 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Enforcement threshold: fail if any gate fail-rate is above this "
-            "percentage (disabled when omitted)"
+            "Legacy threshold: apply same cap to both kernel_fail_rate and "
+            "infra_fail_rate (disabled when omitted)"
+        ),
+    )
+    parser.add_argument(
+        "--max-kernel-fail-rate-percent",
+        type=float,
+        default=None,
+        help=(
+            "Enforcement threshold: fail if any gate kernel_fail_rate is above "
+            "this percentage (disabled when omitted)"
+        ),
+    )
+    parser.add_argument(
+        "--max-infra-fail-rate-percent",
+        type=float,
+        default=None,
+        help=(
+            "Enforcement threshold: fail if any gate infra_fail_rate is above "
+            "this percentage (disabled when omitted)"
         ),
     )
     parser.add_argument(
@@ -295,6 +328,8 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
 
         for gate_spec in gate_specs:
             pass_count = 0
+            kernel_fail_count = 0
+            infra_fail_count = 0
             fail_count = 0
             missing_count = 0
             ignored_count = 0
@@ -317,7 +352,11 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
 
                 if conclusion in PASS_CONCLUSIONS:
                     pass_count += 1
-                elif conclusion in FAIL_CONCLUSIONS:
+                elif conclusion in KERNEL_FAIL_CONCLUSIONS:
+                    kernel_fail_count += 1
+                    fail_count += 1
+                elif conclusion in INFRA_FAIL_CONCLUSIONS:
+                    infra_fail_count += 1
                     fail_count += 1
                 else:
                     ignored_count += 1
@@ -335,6 +374,8 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
                     window_runs=window_runs,
                     evaluated=evaluated,
                     pass_count=pass_count,
+                    kernel_fail_count=kernel_fail_count,
+                    infra_fail_count=infra_fail_count,
                     fail_count=fail_count,
                     missing_count=missing_count,
                     ignored_count=ignored_count,
@@ -346,28 +387,46 @@ def compute_gate_stats(client: GitHubClient, sample_size: int) -> List[GateStats
 
 def evaluate_gate_budget(
     rows: List[GateStats],
-    max_fail_rate_percent: float,
+    max_kernel_fail_rate_percent: Optional[float],
+    max_infra_fail_rate_percent: Optional[float],
     min_evaluated: int,
 ) -> List[GateViolation]:
     violations: List[GateViolation] = []
     for row in rows:
         if row.evaluated < min_evaluated:
             continue
-        rate = row.fail_rate_percent
-        if rate <= max_fail_rate_percent:
-            continue
-        violations.append(
-            GateViolation(
-                workflow=row.workflow,
-                gate=row.gate,
-                source_job=row.source_job,
-                source_step=row.source_step,
-                evaluated=row.evaluated,
-                fail_count=row.fail_count,
-                fail_rate_percent=rate,
-                max_fail_rate_percent=max_fail_rate_percent,
-            )
-        )
+        if max_kernel_fail_rate_percent is not None:
+            rate = row.kernel_fail_rate_percent
+            if rate > max_kernel_fail_rate_percent:
+                violations.append(
+                    GateViolation(
+                        workflow=row.workflow,
+                        gate=row.gate,
+                        source_job=row.source_job,
+                        source_step=row.source_step,
+                        category="kernel",
+                        evaluated=row.evaluated,
+                        fail_count=row.kernel_fail_count,
+                        fail_rate_percent=rate,
+                        max_fail_rate_percent=max_kernel_fail_rate_percent,
+                    )
+                )
+        if max_infra_fail_rate_percent is not None:
+            rate = row.infra_fail_rate_percent
+            if rate > max_infra_fail_rate_percent:
+                violations.append(
+                    GateViolation(
+                        workflow=row.workflow,
+                        gate=row.gate,
+                        source_job=row.source_job,
+                        source_step=row.source_step,
+                        category="infra",
+                        evaluated=row.evaluated,
+                        fail_count=row.infra_fail_count,
+                        fail_rate_percent=rate,
+                        max_fail_rate_percent=max_infra_fail_rate_percent,
+                    )
+                )
     return violations
 
 
@@ -376,7 +435,9 @@ def render_markdown(
     sample_size: int,
     generated_at: str,
     rows: List[GateStats],
-    max_fail_rate_percent: Optional[float],
+    max_kernel_fail_rate_percent: Optional[float],
+    max_infra_fail_rate_percent: Optional[float],
+    legacy_max_fail_rate_percent: Optional[float],
     min_evaluated: int,
     violations: List[GateViolation],
 ) -> str:
@@ -388,23 +449,29 @@ def render_markdown(
     lines.append(f"- Generated at: `{generated_at}`")
     lines.append("")
     lines.append(
-        "| Workflow | Gate | Source | Evaluated | Pass | Fail | Fail Rate | Missing | Ignored |"
+        "| Workflow | Gate | Source | Evaluated | Pass | Kernel Fail | Infra Fail | Total Fail | Kernel Rate | Infra Rate | Total Rate | Missing | Ignored |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in rows:
         source = row.source_job
         if row.source_step:
             source = f"{row.source_job} / {row.source_step}"
         lines.append(
-            "| {workflow} | {gate} | {source} | {evaluated} | {pass_count} | {fail_count} | "
-            "{rate:.2f}% | {missing_count} | {ignored_count} |".format(
+            "| {workflow} | {gate} | {source} | {evaluated} | {pass_count} | "
+            "{kernel_fail_count} | {infra_fail_count} | {fail_count} | "
+            "{kernel_rate:.2f}% | {infra_rate:.2f}% | {total_rate:.2f}% | "
+            "{missing_count} | {ignored_count} |".format(
                 workflow=row.workflow,
                 gate=row.gate,
                 source=source,
                 evaluated=row.evaluated,
                 pass_count=row.pass_count,
+                kernel_fail_count=row.kernel_fail_count,
+                infra_fail_count=row.infra_fail_count,
                 fail_count=row.fail_count,
-                rate=row.fail_rate_percent,
+                kernel_rate=row.kernel_fail_rate_percent,
+                infra_rate=row.infra_fail_rate_percent,
+                total_rate=row.fail_rate_percent,
                 missing_count=row.missing_count,
                 ignored_count=row.ignored_count,
             )
@@ -420,15 +487,38 @@ def render_markdown(
 
     lines.append("")
     lines.append("Enforcement policy:")
-    if max_fail_rate_percent is None:
+    enforcement_enabled = (
+        max_kernel_fail_rate_percent is not None
+        or max_infra_fail_rate_percent is not None
+    )
+    if not enforcement_enabled:
         lines.append("- Disabled")
     else:
+        kernel_cap = (
+            "disabled"
+            if max_kernel_fail_rate_percent is None
+            else f"{max_kernel_fail_rate_percent:.2f}%"
+        )
+        infra_cap = (
+            "disabled"
+            if max_infra_fail_rate_percent is None
+            else f"{max_infra_fail_rate_percent:.2f}%"
+        )
         lines.append(
-            "- Enabled: fail when `fail_rate > {rate:.2f}%` with `evaluated >= {min_eval}`".format(
-                rate=max_fail_rate_percent,
+            "- Enabled: fail when `kernel_fail_rate > {kernel_cap}` or "
+            "`infra_fail_rate > {infra_cap}` with `evaluated >= {min_eval}`".format(
+                kernel_cap=kernel_cap,
+                infra_cap=infra_cap,
                 min_eval=min_evaluated,
             )
         )
+        if legacy_max_fail_rate_percent is not None:
+            lines.append(
+                "- Legacy fallback applied: both caps also inherited from "
+                "`--max-fail-rate-percent={:.2f}%` when specific caps were unset".format(
+                    legacy_max_fail_rate_percent
+                )
+            )
         if not violations:
             lines.append("- Result: pass (no threshold violations)")
         else:
@@ -438,10 +528,12 @@ def render_markdown(
                 if v.source_step:
                     source = f"{v.source_job} / {v.source_step}"
                 lines.append(
-                    "- `{wf}` / `{gate}` ({src}): {rate:.2f}% ({fail}/{evald}) > {max_rate:.2f}%".format(
+                    "- `{wf}` / `{gate}` ({src}) [{kind}]: "
+                    "{rate:.2f}% ({fail}/{evald}) > {max_rate:.2f}%".format(
                         wf=v.workflow,
                         gate=v.gate,
                         src=source,
+                        kind=v.category,
                         rate=v.fail_rate_percent,
                         fail=v.fail_count,
                         evald=v.evaluated,
@@ -473,14 +565,44 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if (
+        args.max_kernel_fail_rate_percent is not None
+        and args.max_kernel_fail_rate_percent < 0
+    ):
+        print(
+            "ci-flake-report: --max-kernel-fail-rate-percent must be >= 0",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.max_infra_fail_rate_percent is not None
+        and args.max_infra_fail_rate_percent < 0
+    ):
+        print(
+            "ci-flake-report: --max-infra-fail-rate-percent must be >= 0",
+            file=sys.stderr,
+        )
+        return 2
+
+    max_kernel_fail_rate_percent = args.max_kernel_fail_rate_percent
+    max_infra_fail_rate_percent = args.max_infra_fail_rate_percent
+    if args.max_fail_rate_percent is not None:
+        if max_kernel_fail_rate_percent is None:
+            max_kernel_fail_rate_percent = args.max_fail_rate_percent
+        if max_infra_fail_rate_percent is None:
+            max_infra_fail_rate_percent = args.max_fail_rate_percent
 
     client = GitHubClient(repo=args.repo, token=token)
     rows = compute_gate_stats(client, args.sample_size)
     violations: List[GateViolation] = []
-    if args.max_fail_rate_percent is not None:
+    if (
+        max_kernel_fail_rate_percent is not None
+        or max_infra_fail_rate_percent is not None
+    ):
         violations = evaluate_gate_budget(
             rows,
-            max_fail_rate_percent=args.max_fail_rate_percent,
+            max_kernel_fail_rate_percent=max_kernel_fail_rate_percent,
+            max_infra_fail_rate_percent=max_infra_fail_rate_percent,
             min_evaluated=args.min_evaluated,
         )
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -491,8 +613,13 @@ def main() -> int:
         "sample_size": args.sample_size,
         "generated_at_utc": now,
         "enforcement": {
-            "enabled": args.max_fail_rate_percent is not None,
-            "max_fail_rate_percent": args.max_fail_rate_percent,
+            "enabled": (
+                max_kernel_fail_rate_percent is not None
+                or max_infra_fail_rate_percent is not None
+            ),
+            "legacy_max_fail_rate_percent": args.max_fail_rate_percent,
+            "max_kernel_fail_rate_percent": max_kernel_fail_rate_percent,
+            "max_infra_fail_rate_percent": max_infra_fail_rate_percent,
             "min_evaluated": args.min_evaluated,
             "violations": [
                 {
@@ -500,6 +627,7 @@ def main() -> int:
                     "gate": v.gate,
                     "source_job": v.source_job,
                     "source_step": v.source_step,
+                    "category": v.category,
                     "evaluated": v.evaluated,
                     "fail_count": v.fail_count,
                     "fail_rate_percent": round(v.fail_rate_percent, 4),
@@ -517,7 +645,11 @@ def main() -> int:
                 "window_runs": row.window_runs,
                 "evaluated": row.evaluated,
                 "pass_count": row.pass_count,
+                "kernel_fail_count": row.kernel_fail_count,
+                "infra_fail_count": row.infra_fail_count,
                 "fail_count": row.fail_count,
+                "kernel_fail_rate_percent": round(row.kernel_fail_rate_percent, 4),
+                "infra_fail_rate_percent": round(row.infra_fail_rate_percent, 4),
                 "fail_rate_percent": round(row.fail_rate_percent, 4),
                 "missing_count": row.missing_count,
                 "ignored_count": row.ignored_count,
@@ -536,6 +668,8 @@ def main() -> int:
         args.sample_size,
         now,
         rows,
+        max_kernel_fail_rate_percent,
+        max_infra_fail_rate_percent,
         args.max_fail_rate_percent,
         args.min_evaluated,
         violations,

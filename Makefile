@@ -335,6 +335,7 @@ USER_INIT := $(BUILD_DIR)/user/init
 USER_INITRAMFS := $(BUILD_DIR)/user/initramfs/init
 USER_ERRNO_SMOKE := $(BUILD_DIR)/user/errno_smoke
 USER_ABI_SMOKE := $(BUILD_DIR)/user/abi_smoke
+USER_EXEC_ELF_SMOKE_INIT := $(BUILD_DIR)/user/exec_elf_smoke_init
 KAIROS_DEPS := scripts/kairos.sh $(wildcard scripts/modules/*.sh scripts/lib/*.sh scripts/impl/*.sh scripts/patches/*/*)
 
 ifeq ($(WITH_TCC),1)
@@ -343,7 +344,7 @@ else
 ROOTFS_OPTIONAL_STAMPS :=
 endif
 
-.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-abi-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-soak-ipc-cap-deep test-concurrent-smoke test-concurrent-vfs-ipc test-focused test-focused-auto gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
+.PHONY: all clean clean-all distclean run run-direct run-e1000 run-e1000-direct debug iso test test-ci-default test-exec-elf-smoke test-tcc-smoke test-busybox-applets-smoke test-errno-smoke test-abi-smoke test-isolated test-driver test-irq-soak test-mm test-sync test-vfork test-sched test-crash test-syscall-trap test-syscall test-ipc-cap test-ipc-cap-matrix test-boot-smoke test-x86-boot-smp test-vfs-ipc test-socket test-device-virtio test-devmodel test-tty test-soak-pr test-soak-ipc-cap-deep test-concurrent-smoke test-concurrent-vfs-ipc test-focused test-focused-auto gc-runs lock-status lock-clean-stale print-config user initramfs compiler-rt busybox tcc exec-elf-smoke-init rootfs rootfs-base rootfs-busybox rootfs-init rootfs-tcc disk uefi check-tools doctor
 
 all: | _reset_count
 all: $(KERNEL)
@@ -384,6 +385,11 @@ $(USER_ERRNO_SMOKE): $(MUSL_STAMP) user/errno_smoke.c user/Makefile
 
 $(USER_ABI_SMOKE): $(MUSL_STAMP) user/abi_smoke.c user/Makefile
 	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V) abi-smoke
+
+exec-elf-smoke-init: $(USER_EXEC_ELF_SMOKE_INIT)
+
+$(USER_EXEC_ELF_SMOKE_INIT): $(MUSL_STAMP) user/exec_elf_smoke_init.c user/Makefile
+	$(Q)$(MAKE) -C user ARCH=$(ARCH) BUILD_ROOT=$(BUILD_ROOT_ABS) USE_GCC=$(USE_GCC) V=$(V) exec-elf-smoke-init
 
 $(INITRAMFS_STAMP): $(USER_INITRAMFS) $(BUSYBOX_STAMP) $(KAIROS_DEPS) scripts/busybox-applets.txt
 	@mkdir -p $(STAMP_DIR)
@@ -868,6 +874,8 @@ TEST_CONCURRENCY ?= 3
 TEST_ROUNDS ?= 3
 TEST_CONCURRENT_TARGET ?= test-vfs-ipc
 TEST_CONCURRENT_TIMEOUT ?= $(TEST_TIMEOUT)
+TEST_CONCURRENT_QEMU_SMP ?= $(QEMU_SMP)
+TEST_CONCURRENT_VFS_IPC_QEMU_SMP ?= 1
 FOCUSED_TARGETS_DEFAULT := test-ipc-cap test-vfs-ipc test-socket test-sched
 FOCUSED_TARGETS ?= $(FOCUSED_TARGETS_DEFAULT)
 FOCUSED_BASE_REF ?= origin/main
@@ -1377,12 +1385,15 @@ test-debug: check-tools $(KAIROS_DEPS) scripts/run-qemu-test.sh
 test-concurrent-smoke: check-tools scripts/test-concurrent.sh
 	$(Q)ARCH="$(ARCH)" TEST_TARGET="$(TEST_CONCURRENT_TARGET)" TEST_CONCURRENCY="$(TEST_CONCURRENCY)" \
 		TEST_ROUNDS="$(TEST_ROUNDS)" TEST_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" \
+		QEMU_SMP="$(TEST_CONCURRENT_QEMU_SMP)" \
 		bash ./scripts/test-concurrent.sh
 
 test-concurrent-vfs-ipc:
 	$(Q)$(MAKE) --no-print-directory ARCH="$(ARCH)" TEST_CONCURRENT_TARGET="test-vfs-ipc" \
 		TEST_CONCURRENCY="$(TEST_CONCURRENCY)" TEST_ROUNDS="$(TEST_ROUNDS)" \
-		TEST_CONCURRENT_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" test-concurrent-smoke
+		TEST_CONCURRENT_TIMEOUT="$(TEST_CONCURRENT_TIMEOUT)" \
+		TEST_CONCURRENT_QEMU_SMP="$(TEST_CONCURRENT_VFS_IPC_QEMU_SMP)" \
+		test-concurrent-smoke
 
 test-focused:
 	$(Q)set -eu; \

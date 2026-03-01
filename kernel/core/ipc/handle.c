@@ -4157,16 +4157,28 @@ static uint64_t kcap_revoke_epoch_snapshot(uint64_t cap_id) {
 }
 
 static bool kcap_transfer_commit_epoch_matches(uint64_t cap_id,
-                                               uint64_t expected_epoch) {
-    if (cap_id == KHANDLE_INVALID_CAP_ID)
+                                               uint64_t expected_epoch,
+                                               uint64_t *out_current_epoch) {
+    if (out_current_epoch)
+        *out_current_epoch = 0;
+    if (cap_id == KHANDLE_INVALID_CAP_ID) {
+        if (out_current_epoch)
+            *out_current_epoch = expected_epoch;
         return true;
+    }
 
     bool matched = false;
     spin_lock(&kcap_lock);
     kcap_hash_ensure_locked();
     struct kcap_node *node = kcap_find_locked(cap_id);
-    if (node)
-        matched = node->revoke_epoch == expected_epoch;
+    if (node) {
+        uint64_t current_epoch = node->revoke_epoch;
+        if (out_current_epoch)
+            *out_current_epoch = current_epoch;
+        matched = current_epoch == expected_epoch;
+    } else if (out_current_epoch) {
+        *out_current_epoch = 0;
+    }
     spin_unlock(&kcap_lock);
     return matched;
 }
@@ -4871,8 +4883,9 @@ int khandle_commit_reserved_transfer(struct process *p, int32_t handle,
 
     uint64_t cap_id = entry->cap_id;
     uint64_t reserved_epoch = entry->cap_revoke_epoch;
-    bool epoch_match =
-        kcap_transfer_commit_epoch_matches(cap_id, reserved_epoch);
+    uint64_t current_epoch = 0;
+    bool epoch_match = kcap_transfer_commit_epoch_matches(
+        cap_id, reserved_epoch, &current_epoch);
 
     entry->obj = NULL;
     entry->rights = 0;
@@ -4884,8 +4897,12 @@ int khandle_commit_reserved_transfer(struct process *p, int32_t handle,
     entry->reserved_deadline_ns = 0;
     atomic_inc(&ht->seq);
     mutex_unlock(&ht->lock);
-    if (!epoch_match)
+    if (!epoch_match) {
         ipc_stat_inc_u64(&ipc_cap_commit_epoch_mismatch_total);
+        uint64_t arg1 =
+            trace_ipc_cap_epoch_pair_pack(reserved_epoch, current_epoch);
+        kcap_trace_event(TRACE_IPC_CAP_OP_COMMIT_EPOCH_MISMATCH, cap_id, arg1);
+    }
     return 0;
 }
 

@@ -4,7 +4,11 @@
 
 #include <kairos/poll.h>
 #include <kairos/pipe.h>
+#include <kairos/mm.h>
+#include <kairos/printk.h>
 #include <kairos/vfs.h>
+
+static uint64_t vfs_poll_wake_invalid_vnode_total;
 
 int vfs_poll(struct file *file, uint32_t events) {
     if (!file || !file->vnode)
@@ -59,6 +63,16 @@ void vfs_poll_unwatch(struct poll_watch *watch) {
 void vfs_poll_wake(struct vnode *vn, uint32_t events) {
     if (!vn)
         return;
+    if ((uintptr_t)vn <= USER_SPACE_END) {
+        uint64_t seen = __atomic_add_fetch(&vfs_poll_wake_invalid_vnode_total, 1,
+                                           __ATOMIC_RELAXED);
+        if (seen <= 8) {
+            void *caller = __builtin_return_address(0);
+            pr_warn("vfs_poll_wake: skip invalid vnode=%p events=0x%x caller=%p\n",
+                    (void *)vn, (unsigned int)events, caller);
+        }
+        return;
+    }
     if (vn->type == VNODE_PIPE) {
         pipe_poll_wake_vnode(vn, events);
         return;

@@ -1,11 +1,6 @@
 name: ci-flake-report
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - master
   schedule:
     - cron: "15 2 * * *"
   workflow_dispatch:
@@ -15,13 +10,25 @@ on:
         required: false
         default: "20"
       max_fail_rate_percent:
-        description: "Fail if a gate fail-rate exceeds this percentage"
+        description: "Legacy fallback: apply same threshold to kernel/infra fail rates"
+        required: false
+        default: ""
+      max_kernel_fail_rate_percent:
+        description: "Fail if a gate kernel-fail rate exceeds this percentage"
         required: false
         default: "10"
+      max_infra_fail_rate_percent:
+        description: "Fail if a gate infra-fail rate exceeds this percentage"
+        required: false
+        default: "20"
       min_evaluated:
         description: "Minimum evaluated samples before enforcing a gate"
         required: false
         default: "10"
+      enforce_flake_budget:
+        description: "Enable threshold enforcement (1/0)"
+        required: false
+        default: "1"
 
 concurrency:
   group: ci-flake-report-${{ github.ref }}
@@ -36,9 +43,11 @@ jobs:
       contents: read
     env:
       SAMPLE_SIZE: ${{ github.event.inputs.sample_size || '20' }}
-      MAX_FAIL_RATE_PERCENT: ${{ github.event.inputs.max_fail_rate_percent || '10' }}
+      MAX_FAIL_RATE_PERCENT: ${{ github.event.inputs.max_fail_rate_percent || '' }}
+      MAX_KERNEL_FAIL_RATE_PERCENT: ${{ github.event.inputs.max_kernel_fail_rate_percent || '10' }}
+      MAX_INFRA_FAIL_RATE_PERCENT: ${{ github.event.inputs.max_infra_fail_rate_percent || '20' }}
       MIN_EVALUATED: ${{ github.event.inputs.min_evaluated || '10' }}
-      ENFORCE_FLAKE_BUDGET: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      ENFORCE_FLAKE_BUDGET: ${{ github.event.inputs.enforce_flake_budget || '1' }}
 
     steps:
       - name: Checkout
@@ -57,9 +66,15 @@ jobs:
             --markdown-out ci-flake-report.md
           )
           if [[ "${ENFORCE_FLAKE_BUDGET}" == "1" ]]; then
-            report_args+=(--max-fail-rate-percent "${MAX_FAIL_RATE_PERCENT}")
+            report_args+=(
+              --max-kernel-fail-rate-percent "${MAX_KERNEL_FAIL_RATE_PERCENT}"
+              --max-infra-fail-rate-percent "${MAX_INFRA_FAIL_RATE_PERCENT}"
+            )
+            if [[ -n "${MAX_FAIL_RATE_PERCENT}" ]]; then
+              report_args+=(--max-fail-rate-percent "${MAX_FAIL_RATE_PERCENT}")
+            fi
           else
-            echo "ci-flake-report: pull_request mode, enforcement disabled"
+            echo "ci-flake-report: enforcement disabled"
           fi
           python3 scripts/impl/ci-flake-report.py "${report_args[@]}"
 

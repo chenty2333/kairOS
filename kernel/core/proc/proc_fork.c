@@ -148,6 +148,9 @@ struct process *proc_fork_ex(const struct proc_fork_opts *opts) {
         arch_context_clone(child->context, parent->context);
     }
 
+    /* Preserve parent TLS for forked child unless CLONE_SETTLS overrides it. */
+    arch_set_tls(child->context, arch_get_tls(parent->context));
+
     /* CLONE_SETTLS overrides child TLS after trapframe/context setup. */
     if ((clone_flags & CLONE_SETTLS) && opts) {
         arch_set_tls(child->context, opts->tls);

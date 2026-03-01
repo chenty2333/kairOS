@@ -33,6 +33,7 @@ INITRAMFS := $(OUT_DIR)/initramfs/init
 DOOM := $(OUT_DIR)/doom
 ERRNO_SMOKE := $(OUT_DIR)/errno_smoke
 ABI_SMOKE := $(OUT_DIR)/abi_smoke
+EXEC_ELF_SMOKE_INIT := $(OUT_DIR)/exec_elf_smoke_init
 DOOM_DIR := $(ROOT_DIR)/third_party/doomgeneric/doomgeneric
 DOOM_PORT_SRC := $(ROOT_DIR)/user/doomgeneric_kairos.c
 
@@ -79,7 +80,7 @@ ifneq ($(RTLIB_BUILTINS),)
 SYSROOT_LINK_DEPS += $(RTLIB_BUILTINS)
 endif
 
-.PHONY: all clean initramfs errno-smoke abi-smoke
+.PHONY: all clean initramfs errno-smoke abi-smoke exec-elf-smoke-init
 
 all: $(INIT) $(DOOM)
 
@@ -107,6 +108,13 @@ abi-smoke: $(ABI_SMOKE)
 $(ABI_SMOKE): abi_smoke.c $(SYSROOT_LINK_DEPS)
 	@mkdir -p $(OUT_DIR)
 	@echo "  CC      user/abi_smoke"
+	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+exec-elf-smoke-init: $(EXEC_ELF_SMOKE_INIT)
+
+$(EXEC_ELF_SMOKE_INIT): exec_elf_smoke_init.c $(SYSROOT_LINK_DEPS)
+	@mkdir -p $(OUT_DIR)
+	@echo "  CC      user/exec_elf_smoke_init"
 	$(Q)$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 DOOM_CFLAGS := $(CFLAGS) -I$(DOOM_DIR) -DDOOMGENERIC_RESX=320 \

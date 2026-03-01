@@ -1,0 +1,47 @@
+name: Run Gate And Assert Structured Result
+description: Run one make gate, then assert latest isolated structured result.
+
+inputs:
+  arch:
+    description: Target architecture (riscv64|x86_64|aarch64)
+    required: true
+  label:
+    description: Human-readable gate label used in error messages
+    required: true
+  make_target:
+    description: Make target to execute
+    required: true
+  make_vars:
+    description: Optional make variable assignments before target
+    required: false
+    default: ""
+  expected_online:
+    description: Optional expected online CPU count (aarch64 SMP assert)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Run gate
+      shell: bash
+      run: |
+        set -euo pipefail
+        make --no-print-directory ARCH="${{ inputs.arch }}" ${{ inputs.make_vars }} "${{ inputs.make_target }}"
+
+    - name: Assert latest isolated run
+      shell: bash
+      run: |
+        set -euo pipefail
+        latest="$(ls -1dt build/runs/* 2>/dev/null | head -n 1 || true)"
+        if [[ -z "${latest}" ]]; then
+          echo "No isolated run found after ${{ inputs.label }}" >&2
+          exit 2
+        fi
+        python3 scripts/impl/assert-result-pass.py "${latest}/result.json" --require-structured
+        if [[ -n "${{ inputs.expected_online }}" ]]; then
+          python3 scripts/impl/assert-aarch64-smp.py \
+            --run-dir "${latest}" \
+            --arch "${{ inputs.arch }}" \
+            --expected-online "${{ inputs.expected_online }}"
+        fi

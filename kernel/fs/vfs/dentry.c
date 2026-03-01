@@ -141,7 +141,7 @@ static void dentry_kobj_init(struct dentry *d) {
                     atomic_set(&d->kobj_state, DENTRY_KOBJ_STATE_FAILED);
                     return;
                 }
-                bridge->owner = d;
+                __atomic_store_n(&bridge->owner, d, __ATOMIC_RELEASE);
                 kobj_init(&bridge->obj, VFS_KOBJ_TYPE_DENTRY, &dentry_kobj_ops);
                 d->kobj = &bridge->obj;
                 uint32_t refs = atomic_read(&d->refcount);
@@ -174,7 +174,7 @@ struct dentry *dentry_from_kobj(struct kobj *obj) {
     if (!obj || obj->type != VFS_KOBJ_TYPE_DENTRY)
         return NULL;
     struct dentry_kobj_bridge *bridge = (struct dentry_kobj_bridge *)obj;
-    return bridge->owner;
+    return __atomic_load_n(&bridge->owner, __ATOMIC_ACQUIRE);
 }
 
 struct dentry *dentry_alloc(struct dentry *parent, const char *name) {
@@ -243,7 +243,13 @@ void dentry_put(struct dentry *d) {
         if (old == 0)
             panic("dentry_put: refcount underflow on dentry '%s'", d->name);
         old = atomic_fetch_sub(&d->refcount, 1);
-        if (dentry_kobj_is_ready(d))
+        bool kobj_ready = dentry_kobj_is_ready(d);
+        if (old == 1 && kobj_ready) {
+            struct dentry_kobj_bridge *bridge =
+                (struct dentry_kobj_bridge *)d->kobj;
+            __atomic_store_n(&bridge->owner, NULL, __ATOMIC_RELEASE);
+        }
+        if (kobj_ready)
             kobj_put(d->kobj);
         if (old != 1)
             break;

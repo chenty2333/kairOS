@@ -7,7 +7,7 @@ Part of the VFS/Block/Filesystems subsystem. See also:
 ## Block I/O Layer (fs/bio/bio.c)
 
 - Buffer cache: 128 static buf structs (NBUF=128), each with one-page backing storage (`CONFIG_PAGE_SIZE`)
-- 32-bucket hash table indexed by `(dev, blockno, block_bytes)`
+- 32-bucket intrusive `khash_*` table indexed by mixed key `(dev, blockno, block_bytes)`; locking remains external (`bcache_lock`)
 - LRU eviction: released buffers move to LRU head, allocation takes unused clean buffers from LRU tail; if only dirty victims exist, one is flushed and allocation retries
 - Supports variable block-size I/O through `breadn(dev, blockno, block_bytes)`; legacy `bread()` remains as page-sized wrapper
 - bwrite(): marks buffer dirty (delayed write)
@@ -15,6 +15,11 @@ Part of the VFS/Block/Filesystems subsystem. See also:
 - brelse(): release buffer (unlock + decrement refcount + update LRU)
 - Buffers protected by mutex for concurrent access
 - blkdev registration now probes partition tables and registers partition child block devices (`vda1`, `nvme0n1p1` style naming); protective MBR triggers GPT-first scan, otherwise valid MBR entries are used
+
+Recent hash migration notes (intrusive + caller-provided locking):
+- block device name index (`blkdev.c`) now uses `khash_*` instead of hand-written masked buckets
+- ext2 inode cache hash (`ext2/inode.c`, `ext2/super.c`, `ext2/vnode.c`) now uses `khash_*`
+- AF_UNIX bind table (`net/af_unix.c`) now uses `khash_*` with existing `unix_bind_table.lock`
 
 ## Implemented Filesystems
 
@@ -37,6 +42,7 @@ Pseudo filesystems:
 - sysfs (fs/sysfs/): device model filesystem
   - exposes `/sys/ipc` IPC observability files (`channels`, `ports`, `transfers`, `stats`, `hash_stats`) plus v2 object paging controls (`/sys/ipc/objects/{page,cursor,page_size}`) and per-object views (`/sys/ipc/objects/<id>/{summary,transfers,transfers_v2,transfers_cursor,transfers_page_size}`); detached sysfs nodes are reclaimed on last vnode close (not immediate free) under explicit node lifecycle state machine (`INIT/LIVE/DETACHED/DYING/FREED`), object-scoped IPC reads pin live objects by `obj_id` before snapshotting, object rows include `kobj` lifecycle text, and `hash_stats` reports bucket/load/average-chain/collision/depth diagnostics with default rehash recommendation flags for IPC hash tables
   - init phase (`init_fs`) performs a lightweight read+format sanity check on `/sys/ipc/hash_stats` and logs warning-only on failure
+  - recent riscv64 long-run samples (`RUN_ID=rev10u-socket-a1-233407`, `rev10u-vfsipc-a1-233826`) were collected with `IPC_REGISTRY_ID_HASH_BITS=10` (`buckets=1024`); under `test-vfs-ipc`, `ipc_registry_id` reported `entries=996`, `collision_entries=365`, `max_bucket_depth=7`, `rehash_recommended=0`
 - tmpfs (fs/tmpfs/): in-memory filesystem
 
 Special:

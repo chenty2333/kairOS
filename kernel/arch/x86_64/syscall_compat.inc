@@ -1,8 +1,11 @@
 /* Auto-generated x86_64 Linux nr -> Kairos nr remap cases. */
     case 0: return 63; /* read */
     case 1: return 64; /* write */
+    case 2: return 10; /* open */
     case 3: return 57; /* close */
+    case 4: return 15; /* stat */
     case 5: return 80; /* fstat */
+    case 6: return 15; /* lstat (best-effort via stat) */
     case 8: return 62; /* lseek */
     case 9: return 222; /* mmap */
     case 10: return 226; /* mprotect */
@@ -16,6 +19,7 @@
     case 18: return 68; /* pwrite64 */
     case 19: return 65; /* readv */
     case 20: return 66; /* writev */
+    case 21: return 22; /* access */
     case 24: return 124; /* sched_yield */
     case 25: return 216; /* mremap */
     case 32: return 23; /* dup */

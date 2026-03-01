@@ -240,6 +240,30 @@ detect_pre_qemu_failure_reason() {
     echo "pre_qemu_failure"
 }
 
+sanitize_log_for_markers() {
+    local src_log="$1"
+    local dst_log="$2"
+
+    python3 - "${src_log}" "${dst_log}" <<'PY'
+import re
+import sys
+
+src = sys.argv[1]
+dst = sys.argv[2]
+
+ansi = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+with open(src, "r", encoding="utf-8", errors="ignore", newline="") as fp:
+    data = fp.read()
+
+data = data.replace("\r\n", "\n").replace("\r", "\n")
+data = ansi.sub("", data)
+
+with open(dst, "w", encoding="utf-8", newline="\n") as fp:
+    fp.write(data)
+PY
+}
+
 write_manifest() {
     local start_time_utc="$1"
     local git_sha="unknown"
@@ -340,6 +364,7 @@ run_test_main() {
     local summary_status summary_failed
     local smoke_fail_reason
     local pre_qemu_reason
+    local marker_log marker_log_tmp
     local status reason exit_code verdict_source
     local allow_signal_override
     local had_errexit_timeout
@@ -392,6 +417,17 @@ run_test_main() {
     fi
     rm -f "${TEST_QEMU_PID_FILE}"
 
+    marker_log="${TEST_LOG}"
+    marker_log_tmp=""
+    if marker_log_tmp="$(mktemp "${TEST_BUILD_ROOT}/markers.XXXXXX.log" 2>/dev/null)"; then
+        if sanitize_log_for_markers "${TEST_LOG}" "${marker_log_tmp}"; then
+            marker_log="${marker_log_tmp}"
+        else
+            rm -f "${marker_log_tmp}" || true
+            marker_log_tmp=""
+        fi
+    fi
+
     has_boot_marker=0
     has_fatal_markers=0
     has_failure_markers=0
@@ -400,19 +436,19 @@ run_test_main() {
     has_optional_markers=1
     optional_marker_failed_rule=""
 
-    if grep -Eiq "${TEST_BOOT_MARKER}" "${TEST_LOG}"; then
+    if grep -Eiq "${TEST_BOOT_MARKER}" "${marker_log}"; then
         has_boot_marker=1
     fi
 
-    if grep -Eiq "${TEST_FATAL_MARKER}" "${TEST_LOG}"; then
+    if grep -Eiq "${TEST_FATAL_MARKER}" "${marker_log}"; then
         has_fatal_markers=1
     fi
 
-    if grep -Eiq "${TEST_FAILURE_MARKER}" "${TEST_LOG}"; then
+    if grep -Eiq "${TEST_FAILURE_MARKER}" "${marker_log}"; then
         has_failure_markers=1
     fi
     if [[ -n "${TEST_REQUIRED_MARKER_REGEX}" ]] &&
-        ! grep -Eiq "${TEST_REQUIRED_MARKER_REGEX}" "${TEST_LOG}"; then
+        ! grep -Eiq "${TEST_REQUIRED_MARKER_REGEX}" "${marker_log}"; then
         has_required_markers=0
     fi
     if [[ ${has_required_markers} -eq 1 && -n "${TEST_REQUIRED_MARKERS_ALL}" ]]; then
@@ -420,7 +456,7 @@ run_test_main() {
             if [[ -z "${required}" ]]; then
                 continue
             fi
-            if ! grep -Eiq "${required}" "${TEST_LOG}"; then
+            if ! grep -Eiq "${required}" "${marker_log}"; then
                 has_required_markers=0
                 break
             fi
@@ -431,8 +467,8 @@ run_test_main() {
             if [[ -z "${present}" || -z "${required}" ]]; then
                 continue
             fi
-            if grep -Eiq "${present}" "${TEST_LOG}" &&
-                ! grep -Eiq "${required}" "${TEST_LOG}"; then
+            if grep -Eiq "${present}" "${marker_log}" &&
+                ! grep -Eiq "${required}" "${marker_log}"; then
                 has_optional_markers=0
                 optional_marker_failed_rule="${required}"
                 break
@@ -440,7 +476,7 @@ run_test_main() {
         done <<< "${TEST_OPTIONAL_MARKERS_IF_PRESENT}"
     fi
     if [[ -n "${TEST_FORBIDDEN_MARKER_REGEX}" ]] &&
-        grep -Eiq "${TEST_FORBIDDEN_MARKER_REGEX}" "${TEST_LOG}"; then
+        grep -Eiq "${TEST_FORBIDDEN_MARKER_REGEX}" "${marker_log}"; then
         has_forbidden_markers=1
     fi
 
@@ -606,10 +642,12 @@ run_test_main() {
     RUN_TEST_LAST_REASON="${reason}"
 
     if [[ "${status}" == "pass" ]]; then
+        rm -f "${marker_log_tmp}" || true
         echo "test: PASS (${reason}, qemu_rc=${qemu_rc})"
         return 0
     fi
 
+    rm -f "${marker_log_tmp}" || true
     echo "test: ${status} (${reason}, qemu_rc=${qemu_rc})" >&2
     if [[ "${reason}" == "optional_markers_invalid" ]] &&
         [[ -n "${optional_marker_failed_rule}" ]]; then

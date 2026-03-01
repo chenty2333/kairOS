@@ -226,6 +226,11 @@ static void handle_exception(struct trap_frame *tf) {
 
     if (from_user) {
         if (cur) {
+            const char *comm =
+                cur->name[0] ? cur->name : "?";
+            pr_err("x86_64 user exception trap=%lu rip=%p cr2=%p err=%p rsp=%p pid=%d comm=%s\n",
+                   trapno, (void *)tf->rip, (void *)cr2, (void *)tf->err,
+                   (void *)tf->rsp, cur->pid, comm);
             signal_send(cur->pid, SIGSEGV);
             signal_deliver_pending();
             return;
@@ -285,14 +290,14 @@ static void handle_syscall(struct trap_frame *tf) {
             return;
         }
         if (nr == X86_NR_FORK) {
-            tf->rax = syscall_dispatch(LINUX_NR_clone, (uint64_t)SIGCHLD, 0, 0, 0, 0,
-                                       0);
+            tf->rax = syscall_dispatch(LINUX_NR_clone, (uint64_t)SIGCHLD, 0, 0, 0,
+                                       0, 0);
             return;
         }
         if (nr == X86_NR_VFORK) {
             tf->rax = syscall_dispatch(LINUX_NR_clone,
-                                       (uint64_t)(CLONE_VFORK | CLONE_VM | SIGCHLD), 0,
-                                       0, 0, 0, 0);
+                                       (uint64_t)(CLONE_VFORK | CLONE_VM | SIGCHLD),
+                                       0, 0, 0, 0, 0);
             return;
         }
         if (nr == X86_NR_MKDIR) {
@@ -305,6 +310,33 @@ static void handle_syscall(struct trap_frame *tf) {
             tf->rax = syscall_dispatch(LINUX_NR_unlinkat,
                                        (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
                                        AT_REMOVEDIR, 0, 0, 0);
+            return;
+        }
+        if (nr == 2) {
+            tf->rax = syscall_dispatch(LINUX_NR_openat,
+                                       (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                       tf->rsi, tf->rdx, 0, 0);
+            return;
+        }
+        if (nr == 4 || nr == 6) {
+            tf->rax = syscall_dispatch(LINUX_NR_newfstatat,
+                                       (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                       tf->rsi, 0, 0, 0);
+            return;
+        }
+        if (nr == 21) {
+            tf->rax = syscall_dispatch(LINUX_NR_faccessat,
+                                       (uint64_t)(int64_t)AT_FDCWD, tf->rdi,
+                                       tf->rsi, 0, 0, 0);
+            return;
+        }
+        if (nr == 22) {
+            tf->rax = syscall_dispatch(LINUX_NR_pipe2, tf->rdi, 0, 0, 0, 0, 0);
+            return;
+        }
+        if (nr == 33) {
+            tf->rax = syscall_dispatch(LINUX_NR_dup3, tf->rdi, tf->rsi, 0, 0, 0,
+                                       0);
             return;
         }
         nr = x86_syscall_remap(nr);

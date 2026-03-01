@@ -123,7 +123,8 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
     vaddr_t base = 0;
     vaddr_t phdr_addr = 0;
     bool base_set = false;
-    bool entry_ok = false;
+    bool entry_in_load = false;
+    bool entry_exec_ok = false;
 
     ret = elf_check_ehdr(ehdr, size);
     if (ret < 0) {
@@ -152,7 +153,9 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
         vaddr_t seg_start = phdr[i].p_vaddr;
         vaddr_t seg_end = seg_start + phdr[i].p_memsz;
         if (ehdr->e_entry >= seg_start && ehdr->e_entry < seg_end) {
-            entry_ok = true;
+            entry_in_load = true;
+            if (phdr[i].p_flags & PF_X)
+                entry_exec_ok = true;
         }
         vaddr_t page_start = ALIGN_DOWN(seg_start, CONFIG_PAGE_SIZE);
         vaddr_t page_end = ALIGN_UP(seg_end, CONFIG_PAGE_SIZE);
@@ -205,9 +208,13 @@ int elf_load(struct mm_struct *mm, const void *elf, size_t size,
         }
     }
 
-    if (!entry_ok) {
+    if (!entry_in_load) {
         pr_err("ELF: entry outside load segments\n");
         return -ENOEXEC;
+    }
+    if (!entry_exec_ok) {
+        pr_err("ELF: entry not in executable segment\n");
+        return -EACCES;
     }
 
     *entry_out = ehdr->e_entry;
@@ -249,7 +256,8 @@ static int elf_load_vnode_internal(struct mm_struct *mm, struct vnode *vn,
     vaddr_t base = 0;
     vaddr_t phdr_addr = 0;
     bool base_set = false;
-    bool entry_ok = false;
+    bool entry_in_load = false;
+    bool entry_exec_ok = false;
 
     if (!mm || !vn || !entry_out) {
         return -EINVAL;
@@ -306,7 +314,9 @@ static int elf_load_vnode_internal(struct mm_struct *mm, struct vnode *vn,
 
         vaddr_t entry = load_bias + ehdr.e_entry;
         if (entry >= seg_start && entry < seg_end) {
-            entry_ok = true;
+            entry_in_load = true;
+            if (ph->p_flags & PF_X)
+                entry_exec_ok = true;
         }
         vaddr_t page_start = ALIGN_DOWN(seg_start, CONFIG_PAGE_SIZE);
         vaddr_t page_end = ALIGN_UP(seg_end, CONFIG_PAGE_SIZE);
@@ -335,10 +345,15 @@ static int elf_load_vnode_internal(struct mm_struct *mm, struct vnode *vn,
         }
     }
 
-    if (!entry_ok) {
+    if (!entry_in_load) {
         pr_err("ELF: entry outside load segments\n");
         kfree(phdrs);
         return -ENOEXEC;
+    }
+    if (!entry_exec_ok) {
+        pr_err("ELF: entry not in executable segment\n");
+        kfree(phdrs);
+        return -EACCES;
     }
 
     *entry_out = load_bias + ehdr.e_entry;

@@ -213,14 +213,23 @@ int mutex_lock_interruptible(struct mutex *m) {
 }
 
 void mutex_unlock(struct mutex *m) {
-    LOCKDEP_RELEASE(m);
     struct process *curr = proc_current();
-    if (curr && m->holder != curr)
-        WARN_ON(1);
     spin_lock(&m->lock);
+    if (!m->locked || (curr && m->holder != curr)) {
+        int curr_pid = curr ? curr->pid : -1;
+        int holder_pid = m->holder ? m->holder->pid : -1;
+        bool locked = m->locked;
+        const char *name = m->name ? m->name : "unnamed";
+        spin_unlock(&m->lock);
+        pr_warn("mutex_unlock mismatch mutex=%s locked=%u curr=%d holder=%d\n",
+                name, locked ? 1U : 0U, curr_pid, holder_pid);
+        WARN_ON(1);
+        return;
+    }
     m->locked = false;
     m->holder = NULL;
     spin_unlock(&m->lock);
+    LOCKDEP_RELEASE(m);
     wait_queue_wakeup_one(&m->wq);
 }
 

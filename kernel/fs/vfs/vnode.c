@@ -52,7 +52,7 @@ void vnode_kobj_init(struct vnode *vn) {
                     atomic_set(&vn->kobj_state, VNODE_KOBJ_STATE_FAILED);
                     return;
                 }
-                bridge->owner = vn;
+                __atomic_store_n(&bridge->owner, vn, __ATOMIC_RELEASE);
                 kobj_init(&bridge->obj, VFS_KOBJ_TYPE_VNODE, &vnode_kobj_ops);
                 vn->kobj = &bridge->obj;
                 uint32_t refs = atomic_read(&vn->refcount);
@@ -88,7 +88,7 @@ struct vnode *vnode_from_kobj(struct kobj *obj) {
     if (!obj || obj->type != VFS_KOBJ_TYPE_VNODE)
         return NULL;
     struct vnode_kobj_bridge *bridge = (struct vnode_kobj_bridge *)obj;
-    return bridge->owner;
+    return __atomic_load_n(&bridge->owner, __ATOMIC_ACQUIRE);
 }
 
 ssize_t vfs_readlink_vnode(struct vnode *vn, char *buf, size_t bufsz,
@@ -165,7 +165,12 @@ void vnode_put(struct vnode *vn) {
         panic("vnode_put: refcount already zero on vnode ino=%lu",
               (unsigned long)vn->ino);
     uint32_t old = atomic_fetch_sub(&vn->refcount, 1);
-    if (vnode_kobj_is_ready(vn))
+    bool kobj_ready = vnode_kobj_is_ready(vn);
+    if (old == 1 && kobj_ready) {
+        struct vnode_kobj_bridge *bridge = (struct vnode_kobj_bridge *)vn->kobj;
+        __atomic_store_n(&bridge->owner, NULL, __ATOMIC_RELEASE);
+    }
+    if (kobj_ready)
         kobj_put(vn->kobj);
     if (old == 1) {
         struct vnode *parent = vn->parent;
@@ -182,7 +187,13 @@ void vnode_put(struct vnode *vn) {
                 panic("vnode_put: refcount already zero on vnode ino=%lu",
                       (unsigned long)parent->ino);
             old = atomic_fetch_sub(&parent->refcount, 1);
-            if (vnode_kobj_is_ready(parent))
+            kobj_ready = vnode_kobj_is_ready(parent);
+            if (old == 1 && kobj_ready) {
+                struct vnode_kobj_bridge *bridge =
+                    (struct vnode_kobj_bridge *)parent->kobj;
+                __atomic_store_n(&bridge->owner, NULL, __ATOMIC_RELEASE);
+            }
+            if (kobj_ready)
                 kobj_put(parent->kobj);
             if (old != 1)
                 break;

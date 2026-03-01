@@ -60,12 +60,13 @@ int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
 
     struct dentry *cur = d;
     struct mount *mnt = d->mnt;
-    struct dentry *ns_root = vfs_root_dentry();
+    struct dentry *ns_root = vfs_root_dentry_get();
+    int ret = 0;
     while (cur) {
         if (ns_root && cur == ns_root) {
             if (pos == sizeof(tmp) - 1) {
                 if (pos == 0)
-                    return -ENAMETOOLONG;
+                    goto out_toolong;
                 tmp[--pos] = '/';
             }
             break;
@@ -74,7 +75,7 @@ int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
             if (!mnt->parent || !mnt->mountpoint_dentry) {
                 if (pos == sizeof(tmp) - 1) {
                     if (pos == 0)
-                        return -ENAMETOOLONG;
+                        goto out_toolong;
                     tmp[--pos] = '/';
                 }
                 break;
@@ -84,23 +85,37 @@ int vfs_build_path_dentry(struct dentry *d, char *out, size_t len) {
             continue;
         }
         if (!cur->name[0])
-            return -ENOENT;
+            goto out_enoent;
         size_t nlen = strlen(cur->name);
         if (nlen + 1 > pos)
-            return -ENAMETOOLONG;
+            goto out_toolong;
         pos -= nlen;
         memcpy(&tmp[pos], cur->name, nlen);
         if (pos == 0)
-            return -ENAMETOOLONG;
+            goto out_toolong;
         tmp[--pos] = '/';
         cur = cur->parent;
     }
     if (!cur)
-        return -ENOENT;
+        goto out_enoent;
 
     size_t plen = strlen(&tmp[pos]);
     if (plen + 1 > len)
-        return -ERANGE;
+        goto out_erange;
     memcpy(out, &tmp[pos], plen + 1);
-    return (int)plen;
+    ret = (int)plen;
+    goto out;
+
+out_toolong:
+    ret = -ENAMETOOLONG;
+    goto out;
+out_enoent:
+    ret = -ENOENT;
+    goto out;
+out_erange:
+    ret = -ERANGE;
+out:
+    if (ns_root)
+        dentry_put(ns_root);
+    return ret;
 }

@@ -86,6 +86,10 @@ static const char *proc_exec_fail_reason(const char *stage, int err) {
         return "invalid_elf";
     if (stage && strcmp(stage, "load_interp_elf") == 0 && e == ENOEXEC)
         return "invalid_interp_elf";
+    if (stage && strcmp(stage, "validate_entry_exec") == 0 && e == ENOEXEC)
+        return "entry_outside_load";
+    if (stage && strcmp(stage, "validate_entry_exec") == 0 && e == EACCES)
+        return "entry_not_executable";
     if (stage && strcmp(stage, "setup_stack") == 0 && e == E2BIG)
         return "argv_env_too_large";
 
@@ -164,6 +168,24 @@ static int proc_load_interp_bias(struct mm_struct *mm, struct vnode *vn,
     }
 
     return last_err;
+}
+
+static int proc_exec_validate_entry_exec(struct mm_struct *mm, vaddr_t entry) {
+    if (!mm)
+        return -EINVAL;
+    if (entry < USER_SPACE_START || entry > USER_SPACE_END)
+        return -ENOEXEC;
+
+    int ret = 0;
+    mutex_lock(&mm->lock);
+    struct vm_area *vma = mm_find_vma(mm, entry);
+    if (!vma || entry < vma->start || entry >= vma->end) {
+        ret = -ENOEXEC;
+    } else if (!(vma->flags & VM_EXEC)) {
+        ret = -EACCES;
+    }
+    mutex_unlock(&mm->lock);
+    return ret;
 }
 
 int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
@@ -358,6 +380,13 @@ int proc_exec_resolve(const char *path, char *const argv[], char *const envp[],
         }
         aux.base = interp_aux.base;
         entry = interp_entry;
+    }
+
+    fail_stage = "validate_entry_exec";
+    ret = proc_exec_validate_entry_exec(new_mm, entry);
+    if (ret < 0) {
+        mm_destroy(new_mm);
+        goto out;
     }
 
     fail_stage = "setup_stack";

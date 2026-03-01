@@ -45,7 +45,7 @@ Filesystem registration: vfs_register_fs() adds fs_type to global fs_type_list.
 
 ## Dentry Cache (fs/vfs/dentry.c)
 
-- 256-bucket hash table (DCACHE_HASH_SIZE), hashed by parent + name + mount
+- 256-bucket intrusive `khash_*` table (`DCACHE_HASH_SIZE`), keyed by parent + name + mount; locking remains external (`dcache_lock`)
 - LRU eviction policy, dcache_count tracks entry count, evicts when exceeding CONFIG_DCACHE_MAX
 - Supports negative caching (DENTRY_NEGATIVE) for non-existent paths
 - Dentry tree structure: parent/children/child linked lists, supports subtree traversal

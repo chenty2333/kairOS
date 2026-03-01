@@ -58,6 +58,7 @@ enum trace_ipc_cap_op {
     TRACE_IPC_CAP_OP_BIND_REJECTED_REVOKED = 2,
     TRACE_IPC_CAP_OP_COMMIT_EAGAIN = 3,
     TRACE_IPC_CAP_OP_TRYGET_FAILED = 4,
+    TRACE_IPC_CAP_OP_COMMIT_EPOCH_MISMATCH = 5,
 };
 
 #define TRACE_IPC_CH_FLAG_OP_SHIFT          0U
@@ -77,6 +78,7 @@ enum trace_ipc_cap_op {
 #define TRACE_IPC_CAP_FLAG_VERSION_SHIFT 28U
 #define TRACE_IPC_CAP_FLAG_VERSION_MASK  0xf0000000U
 #define TRACE_IPC_CAP_FLAG_VERSION_V1    1U
+#define TRACE_IPC_CAP_EPOCH_PART_MASK    0xffffffffULL
 
 static inline uint32_t
 trace_ipc_channel_flags_build(enum trace_ipc_channel_op op,
@@ -142,6 +144,20 @@ static inline uint32_t trace_ipc_cap_flags_version(uint32_t flags) {
 static inline enum trace_ipc_cap_op trace_ipc_cap_flags_op(uint32_t flags) {
     return (enum trace_ipc_cap_op)((flags & TRACE_IPC_CAP_FLAG_OP_MASK) >>
                                    TRACE_IPC_CAP_FLAG_OP_SHIFT);
+}
+
+static inline uint64_t
+trace_ipc_cap_epoch_pair_pack(uint64_t expected_epoch, uint64_t current_epoch) {
+    return ((expected_epoch & TRACE_IPC_CAP_EPOCH_PART_MASK) << 32) |
+           (current_epoch & TRACE_IPC_CAP_EPOCH_PART_MASK);
+}
+
+static inline uint32_t trace_ipc_cap_epoch_pair_expected(uint64_t arg1) {
+    return (uint32_t)(arg1 >> 32);
+}
+
+static inline uint32_t trace_ipc_cap_epoch_pair_current(uint64_t arg1) {
+    return (uint32_t)(arg1 & TRACE_IPC_CAP_EPOCH_PART_MASK);
 }
 
 struct tracepoint_entry {
